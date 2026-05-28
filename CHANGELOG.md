@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed (wrapper/core lockstep bump, 2026-05-28)
+
+- Bump wrapper `1.4.5 → 1.4.6` and the exact core pin `smartmemory-core[lite]==0.9.9 → ==0.9.25` (latest published core on PyPI). The pin had drifted 16 patch releases behind core; this re-establishes the lockstep so `pip install smartmemory` pulls the current core (incl. the centralized extraction-cache refactor `CORE-EXTRACT-CACHE-DRY-1` and graph-only ingest profile).
+
 ### Fixed (MCP `memory_search` broken in local mode, 2026-05-18)
 
 - **MCP `memory_search` completely broken in local mode.** `storage.search()` only accepted `(query, top_k, filters, include_reference)`. The MCP server calls it with `memory_type`, `enable_hybrid`, `decompose_query`, `multi_hop`, `max_hops`, and `budget_ms` — any of those raised `TypeError: search() got an unexpected keyword argument`. Every `memory_search` call in local mode crashed. `storage.search` now accepts `memory_type` (forwarded as a post-filter) and `**search_kwargs` (allowlisted to `decompose_query`, `channel_weights`, `multi_hop`, `max_hops`, `budget_ms`, `semantic_hops`); unknown keys such as `enable_hybrid` are silently dropped instead of raising. Regression test added (`test_search_accepts_mcp_recall_kwargs`).
