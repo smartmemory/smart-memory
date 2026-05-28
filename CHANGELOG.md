@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-05-28
+
 ### Changed (wrapper/core lockstep bump, 2026-05-28)
 
 - Bump wrapper `1.4.5 → 1.4.6` and the exact core pin `smartmemory-core[lite]==0.9.9 → ==0.9.25` (latest published core on PyPI). The pin had drifted 16 patch releases behind core; this re-establishes the lockstep so `pip install smartmemory` pulls the current core (incl. the centralized extraction-cache refactor `CORE-EXTRACT-CACHE-DRY-1` and graph-only ingest profile).
