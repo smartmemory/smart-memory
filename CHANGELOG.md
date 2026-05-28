@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-05-28
+
+### Changed (wrapper/core lockstep bump, 2026-05-28)
+
+- Bump wrapper `1.4.6 → 1.4.7` and the exact core pin `smartmemory-core[lite]==0.9.25 → ==0.9.26`. Core 0.9.26 ships the CORE-ONTOLOGY-EXTRACTOR-1 closeout: `get_relation_type` identity-contract docstring clarification + contract test (no production logic change).
+
 ## [1.4.6] - 2026-05-28
 
 ### Changed (wrapper/core lockstep bump, 2026-05-28)
