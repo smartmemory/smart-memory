@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-05-29
+
+### Changed (wrapper/core lockstep bump, 2026-05-29)
+
+- Bump wrapper `1.4.7 → 1.4.8` and the exact core pin `smartmemory-core[lite]==0.9.26 → ==0.9.27`. Core 0.9.27 declares `click` as a direct dependency (CI-PYPI-CLICK-1) so bare `pip install smartmemory-core` installs cleanly again; the wrapper was never affected because it pulls the `lite` extra, which already included `click`.
+
 ## [1.4.7] - 2026-05-28
 
 ### Changed (wrapper/core lockstep bump, 2026-05-28)
