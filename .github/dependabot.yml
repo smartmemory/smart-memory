@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # SEC-HARDENING-1 M16 pinned GitHub Actions to commit SHAs; Dependabot keeps
+  # those pins fresh (bumps the SHA + the `# vX` comment) via one grouped weekly PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
