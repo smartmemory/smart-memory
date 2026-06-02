@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.15] - 2026-06-02
+
+### Changed (wrapper/core lockstep bump, 2026-06-02)
+
+- Bump wrapper `1.4.14 → 1.4.15` and the exact core pin `smartmemory-core[lite]==0.9.33 → ==0.9.36`. Core 0.9.34–0.9.36 ship: CODE-RERANK-1 (cross-encoder rerank in `semantic_code_search`); a bug-hunt fix for an `ontology_constrain` null-confidence crash that aborted ingests; and a bug-hunt fix preventing an empty-basis evaluation cycle from overwriting a legitimate prior score with 0.0.
+
 ## [1.4.14] - 2026-06-02
 
 ### Changed (wrapper/core lockstep bump, 2026-06-02)
