@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.14] - 2026-06-02
+
+### Changed (wrapper/core lockstep bump, 2026-06-02)
+
+- Bump wrapper `1.4.13 → 1.4.14` and the exact core pin `smartmemory-core[lite]==0.9.32 → ==0.9.33`. Core 0.9.33 adds `SmartMemory.resolve_aliases()` (CORE-GRAPH-ALIAS-RESOLVE-2 B2): a graph-maintenance op that merges unambiguous single-token entity aliases ("Hudson") into their multi-token canonical ("Rock Hudson") over the complete graph, abstaining on collisions. Productizes the B1-proven batch mechanism; validated at +7.3pp (gliner2) / +6.3pp (groq) canonical typed edge recall.
+
 ## [1.4.13] - 2026-06-02
 
 ### Changed (wrapper/core lockstep bump, 2026-06-02)
