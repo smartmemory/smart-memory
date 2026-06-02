@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.17] - 2026-06-02
+
+### Changed (wrapper/core lockstep bump, 2026-06-02)
+
+- Bump wrapper `1.4.16 → 1.4.17` and the exact core pin `==0.9.39 → ==0.9.40`. Core 0.9.40 fixes CORE-GRAPH-SCOPE-LEAK-1: `SmartGraph.rename_entity_type` / `delete_by_run_id` auto-scoped via a non-existent `get_read_context()` (swallowed by a bare except) and silently ran UNSCOPED across every workspace — now scope via `get_isolation_filters()` and fail closed. Also fixes their always-returns-0 count parsing (positional rows). Surfaced by the CORE-GRAPH-ALIAS-RESOLVE-2 B2 Codex review.
+
 ## [1.4.16] - 2026-06-02
 
 ### Changed (wrapper/core lockstep bump, 2026-06-02)
