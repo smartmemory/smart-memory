@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.13] - 2026-06-02
+
+### Changed (wrapper/core lockstep bump, 2026-06-02)
+
+- Bump wrapper `1.4.12 → 1.4.13` and the exact core pin `smartmemory-core[lite]==0.9.31 → ==0.9.32`. Core 0.9.32 fixes SEC-CACHE-1 (search-result cache cross-tenant leak): the process-global Redis search cache now keys on tenant/workspace scope, closing a path where workspace A's cached results were served to workspace B for the same query string.
+
 ## [1.4.8] - 2026-05-29
 
 ### Changed (wrapper/core lockstep bump, 2026-05-29)
