@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.4.16] - 2026-06-02
+
+### Changed (wrapper/core lockstep bump, 2026-06-02)
+
+- Bump wrapper `1.4.15 → 1.4.16` and re-lock the exact core pin `smartmemory-core[lite]==0.9.36 → ==0.9.39` (the pin had drifted behind core 0.9.37/0.9.38). Core 0.9.39 hardens `SmartMemory.resolve_aliases()` (CORE-GRAPH-ALIAS-RESOLVE-2 B2) per a 3-round Codex review: tenant-isolation fix (scope reads via `get_isolation_filters`, fail closed on provider error, drop the `workspace_id` arg), full canonical-identity preservation across the merge, abstain on fragmented canonicals, post-merge cache-hook firing, and failure-safe provenance writes. The B2 mechanism still validates at +7.3pp (gliner2) canonical typed edge recall.
+
 ## [1.4.15] - 2026-06-02
 
 ### Changed (wrapper/core lockstep bump, 2026-06-02)
