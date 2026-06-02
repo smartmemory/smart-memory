@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed (wrapper/core lockstep bump, 2026-06-03)
+
+- Bump wrapper `1.4.17 → 1.4.18` and the exact core pin `==0.9.40 → ==0.9.41`. Core 0.9.41 adds
+  CORE-GRAPH-ALIAS-DISAMBIG-1: opt-in `resolve_aliases(disambiguate=True)` collision disambiguation
+  (default off; typed-neighbor overlap, never mis-merge; groq +8.4pp @ precision 1.0).
+
 ## [1.4.17] - 2026-06-02
 
 ### Changed (wrapper/core lockstep bump, 2026-06-02)
