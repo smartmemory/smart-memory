@@ -12,15 +12,13 @@ SmartMemory is a comprehensive AI memory system that provides persistent, multi-
 ## Install
 
 ```bash
-pip install smartmemory[local]           # Local memory + MCP server + viewer + CLI (recommended)
-pip install smartmemory                  # Remote client only (connects to a SmartMemory service)
+pip install smartmemory                  # Everything: local memory + MCP server + graph viewer + CLI
 pip install smartmemory-core[lite]       # Core library only, local mode (for developers)
 pip install smartmemory-core[server]     # Core library only, server mode (FalkorDB + Redis)
 ```
 
-> **`smartmemory`** is the distribution package — MCP server, graph viewer, and CLI.
+> **`smartmemory`** is the distribution package. A single install bundles `smartmemory-core[lite]` (local SQLite + usearch storage), the unified MCP server, the graph viewer, and the CLI — there is no separate `[local]` extra. You pick **local** or **remote** mode at `smartmemory setup` time, not at install time.
 > **`smartmemory-core`** is the core library for developers building on top of SmartMemory.
-> `smartmemory[local]` bundles `smartmemory-core[lite]` for local SQLite storage. Without `[local]`, it's a remote client only.
 
 ## First Run
 
@@ -78,6 +76,8 @@ This means `smartmemory add` returns instantly while quality improves in the bac
 
 ## Commands
 
+> `sm` is a shorthand alias for `smartmemory` — every command below works with either (`sm add "..."`, `sm search "..."`).
+
 ### Core
 
 ```bash
@@ -93,6 +93,7 @@ smartmemory search --top-k 20 "query"  # Control result count (default: 5)
 smartmemory search --project atlas "q" # Filter by property
 
 smartmemory get <item_id>              # Fetch a single memory by ID
+smartmemory retag --content "x" --origin seed:demo --dry-run  # Re-tag matched items' origin
 smartmemory recall                     # Session context for Claude Code hooks
 smartmemory recall --cwd /path         # Recall with working directory context
 smartmemory viewer                     # Open knowledge graph viewer in browser
@@ -138,6 +139,27 @@ smartmemory admin list-packs           # List available seed packs
 smartmemory admin install-pack NAME    # Install a seed pack
 smartmemory admin mine                 # Mine Wikidata entities via SPARQL
 smartmemory admin convert-rebel        # Convert REBEL dataset to corpus JSONL
+```
+
+### Code Indexing & MCP
+
+```bash
+smartmemory code index <path>          # Index a code repo (AST entities + call graph) into memory
+smartmemory mcp install claude         # Write MCP server config for a client (claude, cursor, codex, ...)
+```
+
+### Lifecycle (hook-driven)
+
+These are invoked automatically by the Claude Code hooks that `smartmemory setup` installs — you rarely call them by hand.
+
+```bash
+smartmemory lifecycle orient           # Recall context at session start
+smartmemory lifecycle recall           # Inject prompt-relevant context
+smartmemory lifecycle observe          # Capture a tool call
+smartmemory lifecycle distill          # Pair a response with its stored prompt
+smartmemory lifecycle learn            # Capture an error pattern
+smartmemory lifecycle persist          # Save a session summary
+smartmemory lifecycle status           # Show lifecycle config and session stats
 ```
 
 ## Architecture Overview
@@ -187,15 +209,15 @@ Each stage implements the `StageCommand` protocol (`execute(state, config) -> st
 
 ## Key Features
 
-- **9 Memory Types**: Pending, Semantic, Episodic, Procedural, Zettelkasten, Reasoning, Opinion, Observation, Decision
+- **11 Curated Memory Types**: Pending, Semantic, Episodic, Procedural, Zettelkasten, Reasoning, Opinion, Observation, Decision, Constraint, Learned (plus structural types like `code`, `plan`, `evaluation`, `anchor`, and `tool_call` used internally)
 - **11-Stage NLP Pipeline**: classify -> coreference -> simplify -> entity_ruler -> llm_extract -> ontology_constrain -> store -> link -> enrich -> ground -> evolve
 - **Self-Learning EntityRuler**: Pattern-matching NER that improves with use — LLM discoveries feed back into rules (96.9% entity F1 at 4ms)
 - **Evolver Framework**: Core auto-registered evolvers plus specialist lifecycle evolvers for decay, consolidation, opinion synthesis, retrieval-based strengthening, Hebbian co-retrieval, and stale memory detection
 - **Code Indexer**: AST-based Python + TypeScript parser with cross-file call resolution, semantic code search, and memory-to-code graph bridging
-- **Zero-Infra Lite Mode**: SQLite + usearch backend — `pip install smartmemory[local]` and go
+- **Zero-Infra Lite Mode**: SQLite + usearch backend — `pip install smartmemory` and go
 - **Server Mode**: FalkorDB graph + Redis caching for production-scale deployments
 - **Hybrid Search**: Graph-structured search + BM25/embedding RRF fusion with query decomposition for compound queries
-- **20 Auto-Registered Plugins**: 4 extractors, 5 enrichers, 10 evolvers, and 1 grounder loaded by default
+- **Auto-Registered Plugins**: 6 enrichers, 9 evolvers, 1 grounder, and 3–5 extractors (3 always loaded + spaCy and GLiNER2 when their optional deps are installed) — plus a larger lazy catalog of ~40 evolvers selectable in Studio
 - **Plugin Security**: Sandboxing, permissions, and resource limits for safe plugin execution
 - **Flexible Scoping**: Optional `ScopeProvider` for multi-tenancy or unrestricted OSS usage
 - **Persistent Daemon**: Background process for <200ms CLI response times
@@ -228,6 +250,12 @@ SmartMemory includes built-in evolvers that automatically transform memories. In
 - **InterferenceBasedConsolidationEvolver**: Similar competing memories interfere, strengthening the dominant one
 - **EnhancedWorkingToEpisodicEvolver**: Context-aware pending→episodic transition with richer metadata
 
+**Sleep-cycle & agent evolvers** — opt-in background re-derivation (REM/NREM analogs):
+- **MemoryConsolidationEvolver**: Re-derives consolidated memories across an entity's scattered facts during an idle "sleep cycle"
+- **TemporalAgingEvolver**: Rewrites future/planned facts into resolved past tense once their date passes ("going to Singapore in July" → "went to Singapore in July 2026") via reversible bi-temporal supersession — triggered by the passage of time, never re-parsing prose
+- **EvaluationEvolver**: Writes evidence-derived per-`(agent, dimension, domain)` performance scores via bi-temporal supersession; read back with `get_evaluation()` / `list_evaluation_history()`
+- **SemanticToProceduralEvolver** / **ProceduralReinforcementEvolver** / **AnchorReconciliationEvolver**: procedural promotion, usage-based strengthening, and spec-anchor drift reconciliation
+
 **Replaced by ConsolidationRouter (CORE-MEMORY-DYNAMICS-1 M1):**
 - The former `WorkingToEpisodicEvolver` and `WorkingToProceduralEvolver` were retired. Routing from the `pending` bucket to `episodic` / `procedural` now happens at ingest time via the `ConsolidationRouter` pipeline stage.
 
@@ -237,17 +265,19 @@ SmartMemory features a unified, extensible plugin architecture. All plugins foll
 
 ### Built-in Plugins
 
-**Auto-registered by default** (loaded by `PluginManager`):
-- **4 Extractors**: `LLMExtractor`, `LLMSingleExtractor`, `ConversationAwareLLMExtractor`, `SpacyExtractor`
-- **5 Enrichers**: `BasicEnricher`, `SentimentEnricher`, `TemporalEnricher`, `ExtractSkillsToolsEnricher`, `TopicEnricher`
-- **8 Evolvers**: `EpisodicToSemanticEvolver`, `EpisodicToZettelEvolver`, `EpisodicDecayEvolver`, `SemanticDecayEvolver`, `ZettelPruneEvolver`, `ExponentialDecayEvolver`, `InterferenceBasedConsolidationEvolver`, `RetrievalBasedStrengtheningEvolver`
+**Auto-registered by default** (loaded by `PluginManager._load_builtin_plugins`):
+- **Extractors**: `LLMExtractor`, `LLMSingleExtractor`, `ConversationAwareLLMExtractor` (always), plus `SpacyExtractor` and `GLiNER2Extractor` when their optional deps are importable
+- **6 Enrichers**: `BasicEnricher`, `LinkExpansionEnricher`, `SentimentEnricher`, `TemporalEnricher`, `ExtractSkillsToolsEnricher`, `TopicEnricher`
+- **9 Evolvers**: `EpisodicToSemanticEvolver`, `EpisodicDecayEvolver`, `SemanticDecayEvolver`, `EpisodicToZettelEvolver`, `ZettelPruneEvolver`, `ExponentialDecayEvolver`, `InterferenceBasedConsolidationEvolver`, `RetrievalBasedStrengtheningEvolver`, `EvaluationEvolver`
 - **1 Grounder**: `WikipediaGrounder`
 
-**Specialist plugins** (used by specific pipeline stages or opt-in features):
+**Specialist plugins** (selected by pipeline stage, opt-in feature, or the Studio evolver catalog — not auto-run in the idle cycle):
 - **Extractors**: `GroqExtractor`, `DecisionExtractor`, `ReasoningExtractor`
-- **Enrichers**: `LinkExpansionEnricher`
-- **Evolvers**: `DecisionConfidenceEvolver`, `OpinionSynthesisEvolver`, `ObservationSynthesisEvolver`, `OpinionReinforcementEvolver`, `StaleMemoryEvolver`, `HebbianCoRetrievalEvolver`, `EnhancedWorkingToEpisodicEvolver`
+- **Enrichers**: `UsageTrackingEnricher`
+- **Evolvers**: `DecisionConfidenceEvolver`, `OpinionSynthesisEvolver`, `ObservationSynthesisEvolver`, `OpinionReinforcementEvolver`, `StaleMemoryEvolver`, `HebbianCoRetrievalEvolver`, `MemoryConsolidationEvolver`, `TemporalAgingEvolver`, `SemanticToProceduralEvolver`, `ProceduralReinforcementEvolver`, `AnchorReconciliationEvolver`
 - **Grounders**: `PublicKnowledgeGrounder` (Wikidata QIDs)
+
+> Two registries coexist by design: a small **eager, auto-run** set (above) that runs in the idle/batch evolution cycle, and a **lazy catalog of ~40 evolvers** (`evolution/registry.py`) that Studio can select into workflow DAGs without importing every class at boot. Auto-run ⊆ catalog is an enforced invariant.
 
 ### Creating Custom Plugins
 
@@ -341,8 +371,25 @@ class SmartMemory:
     def ingest(self, item, sync=True, **kwargs) -> str  # Full pipeline
     def add(self, item, **kwargs) -> str                # Simple storage
     def get(self, item_id: str) -> Optional[MemoryItem]
-    def search(self, query: str, top_k: int = 5, memory_type: str = None) -> List[MemoryItem]
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        memory_type: str = None,
+        origin: str = None,              # prefix filter, e.g. "user"
+        decompose_query: bool = False,   # split compound queries
+        multi_hop: bool = False,         # chained recursive retrieval
+        semantic_hops: bool = False,     # LLM-driven hop planning
+        expertise: bool = False,         # typed-dict expertise channel
+        include_superseded: bool = False,
+        as_of_date=None,                 # bi-temporal time travel (datetime | ISO-8601)
+    ) -> List[MemoryItem]
     def delete(self, item_id: str) -> bool
+
+    # Expertise-layer capture
+    def add_decision(self, content: str, **kwargs) -> str
+    def add_constraint(self, content: str, **kwargs) -> str
+    def add_learning(self, content: str, **kwargs) -> str
 
     # Graph Integrity
     def delete_run(self, run_id: str) -> int
@@ -432,6 +479,6 @@ SmartMemory is dual-licensed to provide flexibility for both open-source and com
 ---
 
 ```bash
-pip install smartmemory[local]
+pip install smartmemory
 smartmemory setup
 ```

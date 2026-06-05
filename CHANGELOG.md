@@ -1,74 +1,42 @@
 # Changelog — smartmemory
 
+Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
+
 ## [Unreleased]
 
-### Changed (wrapper/core lockstep bump, 2026-06-03)
+## [1.4.23] - 2026-06-04
 
-- Bump wrapper `1.4.17 → 1.4.18` and the exact core pin `==0.9.40 → ==0.9.41`. Core 0.9.41 adds
-  CORE-GRAPH-ALIAS-DISAMBIG-1: opt-in `resolve_aliases(disambiguate=True)` collision disambiguation
-  (default off; typed-neighbor overlap, never mis-merge; groq +8.4pp @ precision 1.0).
+### Security
+- **Tenant-scope ingest-time alias resolution.** The opt-in `alias_resolve` stage scanned entities across the shared graph with no workspace filter, so when enabled a surface could resolve to another tenant's entity. Now workspace-scoped (core 0.9.46).
 
-## [1.4.17] - 2026-06-02
+## [1.4.13 – 1.4.22] - 2026-06-02 → 2026-06-03
 
-### Changed (wrapper/core lockstep bump, 2026-06-02)
+A run of entity-resolution and graph-quality releases (core 0.9.32–0.9.45). Highlights — not a per-bump log:
 
-- Bump wrapper `1.4.16 → 1.4.17` and the exact core pin `==0.9.39 → ==0.9.40`. Core 0.9.40 fixes CORE-GRAPH-SCOPE-LEAK-1: `SmartGraph.rename_entity_type` / `delete_by_run_id` auto-scoped via a non-existent `get_read_context()` (swallowed by a bare except) and silently ran UNSCOPED across every workspace — now scope via `get_isolation_filters()` and fail closed. Also fixes their always-returns-0 count parsing (positional rows). Surfaced by the CORE-GRAPH-ALIAS-RESOLVE-2 B2 Codex review.
+### Security
+- **Search-result cache cross-tenant leak fixed.** The process-global Redis search cache now keys on tenant/workspace, closing a path where workspace A's cached results were served to workspace B for the same query (1.4.13 / core 0.9.32, SEC-CACHE-1).
+- **Graph-maintenance ops no longer run cross-tenant.** `rename_entity_type` / `delete_by_run_id` silently ran UNSCOPED across every workspace (auto-scoping swallowed by a bare `except`); now scoped via `get_isolation_filters()` and fail-closed (1.4.17 / core 0.9.40, CORE-GRAPH-SCOPE-LEAK-1).
 
-## [1.4.16] - 2026-06-02
+### Added
+- **Cross-encoder rerank in semantic code search** (1.4.15 / core 0.9.36, CODE-RERANK-1).
+- **`SmartMemory.resolve_aliases()`** — graph-maintenance op that merges unambiguous single-token aliases ("Hudson") into their multi-token canonical ("Rock Hudson"), abstaining on collisions; with opt-in collision disambiguation (1.4.14–1.4.18 / core 0.9.33–0.9.41).
 
-### Changed (wrapper/core lockstep bump, 2026-06-02)
+### Changed
+- Internal extraction-accuracy work: cross-extractor entity-node dedup, write-time entity-type coarsening, async-path canonical-key dedup, and a hierarchical, domain-tagged entity-type ontology (1.4.19–1.4.22 / core 0.9.42–0.9.45).
 
-- Bump wrapper `1.4.15 → 1.4.16` and re-lock the exact core pin `smartmemory-core[lite]==0.9.36 → ==0.9.39` (the pin had drifted behind core 0.9.37/0.9.38). Core 0.9.39 hardens `SmartMemory.resolve_aliases()` (CORE-GRAPH-ALIAS-RESOLVE-2 B2) per a 3-round Codex review: tenant-isolation fix (scope reads via `get_isolation_filters`, fail closed on provider error, drop the `workspace_id` arg), full canonical-identity preservation across the merge, abstain on fragmented canonicals, post-merge cache-hook firing, and failure-safe provenance writes. The B2 mechanism still validates at +7.3pp (gliner2) canonical typed edge recall.
-
-## [1.4.15] - 2026-06-02
-
-### Changed (wrapper/core lockstep bump, 2026-06-02)
-
-- Bump wrapper `1.4.14 → 1.4.15` and the exact core pin `smartmemory-core[lite]==0.9.33 → ==0.9.36`. Core 0.9.34–0.9.36 ship: CODE-RERANK-1 (cross-encoder rerank in `semantic_code_search`); a bug-hunt fix for an `ontology_constrain` null-confidence crash that aborted ingests; and a bug-hunt fix preventing an empty-basis evaluation cycle from overwriting a legitimate prior score with 0.0.
-
-## [1.4.14] - 2026-06-02
-
-### Changed (wrapper/core lockstep bump, 2026-06-02)
-
-- Bump wrapper `1.4.13 → 1.4.14` and the exact core pin `smartmemory-core[lite]==0.9.32 → ==0.9.33`. Core 0.9.33 adds `SmartMemory.resolve_aliases()` (CORE-GRAPH-ALIAS-RESOLVE-2 B2): a graph-maintenance op that merges unambiguous single-token entity aliases ("Hudson") into their multi-token canonical ("Rock Hudson") over the complete graph, abstaining on collisions. Productizes the B1-proven batch mechanism; validated at +7.3pp (gliner2) / +6.3pp (groq) canonical typed edge recall.
-
-## [1.4.13] - 2026-06-02
-
-### Changed (wrapper/core lockstep bump, 2026-06-02)
-
-- Bump wrapper `1.4.12 → 1.4.13` and the exact core pin `smartmemory-core[lite]==0.9.31 → ==0.9.32`. Core 0.9.32 fixes SEC-CACHE-1 (search-result cache cross-tenant leak): the process-global Redis search cache now keys on tenant/workspace scope, closing a path where workspace A's cached results were served to workspace B for the same query string.
-
-## [1.4.8] - 2026-05-29
-
-### Changed (wrapper/core lockstep bump, 2026-05-29)
-
-- Bump wrapper `1.4.7 → 1.4.8` and the exact core pin `smartmemory-core[lite]==0.9.26 → ==0.9.27`. Core 0.9.27 declares `click` as a direct dependency (CI-PYPI-CLICK-1) so bare `pip install smartmemory-core` installs cleanly again; the wrapper was never affected because it pulls the `lite` extra, which already included `click`.
-
-## [1.4.7] - 2026-05-28
-
-### Changed (wrapper/core lockstep bump, 2026-05-28)
-
-- Bump wrapper `1.4.6 → 1.4.7` and the exact core pin `smartmemory-core[lite]==0.9.25 → ==0.9.26`. Core 0.9.26 ships the CORE-ONTOLOGY-EXTRACTOR-1 closeout: `get_relation_type` identity-contract docstring clarification + contract test (no production logic change).
+### Fixed
+- `ontology_constrain` null-confidence crash that aborted ingests, and an empty-basis evaluation cycle overwriting a legitimate prior score with 0.0 (1.4.15 / core 0.9.34–0.9.36).
 
 ## [1.4.6] - 2026-05-28
 
-### Changed (wrapper/core lockstep bump, 2026-05-28)
-
-- Bump wrapper `1.4.5 → 1.4.6` and the exact core pin `smartmemory-core[lite]==0.9.9 → ==0.9.25` (latest published core on PyPI). The pin had drifted 16 patch releases behind core; this re-establishes the lockstep so `pip install smartmemory` pulls the current core (incl. the centralized extraction-cache refactor `CORE-EXTRACT-CACHE-DRY-1` and graph-only ingest profile).
-
-### Fixed (MCP `memory_search` broken in local mode, 2026-05-18)
-
-- **MCP `memory_search` completely broken in local mode.** `storage.search()` only accepted `(query, top_k, filters, include_reference)`. The MCP server calls it with `memory_type`, `enable_hybrid`, `decompose_query`, `multi_hop`, `max_hops`, and `budget_ms` — any of those raised `TypeError: search() got an unexpected keyword argument`. Every `memory_search` call in local mode crashed. `storage.search` now accepts `memory_type` (forwarded as a post-filter) and `**search_kwargs` (allowlisted to `decompose_query`, `channel_weights`, `multi_hop`, `max_hops`, `budget_ms`, `semantic_hops`); unknown keys such as `enable_hybrid` are silently dropped instead of raising. Regression test added (`test_search_accepts_mcp_recall_kwargs`).
-
-### Fixed (DEMO-WALKTHROUGH-1, `smartmemory search` CLI, 2026-05-17)
-
-- **`smartmemory search` no longer crashes with `AttributeError: 'str' object has no attribute 'get'`.** The daemon `/memory/search` returns the CORE-CRUD-LIST contract shape `{"items": [...]}`, but `cli.py search_cmd` iterated the dict directly — so `for r in results` yielded the key string `"items"` and `r.get("content")` threw. Now unwraps `results["items"]` (daemon) vs bare list (storage fallback), with a defensive non-dict skip. Regression test added (`test_search_cmd_daemon_items_contract`); fixed two stale `assert_called_once_with` expectations that predated the `include_reference` fallback kwarg.
+### Fixed
+- **MCP `memory_search` completely broken in local mode.** `storage.search()` rejected the `memory_type`, `enable_hybrid`, `decompose_query`, `multi_hop`, `max_hops`, and `budget_ms` kwargs the MCP server passes — every local-mode `memory_search` raised `TypeError`. Now accepts `memory_type` (post-filter) and an allowlisted `**search_kwargs`; unknown keys are dropped instead of raising. (2026-05-18.)
+- **`smartmemory search` CLI crash** (`AttributeError: 'str' object has no attribute 'get'`). The daemon returns the `{"items": [...]}` contract shape but the CLI iterated the dict directly, so `r.get("content")` threw on the key string. Now unwraps `results["items"]` vs a bare list. (DEMO-WALKTHROUGH-1, 2026-05-17.)
 
 ## [1.4.3] - 2026-05-17
 
-### Changed (lockstep relock — ships the competitive-response sprint)
-
-- **Pinned `smartmemory-core[lite]==0.9.8`** (was `==0.9.1`, 7 versions stale despite the "move in lockstep" comment). The wrapper now actually pulls the shipped sprint core: CORE-BITEMPORAL-1 transaction-time activation, CORE-ATTENTION-FUSION-1 Phase 1, APP-VAULT-SYNC-1 Phase 0, RECALL-CITATIONS-1. Without this, `pip install smartmemory` resolved core 0.9.1 — none of the differentiator. Supersedes the never-published 1.4.2 (committed but no Release was cut; wrapper publishes only on GitHub Release / workflow_dispatch).
+### Added
+- **Bitemporal accuracy, attention fusion, vault sync, and recall citations** reach `pip install smartmemory` (core 0.9.8): CORE-BITEMPORAL-1 transaction-time activation, CORE-ATTENTION-FUSION-1 Phase 1, APP-VAULT-SYNC-1 Phase 0, RECALL-CITATIONS-1.
 
 ### Fixed (DEMO-WALKTHROUGH-1, lite-mode graph viewer SSE, 2026-05-17)
 
@@ -101,31 +69,7 @@ Contract: `smart-memory-docs/docs/features/LAUNCH-METRICS-1/launch-event-contrac
 
 - **README "Memory Types" listing extended** with `Constraint Memory` and `Learned Memory` entries plus a new "Expertise vs knowledge" callout that explains the knowledge / expertise cohort split, points to the canonical 1-pager at `docs.smartmemory.ai/smartmemory/concepts/expertise-vs-knowledge`, and surfaces `mem.search(query, expertise=True)` for partitioned recall. No code change.
 
-## [1.1.5] — 2026-03-24
-
-### Fixed
-
-- **Real-time graph viewer updates work.** Lite WebSocket events server now negotiates the `sm.v1` subprotocol. Browser WebSocket API (per RFC 6455) closes connections when the server doesn't echo back a requested subprotocol — the viewer showed "disconnected" and real-time node animations never fired.
-
-## [1.1.9] — 2026-03-27
-
-### Changed
-
-- **TUI is now a default dependency.** `textual` moved from `[tui]` optional extra to base install. The setup questionnaire TUI is the first-run experience and should work out of the box. `smartmemory[tui]` still works for backward compat (no-op).
-
-## [Unreleased]
-
-## [1.4.1] — 2026-05-07
-
-### Changed
-
-- **Track core 0.9.1.** Pin updated from `smartmemory-core[lite]==0.9.0` to `==0.9.1`. Wrapper itself unchanged; bump pairs with the core release that lands the bounded `EventStream.read_recent(count)` API plus `read_all` deprecation (INSIGHTS-PROGRESS-MIGRATE-1 prep), CORE-EXPERTISE-1 Phase 1 (Decision schema extension), and ONTO-READER-MIGRATE-1 (`OntologyGraph` `:EntityType` → `:OntologyType` reader migration). Per `feedback_bump_wrapper_with_core` policy.
-
 ## [1.4.0] — 2026-05-04
-
-### Changed
-
-- **Track core 0.9.0.** Pin updated from `smartmemory-core[lite]==0.8.0` to `==0.9.0`. Wrapper itself unchanged; bump pairs with the core release that landed ONTO-RECONCILE-1 Phase 4 Tier 1 (5 tasks shipped + 1 deferral) and Tier 2 audit half (6 missing indexes closed). Per `feedback_bump_wrapper_with_core` policy.
 
 ### Fixed
 
@@ -159,6 +103,18 @@ Contract: `smart-memory-docs/docs/features/LAUNCH-METRICS-1/launch-event-contrac
 - **Launchd plist has GROQ_API_KEY.** Daemon managed by launchd didn't inherit shell env vars — LLM enrichment was silently disabled.
 - **Async enrichment no longer drops nodes on SQLite.** Tier 2 LLM entities used deterministic SHA256[:16] item_ids that could collide with existing nodes via SQLite's `ON CONFLICT DO UPDATE`. Entity IDs are now stripped before persist on backends without dual-node support.
 - **Recall works with few memories.** Recency sort key returned `""` for `None` created_at, pushing items with missing timestamps to the end. Fixed to use `"0000-00-00"` fallback.
+
+## [1.1.9] — 2026-03-27
+
+### Changed
+
+- **TUI is now a default dependency.** `textual` moved from the `[tui]` optional extra to the base install so the first-run setup TUI works out of the box. `smartmemory[tui]` still works for backward compat (no-op).
+
+## [1.1.5] — 2026-03-24
+
+### Fixed
+
+- **Real-time graph viewer updates work.** The lite WebSocket events server now negotiates the `sm.v1` subprotocol; per RFC 6455 the browser closes the connection when the server doesn't echo back a requested subprotocol, so the viewer showed "disconnected" and node animations never fired.
 
 ## [1.0.10] — 2026-03-21
 
