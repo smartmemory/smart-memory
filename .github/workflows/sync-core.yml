@@ -1,0 +1,109 @@
+name: Sync to core release
+
+# Chain A (wrapper): smartmemory-core publishes a new version -> repository_dispatch
+# 'core-released' lands here. The wrapper exact-pins core and moves in lockstep, so
+# we rewrite the ==pin, patch-bump our own version, and cut a release. The existing
+# publish.yml (on release: published) then ships the new wrapper to PyPI.
+on:
+  repository_dispatch:
+    types: [core-released]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'smartmemory-core version to pin (e.g. 0.9.48)'
+        required: true
+        type: string
+
+concurrency:
+  group: sync-core
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # PAT so the release we create actually triggers publish.yml
+          # (events made by the default GITHUB_TOKEN do not trigger workflows).
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
+        with:
+          python-version: '3.11'
+
+      - name: Bump core pin + wrapper version
+        id: bump
+        env:
+          CORE_VERSION: ${{ github.event.client_payload.version || github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib, sys
+
+          core = os.environ["CORE_VERSION"].strip()
+          if not re.fullmatch(r"\d+\.\d+\.\d+", core):
+              sys.exit(f"::error::Bad core version '{core}'")
+
+          pp = pathlib.Path("pyproject.toml")
+          text = pp.read_text()
+
+          # Rewrite the exact pin, preserving an optional [extra] (e.g. [lite]).
+          pin_re = re.compile(r'(["\'])smartmemory-core(\[[^\]]*\])?==[^"\']+\1')
+          def repl(m):
+              q, extra = m.group(1), m.group(2) or ""
+              return f'{q}smartmemory-core{extra}=={core}{q}'
+          text, n = pin_re.subn(repl, text)
+          if n != 1:
+              sys.exit(f"::error::Expected exactly 1 core pin, patched {n}")
+
+          # Patch-bump the wrapper's own version (X.Y.Z -> X.Y.Z+1).
+          vm = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', text, re.M)
+          if not vm:
+              sys.exit("::error::Could not find wrapper version line")
+          maj, minr, pat = (int(g) for g in vm.groups())
+          wv = f"{maj}.{minr}.{pat + 1}"
+          text = text[:vm.start()] + f'version = "{wv}"' + text[vm.end():]
+          pp.write_text(text)
+
+          # Best-effort CHANGELOG entry under ## [Unreleased].
+          cl = pathlib.Path("CHANGELOG.md")
+          if cl.exists():
+              c = cl.read_text()
+              entry = (f"\n### Changed (auto, lockstep) — pin smartmemory-core=={core} ({wv})\n"
+                       f"- Automated lockstep sync triggered by smartmemory-core {core} release.\n")
+              if "## [Unreleased]" in c:
+                  c = c.replace("## [Unreleased]", "## [Unreleased]" + entry, 1)
+                  cl.write_text(c)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"wrapper_version={wv}\n")
+              f.write(f"core_version={core}\n")
+          print(f"pinned smartmemory-core=={core}, wrapper -> {wv}")
+          PY
+
+      - name: Commit, push, release
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          WV: ${{ steps.bump.outputs.wrapper_version }}
+          CV: ${{ steps.bump.outputs.core_version }}
+        run: |
+          set -euo pipefail
+          git config user.name "smartmem-dev[bot]"
+          git config user.email "smartmem-dev@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "No changes (already pinned to $CV); nothing to do."
+            exit 0
+          fi
+          git add -A
+          git commit -m "chore(deps): pin smartmemory-core==$CV, bump to $WV"
+          git push origin HEAD:main
+          gh release create "v$WV" \
+            --title "v$WV" \
+            --notes "Lockstep sync with smartmemory-core $CV."
+          echo "✅ Released wrapper v$WV (publish.yml will ship to PyPI)."
