@@ -62,12 +62,12 @@ jobs:
           if n != 1:
               sys.exit(f"::error::Expected exactly 1 core pin, patched {n}")
 
-          # Patch-bump the wrapper's own version (X.Y.Z -> X.Y.Z+1).
-          vm = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', text, re.M)
+          # COPY core's version verbatim (no increment): core is the single source
+          # of truth, so core/wrapper/service always carry the exact same number.
+          wv = core
+          vm = re.search(r'^version = "[^"]+"', text, re.M)
           if not vm:
               sys.exit("::error::Could not find wrapper version line")
-          maj, minr, pat = (int(g) for g in vm.groups())
-          wv = f"{maj}.{minr}.{pat + 1}"
           text = text[:vm.start()] + f'version = "{wv}"' + text[vm.end():]
           pp.write_text(text)
 
@@ -75,8 +75,8 @@ jobs:
           cl = pathlib.Path("CHANGELOG.md")
           if cl.exists():
               c = cl.read_text()
-              entry = (f"\n### Changed (auto, lockstep) — pin smartmemory-core=={core} ({wv})\n"
-                       f"- Automated lockstep sync triggered by smartmemory-core {core} release.\n")
+              entry = (f"\n### Changed (auto, lockstep) — track smartmemory-core=={core} ({wv})\n"
+                       f"- Version copied from smartmemory-core {core} release (single-source lockstep).\n")
               if "## [Unreleased]" in c:
                   c = c.replace("## [Unreleased]", "## [Unreleased]" + entry, 1)
                   cl.write_text(c)
@@ -84,7 +84,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"wrapper_version={wv}\n")
               f.write(f"core_version={core}\n")
-          print(f"pinned smartmemory-core=={core}, wrapper -> {wv}")
+          print(f"pinned smartmemory-core=={core}, wrapper -> {wv} (copied)")
           PY
 
       - name: Commit, push, release
