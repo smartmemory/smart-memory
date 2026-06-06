@@ -112,6 +112,15 @@ def _build_app() -> FastAPI:
                 "neighbors_direction": True,
                 "quota": False,
                 "auth": False,
+                # DIST-OBSIDIAN-LITE-PARITY-1: lineage + per-node links are
+                # served by the daemon (built from get_node / neighbors edges).
+                "lineage": True,
+                "links": True,
+                # Decisions are a hosted-service subsystem (transitive
+                # provenance walk + decision store) the daemon does not
+                # replicate. False → clients degrade the panel explicitly
+                # instead of 404'ing.
+                "decisions": False,
             }
         else:
             mode = "lite"
@@ -121,6 +130,10 @@ def _build_app() -> FastAPI:
                 "neighbors_direction": True,
                 "quota": False,
                 "auth": False,
+                # DIST-OBSIDIAN-LITE-PARITY-1: see remote block above.
+                "lineage": True,
+                "links": True,
+                "decisions": False,
             }
 
         return {

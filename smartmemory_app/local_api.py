@@ -328,6 +328,76 @@ def get_neighbors(memory_id: str) -> dict:
     return {"neighbors": formatted, "edges": edges}
 
 
+@api.get("/{memory_id}/links")
+def get_links(memory_id: str) -> dict:
+    """All edges incident to a node in the {source_id, target_id, link_type}
+    shape the graph adapter's getLinks consumer expects (useGraphData.js
+    fallback path) and the hosted service route returns.
+
+    DIST-OBSIDIAN-LITE-PARITY-1: was missing on the daemon, so the Obsidian
+    graph's per-node link fallback and any links() call 404'd in lite mode.
+    """
+    mem = _get_mem()
+    from smartmemory_app.remote_backend import RemoteMemory
+    if isinstance(mem, RemoteMemory):
+        # RemoteMemory carries raw edges on its neighbors payload; reshape.
+        edges = mem.get_neighbors(memory_id).get("edges", []) or []
+    else:
+        with _rw_lock:
+            edges = _get_backend().get_edges_for_node(memory_id)
+    links = []
+    for e in edges:
+        link_type = e.get("edge_type") or e.get("link_type")
+        if not link_type:
+            continue  # malformed edge — skip rather than emit link_type=None
+        links.append({
+            "source_id": e.get("source_id"),
+            "target_id": e.get("target_id"),
+            "link_type": link_type,
+        })
+    return {"links": links}
+
+
+@api.get("/{memory_id}/lineage")
+def get_lineage(memory_id: str) -> dict:
+    """Walk the derived_from chain from an item back to its root (the item
+    with no derived_from). Mirrors the hosted service route verbatim
+    (smart-memory-service crud.py:634) so the Obsidian LineagePanel renders
+    identically in lite mode. Depth-capped at 20 to bound cycles.
+
+    DIST-OBSIDIAN-LITE-PARITY-1: was missing on the daemon — the panel showed
+    "No derivation history" for every note in lite mode.
+    """
+    mem = _get_mem()
+    from smartmemory_app.remote_backend import RemoteMemory
+    is_remote = isinstance(mem, RemoteMemory)
+
+    def _get_node(node_id: str) -> Optional[dict]:
+        if is_remote:
+            return mem.get_node(node_id)
+        with _rw_lock:
+            return _get_backend().get_node(node_id)
+
+    chain: list[dict] = []
+    current_id: Optional[str] = memory_id
+    seen: set = set()
+    while current_id and len(chain) < 20 and current_id not in seen:
+        seen.add(current_id)
+        node = _get_node(current_id)
+        if node is None:
+            break
+        derived_from = node.get("derived_from")
+        chain.append({
+            "item_id": node.get("item_id") or node.get("id") or current_id,
+            "content": (node.get("content") or "")[:200],
+            "memory_type": node.get("memory_type"),
+            "derived_from": derived_from,
+            "confidence": node.get("confidence"),
+        })
+        current_id = derived_from
+    return {"lineage": chain, "depth": len(chain)}
+
+
 @api.get("/{memory_id}")
 def get_memory_item(memory_id: str) -> dict[str, Any]:
     """get_node() uses _row_to_node() — output is already flat, no transformation needed."""
@@ -588,7 +658,7 @@ def reextract_entities() -> dict:
 
                     extracted += 1
             except Exception as e:
-                logger.warning("Re-extraction failed for %s: %s", item_id, e)
+                log.warning("Re-extraction failed for %s: %s", item_id, e)
                 skipped += 1
 
         elapsed = time.time() - t0
@@ -629,7 +699,6 @@ def ingest_endpoint(body: IngestRequest) -> dict:
       SMARTMEMORY_WORKSPACE_ID env var > None (legacy untagged).
     """
     import os
-    import time
     from smartmemory_app.recall_format import derive_workspace_id
 
     memory_type = body.memory_type
