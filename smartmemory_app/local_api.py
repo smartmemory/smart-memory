@@ -711,6 +711,14 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     if workspace_id and "workspace_id" not in properties:
         properties["workspace_id"] = workspace_id
 
+    # DIST-LITE-QUIET-1: the daemon is a generic local HTTP surface, not CLI-private —
+    # so it stays producer-neutral. Each PRODUCER declares its own origin in the request
+    # context (the `smartmemory add` CLI sends context.origin="cli:add"). A client that
+    # omits it gets origin=None → core attributes it 'unknown' honestly, rather than this
+    # endpoint mislabeling every caller as tier-1 CLI content (origin drives visibility
+    # AND precedence). [Codex review, 2026-06-07]
+    origin = (body.context or {}).get("origin")
+
     has_llm = bool(os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY"))
 
     if has_llm:
@@ -718,7 +726,7 @@ def ingest_endpoint(body: IngestRequest) -> dict:
         # A separate worker process drains the queue — no threading issues.
         with _rw_lock:
             from smartmemory_app.storage import ingest
-            result = ingest(body.content, memory_type, sync=False, properties=properties)
+            result = ingest(body.content, memory_type, sync=False, properties=properties, origin=origin)
             item_id = result["item_id"] if isinstance(result, dict) else result
             raw_ids = result.get("entity_ids", {}) if isinstance(result, dict) else {}
             entity_ids = {k.lower(): v for k, v in raw_ids.items()} if raw_ids else {}
@@ -731,7 +739,7 @@ def ingest_endpoint(body: IngestRequest) -> dict:
         # No LLM — full sync pipeline
         with _rw_lock:
             from smartmemory_app.storage import ingest
-            item_id = ingest(body.content, memory_type, properties=properties)
+            item_id = ingest(body.content, memory_type, properties=properties, origin=origin)
         return {"item_id": item_id}
 
 

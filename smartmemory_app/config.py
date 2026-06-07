@@ -171,11 +171,21 @@ def get_api_key() -> str:
     except Exception:
         key = ""
     if not key:
-        warnings.warn(
-            "No API key found. Set SMARTMEMORY_API_KEY env var "
-            "or run: smartmemory setup --mode remote --api-key sk_...",
-            stacklevel=2,
-        )
+        # DIST-LITE-QUIET-1 (D1): only warn when a key is *expected* — i.e. remote mode.
+        # The FREE/local default needs no key by design, so this warning was pure
+        # first-impression noise on the viral zero-account path. "Expected vs unexpected
+        # missing config" (DEGRADE-1f) applied to credentials. A genuine remote misconfig
+        # still warns (actionable). Guarded so a config-read failure never suppresses it.
+        try:
+            expects_key = load_config().mode == "remote"
+        except Exception:
+            expects_key = True
+        if expects_key:
+            warnings.warn(
+                "No API key found. Set SMARTMEMORY_API_KEY env var "
+                "or run: smartmemory setup --mode remote --api-key sk_...",
+                stacklevel=2,
+            )
     return key
 
 

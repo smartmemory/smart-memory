@@ -32,6 +32,13 @@ class JSONLPatternStore:
         {"name": str, "label": str, "confidence": float, "frequency": int, "source": str}
     """
 
+    # DIST-LITE-QUIET-1: the JSONL store is the FREE/local-tier PatternStore. It
+    # legitimately lacks load_conflict_map (a FalkorDB-only capability), so that
+    # missing-capability fallback is EXPECTED here — PatternManager logs it at DEBUG
+    # rather than WARNING, keeping the zero-account first-run output clean. Operator
+    # (FalkorDB) stores omit this flag and keep the WARNING (no-silent-degradation).
+    quiet_missing_capabilities = True
+
     _LOCK_SUFFIX = ".write.lock"
 
     def __init__(self, data_dir: str | Path) -> None:

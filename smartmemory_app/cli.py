@@ -327,7 +327,9 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         props = _parse_extra_props(ctx.args)
         ids = []
         for chunk in chunks:
-            body: dict = {"content": chunk, "memory_type": memory_type}
+            # DIST-LITE-QUIET-1: the CLI declares its producer to the (producer-neutral)
+            # daemon so writes are attributed cli:add (tier 1), not origin='unknown'.
+            body: dict = {"content": chunk, "memory_type": memory_type, "context": {"origin": "cli:add"}}
             if props:
                 body["properties"] = props
             result = _daemon_request("POST", "/memory/ingest", json=body)
@@ -337,7 +339,8 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 from smartmemory_app.storage import ingest
 
                 _warm_notice()
-                ids.append(ingest(chunk, memory_type, properties=props))
+                # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
+                ids.append(ingest(chunk, memory_type, properties=props, origin="cli:add"))
         click.echo(f"Added {len(ids)} memories")
         for item_id in ids:
             click.echo(item_id)
@@ -345,7 +348,8 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
     if not text.strip():
         raise click.ClickException("Content cannot be empty.")
     props = _parse_extra_props(ctx.args)
-    body: dict = {"content": text, "memory_type": memory_type}
+    # DIST-LITE-QUIET-1: declare the CLI producer to the producer-neutral daemon.
+    body: dict = {"content": text, "memory_type": memory_type, "context": {"origin": "cli:add"}}
     if props:
         body["properties"] = props
     result = _daemon_request("POST", "/memory/ingest", json=body)
@@ -355,7 +359,8 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         from smartmemory_app.storage import ingest
 
         _warm_notice()
-        click.echo(ingest(text, memory_type, properties=props))
+        # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
+        click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))
 
 
 @cli.command("recall")

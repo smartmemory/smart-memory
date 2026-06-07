@@ -216,6 +216,7 @@ def ingest(
     memory_type: str = "episodic",
     sync: bool = True,
     properties: dict[str, str] | None = None,
+    origin: str | None = None,
 ):
     """Ingest content into the active backend.
 
@@ -226,6 +227,9 @@ def ingest(
               If False, run Tier 1 only (spaCy + EntityRuler) and return dict with
               item_id + entity_ids for background Tier 2 enrichment.
         properties: Optional user-supplied key-value properties stored in metadata.
+        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by local write
+            surfaces (CLI sm add → "cli:add"). Threaded into core ingest via context
+            so the stored item is attributed instead of falling to origin='unknown'.
 
     Remote mode: delegates to RemoteMemory.ingest() — no file lock needed.
     Local mode: acquires filelock before calling SmartMemory.ingest() because
@@ -236,10 +240,16 @@ def ingest(
     from smartmemory_app.remote_backend import RemoteMemory
     if isinstance(mem, RemoteMemory):
         return mem.ingest(content, memory_type)  # TODO: pass properties to remote API
-    # Reserved keys that user properties must not overwrite
+    # Reserved keys that user properties must not overwrite.
+    # DIST-LITE-QUIET-1 (Codex review): "origin" is reserved — it drives tier visibility
+    # AND precedence guards, so it must be set only by the producer (the explicit `origin`
+    # param), never via user-supplied properties (which would let a caller claim a
+    # privileged origin, e.g. import:vault, and bypass attribution/tiering).
     _RESERVED = frozenset({"memory_type", "node_category", "item_id", "content",
-                           "embedding", "created_at", "valid_from", "valid_to"})
+                           "embedding", "created_at", "valid_from", "valid_to", "origin"})
     ctx: dict = {"memory_type": memory_type}
+    if origin:
+        ctx["origin"] = origin
     if properties:
         # Flatten user properties into context so they become top-level node
         # properties (metadata keys merge into graph node properties dict).
