@@ -24,6 +24,20 @@ _warm_started = False
 _warm_lock = threading.Lock()
 
 
+def is_warm() -> bool:
+    """True if the local embedder model is already resident in this process.
+
+    Used to decide whether a foreground op is about to pay a cold load, so the
+    caller can show a progress notice instead of a silent hang.
+    """
+    try:
+        from smartmemory.plugins.embedding import EmbeddingService
+
+        return EmbeddingService._st_model is not None or EmbeddingService._pinned_local_model is not None
+    except Exception:
+        return False
+
+
 def warm_models(*, reranker: bool = True) -> None:
     """Synchronously load the local embedder (and optionally the reranker).
 

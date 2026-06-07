@@ -249,6 +249,28 @@ def _validate_memory_type(ctx, param, value: str) -> str:
     return value
 
 
+_warm_notice_shown = False
+
+
+def _warm_notice() -> None:
+    """Show a one-time notice if a direct (no-daemon) op is about to pay a cold model
+    load, so first-run isn't a silent multi-second hang (DIST-LITE-WARMSTART-1). The
+    daemon path already prints "loading models" at start; this covers direct CLI ops.
+    """
+    global _warm_notice_shown
+    if _warm_notice_shown:
+        return
+    from smartmemory_app.warm import is_warm
+
+    if not is_warm():
+        click.echo(
+            "First run: loading local models (~10–40s, one-time). "
+            "Tip: run 'smartmemory warm' to pre-load.",
+            err=True,
+        )
+        _warm_notice_shown = True
+
+
 @cli.command(
     "add",
     context_settings=dict(
@@ -314,6 +336,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
             else:
                 from smartmemory_app.storage import ingest
 
+                _warm_notice()
                 ids.append(ingest(chunk, memory_type, properties=props))
         click.echo(f"Added {len(ids)} memories")
         for item_id in ids:
@@ -331,6 +354,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
     else:
         from smartmemory_app.storage import ingest
 
+        _warm_notice()
         click.echo(ingest(text, memory_type, properties=props))
 
 
@@ -373,6 +397,7 @@ def recall_cmd(
     else:
         from smartmemory_app.storage import recall
 
+        _warm_notice()
         context = recall(
             cwd,
             top_k,

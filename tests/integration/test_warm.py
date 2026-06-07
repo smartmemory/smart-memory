@@ -60,3 +60,45 @@ def test_warm_models_never_raises(monkeypatch):
     monkeypatch.setattr(emb.EmbeddingService, "warm", boom)
     # reranker=False so we don't trigger a real cross-encoder download here.
     warm.warm_models(reranker=False)  # must not raise
+
+
+def test_is_warm_false_when_unloaded(monkeypatch):
+    """is_warm() reports False when no local model is resident."""
+    import smartmemory.plugins.embedding as emb
+
+    monkeypatch.setattr(emb.EmbeddingService, "_st_model", None, raising=False)
+    monkeypatch.setattr(emb.EmbeddingService, "_pinned_local_model", None, raising=False)
+    assert warm.is_warm() is False
+
+
+def test_cli_warm_notice_prints_once_when_cold(monkeypatch, capsys):
+    """The direct-CLI cold-load notice fires exactly once, only when not warm."""
+    from smartmemory_app import cli
+
+    monkeypatch.setattr("smartmemory_app.warm.is_warm", lambda: False)
+    cli._warm_notice_shown = False
+
+    cli._warm_notice()
+    cli._warm_notice()
+
+    err = capsys.readouterr().err
+    assert err.count("First run: loading local models") == 1
+
+
+def test_add_cmd_direct_path_emits_notice(monkeypatch):
+    """The real `add` command, on the direct (no-daemon) path with a cold model,
+    emits the warm notice before the blocking ingest."""
+    from click.testing import CliRunner
+
+    from smartmemory_app import cli
+
+    monkeypatch.setattr(cli, "_daemon_request", lambda *a, **k: None)  # force direct path
+    monkeypatch.setattr("smartmemory_app.storage.ingest", lambda *a, **k: "id-123")
+    monkeypatch.setattr("smartmemory_app.warm.is_warm", lambda: False)
+    cli._warm_notice_shown = False
+
+    r = CliRunner(mix_stderr=False).invoke(cli.cli, ["add", "hello world"])
+
+    assert r.exit_code == 0, r.output
+    assert "id-123" in r.stdout
+    assert "First run: loading local models" in r.stderr

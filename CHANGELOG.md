@@ -11,6 +11,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - The local backend now **warms the embedder in the background at construction** (daemon
   thread) so the user's first `add()` overlaps the model load instead of paying it inline.
   Opt out with `SMARTMEMORY_NO_WARM=1`.
+- Direct (no-daemon) CLI ops (`add`, `recall`) now print a one-time "First run: loading
+  local models…" notice before a cold load, so first-run isn't a silent hang. (The daemon
+  path already prints "loading models" at `start`.)
 - Paired with the core reranker fix (non-blocking model load), this removes the
   multi-second first-run hang from the local FREE path.
 
