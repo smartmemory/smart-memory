@@ -107,6 +107,15 @@ def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
             event_sink=get_event_sink(),    # DIST-LITE-3
         )
         atexit.register(_shutdown)
+        # DIST-LITE-WARMSTART-1: warm the local embedder in the background so the
+        # user's first add() overlaps the ~12s model load instead of paying it inline.
+        # Daemon thread, idempotent, opt out with SMARTMEMORY_NO_WARM=1.
+        try:
+            from smartmemory_app.warm import warm_models_background
+
+            warm_models_background()
+        except Exception:
+            pass
         return _memory
 
 

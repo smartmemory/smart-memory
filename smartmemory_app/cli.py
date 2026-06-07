@@ -148,6 +148,26 @@ def restart_cmd(num_workers: int) -> None:
     click.echo("Daemon ready.")
 
 
+@cli.command("warm")
+@click.option("--no-reranker", is_flag=True, help="Warm only the embedder, skip the reranker model.")
+def warm_cmd(no_reranker: bool) -> None:
+    """Pre-load the local models so the first add/search is instant.
+
+    The first add() otherwise pays a cold embedder load (~12s, or ~38s the first
+    time the model downloads) and the first search() pays a cold reranker load.
+    Run this once after install — or before a demo — to move that cost off the
+    user's first real call (DIST-LITE-WARMSTART-1).
+    """
+    import time
+
+    from smartmemory_app.warm import warm_models
+
+    click.echo("Warming local models (one-time; subsequent runs are cached)...")
+    t0 = time.perf_counter()
+    warm_models(reranker=not no_reranker)
+    click.echo(f"Models warm in {time.perf_counter() - t0:.1f}s. First add/search will now be fast.")
+
+
 @cli.command("status")
 def status_cmd() -> None:
     """Show SmartMemory daemon status."""
@@ -278,7 +298,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         chunks = (
             [raw.strip()]
             if as_whole
-            else [l.strip() for l in raw.splitlines() if l.strip()]
+            else [ln.strip() for ln in raw.splitlines() if ln.strip()]
         )
         if not chunks:
             raise click.ClickException("Content cannot be empty.")
