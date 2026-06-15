@@ -3,6 +3,9 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Changed (auto, lockstep) — track smartmemory-core==1.4.27 (1.4.27)
+- Version copied from smartmemory-core 1.4.27 release (single-source lockstep).
+
 ### Changed — quiet, correctly-attributed FREE/local first run (DIST-LITE-QUIET-1)
 - The `"No API key found"` warning now appears **only in remote mode** — a local-mode
   default needs no key, so the warning was misleading first-run noise on the zero-account path.
