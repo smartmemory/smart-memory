@@ -1,14 +1,14 @@
 """Unit tests for smartmemory_app.remote_backend — DIST-LITE-5.
 
 Tests cover the critical behaviors identified in the coverage sweep:
-  - ingest() returns "Error: ..." string when _request() fails (not raises)
-  - search() returns [{"error": ...}] list when _request() fails
+  - ingest() RAISES RemoteBackendError when _request() fails (surfaces, not masquerades)
+  - search() RAISES RemoteBackendError when _request() fails
   - get_neighbors() normalizes response to always include "edges" key
   - recall() deduplication handles both "item_id" and "id" field names
 
 All tests mock _request() to avoid network calls.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -33,12 +33,13 @@ def test_ingest_returns_item_id_on_success(remote):
     assert result == "abc-123"
 
 
-def test_ingest_returns_error_string_on_failure(remote):
-    """ingest() must return 'Error: ...' string — not raise — when API fails."""
+def test_ingest_raises_on_failure(remote):
+    """ingest() must RAISE RemoteBackendError when the API fails — not return a fake
+    'Error: ...' id that the CLI would print as if the add succeeded."""
+    from smartmemory_app.remote_backend import RemoteBackendError
     with patch.object(remote, "_request", return_value={"error": "upstream timeout"}):
-        result = remote.ingest("hello world")
-    assert result.startswith("Error:")
-    assert "upstream timeout" in result
+        with pytest.raises(RemoteBackendError, match="upstream timeout"):
+            remote.ingest("hello world")
 
 
 # ── search ────────────────────────────────────────────────────────────────
@@ -51,13 +52,13 @@ def test_search_returns_list_of_dicts_on_success(remote):
     assert result == items
 
 
-def test_search_returns_error_list_on_failure(remote):
-    """search() must return [{"error": ...}] — not raise — when API fails."""
+def test_search_raises_on_failure(remote):
+    """search() must RAISE RemoteBackendError when the API fails — not return an
+    error-dict that the CLI renders as 'No results', hiding a 30s timeout."""
+    from smartmemory_app.remote_backend import RemoteBackendError
     with patch.object(remote, "_request", return_value={"error": "rate limited"}):
-        result = remote.search("query")
-    assert isinstance(result, list)
-    assert len(result) == 1
-    assert result[0]["error"] == "rate limited"
+        with pytest.raises(RemoteBackendError, match="rate limited"):
+            remote.search("query")
 
 
 def test_search_returns_empty_list_on_none_response(remote):

@@ -724,6 +724,8 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     origin = (body.context or {}).get("origin")
 
     from smartmemory_app.config import llm_key_present
+    from smartmemory_app.remote_backend import RemoteBackendError
+    from fastapi import HTTPException
     has_llm = llm_key_present()
 
     if has_llm:
@@ -731,7 +733,10 @@ def ingest_endpoint(body: IngestRequest) -> dict:
         # A separate worker process drains the queue — no threading issues.
         with _rw_lock:
             from smartmemory_app.storage import ingest
-            result = ingest(body.content, memory_type, sync=False, properties=properties, origin=origin)
+            try:
+                result = ingest(body.content, memory_type, sync=False, properties=properties, origin=origin)
+            except RemoteBackendError as e:
+                raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
             item_id = result["item_id"] if isinstance(result, dict) else result
             raw_ids = result.get("entity_ids", {}) if isinstance(result, dict) else {}
             entity_ids = {k.lower(): v for k, v in raw_ids.items()} if raw_ids else {}
@@ -755,7 +760,10 @@ def ingest_endpoint(body: IngestRequest) -> dict:
             _llm_warned = True
         with _rw_lock:
             from smartmemory_app.storage import ingest
-            item_id = ingest(body.content, memory_type, properties=properties, origin=origin)
+            try:
+                item_id = ingest(body.content, memory_type, properties=properties, origin=origin)
+            except RemoteBackendError as e:
+                raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
         return {
             "item_id": item_id,
             "warning": "No LLM key configured — stored with Tier-1 (spaCy) extraction "
@@ -785,10 +793,13 @@ def search_endpoint(body: SearchRequest) -> dict:
 
     with _rw_lock:
         from smartmemory_app.storage import search
+        from smartmemory_app.remote_backend import RemoteBackendError
         try:
             results = search(body.query, body.top_k, filters=filters or None)
         except NotImplementedError as e:
             raise HTTPException(status_code=501, detail=str(e))
+        except RemoteBackendError as e:
+            raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
     return {"items": results}
 
 

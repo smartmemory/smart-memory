@@ -29,6 +29,78 @@ def _port() -> int:
     return load_config().daemon_port
 
 
+# ── launchd integration (macOS) ───────────────────────────────────────────────
+# `smartmemory setup` on macOS installs launchd plists with KeepAlive=true, so
+# launchd — not this module's subprocess logic — owns the daemon. A plain os.kill
+# is respawned instantly, which made `sm stop` a no-op and blocked `sm start`
+# /`sm restart` from picking up a config change (e.g. a local→remote mode switch).
+# These helpers make stop bootout the launchd job and start bootstrap it. All are
+# no-ops off macOS / when no plist is installed, so the subprocess path is intact.
+_LAUNCHD_DAEMON_LABEL = "ai.smartmemory.daemon"
+_LAUNCHD_WORKER_LABEL = "ai.smartmemory.worker"
+
+
+def _launchd_plist_path(label: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+
+
+def _launchd_loaded(label: str) -> bool:
+    """True if a launchd job with this label is currently loaded (macOS only)."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        r = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, text=True,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _launchd_bootout(label: str) -> bool:
+    """Unload a launchd job so KeepAlive stops respawning it. Idempotent; macOS only."""
+    if sys.platform != "darwin":
+        return False
+    uid = os.getuid()
+    # Modern API (bootout) first, then legacy unload as a fallback.
+    for cmd in (
+        ["launchctl", "bootout", f"gui/{uid}/{label}"],
+        ["launchctl", "unload", str(_launchd_plist_path(label))],
+    ):
+        try:
+            if subprocess.run(cmd, capture_output=True, text=True).returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _launchd_bootstrap(label: str) -> bool:
+    """Load a launchd job from its plist (RunAtLoad starts it). Idempotent; macOS only."""
+    if sys.platform != "darwin":
+        return False
+    plist = _launchd_plist_path(label)
+    if not plist.exists():
+        return False
+    uid = os.getuid()
+    for cmd in (
+        ["launchctl", "bootstrap", f"gui/{uid}", str(plist)],
+        ["launchctl", "load", str(plist)],
+    ):
+        try:
+            if subprocess.run(cmd, capture_output=True, text=True).returncode == 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _launchd_manages_daemon() -> bool:
+    """True if the daemon plist is installed — launchd, not a subprocess, owns it."""
+    return sys.platform == "darwin" and _launchd_plist_path(_LAUNCHD_DAEMON_LABEL).exists()
+
+
 def is_running(require_healthy: bool = True) -> bool:
     """Check daemon is running AND is SmartMemory (not a random process on the port).
 
@@ -59,6 +131,23 @@ def start_daemon(num_workers: int = 1) -> None:
     """
     if is_running():
         return
+
+    # launchd-managed install (macOS): let launchd own the process via the plist
+    # (RunAtLoad/KeepAlive). bootstrap re-loads it after a `sm stop` bootout and
+    # starts a fresh process that re-reads config — which is how a local→remote
+    # mode switch actually takes effect. Falls through to the subprocess path on
+    # non-macOS or when no plist is installed (dev/CI).
+    if _launchd_manages_daemon():
+        for label in (_LAUNCHD_DAEMON_LABEL, _LAUNCHD_WORKER_LABEL):
+            if _launchd_plist_path(label).exists() and not _launchd_loaded(label):
+                _launchd_bootstrap(label)
+        for _ in range(120):  # up to 60s for launchd to bring it healthy
+            if is_running(require_healthy=False):
+                return
+            time.sleep(0.5)
+        raise TimeoutError(
+            f"launchd daemon did not become healthy within 60s. Check {_data_dir() / 'daemon.log'}"
+        )
 
     port = _port()
     data = _data_dir()
@@ -166,8 +255,28 @@ def _stop_workers() -> None:
 
 
 def stop_daemon() -> None:
-    """Stop the daemon and all workers. Idempotent — no-op if not running."""
+    """Stop the daemon and all workers. Idempotent — no-op if not running.
+
+    If launchd manages the daemon (KeepAlive=true), bootout the job FIRST —
+    otherwise the os.kill below is respawned instantly and `sm stop` is a no-op
+    (and a following mode switch never takes effect). Falls through to the
+    subprocess kill path when launchd isn't managing it.
+    """
     _stop_workers()
+
+    if sys.platform == "darwin":
+        booted = False
+        for label in (_LAUNCHD_WORKER_LABEL, _LAUNCHD_DAEMON_LABEL):
+            if _launchd_loaded(label):
+                _launchd_bootout(label)
+                booted = True
+        if booted:
+            for _ in range(40):  # up to 10s for launchd to tear it down
+                if not is_running(require_healthy=False):
+                    _pid_file().unlink(missing_ok=True)
+                    return
+                time.sleep(0.25)
+
     import httpx
 
     # Prefer health-check-based stop — confirms we're killing SmartMemory, not a reused PID

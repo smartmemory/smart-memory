@@ -16,12 +16,26 @@ Critical invariants:
 """
 from __future__ import annotations
 
-import warnings
+import logging
 from typing import Optional
 
 import httpx
 
 from smartmemory_app.config import get_api_key, set_api_key
+
+log = logging.getLogger(__name__)
+
+
+class RemoteBackendError(RuntimeError):
+    """A hosted-API call failed (unreachable / timeout / HTTP error).
+
+    The low-level `_request()` never raises (returns `{"error": ...}`); the
+    high-level `ingest()` / `search()` RAISE this so a failure surfaces to the
+    caller instead of masquerading as a normal return value — a fake `"Error: ..."`
+    id from ingest, or an empty result list from search that reads as "no results".
+    Background callers (e.g. `recall()`) catch it and degrade; explicit CLI
+    commands (`sm add` / `sm search`) let it surface.
+    """
 
 
 class RemoteMemory:
@@ -150,7 +164,9 @@ class RemoteMemory:
         body = {"content": content, "context": {"memory_type": memory_type}}
         result = self._request("POST", "/memory/ingest", timeout=120, json=body)
         if err := (result or {}).get("error"):
-            return f"Error: {err}"
+            # Surface the failure — do NOT return "Error: ..." as the item_id, which
+            # the CLI would print as if the add succeeded.
+            raise RemoteBackendError(err)
         return result.get("item_id", "unknown")
 
     def search(self, query: str, top_k: int = 5) -> list[dict]:
@@ -159,7 +175,9 @@ class RemoteMemory:
         result = self._request("POST", "/memory/search", json=body)
         # _request() returns a list on success, dict on error, None on 204
         if isinstance(result, dict) and (err := result.get("error")):
-            return [{"error": err}]
+            # Surface the failure — do NOT return an error-dict that the CLI renders
+            # as "No results", hiding a 30s timeout / unreachable service.
+            raise RemoteBackendError(err)
         return result if isinstance(result, list) else []
 
     def get(self, item_id: str) -> dict | None:
@@ -221,16 +239,22 @@ class RemoteMemory:
             except Exception:
                 pass  # snapshot is best-effort
 
-        # 2. Candidates
-        if query:
-            results = self.search(query, top_k=top_k * 2) or []
-        else:
-            requested = max(1, top_k)
-            recent_k = max(1, (requested + 1) // 2)
-            semantic_k = max(0, requested - recent_k)
-            recent = self.search("", top_k=recent_k) or []
-            semantic = self.search(cwd or "", top_k=semantic_k) if cwd and semantic_k else []
-            results = list(recent) + list(semantic)
+        # 2. Candidates — recall runs on every prompt hook, so a remote search
+        # failure degrades to empty (logged) rather than crashing the hook. The
+        # explicit `sm search` / `sm add` commands DO surface RemoteBackendError.
+        try:
+            if query:
+                results = self.search(query, top_k=top_k * 2) or []
+            else:
+                requested = max(1, top_k)
+                recent_k = max(1, (requested + 1) // 2)
+                semantic_k = max(0, requested - recent_k)
+                recent = self.search("", top_k=recent_k) or []
+                semantic = self.search(cwd or "", top_k=semantic_k) if cwd and semantic_k else []
+                results = list(recent) + list(semantic)
+        except RemoteBackendError as e:
+            log.warning("Remote recall search failed — returning empty recall: %s", e)
+            results = []
         results = [r for r in results if r.get("memory_type") != "snapshot"]
 
         # 3. Origin tier filter (dict-aware; legacy "unknown" / missing pass through)

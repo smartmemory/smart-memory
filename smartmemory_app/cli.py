@@ -397,10 +397,16 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 warning = warning or result.get("warning")
             else:
                 from smartmemory_app.storage import ingest
+                from smartmemory_app.remote_backend import RemoteBackendError
 
                 _warm_notice()
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
-                ids.append(ingest(chunk, memory_type, properties=props, origin="cli:add"))
+                try:
+                    ids.append(ingest(chunk, memory_type, properties=props, origin="cli:add"))
+                except RemoteBackendError as e:
+                    raise click.ClickException(
+                        f"Add failed — could not reach the SmartMemory service: {e}"
+                    )
         click.echo(f"Added {len(ids)} memories")
         for item_id in ids:
             click.echo(item_id)
@@ -422,10 +428,16 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
             click.echo(f"⚠  {result['warning']}", err=True)
     else:
         from smartmemory_app.storage import ingest
+        from smartmemory_app.remote_backend import RemoteBackendError
 
         _warm_notice()
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
-        click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))
+        try:
+            click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))
+        except RemoteBackendError as e:
+            raise click.ClickException(
+                f"Add failed — could not reach the SmartMemory service: {e}"
+            )
 
 
 @cli.command("recall")
@@ -594,6 +606,7 @@ def search_cmd(ctx, query: str, top_k: int, include_reference: bool) -> None:
     results = _daemon_request("POST", "/memory/search", json=body)
     if results is None:
         from smartmemory_app.storage import search
+        from smartmemory_app.remote_backend import RemoteBackendError
 
         try:
             results = search(
@@ -601,6 +614,10 @@ def search_cmd(ctx, query: str, top_k: int, include_reference: bool) -> None:
             )
         except NotImplementedError as e:
             raise click.ClickException(str(e))
+        except RemoteBackendError as e:
+            raise click.ClickException(
+                f"Search failed — could not reach the SmartMemory service: {e}"
+            )
     # The daemon returns the CORE-CRUD-LIST contract shape {"items": [...]};
     # the storage fallback returns a bare list. Unwrap so we always iterate
     # result dicts (iterating the dict directly yielded its keys -> "items"
