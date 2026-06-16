@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -120,17 +121,57 @@ def is_running(require_healthy: bool = True) -> bool:
         return False
 
 
-def start_daemon(num_workers: int = 1) -> None:
+def _stream_new_log_lines(log_path: Path, last_pos: int, emit: Callable[[str], None]) -> int:
+    """Emit complete new lines from log_path past last_pos; return the new position.
+
+    Used by start_daemon to surface the daemon's own startup progress (which it
+    already prints — "Loading backend...", "Backend ready (Xs)", etc.) to the
+    terminal while `sm start` blocks. Best-effort: any error returns last_pos
+    unchanged so streaming can never break startup. A trailing partial line is
+    left buffered (not emitted) until its newline arrives on the next poll.
+    """
+    try:
+        with open(log_path, "rb") as fh:
+            fh.seek(last_pos)
+            data = fh.read()
+        if not data:
+            return last_pos
+        text = data.decode("utf-8", errors="replace")
+        nl = text.rfind("\n")
+        if nl == -1:
+            return last_pos  # no complete line yet
+        for line in text[:nl].split("\n"):
+            if line.strip():
+                emit(line)
+        return last_pos + len(text[: nl + 1].encode("utf-8"))
+    except Exception:
+        return last_pos
+
+
+def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] = None) -> None:
     """Start the daemon and enrichment workers.
 
     Blocks until daemon is ready (health check passes) or timeout.
     Then starts num_workers background enrichment worker processes.
 
-    Warmup takes ~22s cold (first run), ~2s warm (model cached).
-    Idempotent — returns immediately if already running.
+    Warmup takes ~22s cold (first run), ~2s warm (model cached). When `on_log` is
+    given, the daemon's own startup progress lines (written to daemon.log) are
+    streamed to it during the wait, so `sm start` shows progress instead of a
+    silent hang. Idempotent — returns immediately if already running.
     """
     if is_running():
         return
+
+    data = _data_dir()
+    data.mkdir(parents=True, exist_ok=True)
+    log_path = data / "daemon.log"
+    # Stream only NEW startup lines — skip whatever was already in daemon.log.
+    _log_pos = log_path.stat().st_size if log_path.exists() else 0
+
+    def _pump() -> None:
+        nonlocal _log_pos
+        if on_log is not None:
+            _log_pos = _stream_new_log_lines(log_path, _log_pos, on_log)
 
     # launchd-managed install (macOS): let launchd own the process via the plist
     # (RunAtLoad/KeepAlive). bootstrap re-loads it after a `sm stop` bootout and
@@ -142,17 +183,16 @@ def start_daemon(num_workers: int = 1) -> None:
             if _launchd_plist_path(label).exists() and not _launchd_loaded(label):
                 _launchd_bootstrap(label)
         for _ in range(120):  # up to 60s for launchd to bring it healthy
+            _pump()
             if is_running(require_healthy=False):
+                _pump()
                 return
             time.sleep(0.5)
         raise TimeoutError(
-            f"launchd daemon did not become healthy within 60s. Check {_data_dir() / 'daemon.log'}"
+            f"launchd daemon did not become healthy within 60s. Check {log_path}"
         )
 
     port = _port()
-    data = _data_dir()
-    data.mkdir(parents=True, exist_ok=True)
-    log_path = data / "daemon.log"
 
     # Launch viewer_server.main() directly — NOT the CLI command
     # (avoids recursion since CLI `viewer` calls start_daemon + open browser).
@@ -171,9 +211,11 @@ def start_daemon(num_workers: int = 1) -> None:
     import socket
     for _ in range(120):  # 60s max
         if proc.poll() is not None:
+            _pump()  # surface whatever the daemon logged before it died
             raise RuntimeError(
                 f"Daemon exited during startup (code {proc.returncode}). Check {log_path}"
             )
+        _pump()
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             if s.connect_ex(("127.0.0.1", port)) == 0:
@@ -192,6 +234,7 @@ def start_daemon(num_workers: int = 1) -> None:
 
     # Phase 3: Start enrichment worker(s)
     _start_workers(num_workers)
+    _pump()  # final drain of any trailing startup lines
 
 
 def _start_workers(num_workers: int = 1) -> None:

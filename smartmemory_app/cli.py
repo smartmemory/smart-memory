@@ -142,7 +142,9 @@ def start_cmd(num_workers: int) -> None:
         return
     click.echo("Starting SmartMemory daemon (loading models)...")
     try:
-        start_daemon(num_workers=num_workers)
+        # Stream the daemon's own startup progress (backend load, embedding warmup,
+        # etc.) so a ~22s cold start shows what it's doing instead of hanging silent.
+        start_daemon(num_workers=num_workers, on_log=lambda ln: click.echo(f"  {ln}"))
         click.echo("Daemon ready.")
     except Exception as e:
         click.echo(f"Failed to start daemon: {e}", err=True)
@@ -176,7 +178,7 @@ def restart_cmd(num_workers: int) -> None:
         click.echo("Stopping daemon...")
         stop_daemon()
     click.echo("Starting daemon...")
-    start_daemon(num_workers=num_workers)
+    start_daemon(num_workers=num_workers, on_log=lambda ln: click.echo(f"  {ln}"))
     click.echo("Daemon ready.")
 
 

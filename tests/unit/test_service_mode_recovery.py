@@ -75,3 +75,37 @@ class TestLaunchdRecovery:
                 patch.object(daemon, "_pid_file", return_value=MagicMock()):
             daemon.stop_daemon()
         assert booted == ["ai.smartmemory.worker", "ai.smartmemory.daemon"]
+
+
+class TestStartupLogStreaming:
+    """`sm start` streams the daemon's own startup progress (already written to
+    daemon.log) so a ~22s cold start shows progress instead of a silent hang."""
+
+    def test_streams_only_new_complete_lines_and_buffers_partial(self, tmp_path):
+        from smartmemory_app import daemon
+        p = tmp_path / "daemon.log"
+        p.write_text("pre-existing line\n")  # old content — must be skipped
+        pos = p.stat().st_size
+        emitted = []
+
+        # no new content yet
+        pos = daemon._stream_new_log_lines(p, pos, emitted.append)
+        assert emitted == []
+
+        # two complete lines + a partial (no trailing newline yet)
+        with open(p, "a") as f:
+            f.write("Loading SmartMemory backend...\nBackend ready (2.0s)\npartial")
+        pos = daemon._stream_new_log_lines(p, pos, emitted.append)
+        assert emitted == ["Loading SmartMemory backend...", "Backend ready (2.0s)"]  # partial withheld
+
+        # the partial line's newline arrives — now it emits as one complete line
+        with open(p, "a") as f:
+            f.write(" done\n")
+        daemon._stream_new_log_lines(p, pos, emitted.append)
+        assert emitted[-1] == "partial done"
+
+    def test_missing_log_is_noop(self, tmp_path):
+        from smartmemory_app import daemon
+        out = []
+        assert daemon._stream_new_log_lines(tmp_path / "nope.log", 0, out.append) == 0
+        assert out == []
