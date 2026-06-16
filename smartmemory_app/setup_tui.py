@@ -37,6 +37,7 @@ LLM_PROVIDERS = [
     ("claude-agent", "Claude Agent SDK, OAuth (no API key)"),
     ("openai", "OpenAI API"),
     ("anthropic", "Anthropic API"),
+    ("gemini", "Google Gemini API"),
     ("ollama", "Local, free (llama3.1, mistral)"),
     ("lmstudio", "Local, OpenAI-compatible endpoint"),
     ("none", "EntityRuler only (very limited)"),
@@ -52,6 +53,7 @@ _KEY_VARS = {
     "groq": "GROQ_API_KEY",
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
 }
 
 LOCAL_MODEL_PROVIDERS = {"ollama", "lmstudio"}

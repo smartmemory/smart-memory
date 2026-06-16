@@ -28,7 +28,7 @@ _VALID_MODES = frozenset({"local", "remote"})
 # endpoint (Tier-2 enqueue), the boot banner, and `smartmemory status` all agree.
 # Previously each site hardcoded its own GROQ|OPENAI check, so an Anthropic- or
 # DeepSeek-only user silently got NO extraction even with a valid key.
-LLM_KEY_ENV_VARS = ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")
+LLM_KEY_ENV_VARS = ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY")
 
 
 class UnconfiguredError(RuntimeError):

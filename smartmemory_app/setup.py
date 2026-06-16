@@ -400,6 +400,7 @@ def _setup_local() -> None:
     click.echo("  claude-agent — Claude Agent SDK, OAuth (no API key)")
     click.echo("  anthropic    — Anthropic API (ANTHROPIC_API_KEY)")
     click.echo("  openai       — OpenAI API (OPENAI_API_KEY)")
+    click.echo("  gemini       — Google Gemini API (GEMINI_API_KEY)")
     click.echo("  ollama       — free, local (llama3.1, mistral)")
     click.echo("  lmstudio     — local, OpenAI-compatible endpoint")
     click.echo("  none         — EntityRuler only (very limited)")
@@ -414,6 +415,7 @@ def _setup_local() -> None:
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "deepseek": "DEEPSEEK_API_KEY",
+        "gemini": "GEMINI_API_KEY",
     }
     key_envvar = _LLM_KEY_ENVVAR.get(llm)
     if key_envvar:

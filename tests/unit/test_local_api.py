@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from smartmemory_app.local_api import api
+from smartmemory_app.config import LLM_KEY_ENV_VARS
 
 
 @pytest.fixture()
@@ -409,7 +410,10 @@ class TestUnconfiguredReturns503:
 # Ingest LLM-key surfacing — no-silent-degradation: when no LLM key is set the
 # daemon degrades to Tier-1 (spaCy) and MUST tell the caller, not store quietly.
 # ---------------------------------------------------------------------------
-_LLM_ENV = {k: "" for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")}
+# Derive the clear-set from the canonical provider list (not a hardcoded tuple)
+# so adding a provider — e.g. GEMINI_API_KEY for CORE-LLM-GEMINI-1 — can't leave
+# this test asserting "no key" while the new var is still set in the environment.
+_LLM_ENV = {k: "" for k in LLM_KEY_ENV_VARS}
 
 
 class TestIngestLLMWarning:
