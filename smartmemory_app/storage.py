@@ -83,6 +83,18 @@ def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
         if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
             os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
 
+        # CORE-LLM-GEMINI-1 (review finding 2): pin the LLM model from config so the
+        # configured provider is honored. An explicit cfg.llm_model is respected for
+        # any provider (previously ignored entirely); a gemini provider with no explicit
+        # model gets the Gemini default — core's get_default_model() prioritises by
+        # key-presence and (without this) never selected Gemini, so a gemini selection
+        # silently routed elsewhere. Mirrors the embedding pin; an explicit
+        # SMARTMEMORY_LLM_MODEL env var still wins.
+        if not os.environ.get("SMARTMEMORY_LLM_MODEL"):
+            _llm_model = cfg.llm_model or ("gemini/gemini-2.0-flash" if cfg.llm_provider == "gemini" else None)
+            if _llm_model:
+                os.environ["SMARTMEMORY_LLM_MODEL"] = _llm_model
+
         # DIST-FULL-LOCAL-1 Phase 2b: apply coreference config to pipeline profile
         from smartmemory.pipeline.config import PipelineConfig
 
