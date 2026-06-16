@@ -12,6 +12,38 @@ import click
 
 log = logging.getLogger(__name__)
 
+# DIST-INSTALL-RESOLVE-1: conservative floor for smartmemory-core. A core BELOW
+# this is from the dead-`/auth/me` era — a pip-backtracked install (e.g. wrapper
+# 1.1.5 → core 0.7.1) that 401s at first API call. `smartmemory doctor` flags it.
+MIN_CORE_VERSION = "1.0.0"
+
+
+def _version_lt(a: str, b: str) -> bool:
+    """Return True if version string `a` is strictly less than `b`.
+
+    Prefers packaging.version (an indirect dep) for PEP 440 correctness; falls
+    back to a tuple-of-ints compare so doctor never hard-fails on a missing dep.
+    """
+    try:
+        from packaging.version import Version
+
+        return Version(a) < Version(b)
+    except Exception:
+        def _tuple(v: str) -> tuple[int, ...]:
+            # Take the leading numeric release segment ("1.4.32rc1" -> (1, 4, 32)).
+            parts: list[int] = []
+            for chunk in v.split(".")[:3]:
+                num = ""
+                for ch in chunk:
+                    if ch.isdigit():
+                        num += ch
+                    else:
+                        break
+                parts.append(int(num) if num else 0)
+            return tuple(parts)
+
+        return _tuple(a) < _tuple(b)
+
 
 def _parse_extra_props(args: list[str]) -> dict[str, str]:
     """Parse Click extra args (--key value pairs) into a property dict."""
@@ -179,6 +211,14 @@ def status_cmd() -> None:
         click.echo("Start with: smartmemory start")
         return
     click.echo(f"SmartMemory daemon: {info.get('status', '?')}")
+    # DIST-LOCAL-REMOTE-AWARENESS-1: surface lite-vs-cloud detachment. The daemon
+    # /health response reports mode ("lite" | "remote"); in lite mode the store is
+    # a local SQLite graph on THIS machine, not the cloud account — so a cloud
+    # dashboard showing "0 memories" is expected, not a sync failure.
+    _mode = info.get("mode")
+    if _mode:
+        _mode_label = "lite (local-only)" if _mode == "lite" else _mode
+        click.echo(f"  Mode:       {_mode_label}")
     click.echo(f"  Memories:   {info.get('memories', '?')}")
     _llm = info.get("llm_provider", "?")
     # Flag the silent-failure case: a provider is configured but no key is present,
@@ -197,6 +237,18 @@ def status_cmd() -> None:
         click.echo(f"  Queue:      pending={pending}, done={done}, failed={failed}")
     else:
         click.echo("  Queue:      (no table)")
+
+    # DIST-LOCAL-REMOTE-AWARENESS-1: in lite mode, explain the local↔cloud
+    # boundary so an empty cloud dashboard isn't read as data loss. The cloud
+    # web dashboard reads the remote account; these memories live on this
+    # machine and were never pushed to the cloud.
+    if _mode == "lite":
+        click.echo(
+            "\nNote: lite (local-only) mode — these memories are stored on THIS "
+            "machine (local SQLite graph), not in your cloud account. A cloud "
+            "dashboard at smartmemory.ai showing 0 memories is expected, not a "
+            "sync failure."
+        )
 
 
 @cli.command("viewer")
@@ -860,6 +912,68 @@ def models_cmd(provider: str | None) -> None:
             click.echo(
                 "\nAnthropic: claude-3-5-haiku-latest, claude-sonnet-4-5-20250514, claude-opus-4-6-20250603"
             )
+
+
+@cli.command("doctor")
+def doctor_cmd() -> None:
+    """Diagnose a broken install (DIST-INSTALL-RESOLVE-1).
+
+    Detects the pip-backtracked-wrapper trap: a fresh `pip install smartmemory`
+    in a polluted environment can backtrack to an ancient wrapper that pins a
+    `smartmemory-core` from the dead-`/auth/me` era, which 401s at first use.
+    Checks the installed core against a conservative floor and reports the
+    Python version.
+    """
+    import sys
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+
+    ok = True
+
+    # ── Python version ──────────────────────────────────────────────────────
+    py = sys.version_info
+    py_str = f"{py.major}.{py.minor}.{py.micro}"
+    if py >= (3, 11):
+        click.echo(f"✓ Python {py_str} (>=3.11 OK)")
+    else:
+        ok = False
+        click.echo(
+            f"✗ Python {py_str} is too old — SmartMemory requires >=3.11. "
+            "Old Python forces pip to backtrack onto a legacy wrapper.",
+            err=True,
+        )
+
+    # ── smartmemory-core version ────────────────────────────────────────────
+    try:
+        core = _pkg_version("smartmemory-core")
+    except PackageNotFoundError:
+        ok = False
+        click.echo(
+            "✗ smartmemory-core is not installed. Reinstall in a clean venv:\n"
+            "    python -m venv .venv && source .venv/bin/activate\n"
+            "    pip install smartmemory",
+            err=True,
+        )
+    else:
+        if _version_lt(core, MIN_CORE_VERSION):
+            ok = False
+            click.echo(
+                f"✗ smartmemory-core {core} is too old (floor is {MIN_CORE_VERSION}).\n"
+                "  You likely have a pip-backtracked install: pip could not satisfy the\n"
+                "  current wrapper's dependency tree in this environment and walked back to\n"
+                "  an ancient wrapper (e.g. 1.1.5 → core 0.7.1) that talks to a dead API and\n"
+                "  401s at first use. This usually happens when installing into a polluted\n"
+                "  environment (e.g. the Anaconda base env).\n"
+                "  Fix: reinstall in a clean, isolated environment:\n"
+                "    python -m venv .venv && source .venv/bin/activate\n"
+                "    pip install --upgrade smartmemory",
+                err=True,
+            )
+        else:
+            click.echo(f"✓ smartmemory-core {core} OK")
+
+    if not ok:
+        raise SystemExit(1)
+    click.echo("\nAll checks passed.")
 
 
 @cli.command("config")
