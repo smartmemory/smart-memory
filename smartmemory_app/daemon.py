@@ -115,7 +115,15 @@ def _start_workers(num_workers: int = 1) -> None:
     Args:
         num_workers: Number of worker processes to start (default 1).
     """
-    if not (os.environ.get("GROQ_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+    from smartmemory_app.config import LLM_KEY_ENV_VARS, llm_key_present
+    if not llm_key_present():
+        # no-silent-degradation: this fallback disables Tier-2 entirely, so say so.
+        log.warning(
+            "No LLM API key found (checked %s) — Tier-2 entity extraction and "
+            "enrichment workers will NOT start. Memories are still stored with "
+            "Tier-1 (spaCy) extraction only. Add a key with `smartmemory setup`.",
+            ", ".join(LLM_KEY_ENV_VARS),
+        )
         return
 
     data = _data_dir()

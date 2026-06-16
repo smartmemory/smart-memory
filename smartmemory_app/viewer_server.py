@@ -136,11 +136,13 @@ def _build_app() -> FastAPI:
                 "decisions": False,
             }
 
+        from smartmemory_app.config import llm_key_present
         return {
             "service": "smartmemory",
             "status": "ok" if backend_ok else "degraded",
             "memories": node_count,
             "llm_provider": cfg.llm_provider,
+            "llm_key_present": llm_key_present(),
             "embedding_provider": cfg.embedding_provider,
             "pid": os.getpid(),
             "async_enrichment": async_info,
@@ -179,8 +181,8 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # Load LLM API keys: env → keychain → shell profile.
     # setup stores keys in all three locations. Keychain and profile
     # are available immediately without sourcing .zshrc in a new shell.
-    _LLM_KEYS = ["GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"]
-    for key_name in _LLM_KEYS:
+    from smartmemory_app.config import LLM_KEY_ENV_VARS, llm_key_present
+    for key_name in LLM_KEY_ENV_VARS:
         if os.environ.get(key_name):
             continue
         # Try keychain
@@ -202,6 +204,20 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
                 print(f"  Loaded {key_name} from shell profile", flush=True)
         except Exception:
             pass
+
+    # no-silent-degradation: make the LLM-extraction state explicit at boot so a
+    # missing key is a loud, actionable banner line — not a thing the user only
+    # discovers when `add` quietly stores Tier-1-only memories.
+    if llm_key_present():
+        _present = [k for k in LLM_KEY_ENV_VARS if os.environ.get(k)]
+        print(f"  LLM extraction: enabled ({', '.join(_present)})", flush=True)
+    else:
+        print(
+            "  LLM extraction: DISABLED — no LLM API key found. Memories will store "
+            "with Tier-1 (spaCy) extraction only; entity extraction and enrichment "
+            "are off. Run `smartmemory setup` to add a key.",
+            flush=True,
+        )
 
     print("Loading SmartMemory backend...", flush=True)
     t0 = time.time()

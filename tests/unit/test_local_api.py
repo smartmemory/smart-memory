@@ -12,6 +12,7 @@ Tests cover:
 
 All tests mock _get_backend() to avoid touching the filesystem.
 """
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -402,3 +403,48 @@ class TestUnconfiguredReturns503:
             r = client.get("/graph/full")
         assert r.status_code == 400
         assert "misconfigured" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Ingest LLM-key surfacing — no-silent-degradation: when no LLM key is set the
+# daemon degrades to Tier-1 (spaCy) and MUST tell the caller, not store quietly.
+# ---------------------------------------------------------------------------
+_LLM_ENV = {k: "" for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")}
+
+
+class TestIngestLLMWarning:
+    def test_warns_when_no_llm_key(self, client):
+        """No LLM key → 200 with item_id AND a 'warning' field naming the downgrade."""
+        with patch.dict("os.environ", _LLM_ENV, clear=False):
+            for k in list(_LLM_ENV):
+                os.environ.pop(k, None)
+            with patch("smartmemory_app.storage.ingest", return_value="itm_123"):
+                r = client.post("/ingest", json={"content": "Alice leads Atlas", "memory_type": "episodic"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["item_id"] == "itm_123"
+        assert "warning" in body and "LLM" in body["warning"]
+
+    def test_no_warning_when_llm_key_present(self, client):
+        """With a key, the two-tier path runs and the response carries NO warning."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
+            with patch(
+                "smartmemory_app.storage.ingest",
+                return_value={"item_id": "itm_456", "entity_ids": {}, "queued": True},
+            ):
+                r = client.post("/ingest", json={"content": "Bob ships Beta", "memory_type": "episodic"})
+        assert r.status_code == 200
+        assert "warning" not in r.json()
+
+    def test_anthropic_only_key_is_recognised(self, client):
+        """Regression: Anthropic-only used to be silently treated as no-key (Tier-2 skipped)."""
+        with patch.dict("os.environ", {**_LLM_ENV, "ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False):
+            for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+                os.environ.pop(k, None)
+            with patch(
+                "smartmemory_app.storage.ingest",
+                return_value={"item_id": "itm_789", "entity_ids": {}, "queued": True},
+            ):
+                r = client.post("/ingest", json={"content": "Carol owns Core", "memory_type": "episodic"})
+        assert r.status_code == 200
+        assert "warning" not in r.json()  # key present → no downgrade

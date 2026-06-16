@@ -180,7 +180,13 @@ def status_cmd() -> None:
         return
     click.echo(f"SmartMemory daemon: {info.get('status', '?')}")
     click.echo(f"  Memories:   {info.get('memories', '?')}")
-    click.echo(f"  LLM:        {info.get('llm_provider', '?')}")
+    _llm = info.get("llm_provider", "?")
+    # Flag the silent-failure case: a provider is configured but no key is present,
+    # so extraction is actually disabled despite the config saying otherwise.
+    if info.get("llm_key_present") is False and _llm not in ("none", "?"):
+        click.echo(f"  LLM:        {_llm} (no API key — extraction disabled)")
+    else:
+        click.echo(f"  LLM:        {_llm}")
     click.echo(f"  Embeddings: {info.get('embedding_provider', '?')}")
     click.echo(f"  PID:        {info.get('pid', '?')}")
     async_info = info.get("async_enrichment", {})
@@ -326,6 +332,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
             raise click.ClickException("Content cannot be empty.")
         props = _parse_extra_props(ctx.args)
         ids = []
+        warning = None
         for chunk in chunks:
             # DIST-LITE-QUIET-1: the CLI declares its producer to the (producer-neutral)
             # daemon so writes are attributed cli:add (tier 1), not origin='unknown'.
@@ -335,6 +342,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
             result = _daemon_request("POST", "/memory/ingest", json=body)
             if result:
                 ids.append(result.get("item_id", "?"))
+                warning = warning or result.get("warning")
             else:
                 from smartmemory_app.storage import ingest
 
@@ -344,6 +352,9 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         click.echo(f"Added {len(ids)} memories")
         for item_id in ids:
             click.echo(item_id)
+        if warning:
+            # Surfaced once for the whole batch — the daemon degraded to Tier-1.
+            click.echo(f"⚠  {warning}", err=True)
         return
     if not text.strip():
         raise click.ClickException("Content cannot be empty.")
@@ -355,6 +366,8 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
     result = _daemon_request("POST", "/memory/ingest", json=body)
     if result:
         click.echo(result.get("item_id", "?"))
+        if result.get("warning"):
+            click.echo(f"⚠  {result['warning']}", err=True)
     else:
         from smartmemory_app.storage import ingest
 

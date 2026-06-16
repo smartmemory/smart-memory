@@ -21,6 +21,15 @@ import tomli_w
 
 _VALID_MODES = frozenset({"local", "remote"})
 
+# Canonical set of env vars that satisfy "an LLM key is available" for local
+# Tier-2 entity extraction + enrichment. Must stay in sync with the key-loading
+# list in viewer_server.main() — these are the providers core's litellm routing
+# can use. Single source of truth so the daemon (worker start), the ingest
+# endpoint (Tier-2 enqueue), the boot banner, and `smartmemory status` all agree.
+# Previously each site hardcoded its own GROQ|OPENAI check, so an Anthropic- or
+# DeepSeek-only user silently got NO extraction even with a valid key.
+LLM_KEY_ENV_VARS = ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")
+
 
 class UnconfiguredError(RuntimeError):
     """Raised by storage.get_memory() when no config exists and auto-migration fails.
@@ -155,6 +164,17 @@ def is_configured() -> bool:
     if os.environ.get("SMARTMEMORY_MODE"):
         return True
     return load_config().mode is not None
+
+
+def llm_key_present() -> bool:
+    """True if any supported LLM provider key is set in the environment.
+
+    Single source of truth for "can Tier-2 LLM extraction run?". Used by the
+    daemon worker-start gate, the ingest endpoint's Tier-2 enqueue, the daemon
+    boot banner, and `smartmemory status`. Checks all of LLM_KEY_ENV_VARS, so a
+    user configured with Anthropic or DeepSeek is recognised — not just GROQ/OpenAI.
+    """
+    return any(os.environ.get(k) for k in LLM_KEY_ENV_VARS)
 
 
 def get_api_key() -> str:

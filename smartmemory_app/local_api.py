@@ -35,6 +35,11 @@ from smartmemory_app.storage import get_memory
 # ingest+read could race on the SmartMemory singleton's non-thread-safe state.
 _rw_lock = threading.RLock()
 
+# One-shot guard so the "no LLM key → Tier-2 disabled" warning is logged once per
+# daemon lifetime instead of on every line of a batch ingest (the per-request
+# signal still rides back to the user in the response `warning` field every time).
+_llm_warned = False
+
 api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
 
 # Fields that normalizeAPIResponse reads at top level (normalize.js:38,46).
@@ -698,7 +703,6 @@ def ingest_endpoint(body: IngestRequest) -> dict:
       explicit body.workspace_id > derive_workspace_id(body.cwd) >
       SMARTMEMORY_WORKSPACE_ID env var > None (legacy untagged).
     """
-    import os
     from smartmemory_app.recall_format import derive_workspace_id
 
     memory_type = body.memory_type
@@ -719,7 +723,8 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     # AND precedence). [Codex review, 2026-06-07]
     origin = (body.context or {}).get("origin")
 
-    has_llm = bool(os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY"))
+    from smartmemory_app.config import llm_key_present
+    has_llm = llm_key_present()
 
     if has_llm:
         # Two-tier: Tier 1 sync (spaCy), enqueue Tier 2 (LLM) via SQLite queue.
@@ -736,11 +741,27 @@ def ingest_endpoint(body: IngestRequest) -> dict:
                 enqueue(item_id, entity_ids)
         return {"item_id": item_id}
     else:
-        # No LLM — full sync pipeline
+        # No LLM key — Tier-1 only (spaCy). This is a real capability downgrade:
+        # no entity extraction, no enrichment, weaker semantic index. Per
+        # no-silent-degradation, say so — both in the daemon log (once) and to
+        # the caller (every time, so the CLI can surface it).
+        global _llm_warned
+        if not _llm_warned:
+            log.warning(
+                "Ingesting without an LLM API key — Tier-2 entity extraction and "
+                "enrichment are DISABLED (Tier-1 spaCy only). Add a key with "
+                "`smartmemory setup` to enable full extraction."
+            )
+            _llm_warned = True
         with _rw_lock:
             from smartmemory_app.storage import ingest
             item_id = ingest(body.content, memory_type, properties=properties, origin=origin)
-        return {"item_id": item_id}
+        return {
+            "item_id": item_id,
+            "warning": "No LLM key configured — stored with Tier-1 (spaCy) extraction "
+                       "only; entity extraction and enrichment are disabled. "
+                       "Run `smartmemory setup` to add a key.",
+        }
 
 
 class SearchRequest(BaseModel):
