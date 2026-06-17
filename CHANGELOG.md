@@ -3,6 +3,9 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Added (lockstep) — track smartmemory-core==1.4.33 (1.4.33)
+- **Cold-start entity-typing parity for server mode.** Bundles the seed-pattern ROM so a fresh workspace gets deterministic dictionary entity-typing from request #1, matching Lite (CORE-RELATION-RULER-1).
+
 ### Fixed
 - **No-LLM ingestion is no longer silent.** When no LLM provider key is configured, the daemon degraded to Tier-1 (spaCy) extraction without telling anyone — `add` returned a normal item id, the boot banner said nothing, and `status` showed the configured provider as if it were active. Now: the daemon boot prints an explicit `LLM extraction: DISABLED …` line, the worker-start gate logs a WARNING instead of returning silently, `/memory/ingest` returns a `warning` field that `smartmemory add` surfaces (`⚠ …`), and `smartmemory status` shows `LLM: <provider> (no API key — extraction disabled)`.
 - **Anthropic/DeepSeek keys are now recognised for Tier-2.** The worker-start and ingest paths previously hardcoded a `GROQ_API_KEY || OPENAI_API_KEY` check, so a user configured only with Anthropic or DeepSeek silently got no entity extraction despite a valid key. All four providers now share one source of truth (`config.llm_key_present()`).
