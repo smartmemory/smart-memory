@@ -123,6 +123,64 @@ cli.add_command(_code_group, name="code")
 cli.add_command(_mcp_group, name="mcp")
 
 
+# ── `sm provenance …` — code-to-conversation provenance (CORE-CODE-PROVENANCE-1) ──
+def _codex_path_on_or_after(path, root, since: str) -> bool:
+    """A rollout lives at ``<root>/YYYY/MM/DD/rollout-*.jsonl``; keep it iff its
+    path-date dir is on/after ``since`` (YYYY-MM-DD). Cheapest robust filter — no
+    per-file stat. Paths not matching the date layout are kept (not filtered out)."""
+    try:
+        parts = path.relative_to(root).parts  # (YYYY, MM, DD, filename)
+        if len(parts) >= 3:
+            return f"{parts[0]}-{parts[1]}-{parts[2]}" >= since
+    except Exception:
+        pass
+    return True
+
+
+@cli.group("provenance")
+def provenance_group() -> None:
+    """Code-to-conversation provenance (CORE-CODE-PROVENANCE-1)."""
+
+
+@provenance_group.command("import-codex")
+@click.option("--codex-dir", default=None, show_default=True,
+              help="Codex sessions root (default: ~/.codex/sessions).")
+@click.option("--since", default=None,
+              help="Only import rollouts whose path-date dir is on/after YYYY-MM-DD.")
+@click.option("--dry-run", is_flag=True, help="Parse and count, but do not persist.")
+def provenance_import_codex(codex_dir, since, dry_run) -> None:
+    """Import Codex apply_patch authorship into the graph as code_provenance evidence."""
+    from pathlib import Path
+
+    from smartmemory.provenance.extract import codex_session_edits, iter_codex_sessions
+    from smartmemory_app.storage import persist_provenance
+
+    root = Path(codex_dir).expanduser() if codex_dir else (Path.home() / ".codex" / "sessions")
+    if not root.exists():
+        click.echo(f"No Codex sessions directory at {root}")
+        return
+
+    sessions = rows = edges = no_patch = 0
+    for path in iter_codex_sessions(root):
+        if since and not _codex_path_on_or_after(path, root, since):
+            continue
+        se = codex_session_edits(path)
+        if se is None:
+            no_patch += 1
+            continue
+        sessions += 1
+        rows += len(se.edits)
+        if not dry_run:
+            res = persist_provenance(se)
+            edges += int(res.get("edges", 0))
+
+    verb = "Would import" if dry_run else "Imported"
+    click.echo(
+        f"{verb} {rows} evidence rows across {sessions} sessions "
+        f"({edges} edges; {no_patch} rollouts had no apply_patch)."
+    )
+
+
 # ── Daemon lifecycle ────────────────────────────────────────────────────────
 
 
@@ -732,6 +790,8 @@ def lifecycle_observe() -> None:
         tool_name=body.get("tool_name", "unknown"),
         tool_input=body.get("tool_input", {}),
         tool_result=body.get("tool_response", ""),
+        transcript_path=body.get("transcript_path"),
+        cwd=body.get("cwd"),
     )
 
 

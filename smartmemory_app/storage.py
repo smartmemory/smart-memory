@@ -278,6 +278,30 @@ def ingest(
     return _normalize_ingest_result(result)
 
 
+def persist_provenance(edits) -> dict:
+    """Persist a `SessionEdits` batch (CORE-CODE-PROVENANCE-1 Phase 2a) under the
+    SAME cross-process write lock as ingest(), so concurrent detached hooks for the
+    same session serialize (one :Session node, intact edges). No-op in remote mode
+    — provenance capture is local/lite only.
+
+    Returns the persister's counts dict, or a `{"skipped": ...}` marker.
+    """
+    if not edits or not getattr(edits, "edits", None):
+        return {"evidence": 0, "edges": 0, "skipped": "empty"}
+    mem = get_memory()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        log.debug("persist_provenance: remote mode — skipping (local-only capture)")
+        return {"evidence": 0, "edges": 0, "skipped": "remote"}
+    from smartmemory.provenance.persister import ProvenancePersister
+
+    data_path = _data_path if _data_path is not None else _resolve_data_dir()
+    lock = _get_lock_file(data_path)
+    with lock:
+        return ProvenancePersister(mem).persist(edits)
+
+
 def _list_all_memories(mem) -> list[dict]:
     """Return all memory nodes (excluding entity/relation/Version nodes).
 

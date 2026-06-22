@@ -71,6 +71,8 @@ async def observe(request: Request):
         tool_name=body.get("tool_name", "unknown"),
         tool_input=body.get("tool_input", {}),
         tool_result=body.get("tool_response", ""),
+        transcript_path=body.get("transcript_path"),
+        cwd=body.get("cwd"),
     )
     return {"status": "ok"}
 

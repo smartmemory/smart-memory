@@ -137,8 +137,21 @@ class MemoryLifecycle:
         self._save_state()
         return output
 
-    def observe(self, tool_name: str, tool_input: dict, tool_result: str) -> None:
-        """Phase 3: Capture tool call as observation. Async via storage.ingest()."""
+    def observe(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        tool_result: str,
+        transcript_path: str | None = None,
+        cwd: str | None = None,
+    ) -> None:
+        """Phase 3: Capture tool call as observation. Async via storage.ingest().
+
+        Augmented (CORE-CODE-PROVENANCE-1 Phase 2a): for Edit/Write/MultiEdit, ALSO
+        persist full-payload code-authorship evidence (tier-4, hidden) anchored to
+        this session, so code can be traced back to the conversation that wrote it.
+        The two writes are failure-isolated — a provenance error never regresses the
+        episodic capture. (PostToolUse fires post-success; failures route to learn.)"""
         if not self._config.enabled or not self._config.observe_tool_calls:
             return
 
@@ -149,11 +162,54 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(text, memory_type="episodic", properties={"origin": "hook:observe"})
+            # origin MUST be the explicit kwarg — it is a reserved key stripped from
+            # `properties` (DIST-LITE-QUIET-1), so the old properties= form silently
+            # stored origin="unknown". (CORE-CODE-PROVENANCE-1 Phase 2a fix.)
+            ingest(text, memory_type="episodic", origin="hook:observe")
             self._observation_count += 1
             self._save_state()
         except Exception as e:
             log.warning("Observe ingest failed: %s", e)
+
+        # CORE-CODE-PROVENANCE-1 Phase 2a — durable code-authorship evidence, in its
+        # OWN try/except so a failure here cannot regress the episodic write above.
+        try:
+            if tool_name in ("Edit", "Write", "MultiEdit"):
+                if not transcript_path:
+                    # No transcript_path -> we cannot form a read-back source handle, so
+                    # provenance is skipped. Surface it once (no-silent-degradation) rather
+                    # than dropping the capture invisibly.
+                    if not getattr(self, "_warned_no_transcript", False):
+                        log.warning(
+                            "Provenance capture skipped: no transcript_path on %s event; "
+                            "code-authorship evidence will not be persisted for this session.",
+                            tool_name,
+                        )
+                        self._warned_no_transcript = True
+                else:
+                    from smartmemory.provenance.evidence import SessionEdits
+                    from smartmemory.provenance.extract import cc_live_evidence
+                    from smartmemory_app.storage import persist_provenance
+
+                    rows = cc_live_evidence(
+                        tool_name=tool_name,
+                        tool_input=tool_input or {},
+                        session_id=self.session_id,
+                        source_path=transcript_path,
+                    )
+                    if rows:
+                        persist_provenance(
+                            SessionEdits(
+                                source="cc",
+                                source_path=transcript_path,
+                                session_id=self.session_id,
+                                cwd=cwd,
+                                repo=None,
+                                edits=rows,
+                            )
+                        )
+        except Exception as e:
+            log.warning("Provenance persist failed (non-fatal): %s", e)
 
     def distill(self, response: str) -> None:
         """Phase 4: Pair assistant response with stored prompt, save turn pair.
