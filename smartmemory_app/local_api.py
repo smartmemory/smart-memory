@@ -803,8 +803,10 @@ def search_endpoint(body: SearchRequest) -> dict:
     return {"items": results}
 
 
-# LAUNCH-METRICS-1: daemon-side ingest. Local mode appends to a JSONL file in
-# the data dir; remote mode forwards to the configured service. Best-effort.
+# LAUNCH-METRICS-1: daemon-side ingest. Remote mode forwards to the configured
+# service (authenticated) so hosted-funnel aggregation sees CLI events; local
+# mode appends to a JSONL file in the data dir (local data stays local). A
+# failed forward falls back to the local JSONL — never discarded. Best-effort.
 @api.post("/launch/event")
 def ingest_launch_event(body: dict) -> dict:
     import json as _json
@@ -815,10 +817,45 @@ def ingest_launch_event(body: dict) -> dict:
     if not event_type:
         from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="event_type required")
+    props = body.get("props") or {}
+
+    try:
+        from smartmemory_app.config import get_api_key, load_config
+
+        cfg = load_config()
+    except Exception:
+        cfg = None
+    if cfg is not None and cfg.mode == "remote":
+        api_key = ""
+        try:
+            api_key = get_api_key()
+        except Exception:
+            pass
+        if api_key:
+            try:
+                import httpx
+
+                r = httpx.post(
+                    f"{cfg.api_url.rstrip('/')}/memory/launch/event",
+                    json={"event_type": event_type, "props": props},
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=5.0,
+                )
+                r.raise_for_status()
+                return r.json()
+            except Exception as exc:
+                log.warning(
+                    "launch_metrics: remote forward failed, falling back to local JSONL: %s", exc
+                )
+        else:
+            log.warning(
+                "launch_metrics: remote mode but no API key available; writing local JSONL only"
+            )
+
     record = {
         "event_id": _uuid.uuid4().hex,
         "event_type": event_type,
-        "props": body.get("props") or {},
+        "props": props,
         "ts": _time.time(),
     }
     try:

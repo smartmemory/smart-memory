@@ -3,6 +3,15 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Fixed — Launch telemetry now reaches the hosted funnel in remote mode (LAUNCH-METRICS-1)
+- **Daemon `/launch/event` forwards to the hosted service in remote mode** (authenticated with
+  your API key), so CLI funnel events actually land in the hosted `launch_events` store. The
+  CLI docstring claimed this proxying existed; it did not — events silently stayed on-disk. A
+  failed forward falls back to the local `launch_events.jsonl` (never discarded, logged at
+  WARNING). Local mode is unchanged: events stay local. Opt-out remains
+  `SMARTMEMORY_DISABLE_LAUNCH_METRICS=1`. New `tests/unit/test_launch_emission.py` covers the
+  emitter contract, JSONL append, remote forward, and the fallback (9 tests).
+
 ### Added — Code-authorship capture (CORE-CODE-PROVENANCE-1 Phase 2a)
 - **Trace code back to the conversation that wrote it.** The PostToolUse hook now persists full-payload code-authorship evidence for Edit/Write/MultiEdit (alongside the existing reflection, never replacing it), anchored to a `:Session` graph node. A new `smartmemory provenance import-codex` command imports Codex `apply_patch` authorship from `~/.codex/sessions`. Capture is failure-isolated (a provenance error never blocks the normal hook) and serializes across concurrent detached hooks via the cross-process write lock.
 - **Fixed: hook captures stored `origin="unknown"`.** `observe`/`distill`/`learn`/`persist` passed `origin` via `properties`, a reserved key that gets stripped — so those items were mis-attributed as `unknown` (tier 4) instead of their intended tags. The re-routed `observe` capture is corrected to `origin="hook:observe"` (tier 3); the `distill`/`learn`/`persist` siblings are flagged for a follow-up.

@@ -1,9 +1,10 @@
 """LAUNCH-METRICS-1 — CLI-side launch event emission.
 
 Lightweight wrapper that POSTs to the daemon HTTP API at /launch/event. The
-daemon proxies to the service when configured for remote mode; in local mode
-it can write directly to a local Mongo. Failures are best-effort (logged at
-WARNING) — observability must never break a CLI command.
+daemon forwards to the hosted service when configured for remote mode; in
+local mode it appends to ``launch_events.jsonl`` in the data dir (local data
+stays local). Failures are best-effort (logged at WARNING) — observability
+must never break a CLI command.
 """
 
 from __future__ import annotations
