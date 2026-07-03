@@ -107,10 +107,14 @@ def is_running(require_healthy: bool = True) -> bool:
 
     require_healthy=True: also checks backend loaded ("ok" status).
     require_healthy=False: any SmartMemory response counts (for stop/status).
+
+    Uses trust_env=False so proxy env vars never route the local health check
+    through a proxy and falsely report the daemon as down (L4).
     """
     try:
         import httpx
-        r = httpx.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
+        with httpx.Client(trust_env=False) as client:
+            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
         data = r.json()
         if data.get("service") != "smartmemory":
             return False
@@ -230,7 +234,10 @@ def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] =
     # Phase 2: Verify it's actually SmartMemory responding
     if not is_running(require_healthy=False):
         proc.terminate()
-        raise RuntimeError(f"Port {port} is open but health check failed. Check {log_path}")
+        raise RuntimeError(
+            f"Port {port} is in use (possibly another SmartMemory daemon or process); "
+            f"check `sm status` after fixing. (See {log_path})"
+        )
 
     # Phase 3: Start enrichment worker(s)
     _start_workers(num_workers)
@@ -325,7 +332,8 @@ def stop_daemon() -> None:
     # Prefer health-check-based stop — confirms we're killing SmartMemory, not a reused PID
     if is_running(require_healthy=False):
         try:
-            r = httpx.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
+            with httpx.Client(trust_env=False) as _hc:
+                r = _hc.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
             pid = r.json().get("pid")
             if pid:
                 os.kill(pid, signal.SIGTERM)
@@ -364,7 +372,8 @@ def get_status() -> dict | None:
         return None
     try:
         import httpx
-        r = httpx.get(f"http://127.0.0.1:{_port()}/health", timeout=3)
+        with httpx.Client(trust_env=False) as client:
+            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=3)
         return r.json()
     except Exception:
         return {"service": "smartmemory", "status": "unreachable"}

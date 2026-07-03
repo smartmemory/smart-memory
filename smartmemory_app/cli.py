@@ -68,40 +68,64 @@ def _daemon_url() -> str:
     return f"http://127.0.0.1:{load_config().daemon_port}"
 
 
+_DAEMON_NOT_RUNNING_MSG = (
+    "SmartMemory daemon is not running. Run `sm start` (first time: `sm setup`)."
+)
+_DAEMON_LOG_HINT = "~/.smartmemory/daemon.log"
+
+
 def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
-    """Try daemon HTTP API. Returns parsed JSON or None if daemon unreachable.
+    """Try daemon HTTP API. Returns parsed JSON.
 
     Retries once on connection drop — handles the case where the daemon
     auto-restarts after a pip upgrade (version guard middleware exits the
     process, launchd restarts it within ~5s).
+
+    Uses trust_env=False so proxy env vars (ALL_PROXY/HTTP(S)_PROXY, SOCKS)
+    never interfere with local 127.0.0.1 daemon calls (L4).
+
+    Raises click.ClickException with a user-friendly message on transport
+    errors or HTTP 5xx responses — no raw tracebacks (L1).
     """
     import httpx
     import time
 
     for attempt in range(2):
         try:
-            r = httpx.request(
-                method, f"{_daemon_url()}{path}", timeout=timeout, **kwargs
-            )
+            with httpx.Client(trust_env=False) as client:
+                r = client.request(
+                    method, f"{_daemon_url()}{path}", timeout=timeout, **kwargs
+                )
             r.raise_for_status()
             return r.json() if r.status_code != 204 else {}
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
             if attempt == 0:
                 time.sleep(2)  # wait for launchd to restart daemon (~1.2s startup)
                 continue
-            return None  # still down after retry — fall back to direct
+            # Daemon unreachable: return None so callers fall back to direct local
+            # storage (add/search/get all branch on None). Commands with no local
+            # fallback surface _DAEMON_NOT_RUNNING_MSG themselves.
+            click.echo(f"({_DAEMON_NOT_RUNNING_MSG} Using direct local access.)", err=True)
+            return None
         except httpx.HTTPStatusError as e:
             # Surface server errors (e.g. 501 for unsupported filters) to caller
             try:
                 detail = e.response.json().get("detail", str(e))
             except Exception:
                 detail = str(e)
+            if e.response.status_code >= 500:
+                raise click.ClickException(
+                    f"{detail}  (check {_DAEMON_LOG_HINT})"
+                )
             raise click.ClickException(detail)
         except httpx.ReadTimeout:
-            return None
+            raise click.ClickException(
+                f"SmartMemory daemon is not responding (timeout).  (check {_DAEMON_LOG_HINT})"
+            )
 
 
 @click.group()
+@click.version_option(package_name="smartmemory", prog_name="smartmemory")
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
 

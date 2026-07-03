@@ -3,6 +3,25 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Fixed — Proxy immunity + friendly CLI errors for daemon calls (FIX-C / L1 + L4)
+- **`trust_env=False` on all local daemon httpx calls.** `_daemon_request`, `is_running`,
+  `stop_daemon`, and `get_status` now construct `httpx.Client(trust_env=False)` so proxy
+  env vars (`ALL_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY`, SOCKS) never route health-checks
+  through a proxy — fixing `sm start`/`sm status` falsely reporting the daemon as down under
+  a SOCKS proxy (L4).
+- **Friendly CLI errors for transport failures.** Connection refused/timeout now raises a
+  `ClickException("SmartMemory daemon is not running. Run \`sm start\` …")` instead of silently
+  returning `None`. HTTP 5xx responses now append a `(check ~/.smartmemory/daemon.log)` hint.
+  `ReadTimeout` likewise surfaces a message with the log pointer. No raw tracebacks for either
+  class (L1).
+- **Port-conflict message.** When `sm start` opens a port but the health check fails (another
+  process is already using the port), the error message now reads "Port N is in use (possibly
+  another SmartMemory daemon or process); check \`sm status\` after fixing."
+
+### Added — `--version` flag (FIX-C / L2)
+- Both `sm` and `smartmemory` entry points now accept `--version` to print the package version
+  (`smartmemory x.y.z`) and exit.
+
 ### Fixed — Launch telemetry now reaches the hosted funnel in remote mode (LAUNCH-METRICS-1)
 - **Daemon `/launch/event` forwards to the hosted service in remote mode** (authenticated with
   your API key), so CLI funnel events actually land in the hosted `launch_events` store. The
