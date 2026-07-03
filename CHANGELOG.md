@@ -16,6 +16,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - **Trace code back to the conversation that wrote it.** The PostToolUse hook now persists full-payload code-authorship evidence for Edit/Write/MultiEdit (alongside the existing reflection, never replacing it), anchored to a `:Session` graph node. A new `smartmemory provenance import-codex` command imports Codex `apply_patch` authorship from `~/.codex/sessions`. Capture is failure-isolated (a provenance error never blocks the normal hook) and serializes across concurrent detached hooks via the cross-process write lock.
 - **Fixed: hook captures stored `origin="unknown"`.** `observe`/`distill`/`learn`/`persist` passed `origin` via `properties`, a reserved key that gets stripped — so those items were mis-attributed as `unknown` (tier 4) instead of their intended tags. The re-routed `observe` capture is corrected to `origin="hook:observe"` (tier 3); the `distill`/`learn`/`persist` siblings are flagged for a follow-up.
 
+### Changed (auto, lockstep) — track smartmemory-core==1.4.36 (1.4.36)
+- Version copied from smartmemory-core 1.4.36 release (single-source lockstep).
+
 ### Added (lockstep) — track smartmemory-core==1.4.33 (1.4.33)
 - **Cold-start entity-typing parity for server mode.** Bundles the seed-pattern ROM so a fresh workspace gets deterministic dictionary entity-typing from request #1, matching Lite (CORE-RELATION-RULER-1).
 
