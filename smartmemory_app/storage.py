@@ -166,7 +166,10 @@ def _shutdown() -> None:
     """Flush state to disk on clean exit. Called by atexit.
 
     Verified API paths (confirmed against core source):
-      UsearchVectorBackend._save()  — private flush, no public save()
+      CollectionAwareVectorBackend.save_all() — flushes every per-collection backend
+                                                 (lite mode injects this registry, not
+                                                 a bare UsearchVectorBackend — CORE-VEC-DELETE-1)
+      UsearchVectorBackend._save()  — private flush, no public save() (legacy single-backend path)
       SQLiteBackend.close()         — via memory._graph.backend.close() (factory.py:79)
     """
     global _memory
@@ -174,7 +177,11 @@ def _shutdown() -> None:
         return
     try:
         if hasattr(_memory, "_vector_backend") and _memory._vector_backend is not None:
-            _memory._vector_backend._save()
+            vb = _memory._vector_backend
+            if hasattr(vb, "save_all"):
+                vb.save_all()
+            elif hasattr(vb, "_save"):
+                vb._save()
         # Use SmartMemory.close() which shuts down evolution worker, ontology
         # store, and graph backend in the correct order.
         if hasattr(_memory, "close"):

@@ -62,10 +62,12 @@ def test_get_memory_registers_atexit(tmp_path):
 
 
 def test_shutdown_calls_save_and_close():
-    """_shutdown() calls _save() and SmartMemory.close() on the memory instance.
+    """_shutdown() calls save_all() and SmartMemory.close() on the memory instance.
 
-    _shutdown() prefers SmartMemory.close() (which orchestrates evolution worker,
-    ontology store, and graph backend shutdown). Only falls back to
+    _shutdown() prefers CollectionAwareVectorBackend.save_all() (CORE-VEC-DELETE-1) —
+    lite mode injects that registry, not a bare UsearchVectorBackend, and the registry
+    has no _save() of its own. It prefers SmartMemory.close() (which orchestrates
+    evolution worker, ontology store, and graph backend shutdown); only falls back to
     _graph.backend.close() when close() is unavailable.
     """
     import smartmemory_app.storage as storage
@@ -77,8 +79,25 @@ def test_shutdown_calls_save_and_close():
 
     storage._shutdown()
 
-    mock_vector._save.assert_called_once()
+    mock_vector.save_all.assert_called_once()
+    mock_vector._save.assert_not_called()
     mock_mem.close.assert_called_once()
+
+
+def test_shutdown_falls_back_to_save_when_no_save_all():
+    """_shutdown() calls _save() directly for the legacy single-backend injection
+    path, i.e. a vector backend that has no save_all() (only a bare UsearchVectorBackend,
+    not the CollectionAwareVectorBackend registry)."""
+    import smartmemory_app.storage as storage
+
+    mock_vector = MagicMock(spec=["_save"])
+    mock_mem = MagicMock()
+    mock_mem._vector_backend = mock_vector
+    storage._memory = mock_mem
+
+    storage._shutdown()
+
+    mock_vector._save.assert_called_once()
 
 
 def test_shutdown_clears_singleton():
