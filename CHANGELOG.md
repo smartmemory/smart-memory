@@ -3,6 +3,18 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+
+### Fixed — Deleted memories left orphaned vector embeddings behind (CORE-VEC-DELETE-1)
+- `sm`'s local/lite mode never actually removed a deleted memory's embedding from disk —
+  `smartmemory-core`'s usearch backend had no single-item delete, so the vector index kept
+  serving stale hits for item IDs that no longer existed in the graph. Fixed upstream in
+  `smartmemory-core` (see its CHANGELOG); also fixes a related shutdown-time warning
+  (`'CollectionAwareVectorBackend' object has no attribute '_save'`) that fired on every
+  daemon/CLI exit in local mode — harmless (embeddings already persist on every write) but noisy.
+
+### Changed (auto, lockstep) — track smartmemory-core==1.4.37 (1.4.37)
+- Version copied from smartmemory-core 1.4.37 release (single-source lockstep).
+
 ### Fixed — Proxy immunity + friendly CLI errors for daemon calls (FIX-C / L1 + L4)
 - **`trust_env=False` on all local daemon httpx calls.** `_daemon_request`, `is_running`,
   `stop_daemon`, and `get_status` now construct `httpx.Client(trust_env=False)` so proxy
