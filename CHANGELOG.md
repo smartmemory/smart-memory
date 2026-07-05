@@ -12,6 +12,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   (`'CollectionAwareVectorBackend' object has no attribute '_save'`) that fired on every
   daemon/CLI exit in local mode — harmless (embeddings already persist on every write) but noisy.
 
+### Changed (auto, lockstep) — track smartmemory-core==1.4.38 (1.4.38)
+- Version copied from smartmemory-core 1.4.38 release (single-source lockstep).
+
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.37 (1.4.37)
 - Version copied from smartmemory-core 1.4.37 release (single-source lockstep).
 

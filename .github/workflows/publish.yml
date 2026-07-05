@@ -27,13 +27,109 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build twine hatchling
+          pip install build twine hatchling pytest
+
+      - name: Read package metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          import tomllib
+          from pathlib import Path
+
+          data = tomllib.loads(Path("pyproject.toml").read_text())
+          version = data["project"]["version"]
+          pins = [
+              dep
+              for dep in data["project"]["dependencies"]
+              if dep.startswith("smartmemory-core")
+          ]
+          if len(pins) != 1:
+              raise SystemExit(f"expected exactly one smartmemory-core pin, got {pins!r}")
+          match = re.fullmatch(r"smartmemory-core(?:\[[^\]]+\])?==(.+)", pins[0])
+          if not match:
+              raise SystemExit(f"smartmemory-core dependency must be an exact pin, got {pins[0]!r}")
+          print(f"version={version}")
+          print(f"core_version={match.group(1)}")
+          PY
+
+      - name: Block unresolved merge-conflict markers
+        run: |
+          set -euo pipefail
+          if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' \
+              --exclude-dir=.git --exclude-dir=dist --exclude-dir=build .; then
+            echo "::error::Unresolved merge-conflict markers found."
+            exit 1
+          fi
+
+      - name: Preflight public dependency resolution
+        if: github.event.inputs.test_pypi != 'true'
+        run: |
+          set -euo pipefail
+          python -m venv resolver-env
+          source resolver-env/bin/activate
+          python -m pip install --upgrade pip
+          pip install --dry-run --only-binary=:all: \
+            "smartmemory-core[lite]==${{ steps.meta.outputs.core_version }}" \
+            "smartmemory-mcp>=0.2.0"
+          deactivate
+
+      - name: Install package and run release-blocking tests
+        run: |
+          set -euo pipefail
+          python -m pip install -e .
+          python -m pytest tests/unit/test_cli_ux.py -q
 
       - name: Build package
-        run: python -m build
+        run: |
+          set -euo pipefail
+          rm -rf dist/ build/ *.egg-info
+          python -m build
 
       - name: Check package
         run: twine check dist/*
+
+      - name: Verify wheel contains proxy-immune daemon calls
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob("dist/smartmemory-*.whl")
+          if len(wheels) != 1:
+              raise SystemExit(f"expected one wheel, got {wheels!r}")
+          with zipfile.ZipFile(wheels[0]) as zf:
+              daemon = zf.read("smartmemory_app/daemon.py").decode()
+              cli = zf.read("smartmemory_app/cli.py").decode()
+          if daemon.count("trust_env=False") < 3:
+              raise SystemExit("daemon.py is missing trust_env=False on local health/status calls")
+          if "trust_env=False" not in cli:
+              raise SystemExit("cli.py is missing trust_env=False on daemon requests")
+          print("✅ Wheel contains proxy-immune local daemon calls")
+          PY
+
+      - name: Pre-upload clean install smoke
+        if: github.event.inputs.test_pypi != 'true'
+        run: |
+          set -euo pipefail
+          python -m venv install-env
+          source install-env/bin/activate
+          python -m pip install --upgrade pip
+          pip install --find-links dist "smartmemory==${{ steps.meta.outputs.version }}" --only-binary=:all: --no-cache-dir
+          smartmemory --version
+          python - <<'PY'
+          import inspect
+          from smartmemory_app import cli, daemon
+
+          daemon_src = inspect.getsource(daemon)
+          cli_src = inspect.getsource(cli)
+          assert "trust_env=False" in daemon_src
+          assert "trust_env=False" in cli_src
+          print("✅ Installed wheel has proxy-immune daemon code")
+          PY
+          deactivate
 
       - name: Publish to Test PyPI
         if: github.event.inputs.test_pypi == 'true'
@@ -52,11 +148,21 @@ jobs:
       - name: Test installation
         if: github.event.inputs.test_pypi != 'true'
         run: |
+          set -euo pipefail
           sleep 60
           python -m venv test-env
           source test-env/bin/activate
-          pip install smartmemory --no-cache-dir
-          smartmemory --help
+          python -m pip install --upgrade pip
+          pip install "smartmemory==${{ steps.meta.outputs.version }}" --only-binary=:all: --no-cache-dir
+          smartmemory --version
+          python - <<'PY'
+          import inspect
+          from smartmemory_app import cli, daemon
+
+          assert "trust_env=False" in inspect.getsource(daemon)
+          assert "trust_env=False" in inspect.getsource(cli)
+          print("✅ PyPI install has proxy-immune daemon code")
+          PY
           deactivate
 
       - name: Notify Discord

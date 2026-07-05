@@ -87,6 +87,19 @@ jobs:
           print(f"pinned smartmemory-core=={core}, wrapper -> {wv} (copied)")
           PY
 
+      - name: Verify public dependency resolution before release
+        env:
+          CV: ${{ steps.bump.outputs.core_version }}
+        run: |
+          set -euo pipefail
+          python -m venv resolver-env
+          source resolver-env/bin/activate
+          python -m pip install --upgrade pip
+          pip install --dry-run --only-binary=:all: \
+            "smartmemory-core[lite]==$CV" \
+            "smartmemory-mcp>=0.2.0"
+          deactivate
+
       - name: Commit, push, release
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
