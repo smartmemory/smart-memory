@@ -267,3 +267,32 @@ class TestRemoteHandoff:
             runner.invoke(cli, ["setup"])
 
         mock_remote.assert_called_once()
+
+
+class TestProgressScreen:
+    """Progress screen completion handling is independent of Textual internals."""
+
+    def test_set_final_status_marks_setup_finished_without_renderable(self):
+        from smartmemory_app.setup_tui import ProgressScreen
+
+        screen = ProgressScreen()
+        screen._setup_finished = False
+        final = MagicMock()
+        del final.renderable
+
+        with patch.object(screen, "query_one", return_value=final):
+            screen._set_final_status("done")
+
+        final.update.assert_called_once_with("done")
+        assert screen._setup_finished is True
+
+    def test_keypress_before_setup_finished_does_not_read_static_renderable(self):
+        from smartmemory_app.setup_tui import ProgressScreen
+
+        screen = ProgressScreen()
+        screen._setup_finished = False
+
+        with patch.object(screen, "query_one") as query_one:
+            screen.on_key()
+
+        query_one.assert_not_called()

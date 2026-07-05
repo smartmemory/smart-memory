@@ -303,7 +303,12 @@ class ProgressScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._setup_finished = False
         self._run_setup()
+
+    def _set_final_status(self, status_text: str) -> None:
+        self.query_one("#final-status", Static).update(status_text)
+        self._setup_finished = True
 
     @work(thread=True)
     def _run_setup(self) -> None:
@@ -355,19 +360,15 @@ class ProgressScreen(Screen):
                 )
                 status_text = "\n[bold yellow]Setup complete but daemon not running.[/bold yellow]\nStart manually: [cyan]smartmemory start[/cyan]\n\nPress any key to exit."
 
-            self.app.call_from_thread(
-                self.query_one("#final-status", Static).update,
-                status_text,
-            )
+            self.app.call_from_thread(self._set_final_status, status_text)
         except Exception as e:
             self.app.call_from_thread(
-                self.query_one("#final-status", Static).update,
+                self._set_final_status,
                 f"\n[bold red]Setup failed: {e}[/bold red]\n\nPress any key to exit.",
             )
 
     def on_key(self) -> None:
-        final = self.query_one("#final-status", Static)
-        if str(final.renderable).strip():
+        if getattr(self, "_setup_finished", False):
             self.app.exit(self.app._result)
 
 
