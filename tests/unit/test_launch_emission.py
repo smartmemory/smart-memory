@@ -38,19 +38,61 @@ class TestCliEmit:
     def test_emit_posts_event_to_daemon(self, monkeypatch):
         calls = {}
 
-        def fake_post(url, json=None, timeout=None):
-            calls["url"] = url
-            calls["json"] = json
-            return _FakeResponse(200)
-
         import httpx
 
-        monkeypatch.setattr(httpx, "post", fake_post)
+        class FakeClient:
+            def __init__(self, **kwargs):
+                calls["client_kwargs"] = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, json=None, timeout=None):
+                calls["url"] = url
+                calls["json"] = json
+                calls["timeout"] = timeout
+                return _FakeResponse(200)
+
+        monkeypatch.setattr(httpx, "Client", FakeClient)
         monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
 
         assert launch_metrics.emit("setup.complete", {"mode": "local"}) is True
+        assert calls["client_kwargs"] == {"trust_env": False}
         assert calls["url"] == "http://127.0.0.1:9014/launch/event"
         assert calls["json"] == {"event_type": "setup.complete", "props": {"mode": "local"}}
+        assert calls["timeout"] == 2.0
+
+    def test_emit_ignores_socks_proxy_env_for_daemon_post(self, monkeypatch):
+        calls = {}
+
+        import httpx
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                calls["client_kwargs"] = kwargs
+                if kwargs.get("trust_env") is not False:
+                    raise ImportError(
+                        "Using SOCKS proxy, but the 'socksio' package is not installed"
+                    )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, *args, **kwargs):
+                return _FakeResponse(200)
+
+        monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
+        monkeypatch.setattr(httpx, "Client", FakeClient)
+        monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
+
+        assert launch_metrics.emit("setup.complete", {"mode": "local"}) is True
+        assert calls["client_kwargs"] == {"trust_env": False}
 
     def test_emit_rejects_unknown_event_type(self, monkeypatch):
         import httpx
@@ -69,10 +111,20 @@ class TestCliEmit:
     def test_emit_returns_false_when_daemon_unreachable(self, monkeypatch):
         import httpx
 
-        def boom(*a, **k):
-            raise httpx.ConnectError("nope")
+        class FakeClient:
+            def __init__(self, **kwargs):
+                pass
 
-        monkeypatch.setattr(httpx, "post", boom)
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, *args, **kwargs):
+                raise httpx.ConnectError("nope")
+
+        monkeypatch.setattr(httpx, "Client", FakeClient)
         monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
         assert launch_metrics.emit("setup.complete") is False
 

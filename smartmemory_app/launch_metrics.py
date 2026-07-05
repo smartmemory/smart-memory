@@ -60,7 +60,11 @@ def emit(event_type: str, props: Optional[Mapping[str, Any]] = None) -> bool:
 
     payload = {"event_type": event_type, "props": dict(props or {})}
     try:
-        r = httpx.post(f"{base}/launch/event", json=payload, timeout=2.0)
+        # This is always a localhost daemon call. Do not honor proxy env vars:
+        # SOCKS proxies require optional httpx extras and can break setup even
+        # though the daemon is running normally.
+        with httpx.Client(trust_env=False) as client:
+            r = client.post(f"{base}/launch/event", json=payload, timeout=2.0)
         return 200 <= r.status_code < 300
     except Exception as e:
         log.warning("launch_metrics: daemon emit failed event=%s err=%s", event_type, e)

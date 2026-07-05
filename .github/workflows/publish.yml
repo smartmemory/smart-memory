@@ -98,7 +98,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install -e .
-          python -m pytest tests/unit/test_cli_ux.py -q
+          python -m pytest tests/unit/test_cli_ux.py tests/unit/test_launch_emission.py -q
 
       - name: Build package
         run: |
@@ -122,10 +122,13 @@ jobs:
           with zipfile.ZipFile(wheels[0]) as zf:
               daemon = zf.read("smartmemory_app/daemon.py").decode()
               cli = zf.read("smartmemory_app/cli.py").decode()
+              launch_metrics = zf.read("smartmemory_app/launch_metrics.py").decode()
           if daemon.count("trust_env=False") < 3:
               raise SystemExit("daemon.py is missing trust_env=False on local health/status calls")
           if "trust_env=False" not in cli:
               raise SystemExit("cli.py is missing trust_env=False on daemon requests")
+          if "trust_env=False" not in launch_metrics:
+              raise SystemExit("launch_metrics.py is missing trust_env=False on local daemon event emission")
           print("✅ Wheel contains proxy-immune local daemon calls")
           PY
 
@@ -140,12 +143,14 @@ jobs:
           smartmemory --version
           python - <<'PY'
           import inspect
-          from smartmemory_app import cli, daemon
+          from smartmemory_app import cli, daemon, launch_metrics
 
           daemon_src = inspect.getsource(daemon)
           cli_src = inspect.getsource(cli)
+          launch_metrics_src = inspect.getsource(launch_metrics)
           assert "trust_env=False" in daemon_src
           assert "trust_env=False" in cli_src
+          assert "trust_env=False" in launch_metrics_src
           print("✅ Installed wheel has proxy-immune daemon code")
           PY
           deactivate
@@ -184,10 +189,11 @@ jobs:
           smartmemory --version
           python - <<'PY'
           import inspect
-          from smartmemory_app import cli, daemon
+          from smartmemory_app import cli, daemon, launch_metrics
 
           assert "trust_env=False" in inspect.getsource(daemon)
           assert "trust_env=False" in inspect.getsource(cli)
+          assert "trust_env=False" in inspect.getsource(launch_metrics)
           print("✅ PyPI install has proxy-immune daemon code")
           PY
           deactivate
