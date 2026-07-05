@@ -1,9 +1,10 @@
 name: Sync to core release
 
 # Chain A (wrapper): smartmemory-core publishes a new version -> repository_dispatch
-# 'core-released' lands here. The wrapper exact-pins core and moves in lockstep, so
-# we rewrite the ==pin, patch-bump our own version, and cut a release. The existing
-# publish.yml (on release: published) then ships the new wrapper to PyPI.
+# 'core-released' lands here. The wrapper exact-pins core + MCP and moves in
+# lockstep, so we rewrite both ==pins, copy the product version, and cut a
+# release. The existing publish.yml (on release: published) then ships the new
+# wrapper to PyPI.
 on:
   repository_dispatch:
     types: [core-released]
@@ -37,7 +38,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Bump core pin + wrapper version
+      - name: Bump dependency pins + wrapper version
         id: bump
         env:
           CORE_VERSION: ${{ github.event.client_payload.version || github.event.inputs.version }}
@@ -53,17 +54,25 @@ jobs:
           pp = pathlib.Path("pyproject.toml")
           text = pp.read_text()
 
-          # Rewrite the exact pin, preserving an optional [extra] (e.g. [lite]).
-          pin_re = re.compile(r'(["\'])smartmemory-core(\[[^\]]*\])?==[^"\']+\1')
-          def repl(m):
-              q, extra = m.group(1), m.group(2) or ""
-              return f'{q}smartmemory-core{extra}=={core}{q}'
-          text, n = pin_re.subn(repl, text)
-          if n != 1:
-              sys.exit(f"::error::Expected exactly 1 core pin, patched {n}")
+          def rewrite_pin(package: str, version: str) -> None:
+              nonlocal_text = rewrite_pin.text
+              # Rewrite the exact pin, preserving an optional [extra] (e.g. [lite]).
+              pin_re = re.compile(rf'(["\']){re.escape(package)}(\[[^\]]*\])?==[^"\']+\1')
+              def repl(m):
+                  q, extra = m.group(1), m.group(2) or ""
+                  return f'{q}{package}{extra}=={version}{q}'
+              updated, n = pin_re.subn(repl, nonlocal_text)
+              if n != 1:
+                  sys.exit(f"::error::Expected exactly 1 {package} pin, patched {n}")
+              rewrite_pin.text = updated
+
+          rewrite_pin.text = text
+          rewrite_pin("smartmemory-core", core)
+          rewrite_pin("smartmemory-mcp", core)
+          text = rewrite_pin.text
 
           # COPY core's version verbatim (no increment): core is the single source
-          # of truth, so core/wrapper/service always carry the exact same number.
+          # of truth, so core/wrapper/MCP/service always carry the exact same number.
           wv = core
           vm = re.search(r'^version = "[^"]+"', text, re.M)
           if not vm:
@@ -84,7 +93,7 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"wrapper_version={wv}\n")
               f.write(f"core_version={core}\n")
-          print(f"pinned smartmemory-core=={core}, wrapper -> {wv} (copied)")
+          print(f"pinned smartmemory-core=={core}, smartmemory-mcp=={core}, wrapper -> {wv} (copied)")
           PY
 
       - name: Verify public dependency resolution before release
@@ -92,12 +101,14 @@ jobs:
           CV: ${{ steps.bump.outputs.core_version }}
         run: |
           set -euo pipefail
-          python -m venv resolver-env
-          source resolver-env/bin/activate
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          python -m venv "$tmpdir/resolver-env"
+          source "$tmpdir/resolver-env/bin/activate"
           python -m pip install --upgrade pip
           pip install --dry-run --only-binary=:all: \
             "smartmemory-core[lite]==$CV" \
-            "smartmemory-mcp>=0.2.0"
+            "smartmemory-mcp==$CV"
           deactivate
 
       - name: Commit, push, release
@@ -113,7 +124,7 @@ jobs:
             echo "No changes (already pinned to $CV); nothing to do."
             exit 0
           fi
-          git add -A
+          git add pyproject.toml CHANGELOG.md
           git commit -m "chore(deps): pin smartmemory-core==$CV, bump to $WV"
           git push origin HEAD:main
           gh release create "v$WV" \

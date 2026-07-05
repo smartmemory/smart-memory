@@ -5,6 +5,9 @@ dist/
 build/
 .venv/
 venv/
+resolver-env/
+install-env/
+test-env/
 .pytest_cache/
 .ruff_cache/
 *.egg

@@ -40,25 +40,42 @@ jobs:
 
           data = tomllib.loads(Path("pyproject.toml").read_text())
           version = data["project"]["version"]
-          pins = [
-              dep
-              for dep in data["project"]["dependencies"]
-              if dep.startswith("smartmemory-core")
-          ]
-          if len(pins) != 1:
-              raise SystemExit(f"expected exactly one smartmemory-core pin, got {pins!r}")
-          match = re.fullmatch(r"smartmemory-core(?:\[[^\]]+\])?==(.+)", pins[0])
-          if not match:
-              raise SystemExit(f"smartmemory-core dependency must be an exact pin, got {pins[0]!r}")
+          def exact_pin(package: str) -> str:
+              pins = [
+                  dep
+                  for dep in data["project"]["dependencies"]
+                  if dep.startswith(package)
+              ]
+              if len(pins) != 1:
+                  raise SystemExit(f"expected exactly one {package} pin, got {pins!r}")
+              match = re.fullmatch(rf"{re.escape(package)}(?:\[[^\]]+\])?==(.+)", pins[0])
+              if not match:
+                  raise SystemExit(f"{package} dependency must be an exact pin, got {pins[0]!r}")
+              return match.group(1)
+
+          core_version = exact_pin("smartmemory-core")
+          mcp_version = exact_pin("smartmemory-mcp")
+          if core_version != version:
+              raise SystemExit(f"smartmemory-core pin {core_version} must match wrapper version {version}")
+          if mcp_version != version:
+              raise SystemExit(f"smartmemory-mcp pin {mcp_version} must match wrapper version {version}")
           print(f"version={version}")
-          print(f"core_version={match.group(1)}")
+          print(f"core_version={core_version}")
+          print(f"mcp_version={mcp_version}")
           PY
 
       - name: Block unresolved merge-conflict markers
         run: |
           set -euo pipefail
           if grep -R -n -E '^(<<<<<<<|=======|>>>>>>>)' \
-              --exclude-dir=.git --exclude-dir=dist --exclude-dir=build .; then
+              --exclude-dir=.git \
+              --exclude-dir=.venv \
+              --exclude-dir=venv \
+              --exclude-dir=resolver-env \
+              --exclude-dir=install-env \
+              --exclude-dir=test-env \
+              --exclude-dir=dist \
+              --exclude-dir=build .; then
             echo "::error::Unresolved merge-conflict markers found."
             exit 1
           fi
@@ -67,12 +84,14 @@ jobs:
         if: github.event.inputs.test_pypi != 'true'
         run: |
           set -euo pipefail
-          python -m venv resolver-env
-          source resolver-env/bin/activate
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+          python -m venv "$tmpdir/resolver-env"
+          source "$tmpdir/resolver-env/bin/activate"
           python -m pip install --upgrade pip
           pip install --dry-run --only-binary=:all: \
             "smartmemory-core[lite]==${{ steps.meta.outputs.core_version }}" \
-            "smartmemory-mcp>=0.2.0"
+            "smartmemory-mcp==${{ steps.meta.outputs.mcp_version }}"
           deactivate
 
       - name: Install package and run release-blocking tests
@@ -136,24 +155,32 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        run: twine upload --repository testpypi dist/*
+        run: twine upload --repository testpypi --skip-existing dist/*
 
       - name: Publish to PyPI
         if: github.event.inputs.test_pypi != 'true'
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        run: twine upload --skip-existing dist/*
 
       - name: Test installation
         if: github.event.inputs.test_pypi != 'true'
         run: |
           set -euo pipefail
-          sleep 60
           python -m venv test-env
           source test-env/bin/activate
           python -m pip install --upgrade pip
-          pip install "smartmemory==${{ steps.meta.outputs.version }}" --only-binary=:all: --no-cache-dir
+          for attempt in {1..10}; do
+            if pip install "smartmemory==${{ steps.meta.outputs.version }}" --only-binary=:all: --no-cache-dir; then
+              break
+            fi
+            if [ "$attempt" = "10" ]; then
+              exit 1
+            fi
+            echo "PyPI propagation pending; retrying in 30s ($attempt/10)"
+            sleep 30
+          done
           smartmemory --version
           python - <<'PY'
           import inspect
