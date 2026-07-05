@@ -145,7 +145,7 @@ jobs:
             "smartmemory-mcp==$CV"
           deactivate
 
-      - name: Commit, push, release
+      - name: Commit, push, release, publish
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}
           WV: ${{ steps.bump.outputs.wrapper_version }}
@@ -155,13 +155,23 @@ jobs:
           git config user.name "smartmem-dev[bot]"
           git config user.email "smartmem-dev@users.noreply.github.com"
           if git diff --quiet; then
-            echo "No changes (already pinned to $CV); nothing to do."
-            exit 0
+            echo "No changes (already pinned to $CV); no version commit needed."
+          else
+            git add pyproject.toml CHANGELOG.md
+            git commit -m "chore(deps): pin smartmemory-core==$CV, bump to $WV"
+            git push origin HEAD:main
           fi
-          git add pyproject.toml CHANGELOG.md
-          git commit -m "chore(deps): pin smartmemory-core==$CV, bump to $WV"
-          git push origin HEAD:main
-          gh release create "v$WV" \
-            --title "v$WV" \
-            --notes "Lockstep sync with smartmemory-core $CV."
-          echo "✅ Released wrapper v$WV (publish.yml will ship to PyPI)."
+
+          if gh release view "v$WV" >/dev/null 2>&1; then
+            echo "Release v$WV already exists."
+          else
+            gh release create "v$WV" \
+              --title "v$WV" \
+              --notes "Lockstep sync with smartmemory-core $CV."
+          fi
+
+          # Do not rely solely on the release-created event. Explicit dispatch
+          # makes reruns publish a missing artifact and keeps the lockstep chain
+          # recoverable after PyPI propagation races.
+          gh workflow run publish.yml --ref main
+          echo "✅ Ensured wrapper v$WV release and dispatched publish.yml."
