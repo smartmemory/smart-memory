@@ -6,6 +6,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.44 (1.4.44)
 - Version copied from smartmemory-core 1.4.44 release (single-source lockstep).
 
+### Changed (auto, lockstep) — track smartmemory-core==1.4.44 (1.4.44)
+- Version copied from smartmemory-core 1.4.44 release (single-source lockstep).
+
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.43 (1.4.43)
 - Version copied from smartmemory-core 1.4.43 release (single-source lockstep).
 
