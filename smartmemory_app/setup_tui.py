@@ -312,8 +312,6 @@ class ProgressScreen(Screen):
 
     @work(thread=True)
     def _run_setup(self) -> None:
-        from smartmemory_app.setup import _apply_setup_result, _start_daemon_local
-
         step_map = {
             "Config written": "step-config",
             "spaCy model ready": "step-spacy",
@@ -332,6 +330,8 @@ class ProgressScreen(Screen):
                 )
 
         try:
+            from smartmemory_app.setup import _apply_setup_result, _start_daemon_local
+
             _apply_setup_result(self.app._result, on_step=on_step)
 
             self.app.call_from_thread(
@@ -361,10 +361,11 @@ class ProgressScreen(Screen):
                 status_text = "\n[bold yellow]Setup complete but daemon not running.[/bold yellow]\nStart manually: [cyan]smartmemory start[/cyan]\n\nPress any key to exit."
 
             self.app.call_from_thread(self._set_final_status, status_text)
-        except Exception as e:
+        except BaseException as e:
+            message = str(e) or e.__class__.__name__
             self.app.call_from_thread(
                 self._set_final_status,
-                f"\n[bold red]Setup failed: {e}[/bold red]\n\nPress any key to exit.",
+                f"\n[bold red]Setup failed: {message}[/bold red]\n\nPress any key to exit.",
             )
 
     def on_key(self) -> None:

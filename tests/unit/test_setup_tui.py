@@ -1,7 +1,7 @@
 """Unit tests for DIST-SETUP-TUI-1: setup refactor + TUI integration."""
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, PropertyMock, patch, call
 
 import pytest
 
@@ -296,3 +296,27 @@ class TestProgressScreen:
             screen.on_key()
 
         query_one.assert_not_called()
+
+    def test_worker_marks_finished_when_setup_exits_outside_exception(self):
+        from smartmemory_app.setup_tui import ProgressScreen
+
+        screen = ProgressScreen()
+        screen._setup_finished = False
+        final = MagicMock()
+
+        class AppStub:
+            _result = SetupResult()
+
+            def call_from_thread(self, callback, *args):
+                callback(*args)
+
+        with (
+            patch.object(ProgressScreen, "app", new_callable=PropertyMock, return_value=AppStub()),
+            patch.object(screen, "query_one", return_value=final),
+            patch("smartmemory_app.setup._apply_setup_result", side_effect=KeyboardInterrupt()),
+        ):
+            ProgressScreen._run_setup.__wrapped__(screen)
+
+        final.update.assert_called_once()
+        assert "KeyboardInterrupt" in final.update.call_args.args[0]
+        assert screen._setup_finished is True

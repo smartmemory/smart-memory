@@ -89,9 +89,19 @@ jobs:
           python -m venv "$tmpdir/resolver-env"
           source "$tmpdir/resolver-env/bin/activate"
           python -m pip install --upgrade pip
-          pip install --dry-run --only-binary=:all: \
-            "smartmemory-core[lite]==${{ steps.meta.outputs.core_version }}" \
-            "smartmemory-mcp==${{ steps.meta.outputs.mcp_version }}"
+          for attempt in {1..10}; do
+            if pip install --dry-run --only-binary=:all: \
+              "smartmemory-core[lite]==${{ steps.meta.outputs.core_version }}" \
+              "smartmemory-mcp==${{ steps.meta.outputs.mcp_version }}"; then
+              break
+            fi
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::Timed out waiting for pip resolver visibility for smartmemory-core/smartmemory-mcp ${{ steps.meta.outputs.core_version }}"
+              exit 1
+            fi
+            echo "pip resolver did not see smartmemory-core/smartmemory-mcp ${{ steps.meta.outputs.core_version }} yet; retrying in 30s ($attempt/10)"
+            sleep 30
+          done
           deactivate
 
       - name: Install package and run release-blocking tests

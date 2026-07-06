@@ -110,7 +110,7 @@ jobs:
 
           version = sys.argv[1]
           projects = ("smartmemory-core", "smartmemory-mcp")
-          deadline = time.monotonic() + 15 * 60
+          deadline = time.monotonic() + 45 * 60
 
           def has_release(project: str) -> bool:
               try:
@@ -140,9 +140,19 @@ jobs:
           python -m venv "$tmpdir/resolver-env"
           source "$tmpdir/resolver-env/bin/activate"
           python -m pip install --upgrade pip
-          pip install --dry-run --only-binary=:all: \
-            "smartmemory-core[lite]==$CV" \
-            "smartmemory-mcp==$CV"
+          for attempt in {1..90}; do
+            if pip install --dry-run --only-binary=:all: \
+              "smartmemory-core[lite]==$CV" \
+              "smartmemory-mcp==$CV"; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then
+              echo "::error::Timed out waiting for pip resolver visibility for smartmemory-core/smartmemory-mcp $CV"
+              exit 1
+            fi
+            echo "pip resolver did not see smartmemory-core/smartmemory-mcp $CV yet; retrying in 30s ($attempt/90)"
+            sleep 30
+          done
           deactivate
 
       - name: Commit, push, release, publish
@@ -173,5 +183,5 @@ jobs:
           # Do not rely solely on the release-created event. Explicit dispatch
           # makes reruns publish a missing artifact and keeps the lockstep chain
           # recoverable after PyPI propagation races.
-          gh workflow run publish.yml --ref main
+          gh workflow run publish.yml --ref "v$WV"
           echo "✅ Ensured wrapper v$WV release and dispatched publish.yml."
