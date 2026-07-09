@@ -11,6 +11,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed
 - README command reference showed `smartmemory mcp install claude`; the actual client argument is `claude-code` (choices: `claude-code`, `cursor`, `codex`).
+- DIST-CLI-QUIET-1: the CLI now installs a root logging policy (default WARNING, `SMARTMEMORY_LOG_LEVEL` to override), so cold-start adds stop printing walls of pipeline INFO chatter. Installing the root handler up front also neutralizes import-time `logging.basicConfig()` in dependencies (fastcoref). `sm worker` keeps its INFO progress lines. Pairs with smartmemory-core's DIST-LITE-QUIET-3 fixes.
 
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.44 (1.4.44)
 - Version copied from smartmemory-core 1.4.44 release (single-source lockstep).
