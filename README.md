@@ -263,8 +263,7 @@ smartmemory lifecycle status           # Show lifecycle config and session stats
 
 ```bash
 pip install smartmemory                  # Everything: local memory + MCP server + graph viewer + CLI
-pip install smartmemory-core[lite]       # Core library only, local mode (for developers)
-pip install smartmemory-core[server]     # Core library only, server mode (FalkorDB + Redis)
+pip install smartmemory-core[lite]       # Core library only, no CLI/MCP/viewer
 ```
 
 > **`smartmemory`** is the distribution package. A single install bundles `smartmemory-core[lite]` (local SQLite + usearch storage), the unified MCP server, the graph viewer, and the CLI. You pick **local** or **remote** mode at `smartmemory setup` time, not at install time.
@@ -272,10 +271,12 @@ pip install smartmemory-core[server]     # Core library only, server mode (Falko
 
 **Local mode** wires Claude Code hooks, downloads the spaCy language model (about 15MB), and starts a persistent daemon. **Remote mode** validates your API key and stores it in the OS keychain.
 
-## Two storage modes
+## Lite or Service
 
-- **Lite mode** (the default): SQLite graph plus usearch vectors. No Docker, no external services. `pip install smartmemory` and go.
-- **Server mode**: FalkorDB (graph and vectors) plus Redis (caching) for production-scale deployments. Requires Docker.
+- **Lite** (the default): everything runs on your machine. SQLite graph plus usearch vectors, no Docker, no external services, no account. `pip install smartmemory` and go.
+- **Service**: connect to the managed SmartMemory backend instead of running storage locally. Run `smartmemory setup --mode remote` and paste an API key from [app.smartmemory.ai](https://app.smartmemory.ai). Nothing to install or operate, and there is a free tier to start on.
+
+You choose Lite or Service at `smartmemory setup` time, not at install time, and you can switch later by re-running setup.
 
 ## Going deeper
 
@@ -305,6 +306,112 @@ The expertise layer is what makes an agent's memory useful for acting: captured 
 Structural types like `code`, `plan`, `evaluation`, `anchor`, and `tool_call` are used internally.
 
 </details>
+
+### Advanced recall in practice
+
+The quickstart above is capture and simple search. These are the recall patterns a flat memory file cannot do.
+Every example runs in local Lite mode with no API key (LLM extraction only matters when you want these
+classified automatically out of raw prose, rather than recorded explicitly). Shared setup:
+
+```python
+from datetime import datetime, timezone
+from smartmemory.pipeline.config import PipelineConfig
+from smartmemory.tools.factory import lite_context
+from smartmemory.models.memory_item import MemoryItem
+
+lite = dict(pipeline_profile=PipelineConfig.lite(llm_enabled=False))
+```
+
+**Decisions, including what you decided _not_ to do.** A decision is a first-class object that keeps the
+rejected alternatives and the reasoning attached, so you can recall the road not taken.
+
+```python
+with lite_context(**lite) as m:
+    d = m.add_decision(
+        "Use SQLite for local lite storage",
+        rejected_alternatives=["Postgres sidecar", "remote-only cloud sync"],
+        rationale="Zero-infra installs must work offline",
+    )
+    print(m.get_decision(d.decision_id).rejected_alternatives)
+    # -> ['Postgres sidecar', 'remote-only cloud sync']
+
+    hits = m.search("what did we decide NOT to do for storage", expertise=True)
+    print([i.content for i in hits["decision"]])
+    # -> ['Use SQLite for local lite storage']
+```
+
+`search(expertise=True)` returns a dict keyed by expertise type (`decision`, `constraint`, `learned`, ...),
+not a flat list.
+
+**Truth maintenance: supersede a fact, and only the current one comes back.**
+
+```python
+with lite_context(**lite) as m:
+    old = m.add(MemoryItem(content="The incident channel is #ops-old", memory_type="semantic"))
+    new = m.add(MemoryItem(content="The incident channel is #ops-war-room", memory_type="semantic"))
+    m.supersede(old, new, reason="Team renamed the channel")
+
+    print([r.content for r in m.search("incident channel")])
+    # -> ['The incident channel is #ops-war-room']                      (current only)
+    print([r.content for r in m.search("incident channel", include_superseded=True)])
+    # -> ['The incident channel is #ops-old', 'The incident channel is #ops-war-room']   (full history)
+```
+
+**Bi-temporal recall: what did we believe _before_ it changed.** Keep the old record's time with
+`reference_time`, then ask as of a past moment. A markdown file cannot answer this: once you edit the line,
+the old value is gone.
+
+```python
+with lite_context(**lite) as m:
+    old = m.add(MemoryItem(content="The billing provider is Stripe", memory_type="semantic",
+                           metadata={"reference_time": datetime.now(timezone.utc).isoformat()}))
+    t_before_change = datetime.now(timezone.utc)
+    new = m.add(MemoryItem(content="The billing provider is Paddle", memory_type="semantic",
+                           metadata={"reference_time": datetime.now(timezone.utc).isoformat()}))
+    m.supersede(old, new, reason="Pricing model changed")
+
+    print([r.content for r in m.search("billing provider", as_of_date=t_before_change, include_superseded=True)])
+    # -> ['The billing provider is Stripe']      (what you believed then)
+    print([r.content for r in m.search("billing provider")])
+    # -> ['The billing provider is Paddle']       (what you believe now)
+```
+
+**Constraints and lessons, recalled as expertise.**
+
+```python
+with lite_context(**lite) as m:
+    m.add_constraint("Production deploys must use GitHub Actions", domain="release")
+    m.add_learning("SQLite WAL avoids writer stalls under concurrent tests")
+    hits = m.search("deploy and sqlite guidance", expertise=True)
+    print([i.content for i in hits["constraint"]])
+    # -> ['Production deploys must use GitHub Actions']
+    print([i.content for i in hits["learned"]])
+    # -> ['SQLite WAL avoids writer stalls under concurrent tests']
+```
+
+**Multi-hop retrieval** chains results so each hop informs the next query, reaching facts a single lookup would
+miss. It pays off once your graph is rich (`semantic_hops=True` adds LLM-planned hops):
+
+```python
+with lite_context(**lite) as m:
+    hits = m.search("Redis migration fallout", multi_hop=True, max_hops=3)
+```
+
+**Code intelligence: index a repo, then search it by meaning.** `sm code index` builds an AST and call graph
+into memory. Recall it with `search_code`, which is semantic, so it finds code that shares no keywords with
+your query (a plain `grep` would miss it):
+
+```bash
+sm code index ./my-project --repo my-project
+```
+
+```python
+with lite_context(**lite) as m:
+    # "clean up vendor billing records" matches a function actually named
+    # reconcile_widget_invoice (no shared keywords, found by meaning).
+    for hit in m.search_code("clean up vendor billing records", repo="my-project"):
+        print(hit["name"], hit["entity_type"], f'{hit["file_path"]}:{hit["line_number"]}')
+```
 
 ### The processing pipeline
 
@@ -460,16 +567,17 @@ class SmartMemory:
         decompose_query: bool = False,   # split compound queries
         multi_hop: bool = False,         # chained recursive retrieval
         semantic_hops: bool = False,     # LLM-driven hop planning
-        expertise: bool = False,         # typed-dict expertise channel
+        expertise: bool = False,         # return the expertise channel instead of a flat list
         include_superseded: bool = False,
-        as_of_date=None,                 # bi-temporal time travel (datetime | ISO-8601)
-    ) -> List[MemoryItem]
+        as_of_date=None,                 # bi-temporal recall (datetime | ISO-8601); see notes below
+    ) -> List[MemoryItem]                # NOTE: with expertise=True, returns dict[str, list] keyed by
+                                         # decision/constraint/learned/opinion/reasoning/observation
     def delete(self, item_id: str) -> bool
 
-    # Expertise-layer capture
-    def add_decision(self, content: str, **kwargs) -> str
-    def add_constraint(self, content: str, **kwargs) -> str
-    def add_learning(self, content: str, **kwargs) -> str
+    # Expertise-layer capture (each returns a typed object, not a str)
+    def add_decision(self, content: str, **kwargs) -> "Decision"    # .decision_id, .rejected_alternatives, .rationale, ...
+    def add_constraint(self, content: str, **kwargs) -> "Constraint" # .constraint_id, ...
+    def add_learning(self, content: str, **kwargs) -> "Learned"      # .learned_id, ...
 
     # Graph Integrity
     def delete_run(self, run_id: str) -> int
