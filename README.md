@@ -6,7 +6,7 @@
 [![PyPI version](https://badge.fury.io/py/smartmemory.svg)](https://pypi.org/project/smartmemory/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-**[Read the docs](https://docs.smartmemory.ai/smartmemory/intro)** | **[Maya sample app](https://docs.smartmemory.ai/maya)**
+**[Read the docs](https://docs.smartmemory.ai/)**
 
 SmartMemory remembers what you and your AI learn while you work: decisions, preferences, facts, and hard-won lessons. Next session, the relevant parts come back automatically. It runs on your machine by default, with no Docker and no database to install.
 
