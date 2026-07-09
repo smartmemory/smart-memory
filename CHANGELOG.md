@@ -3,6 +3,12 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Changed
+- README restructured around an accessible quickstart: install-to-working in the first screen, a guided CLI tour (capture, piping notes in, per-project tagging, daemon, viewer), and new "Use it with Claude Code" / "Use it with Obsidian" sections. Full command reference, evolver/plugin catalogs, and the Python API moved into collapsible sections; no information removed. CLI examples validated against a live install.
+
+### Fixed
+- README command reference showed `smartmemory mcp install claude`; the actual client argument is `claude-code` (choices: `claude-code`, `cursor`, `codex`).
+
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.44 (1.4.44)
 - Version copied from smartmemory-core 1.4.44 release (single-source lockstep).
 

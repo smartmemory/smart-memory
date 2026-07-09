@@ -1,82 +1,169 @@
-# SmartMemory - Multi-Layered AI Memory System
+# SmartMemory
+
+**Give your AI a memory.** Your coding assistant forgets everything the moment a session ends. SmartMemory fixes that.
 
 [![Docs](https://img.shields.io/badge/docs-smartmemory.ai-blue)](https://docs.smartmemory.ai/smartmemory/intro)
 [![PyPI version](https://badge.fury.io/py/smartmemory.svg)](https://pypi.org/project/smartmemory/)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 **[Read the docs](https://docs.smartmemory.ai/smartmemory/intro)** | **[Maya sample app](https://docs.smartmemory.ai/maya)**
 
-SmartMemory is a comprehensive AI memory system that provides persistent, multi-layered memory storage and retrieval for AI applications. It combines graph databases, vector stores, and intelligent processing pipelines to create a unified memory architecture.
+SmartMemory remembers what you and your AI learn while you work: decisions, preferences, facts, and hard-won lessons. Next session, the relevant parts come back automatically. It runs on your machine by default, with no Docker and no database to install.
 
-## Install
+Works out of the box with **Claude Code**, **Cursor**, and other MCP-compatible tools, or directly from **Python**.
 
-```bash
-pip install smartmemory                  # Everything: local memory + MCP server + graph viewer + CLI
-pip install smartmemory-core[lite]       # Core library only, local mode (for developers)
-pip install smartmemory-core[server]     # Core library only, server mode (FalkorDB + Redis)
-```
-
-> **`smartmemory`** is the distribution package. A single install bundles `smartmemory-core[lite]` (local SQLite + usearch storage), the unified MCP server, the graph viewer, and the CLI — there is no separate `[local]` extra. You pick **local** or **remote** mode at `smartmemory setup` time, not at install time.
-> **`smartmemory-core`** is the core library for developers building on top of SmartMemory.
-
-## First Run
+## Get started in 2 minutes
 
 ```bash
+pip install smartmemory
 smartmemory setup
 ```
 
-Launches a Textual TUI with arrow-key selection for LLM provider, live model discovery from ollama/lmstudio, embedding provider, and a summary screen. Falls back to text prompts in non-interactive environments (Docker, CI).
+That's it. Setup asks a couple of questions (arrow keys, sensible defaults) and wires SmartMemory into Claude Code. Using Cursor instead? Run `smartmemory setup --for cursor`.
 
-**Local mode** wires Claude Code hooks, downloads the spaCy language model (~15MB), and starts a persistent daemon.
+Now try it:
 
-**Remote mode** validates your API key and stores it in the OS keychain.
+```bash
+sm add "We chose Postgres over MongoDB because of the reporting queries"
+sm add "Deploys go through GitHub Actions, never manual"
+sm search "which database did we pick"
+```
 
-## Quick Start — Local Python API
+`sm` is the short alias for `smartmemory`. Every command works with either.
+
+### What you get from here
+
+- **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts. No more re-explaining your project every morning.
+- **Ask questions in plain language.** `sm search` is semantic search. "Which database did we pick" finds the Postgres memory even though the words don't match.
+- **A knowledge graph you can see.** Everything you add gets linked into a graph you can explore in your browser. The tour below shows you around.
+
+## A quick tour
+
+Five minutes with the CLI covers most of what SmartMemory does day to day.
+
+### Capture things worth remembering
+
+Decisions, gotchas, preferences. Add them as they happen:
+
+```bash
+sm add "Staging rate-limits at 100 requests per minute, batch the uploads"
+sm add --type procedural "Reset the local DB with docker compose down -v, then ./dev.sh start"
+```
+
+Memory types (`semantic`, `procedural`, and more) are optional. Skip the flag and new memories land as `episodic`, the type for things that happened.
+
+### Feed it what you already have
+
+Pipe in notes and documents instead of retyping them:
+
+```bash
+sm add - < meeting-notes.txt        # one memory per line
+sm add --all - < project-brief.md   # the whole file as one memory
+```
+
+### Keep projects separate
+
+Tag memories with any property, then filter searches on it:
+
+```bash
+sm add --project atlas "Atlas v2 ships on the 15th"
+sm search --project atlas "when do we ship"
+sm search --top-k 20 "*"            # list more of everything
+```
+
+### Meet the daemon
+
+SmartMemory runs a small background daemon so the CLI answers in under 200ms instead of cold-starting Python on every command. Setup starts it for you, and on macOS it comes back after login and crashes.
+
+```bash
+sm status     # daemon health, memory count, enrichment queue
+sm restart    # if you ever need a fresh start
+```
+
+The daemon is also where the quality comes from. `sm add` returns instantly because fast entity extraction runs in about 4ms. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You never wait for it, and `sm status` shows the queue draining.
+
+### Explore your knowledge graph
+
+```bash
+sm viewer
+```
+
+This opens an interactive graph in your browser. Every memory appears linked to the people, projects, and concepts inside it, and memories that share entities cluster together. After a few days of real use it reads like a map of your work. If the default port is taken, use `sm viewer --port 8080`.
+
+## Use it with Claude Code
+
+If you ran `smartmemory setup`, this is already working. Setup installs six hooks that follow the rhythm of a coding session:
+
+- **Session starts**: SmartMemory recalls what it knows about the directory you're working in.
+- **You send a prompt**: memories relevant to that prompt are injected as context.
+- **Tools run**: tool calls are observed and captured.
+- **A tool fails**: the error pattern is saved so the same mistake isn't repeated.
+- **Claude finishes responding**: the response is paired with the prompt that produced it.
+- **Session ends**: a session summary is persisted.
+
+The net effect is that tomorrow's session starts where today's left off, without you pasting context around.
+
+You also get slash commands inside Claude Code:
+
+```
+/remember <something worth keeping>
+/search <query>
+/ingest            (current file or a pasted block)
+/orient            (what does SmartMemory know about this directory?)
+```
+
+Want Claude to call memory as a tool too? Install the MCP server:
+
+```bash
+sm mcp install claude-code    # also: cursor, codex
+```
+
+Using Cursor as your editor? `smartmemory setup --for cursor` configures it in one step.
+
+## Use it with Obsidian
+
+The [SmartMemory Obsidian plugin](https://github.com/smartmemory/smartmemory-obsidian) brings the same memory to your vault: every note becomes a structured memory with extracted entities, entity chips link every note that mentions the same person or project, a graph pane shows the neighborhood around the active note, and `Cmd+Shift+R` runs multi-hop semantic search across the whole vault. It can also propose `[[wikilinks]]` for entity mentions and warn you inline when a note contradicts something newer.
+
+The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). Install it with [BRAT](https://github.com/TfTHacker/obsidian42-brat) by adding `smartmemory/smartmemory-obsidian`, then paste your API key from [app.smartmemory.ai](https://app.smartmemory.ai) into Settings → SmartMemory.
+
+## What happens when you add a memory
+
+SmartMemory doesn't just save text. It extracts the people, projects, and concepts inside each memory and links them into a knowledge graph. "Alice leads Project Atlas" becomes Alice, Project Atlas, and the relationship between them. That's why search can answer questions instead of just matching keywords, and why the viewer has a graph to draw.
+
+## Use it from Python
 
 ```python
 from smartmemory.tools.factory import create_lite_memory, lite_context
 
-# Simple usage — full LLM extraction runs if OPENAI_API_KEY is set
+# Simple usage. Full LLM extraction runs if OPENAI_API_KEY is set.
 memory = create_lite_memory()
 item_id = memory.ingest("Alice leads Project Atlas")
 results = memory.search("who leads Atlas", top_k=5)
 
-# Preferred in scripts — cleans up globals and closes SQLite on exit
+# Preferred in scripts: cleans up globals and closes SQLite on exit.
 with lite_context() as memory:
     item_id = memory.ingest("Alice leads Project Atlas")
     results = memory.search("who leads Atlas")
 
-# Force no LLM calls (even if OPENAI_API_KEY is set)
+# Force no LLM calls (even if OPENAI_API_KEY is set).
 from smartmemory.pipeline.config import PipelineConfig
 memory = create_lite_memory(pipeline_profile=PipelineConfig.lite(llm_enabled=False))
 ```
 
-## Daemon
-
-SmartMemory runs a persistent background daemon so CLI commands respond in <200ms instead of cold-starting Python every time (~22s).
+## Everyday commands
 
 ```bash
-smartmemory start       # Start daemon (auto-started by setup)
-smartmemory stop        # Stop daemon
-smartmemory restart     # Restart daemon
-smartmemory status      # Show status, memory count, enrichment queue
+sm add "text"                  # Remember something
+sm search "query"              # Find memories by meaning
+sm search "*"                  # List everything
+sm viewer                      # Open the knowledge graph in your browser
+sm status                      # Daemon health and memory count
+sm config                      # View settings
+sm clear                       # Start over (deletes all memories)
 ```
 
-On macOS, `smartmemory setup` installs a launchd plist — the daemon auto-starts on login and restarts on crash.
-
-### Two-tier ingest
-
-When an LLM API key is available, the daemon runs **two-tier ingestion**:
-
-- **Tier 1 (sync, ~4ms):** spaCy + EntityRuler extracts entities immediately, returns item_id
-- **Tier 2 (async, ~740ms):** Background drain thread runs LLM extraction, adds net-new entities and relations
-
-This means `smartmemory add` returns instantly while quality improves in the background.
-
-## Commands
-
-> `sm` is a shorthand alias for `smartmemory` — every command below works with either (`sm add "..."`, `sm search "..."`).
+<details>
+<summary><strong>Full command reference</strong></summary>
 
 ### Core
 
@@ -116,7 +203,7 @@ smartmemory worker                     # Run enrichment worker (drain and exit)
 smartmemory worker --loop              # Run enrichment worker continuously
 ```
 
-### Setup & Lifecycle
+### Setup and lifecycle
 
 ```bash
 smartmemory setup                      # Interactive first-run questionnaire
@@ -141,16 +228,16 @@ smartmemory admin mine                 # Mine Wikidata entities via SPARQL
 smartmemory admin convert-rebel        # Convert REBEL dataset to corpus JSONL
 ```
 
-### Code Indexing & MCP
+### Code indexing and MCP
 
 ```bash
 smartmemory code index <path>          # Index a code repo (AST entities + call graph) into memory
-smartmemory mcp install claude         # Write MCP server config for a client (claude, cursor, codex, ...)
+smartmemory mcp install claude-code    # Write MCP server config for a client (claude-code, cursor, codex)
 ```
 
 ### Lifecycle (hook-driven)
 
-These are invoked automatically by the Claude Code hooks that `smartmemory setup` installs — you rarely call them by hand.
+These are invoked automatically by the Claude Code hooks that `smartmemory setup` installs. You rarely call them by hand.
 
 ```bash
 smartmemory lifecycle orient           # Recall context at session start
@@ -162,21 +249,40 @@ smartmemory lifecycle persist          # Save a session summary
 smartmemory lifecycle status           # Show lifecycle config and session stats
 ```
 
-## Architecture Overview
+</details>
 
-SmartMemory implements a multi-layered memory architecture:
+## Install options
 
-### Core Components
+```bash
+pip install smartmemory                  # Everything: local memory + MCP server + graph viewer + CLI
+pip install smartmemory-core[lite]       # Core library only, local mode (for developers)
+pip install smartmemory-core[server]     # Core library only, server mode (FalkorDB + Redis)
+```
 
-- **SmartMemory**: Main unified memory interface (`smartmemory.smart_memory.SmartMemory`)
-- **SmartGraph**: Graph database backend using FalkorDB for relationship storage
-- **Memory Types**: Specialized memory stores for different data types
-- **Pipeline Stages**: Processing stages for ingestion, enrichment, and evolution
-- **Plugin System**: Extensible architecture for custom evolvers and enrichers
+> **`smartmemory`** is the distribution package. A single install bundles `smartmemory-core[lite]` (local SQLite + usearch storage), the unified MCP server, the graph viewer, and the CLI. You pick **local** or **remote** mode at `smartmemory setup` time, not at install time.
+> **`smartmemory-core`** is the core library for developers building on top of SmartMemory.
 
-### Memory Types
+**Local mode** wires Claude Code hooks, downloads the spaCy language model (about 15MB), and starts a persistent daemon. **Remote mode** validates your API key and stores it in the OS keychain.
 
-- **Pending Memory**: Short-term buffer for items awaiting consolidation (formerly "working"; routed at ingest by the `ConsolidationRouter`)
+## Two storage modes
+
+- **Lite mode** (the default): SQLite graph plus usearch vectors. No Docker, no external services. `pip install smartmemory` and go.
+- **Server mode**: FalkorDB (graph and vectors) plus Redis (caching) for production-scale deployments. Requires Docker.
+
+## Going deeper
+
+Everything below is here for the curious and for developers building on top of SmartMemory. You don't need any of it to use the tool.
+
+### Memory types
+
+SmartMemory sorts what it stores into 11 curated memory types. Five core types hold **knowledge** (what's true): Pending, Semantic, Episodic, Procedural, and Zettelkasten. The rest capture **expertise** (what to do and what not to do): Reasoning, Opinion, Observation, Decision, Constraint, and Learned.
+
+The expertise layer is what makes an agent's memory useful for acting: captured choices, rejected alternatives, hard constraints, and lessons learned. Capture them with `mem.add_decision(...)`, `mem.add_constraint(...)`, and `mem.add_learning(...)`, and recall them with `mem.search(query, expertise=True)`. See [Expertise vs Knowledge](https://docs.smartmemory.ai/smartmemory/concepts/expertise-vs-knowledge) for the full mapping.
+
+<details>
+<summary><strong>All 11 memory types</strong></summary>
+
+- **Pending Memory**: Short-term buffer for items awaiting consolidation (formerly "working", routed at ingest by the `ConsolidationRouter`)
 - **Semantic Memory**: Facts and concepts with vector embeddings
 - **Episodic Memory**: Personal experiences and learning history
 - **Procedural Memory**: Skills, strategies, and learned patterns
@@ -184,18 +290,15 @@ SmartMemory implements a multi-layered memory architecture:
 - **Reasoning Memory**: Chain-of-thought traces capturing "why" decisions were made (System 2)
 - **Opinion Memory**: Beliefs with confidence scores, reinforced or contradicted over time
 - **Observation Memory**: Synthesized entity summaries from scattered facts
-- **Decision Memory**: First-class decisions with confidence tracking, provenance chains, and lifecycle management. Now structured: `rejected_alternatives`, `rationale`, `constraints`. Capture: `mem.add_decision(...)`.
-- **Constraint Memory**: Hard rules — discovered or imposed. Capture: `mem.add_constraint(...)`.
-- **Learned Memory**: Lessons learned the hard way. Capture: `mem.add_learning(...)`.
+- **Decision Memory**: First-class decisions with confidence tracking, provenance chains, and lifecycle management. Structured fields: `rejected_alternatives`, `rationale`, `constraints`. Capture: `mem.add_decision(...)`
+- **Constraint Memory**: Hard rules, discovered or imposed. Capture: `mem.add_constraint(...)`
+- **Learned Memory**: Lessons learned the hard way. Capture: `mem.add_learning(...)`
 
-> **Expertise vs knowledge.** The five core types above (Pending/Semantic/Episodic/Procedural/Zettelkasten) plus Reasoning are best read as the **knowledge layer** — what's *true*. Decision/Constraint/Learned/Opinion/Observation form the **expertise layer** — what to *do*, and what *not* to do. The expertise layer is what makes an agent's memory useful for *acting*: captured choices, rejected alternatives, hard constraints, lessons learned. Recall partitioned by expertise type via `mem.search(query, expertise=True)`. See [Expertise vs Knowledge](https://docs.smartmemory.ai/smartmemory/concepts/expertise-vs-knowledge) for the full mapping.
+Structural types like `code`, `plan`, `evaluation`, `anchor`, and `tool_call` are used internally.
 
-### Storage Backends
+</details>
 
-- **Lite mode**: SQLite graph + usearch vectors — no Docker, no external services
-- **Server mode**: FalkorDB (graph + vectors) + Redis (caching) — full-featured, requires Docker
-
-### Processing Pipeline
+### The processing pipeline
 
 `ingest()` runs an 11-stage pipeline:
 
@@ -205,33 +308,32 @@ classify -> coreference -> simplify -> entity_ruler -> llm_extract -> ontology_c
 
 Each stage implements the `StageCommand` protocol (`execute(state, config) -> state`, `undo(state) -> state`). The pipeline supports breakpoint execution (`run_to()`, `run_from()`, `undo_to()`) for debugging and resumption.
 
-`add()` is simple storage: normalize -> store -> embed (use for internal/derived items).
+`add()` is simple storage (normalize -> store -> embed) for internal or derived items.
 
-## Key Features
+When an LLM API key is available, the daemon runs **two-tier ingestion**:
 
-- **11 Curated Memory Types**: Pending, Semantic, Episodic, Procedural, Zettelkasten, Reasoning, Opinion, Observation, Decision, Constraint, Learned (plus structural types like `code`, `plan`, `evaluation`, `anchor`, and `tool_call` used internally)
-- **11-Stage NLP Pipeline**: classify -> coreference -> simplify -> entity_ruler -> llm_extract -> ontology_constrain -> store -> link -> enrich -> ground -> evolve
-- **Self-Learning EntityRuler**: Pattern-matching NER that improves with use — LLM discoveries feed back into rules (96.9% entity F1 at 4ms)
-- **Evolver Framework**: Core auto-registered evolvers plus specialist lifecycle evolvers for decay, consolidation, opinion synthesis, retrieval-based strengthening, Hebbian co-retrieval, and stale memory detection
-- **Code Indexer**: AST-based Python + TypeScript parser with cross-file call resolution, semantic code search, and memory-to-code graph bridging
-- **Zero-Infra Lite Mode**: SQLite + usearch backend — `pip install smartmemory` and go
-- **Server Mode**: FalkorDB graph + Redis caching for production-scale deployments
-- **Hybrid Search**: Graph-structured search + BM25/embedding RRF fusion with query decomposition for compound queries
-- **Auto-Registered Plugins**: 6 enrichers, 9 evolvers, 1 grounder, and 3–5 extractors (3 always loaded + spaCy and GLiNER2 when their optional deps are installed) — plus a larger lazy catalog of ~40 evolvers selectable in Studio
-- **Plugin Security**: Sandboxing, permissions, and resource limits for safe plugin execution
-- **Flexible Scoping**: Optional `ScopeProvider` for multi-tenancy or unrestricted OSS usage
-- **Persistent Daemon**: Background process for <200ms CLI response times
-- **Two-Tier Ingestion**: Instant spaCy extraction + async LLM enrichment
-- **MCP Server**: Works with Claude Code, Cursor, and other MCP-compatible tools
-- **Knowledge Graph Viewer**: Interactive browser-based graph visualization
+- **Tier 1 (sync, ~4ms):** spaCy + EntityRuler extracts entities immediately and returns the item ID
+- **Tier 2 (async, ~740ms):** A background drain thread runs LLM extraction and adds net-new entities and relations
 
-## Memory Evolution
+This means `sm add` returns instantly while quality improves in the background.
+
+### What makes it different
+
+- **Self-learning EntityRuler**: Pattern-matching NER that improves with use. LLM discoveries feed back into rules (96.9% entity F1 at 4ms)
+- **Memory evolution**: Built-in evolvers automatically transform memories over time, promoting stable facts, decaying stale ones, and strengthening what you actually use
+- **Hybrid search**: Graph-structured search plus BM25/embedding RRF fusion with query decomposition for compound queries
+- **Code indexer**: AST-based Python and TypeScript parser with cross-file call resolution, semantic code search, and memory-to-code graph bridging
+- **Two-tier ingestion**: Instant spaCy extraction plus async LLM enrichment
+- **MCP server**: Works with Claude Code, Cursor, and other MCP-compatible tools
+- **Flexible scoping**: Optional `ScopeProvider` for multi-tenancy or unrestricted usage
+- **Plugin security**: Sandboxing, permissions, and resource limits for safe plugin execution
+
+<details>
+<summary><strong>Memory evolution in detail</strong></summary>
 
 SmartMemory includes built-in evolvers that automatically transform memories. In lite mode, evolution runs incrementally in the background.
 
-### Available Evolvers
-
-**Core evolvers** — memory type transitions and lifecycle:
+**Core evolvers** (memory type transitions and lifecycle):
 - **EpisodicToSemanticEvolver**: Promotes stable facts to semantic memory
 - **EpisodicToZettelEvolver**: Converts episodic events to Zettelkasten notes
 - **EpisodicDecayEvolver**: Archives old episodic memories
@@ -243,27 +345,28 @@ SmartMemory includes built-in evolvers that automatically transform memories. In
 - **OpinionReinforcementEvolver**: Adjusts opinion confidence based on new evidence
 - **StaleMemoryEvolver**: Flags memories as stale when referenced source code changes
 
-**Enhanced evolvers** — neuroscience-inspired dynamics:
+**Enhanced evolvers** (neuroscience-inspired dynamics):
 - **ExponentialDecayEvolver**: Time-based activation decay with configurable half-life
 - **RetrievalBasedStrengtheningEvolver**: Memories accessed more frequently become harder to forget
 - **HebbianCoRetrievalEvolver**: Reinforces edges between memories retrieved together ("neurons that fire together wire together")
 - **InterferenceBasedConsolidationEvolver**: Similar competing memories interfere, strengthening the dominant one
-- **EnhancedWorkingToEpisodicEvolver**: Context-aware pending→episodic transition with richer metadata
+- **EnhancedWorkingToEpisodicEvolver**: Context-aware pending-to-episodic transition with richer metadata
 
-**Sleep-cycle & agent evolvers** — opt-in background re-derivation (REM/NREM analogs):
+**Sleep-cycle and agent evolvers** (opt-in background re-derivation, REM/NREM analogs):
 - **MemoryConsolidationEvolver**: Re-derives consolidated memories across an entity's scattered facts during an idle "sleep cycle"
-- **TemporalAgingEvolver**: Rewrites future/planned facts into resolved past tense once their date passes ("going to Singapore in July" → "went to Singapore in July 2026") via reversible bi-temporal supersession — triggered by the passage of time, never re-parsing prose
-- **EvaluationEvolver**: Writes evidence-derived per-`(agent, dimension, domain)` performance scores via bi-temporal supersession; read back with `get_evaluation()` / `list_evaluation_history()`
-- **SemanticToProceduralEvolver** / **ProceduralReinforcementEvolver** / **AnchorReconciliationEvolver**: procedural promotion, usage-based strengthening, and spec-anchor drift reconciliation
+- **TemporalAgingEvolver**: Rewrites future/planned facts into resolved past tense once their date passes ("going to Singapore in July" becomes "went to Singapore in July 2026") via reversible bi-temporal supersession. Triggered by the passage of time, never by re-parsing prose
+- **EvaluationEvolver**: Writes evidence-derived per-`(agent, dimension, domain)` performance scores via bi-temporal supersession. Read back with `get_evaluation()` / `list_evaluation_history()`
+- **SemanticToProceduralEvolver** / **ProceduralReinforcementEvolver** / **AnchorReconciliationEvolver**: Procedural promotion, usage-based strengthening, and spec-anchor drift reconciliation
 
 **Replaced by ConsolidationRouter (CORE-MEMORY-DYNAMICS-1 M1):**
 - The former `WorkingToEpisodicEvolver` and `WorkingToProceduralEvolver` were retired. Routing from the `pending` bucket to `episodic` / `procedural` now happens at ingest time via the `ConsolidationRouter` pipeline stage.
 
-## Plugin System
+</details>
+
+<details>
+<summary><strong>Plugin system in detail</strong></summary>
 
 SmartMemory features a unified, extensible plugin architecture. All plugins follow a consistent class-based pattern.
-
-### Built-in Plugins
 
 **Auto-registered by default** (loaded by `PluginManager._load_builtin_plugins`):
 - **Extractors**: `LLMExtractor`, `LLMSingleExtractor`, `ConversationAwareLLMExtractor` (always), plus `SpacyExtractor` and `GLiNER2Extractor` when their optional deps are importable
@@ -271,7 +374,7 @@ SmartMemory features a unified, extensible plugin architecture. All plugins foll
 - **9 Evolvers**: `EpisodicToSemanticEvolver`, `EpisodicDecayEvolver`, `SemanticDecayEvolver`, `EpisodicToZettelEvolver`, `ZettelPruneEvolver`, `ExponentialDecayEvolver`, `InterferenceBasedConsolidationEvolver`, `RetrievalBasedStrengtheningEvolver`, `EvaluationEvolver`
 - **1 Grounder**: `WikipediaGrounder`
 
-**Specialist plugins** (selected by pipeline stage, opt-in feature, or the Studio evolver catalog — not auto-run in the idle cycle):
+**Specialist plugins** (selected by pipeline stage, opt-in feature, or the Studio evolver catalog, not auto-run in the idle cycle):
 - **Extractors**: `GroqExtractor`, `DecisionExtractor`, `ReasoningExtractor`
 - **Enrichers**: `UsageTrackingEnricher`
 - **Evolvers**: `DecisionConfidenceEvolver`, `OpinionSynthesisEvolver`, `ObservationSynthesisEvolver`, `OpinionReinforcementEvolver`, `StaleMemoryEvolver`, `HebbianCoRetrievalEvolver`, `MemoryConsolidationEvolver`, `TemporalAgingEvolver`, `SemanticToProceduralEvolver`, `ProceduralReinforcementEvolver`, `AnchorReconciliationEvolver`
@@ -279,7 +382,7 @@ SmartMemory features a unified, extensible plugin architecture. All plugins foll
 
 > Two registries coexist by design: a small **eager, auto-run** set (above) that runs in the idle/batch evolution cycle, and a **lazy catalog of ~40 evolvers** (`evolution/registry.py`) that Studio can select into workflow DAGs without importing every class at boot. Auto-run ⊆ catalog is an enforced invariant.
 
-### Creating Custom Plugins
+**Creating custom plugins:**
 
 ```python
 from smartmemory.plugins.base import EnricherPlugin, PluginMetadata
@@ -298,13 +401,13 @@ class MyCustomEnricher(EnricherPlugin):
             requires_network=False,
             requires_llm=False
         )
-    
+
     def enrich(self, item, node_ids=None):
         item.metadata["custom_field"] = "value"
         return item.metadata
 ```
 
-### Publishing Plugins
+**Publishing plugins:**
 
 ```toml
 # pyproject.toml
@@ -317,43 +420,12 @@ pip install my-smartmemory-plugin
 # Automatically discovered and loaded!
 ```
 
-## Non-interactive / CI
+</details>
 
-```bash
-# Local
-SMARTMEMORY_MODE=local smartmemory server
+<details>
+<summary><strong>Python API reference</strong></summary>
 
-# Remote
-SMARTMEMORY_MODE=remote SMARTMEMORY_API_KEY=sk_... smartmemory server
-```
-
-Env vars always override config file — the correct path for Docker and CI. The TUI is automatically disabled in non-interactive environments.
-
-## Configuration
-
-Config file: `~/.config/smartmemory/config.toml` (XDG on Linux/macOS, `%APPDATA%\smartmemory\config.toml` on Windows).
-
-API keys are stored in the OS keychain, never in the config file. Set `SMARTMEMORY_API_KEY` as an env var on headless systems where the keychain is unavailable.
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `SMARTMEMORY_MODE` | `local` or `remote` — overrides config file |
-| `SMARTMEMORY_API_KEY` | API key for remote mode — bypasses keychain |
-| `SMARTMEMORY_API_URL` | Remote API URL (default: `https://api.smartmemory.ai`) |
-| `SMARTMEMORY_TEAM_ID` | Team/workspace ID for remote mode |
-| `SMARTMEMORY_DATA_DIR` | Local data directory (default: `~/.smartmemory`) |
-| `SMARTMEMORY_LLM_PROVIDER` | LLM provider for local enrichment |
-| `SMARTMEMORY_EMBEDDING_PROVIDER` | Embedding provider (`local`, `openai`, `ollama`) |
-| `SMARTMEMORY_DAEMON_PORT` | Daemon port (default: `9014`) |
-| `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
-| `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
-| `GROQ_API_KEY` | Groq API key — alternative to OpenAI for LLM extraction |
-
-## API Reference
-
-### SmartMemory Class
+### SmartMemory class
 
 ```python
 class SmartMemory:
@@ -404,7 +476,7 @@ class SmartMemory:
     def close(self) -> None
 ```
 
-### MemoryItem Class
+### MemoryItem class
 
 ```python
 @dataclass
@@ -421,6 +493,45 @@ class MemoryItem:
     metadata: dict = field(default_factory=dict)
 ```
 
+</details>
+
+## Configuration
+
+Config file: `~/.config/smartmemory/config.toml` (XDG on Linux/macOS, `%APPDATA%\smartmemory\config.toml` on Windows).
+
+API keys are stored in the OS keychain, never in the config file. Set `SMARTMEMORY_API_KEY` as an env var on headless systems where the keychain is unavailable.
+
+### Non-interactive / CI
+
+```bash
+# Local
+SMARTMEMORY_MODE=local smartmemory server
+
+# Remote
+SMARTMEMORY_MODE=remote SMARTMEMORY_API_KEY=sk_... smartmemory server
+```
+
+Env vars always override the config file, which is the correct path for Docker and CI. The setup TUI is automatically disabled in non-interactive environments.
+
+<details>
+<summary><strong>Environment variables</strong></summary>
+
+| Variable | Description |
+|----------|-------------|
+| `SMARTMEMORY_MODE` | `local` or `remote`, overrides config file |
+| `SMARTMEMORY_API_KEY` | API key for remote mode, bypasses keychain |
+| `SMARTMEMORY_API_URL` | Remote API URL (default: `https://api.smartmemory.ai`) |
+| `SMARTMEMORY_TEAM_ID` | Team/workspace ID for remote mode |
+| `SMARTMEMORY_DATA_DIR` | Local data directory (default: `~/.smartmemory`) |
+| `SMARTMEMORY_LLM_PROVIDER` | LLM provider for local enrichment |
+| `SMARTMEMORY_EMBEDDING_PROVIDER` | Embedding provider (`local`, `openai`, `ollama`) |
+| `SMARTMEMORY_DAEMON_PORT` | Daemon port (default: `9014`) |
+| `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
+| `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
+| `GROQ_API_KEY` | Groq API key, an alternative to OpenAI for LLM extraction |
+
+</details>
+
 ## Testing
 
 ```bash
@@ -432,27 +543,6 @@ PYTHONPATH=. pytest tests/unit/
 PYTHONPATH=. pytest tests/integration/
 PYTHONPATH=. pytest tests/e2e/
 ```
-
-## Use Cases
-
-### Conversational AI Systems
-- Maintain context across multiple conversation sessions
-- Learn user preferences and adapt responses
-- Build comprehensive user profiles over time
-
-### Knowledge Management
-- Store and retrieve complex information relationships
-- Connect related concepts across different domains
-- Build a personal knowledge base with Zettelkasten method
-
-### Personal AI Assistants
-- Remember user preferences and past interactions
-- Provide contextually relevant recommendations
-- Learn from user feedback to improve responses
-
-### Educational Applications
-- Track learning progress and adapt teaching strategies
-- Personalize content based on individual learning patterns
 
 ## Contributing
 
