@@ -39,9 +39,17 @@ sm search "which database did we pick"
 
 ## A quick tour
 
-Five minutes with the CLI covers most of what SmartMemory does day to day.
+Run the guided tour first:
 
-### Capture things worth remembering
+```bash
+sm tour
+```
+
+It starts an isolated local tour store, opens the graph viewer, seeds a few project facts, searches them, shows a real token receipt, then proves cross-session recall. The tour does not touch your real memories. Use `sm tour --no-viewer` for headless runs, or `sm tour --keep` if you want to inspect the temporary store afterward.
+
+Prefer to read the flow instead? The written analog is below.
+
+### 1. Capture things worth remembering
 
 Decisions, gotchas, preferences. Add them as they happen:
 
@@ -52,7 +60,7 @@ sm add --type procedural "Reset the local DB with docker compose down -v, then .
 
 Memory types (`semantic`, `procedural`, and more) are optional. Skip the flag and new memories land as `episodic`, the type for things that happened.
 
-### Feed it what you already have
+### 2. Feed it what you already have
 
 Pipe in notes and documents instead of retyping them:
 
@@ -61,7 +69,7 @@ sm add - < meeting-notes.txt        # one memory per line
 sm add --all - < project-brief.md   # the whole file as one memory
 ```
 
-### Keep projects separate
+### 3. Keep projects separate
 
 Tag memories with any property, then filter searches on it:
 
@@ -71,7 +79,7 @@ sm search --project atlas "when do we ship"
 sm search --top-k 20 "*"            # list more of everything
 ```
 
-### Meet the daemon
+### 4. Meet the daemon
 
 SmartMemory runs a small background daemon so the CLI answers in under 200ms instead of cold-starting Python on every command. Setup starts it for you, and on macOS it comes back after login and crashes.
 
@@ -82,7 +90,7 @@ sm restart    # if you ever need a fresh start
 
 The daemon is also where the quality comes from. `sm add` returns instantly because fast entity extraction runs in about 4ms. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You never wait for it, and `sm status` shows the queue draining.
 
-### Explore your knowledge graph
+### 5. Explore your knowledge graph
 
 ```bash
 sm viewer

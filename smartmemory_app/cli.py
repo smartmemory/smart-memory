@@ -31,6 +31,7 @@ def _configure_cli_logging() -> None:
         level = logging.WARNING
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
+
 # DIST-INSTALL-RESOLVE-1: conservative floor for smartmemory-core. A core BELOW
 # this is from the dead-`/auth/me` era — a pip-backtracked install (e.g. wrapper
 # 1.1.5 → core 0.7.1) that 401s at first API call. `smartmemory doctor` flags it.
@@ -48,6 +49,7 @@ def _version_lt(a: str, b: str) -> bool:
 
         return Version(a) < Version(b)
     except Exception:
+
         def _tuple(v: str) -> tuple[int, ...]:
             # Take the leading numeric release segment ("1.4.32rc1" -> (1, 4, 32)).
             parts: list[int] = []
@@ -124,7 +126,9 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             # Daemon unreachable: return None so callers fall back to direct local
             # storage (add/search/get all branch on None). Commands with no local
             # fallback surface _DAEMON_NOT_RUNNING_MSG themselves.
-            click.echo(f"({_DAEMON_NOT_RUNNING_MSG} Using direct local access.)", err=True)
+            click.echo(
+                f"({_DAEMON_NOT_RUNNING_MSG} Using direct local access.)", err=True
+            )
             return None
         except httpx.HTTPStatusError as e:
             # Surface server errors (e.g. 501 for unsupported filters) to caller
@@ -133,9 +137,7 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             except Exception:
                 detail = str(e)
             if e.response.status_code >= 500:
-                raise click.ClickException(
-                    f"{detail}  (check {_DAEMON_LOG_HINT})"
-                )
+                raise click.ClickException(f"{detail}  (check {_DAEMON_LOG_HINT})")
             raise click.ClickException(detail)
         except httpx.ReadTimeout:
             raise click.ClickException(
@@ -187,10 +189,17 @@ def provenance_group() -> None:
 
 
 @provenance_group.command("import-codex")
-@click.option("--codex-dir", default=None, show_default=True,
-              help="Codex sessions root (default: ~/.codex/sessions).")
-@click.option("--since", default=None,
-              help="Only import rollouts whose path-date dir is on/after YYYY-MM-DD.")
+@click.option(
+    "--codex-dir",
+    default=None,
+    show_default=True,
+    help="Codex sessions root (default: ~/.codex/sessions).",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Only import rollouts whose path-date dir is on/after YYYY-MM-DD.",
+)
 @click.option("--dry-run", is_flag=True, help="Parse and count, but do not persist.")
 def provenance_import_codex(codex_dir, since, dry_run) -> None:
     """Import Codex apply_patch authorship into the graph as code_provenance evidence."""
@@ -199,7 +208,11 @@ def provenance_import_codex(codex_dir, since, dry_run) -> None:
     from smartmemory.provenance.extract import codex_session_edits, iter_codex_sessions
     from smartmemory_app.storage import persist_provenance
 
-    root = Path(codex_dir).expanduser() if codex_dir else (Path.home() / ".codex" / "sessions")
+    root = (
+        Path(codex_dir).expanduser()
+        if codex_dir
+        else (Path.home() / ".codex" / "sessions")
+    )
     if not root.exists():
         click.echo(f"No Codex sessions directory at {root}")
         return
@@ -285,7 +298,11 @@ def restart_cmd(num_workers: int) -> None:
 
 
 @cli.command("warm")
-@click.option("--no-reranker", is_flag=True, help="Warm only the embedder, skip the reranker model.")
+@click.option(
+    "--no-reranker",
+    is_flag=True,
+    help="Warm only the embedder, skip the reranker model.",
+)
 def warm_cmd(no_reranker: bool) -> None:
     """Pre-load the local models so the first add/search is instant.
 
@@ -301,7 +318,9 @@ def warm_cmd(no_reranker: bool) -> None:
     click.echo("Warming local models (one-time; subsequent runs are cached)...")
     t0 = time.perf_counter()
     warm_models(reranker=not no_reranker)
-    click.echo(f"Models warm in {time.perf_counter() - t0:.1f}s. First add/search will now be fast.")
+    click.echo(
+        f"Models warm in {time.perf_counter() - t0:.1f}s. First add/search will now be fast."
+    )
 
 
 @cli.command("status")
@@ -367,6 +386,22 @@ def viewer_cmd(port: int | None) -> None:
         start_daemon()
     p = port or _port()
     webbrowser.open(f"http://localhost:{p}")
+
+
+@cli.command("tour")
+@click.option("--keep", is_flag=True, help="Keep the isolated tour store after exit.")
+@click.option("--code", is_flag=True, help="Show the code-intelligence tour branch.")
+@click.option(
+    "--port", default=None, type=int, help="Port override for the tour daemon."
+)
+@click.option(
+    "--no-viewer", is_flag=True, help="Run without opening the browser viewer."
+)
+def tour_cmd(keep: bool, code: bool, port: int | None, no_viewer: bool) -> None:
+    """Run the guided SmartMemory onboarding tour."""
+    from smartmemory_app import tour
+
+    tour.run_tour(keep=keep, code=code, port=port, no_viewer=no_viewer)
 
 
 @cli.command("worker")
@@ -497,7 +532,11 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         for chunk in chunks:
             # DIST-LITE-QUIET-1: the CLI declares its producer to the (producer-neutral)
             # daemon so writes are attributed cli:add (tier 1), not origin='unknown'.
-            body: dict = {"content": chunk, "memory_type": memory_type, "context": {"origin": "cli:add"}}
+            body: dict = {
+                "content": chunk,
+                "memory_type": memory_type,
+                "context": {"origin": "cli:add"},
+            }
             if props:
                 body["properties"] = props
             result = _daemon_request("POST", "/memory/ingest", json=body)
@@ -511,7 +550,9 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 _warm_notice()
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
-                    ids.append(ingest(chunk, memory_type, properties=props, origin="cli:add"))
+                    ids.append(
+                        ingest(chunk, memory_type, properties=props, origin="cli:add")
+                    )
                 except RemoteBackendError as e:
                     raise click.ClickException(
                         f"Add failed — could not reach the SmartMemory service: {e}"
@@ -527,7 +568,11 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         raise click.ClickException("Content cannot be empty.")
     props = _parse_extra_props(ctx.args)
     # DIST-LITE-QUIET-1: declare the CLI producer to the producer-neutral daemon.
-    body: dict = {"content": text, "memory_type": memory_type, "context": {"origin": "cli:add"}}
+    body: dict = {
+        "content": text,
+        "memory_type": memory_type,
+        "context": {"origin": "cli:add"},
+    }
     if props:
         body["properties"] = props
     result = _daemon_request("POST", "/memory/ingest", json=body)

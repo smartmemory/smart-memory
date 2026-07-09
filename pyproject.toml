@@ -18,6 +18,7 @@ dependencies = [
     "keyring>=24.0",           # DIST-LITE-5: OS credential store for API keys
     "tomli-w>=1.0",            # DIST-LITE-5: TOML config writing (tomllib stdlib reads only)
     "textual>=8.0",            # TUI for setup questionnaire
+    "tiktoken>=0.7",           # DIST-TOUR-1: real token receipt in `sm tour`
 ]
 
 [project.optional-dependencies]
@@ -41,4 +42,5 @@ include = [
 testpaths = ["tests"]
 markers = [
     "integration: tests requiring real filesystem/subprocess (no mocks)",
+    "needs_live_daemon: tests that bind localhost and require an unsandboxed daemon",
 ]
