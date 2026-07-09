@@ -27,7 +27,7 @@ def test_persist_cmd_fallback(runner):
 
     assert result.exit_code == 0
     assert "item-abc" in result.output
-    mock_ingest.assert_called_once_with("test memory text", "episodic", properties={})
+    mock_ingest.assert_called_once_with("test memory text", "episodic", properties={}, origin="cli:add")
 
 
 def test_add_cmd_daemon_path(runner):
@@ -51,7 +51,9 @@ def test_recall_cmd_fallback(runner):
 
     assert result.exit_code == 0
     assert "SmartMemory" in result.output
-    mock_recall.assert_called_once_with("/my/project", 10)
+    mock_recall.assert_called_once_with(
+        "/my/project", 10, query=None, workspace_id=None, include_snapshot=True, strict=False
+    )
 
 
 def test_recall_cmd_no_cwd_fallback(runner):
@@ -64,7 +66,9 @@ def test_recall_cmd_no_cwd_fallback(runner):
         result = runner.invoke(cli, ["recall"])
 
     assert result.exit_code == 0
-    mock_recall.assert_called_once_with(None, 10)
+    mock_recall.assert_called_once_with(
+        None, 10, query=None, workspace_id=None, include_snapshot=True, strict=False
+    )
 
 
 def test_recall_cmd_daemon_path(runner):
@@ -192,7 +196,9 @@ def test_add_cmd_with_properties(runner):
 
     assert result.exit_code == 0
     assert "prop-id" in result.output
-    mock_ingest.assert_called_once_with("test text", "episodic", properties={"project": "atlas", "domain": "legal"})
+    mock_ingest.assert_called_once_with(
+        "test text", "episodic", properties={"project": "atlas", "domain": "legal"}, origin="cli:add"
+    )
 
 
 def test_search_cmd_with_filters(runner):
@@ -208,3 +214,69 @@ def test_search_cmd_with_filters(runner):
     assert result.exit_code == 0
     assert "abc12345" in result.output
     mock_search.assert_called_once_with("test", 5, filters={"project": "atlas"}, include_reference=False)
+
+
+class TestCliLoggingPolicy:
+    """DIST-CLI-QUIET-1: the CLI installs a root logging policy on every invocation.
+
+    Default WARNING keeps pipeline INFO chatter out of user-facing commands and
+    neutralizes import-time logging.basicConfig() in deps (fastcoref). Warnings
+    stay visible (no-silent-degradation). SMARTMEMORY_LOG_LEVEL overrides.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_root_logger(self):
+        """Snapshot/restore the root logger so these tests don't leak global state."""
+        import logging
+
+        root = logging.getLogger()
+        handlers, level = list(root.handlers), root.level
+        yield
+        root.handlers[:] = handlers
+        root.setLevel(level)
+
+    def _reset_root(self):
+        import logging
+
+        root = logging.getLogger()
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        root.setLevel(logging.WARNING)
+
+    def test_default_level_is_warning(self, runner, monkeypatch):
+        import logging
+
+        monkeypatch.delenv("SMARTMEMORY_LOG_LEVEL", raising=False)
+        self._reset_root()
+        with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}):
+            from smartmemory_app.cli import cli
+            result = runner.invoke(cli, ["add", "t"])
+
+        assert result.exit_code == 0
+        root = logging.getLogger()
+        assert root.level == logging.WARNING
+        assert root.handlers, "CLI must install a root handler (neutralizes dep basicConfig)"
+
+    def test_env_override_raises_verbosity(self, runner, monkeypatch):
+        import logging
+
+        monkeypatch.setenv("SMARTMEMORY_LOG_LEVEL", "DEBUG")
+        self._reset_root()
+        with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}):
+            from smartmemory_app.cli import cli
+            result = runner.invoke(cli, ["add", "t"])
+
+        assert result.exit_code == 0
+        assert logging.getLogger().level == logging.DEBUG
+
+    def test_invalid_env_falls_back_to_warning(self, runner, monkeypatch):
+        import logging
+
+        monkeypatch.setenv("SMARTMEMORY_LOG_LEVEL", "not-a-level")
+        self._reset_root()
+        with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}):
+            from smartmemory_app.cli import cli
+            result = runner.invoke(cli, ["add", "t"])
+
+        assert result.exit_code == 0
+        assert logging.getLogger().level == logging.WARNING

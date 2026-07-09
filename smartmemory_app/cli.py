@@ -7,10 +7,29 @@ is not running (~22s cold start).
 
 import logging
 import json
+import os
 
 import click
 
 log = logging.getLogger(__name__)
+
+
+def _configure_cli_logging() -> None:
+    """Install the CLI's root logging policy (DIST-CLI-QUIET-1).
+
+    Default WARNING so user-facing commands stay clean of pipeline INFO chatter,
+    while degradation warnings remain visible (no-silent-degradation rule).
+    Installing a root handler up front also neutralizes import-time
+    ``logging.basicConfig()`` calls in third-party deps (e.g. fastcoref), which
+    are no-ops once the root logger already has a handler.
+
+    Override with ``SMARTMEMORY_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR``.
+    """
+    level_name = os.environ.get("SMARTMEMORY_LOG_LEVEL", "WARNING").upper()
+    level = getattr(logging, level_name, None)
+    if not isinstance(level, int):
+        level = logging.WARNING
+    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 # DIST-INSTALL-RESOLVE-1: conservative floor for smartmemory-core. A core BELOW
 # this is from the dead-`/auth/me` era — a pip-backtracked install (e.g. wrapper
@@ -128,6 +147,7 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
+    _configure_cli_logging()
 
 
 # Register setup/uninstall commands from setup module
@@ -358,6 +378,11 @@ def worker_cmd(loop: bool) -> None:
 
     Drains the SQLite enrichment queue. Use --loop for continuous polling.
     """
+    # The worker's module-level basicConfig is a no-op under the CLI's root
+    # handler; its INFO progress lines are the command's purpose, so raise the
+    # level here unless the user pinned one explicitly.
+    if "SMARTMEMORY_LOG_LEVEL" not in os.environ:
+        logging.getLogger().setLevel(logging.INFO)
     from smartmemory_app.enrichment_worker import drain_queue, run_loop
 
     if loop:
