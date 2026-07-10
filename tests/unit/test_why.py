@@ -20,10 +20,13 @@ PROVENANCE = {
     "reasoning_trace": [],
     "evidence": [
         {
+            # Real provenance payloads (verified live, DEMO-WALKTHROUGH-4 spike 0.3)
+            # carry NO top-level created_at on resolved memories — the timestamp
+            # lives in metadata.created_at.
             "memory": {
                 "memory_type": "episodic",
                 "content": "The local daemon only supports generic memory lineage.",
-                "created_at": "2026-07-09T09:00:00Z",
+                "metadata": {"created_at": "2026-07-09T09:00:00Z"},
             }
         }
     ],
@@ -71,7 +74,19 @@ def test_why_remote_renders_provenance(monkeypatch) -> None:
     assert "Use the hosted service" in result.output
     assert "supersedes: Use a local decision store." in result.output
     assert "[episodic] The local daemon" in result.output
+    # Evidence timestamp must render from metadata.created_at (never "unknown date")
+    assert "(2026-07-09T09:00:00Z)" in result.output
+    assert "unknown date" not in result.output
     assert "Also matched: Keep decisions query-only." in result.output
+
+
+def test_why_date_falls_back_through_metadata_and_transaction_time() -> None:
+    """_why_date: created_at > updated_at > metadata.created_at > transaction_time."""
+    assert cli_module._why_date({"created_at": "A", "transaction_time": "D"}) == "A"
+    assert cli_module._why_date({"updated_at": "B"}) == "B"
+    assert cli_module._why_date({"metadata": {"created_at": "C"}}) == "C"
+    assert cli_module._why_date({"metadata": None, "transaction_time": "D"}) == "D"
+    assert cli_module._why_date({}) == "unknown date"
 
 
 def test_why_remote_json_prints_raw_provenance(monkeypatch) -> None:

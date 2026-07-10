@@ -840,8 +840,20 @@ def _why_title(item: dict) -> str:
 
 
 def _why_date(item: dict) -> str:
-    """Return the most useful available display date for an item."""
-    return str(item.get("created_at") or item.get("updated_at") or "unknown date")
+    """Return the most useful available display date for an item.
+
+    Decisions carry top-level created_at/updated_at; memory evidence resolved by
+    the provenance route carries its timestamp in metadata.created_at (top-level
+    created_at is absent), with bi-temporal transaction_time as a last resort.
+    """
+    metadata = item.get("metadata") or {}
+    return str(
+        item.get("created_at")
+        or item.get("updated_at")
+        or (metadata.get("created_at") if isinstance(metadata, dict) else None)
+        or item.get("transaction_time")
+        or "unknown date"
+    )
 
 
 def _why_truncate(content: object, limit: int = 100) -> str:

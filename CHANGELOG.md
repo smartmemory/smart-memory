@@ -5,6 +5,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ## [Unreleased]
 ### Fixed
 - Remote mode `sm search` always printed "No results": `RemoteMemory.search()` predated the CORE-RECALL-LINEAGE-1 `SearchResponse` envelope (`{"results": [...]}`) and silently degraded every dict response to an empty list. It now unwraps the envelope (bare-array responses from pre-LINEAGE-1 services still work). Found live in DEMO-WALKTHROUGH-4 spike 0.1.
+- Local-mode search 500'd whenever `entity_patterns.jsonl` contained a Wikidata-harvest `_comment` header row: `JSONLPatternStore._read_all()` KeyError'd on rows without `name`. Header/metadata rows are now skipped generically (mirroring core `seed_rom.py`); malformed JSON rows are skipped with a WARNING.
+- `sm why` rendered evidence memories as "(unknown date)": resolved provenance evidence carries its timestamp in `metadata.created_at` (no top-level `created_at`), which `_why_date` now falls back to (then bi-temporal `transaction_time`).
 
 ### Added
 - DIST-TOUR-1: `sm tour` now launches a guided onboarding TUI that runs against an isolated local tour store, opens the graph viewer, seeds demo project facts, shows semantic search and cross-session recall, and computes a real `tiktoken` token receipt. `--no-viewer`, `--keep`, `--port`, and the stubbed `--code` branch are wired through the CLI.

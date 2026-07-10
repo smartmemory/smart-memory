@@ -41,6 +41,37 @@ def test_load_existing(tmp_path):
     assert ("pytest", "TOOL") in patterns
 
 
+def test_read_all_skips_header_and_malformed_rows(tmp_path, caplog):
+    """Harvest-batch `_comment` header rows (no "name") must be skipped, not KeyError.
+
+    A single header row was 500ing every local-mode search (found live in
+    DEMO-WALKTHROUGH-4 spike 0.3). Mirrors core seed_rom.py row handling.
+    Malformed JSON rows are skipped with a WARNING (no silent data loss).
+    """
+    import logging
+
+    from smartmemory_app.patterns import JSONLPatternStore
+
+    _suppress_seed_sync(tmp_path)
+    pattern_file = tmp_path / "entity_patterns.jsonl"
+    rows = [
+        json.dumps({"_comment": "Wikidata harvest batch", "_count": 2746}),
+        json.dumps({"name": "pytest", "label": "TOOL", "confidence": 0.99, "frequency": 2}),
+        "{not valid json",
+    ]
+    pattern_file.write_text("\n".join(rows) + "\n")
+
+    with caplog.at_level(logging.WARNING, logger="smartmemory_app.patterns"):
+        store = JSONLPatternStore(tmp_path)
+        entries = store._read_all()
+
+    assert "pytest" in entries
+    assert len(entries) == 1, "header + malformed rows must not become patterns"
+    assert any("malformed pattern row" in r.message for r in caplog.records), (
+        "malformed rows must log a WARNING, not vanish silently"
+    )
+
+
 def test_load_quality_gate(tmp_path):
     """Patterns with frequency=1 are excluded; frequency=2 are included."""
     from smartmemory_app.patterns import JSONLPatternStore

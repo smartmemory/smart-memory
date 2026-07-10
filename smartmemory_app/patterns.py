@@ -207,16 +207,34 @@ class JSONLPatternStore:
                 self._write_all(entries)
 
     def _read_all(self) -> dict[str, dict]:
-        """Read all JSONL records as {name.lower(): entry_dict}."""
+        """Read all JSONL records as {name.lower(): entry_dict}.
+
+        Mirrors core seed_rom.py row handling: harvest batches prepend
+        ``_comment`` header rows (no ``name``) as provenance metadata, so any
+        row lacking ``name`` is skipped generically instead of KeyErroring
+        (a single header row was 500ing every local-mode search). Unparseable
+        rows are skipped with a WARNING (no silent data loss).
+        """
         result: dict[str, dict] = {}
         if not self._path.exists():
             return result
         with open(self._path) as f:
-            for line in f:
+            for lineno, line in enumerate(f, 1):
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     entry = json.loads(line)
-                    result[entry["name"].lower()] = entry
+                except json.JSONDecodeError as exc:
+                    log.warning(
+                        "Skipping malformed pattern row %s:%d: %s",
+                        self._path, lineno, exc,
+                    )
+                    continue
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if not name:
+                    continue  # header/metadata row (e.g. _comment) — expected
+                result[str(name).lower()] = entry
         return result
 
     def _write_all(self, entries: dict[str, dict]) -> None:
