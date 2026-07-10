@@ -174,6 +174,49 @@ def test_arc_driver_seeds_searches_recalls_and_receipts(tmp_path: Path) -> None:
     assert result.receipt.recall_tokens == tour.count_tokens(result.recall_text)
 
 
+def test_arc_driver_types_session_commands_before_running_them(tmp_path: Path) -> None:
+    """Live runs (pace > 0) type each CLI command into the session pane BEFORE its
+    API call runs; headless runs (pace == 0) stay session-silent so the step event
+    sequence is unchanged for tests and programmatic consumers."""
+    client = FakeHttpClient()
+    events: list[tour.TourEvent] = []
+    driver = tour.TourArcDriver(
+        client=client,
+        facts=tour.DEFAULT_TOUR_FACTS,
+        cwd=tmp_path,
+        pace_seconds=0.01,
+        step_dwell_seconds=0,
+    )
+
+    with patch("smartmemory_app.tour.time.sleep"):
+        driver.run_default_arc(include_claude_import=False, emit=events.append)
+
+    session = [e for e in events if e.kind == "session"]
+    assert session, "live run must emit session events"
+    session_text = session[-1].body
+    assert f'$ sm search "{tour.SEARCH_QUERY}"' in session_text
+    assert f'$ sm recall --query "{tour.RECALL_QUERY}"' in session_text
+    # Typing starts before the call returns: the first session keystroke precedes
+    # the "Added 1/N" step event for the first fact.
+    typed_first = next(
+        i for i, e in enumerate(events) if e.kind == "session" and e.body.endswith("$ s")
+    )
+    added_first = next(
+        i for i, e in enumerate(events) if e.kind == "step" and e.body.startswith("Added 1/")
+    )
+    assert typed_first < added_first
+
+    quiet_events: list[tour.TourEvent] = []
+    quiet = tour.TourArcDriver(
+        client=FakeHttpClient(),
+        facts=tour.DEFAULT_TOUR_FACTS,
+        cwd=tmp_path,
+        pace_seconds=0,
+    )
+    quiet.run_default_arc(include_claude_import=False, emit=quiet_events.append)
+    assert all(e.kind == "step" for e in quiet_events)
+
+
 def test_arc_driver_zero_step_dwell_does_not_sleep_between_receipt_and_recall(
     tmp_path: Path,
 ) -> None:

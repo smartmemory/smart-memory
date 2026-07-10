@@ -6,6 +6,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ### Added
 - DIST-TOUR-1: `sm tour` now launches a guided onboarding TUI that runs against an isolated local tour store, opens the graph viewer, seeds demo project facts, shows semantic search and cross-session recall, and computes a real `tiktoken` token receipt. `--no-viewer`, `--keep`, `--port`, and the stubbed `--code` branch are wired through the CLI.
 
+### Changed
+- DIST-TOUR-1: the tour TUI now presents each step as the CLI session it teaches — `$ sm add/search/recall` commands (was raw `POST /memory/...` REST strings), command above output (was output-command-output, with the body duplicated into the scroll pane), and a two-phase search step (the command appears, then its results land). The tour box also clamps to the terminal width (`max-width: 100%`) — terminals narrower than 88 columns previously clipped its right edge.
+
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.45 (1.4.45)
 - Version copied from smartmemory-core 1.4.45 release (single-source lockstep).
 

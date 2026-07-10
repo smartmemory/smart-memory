@@ -1,7 +1,9 @@
 """DIST-TOUR-1: guided onboarding tour for `sm tour`.
 
-The tour deliberately drives the same local daemon HTTP API as normal usage:
-`POST /memory/ingest`, `POST /memory/search`, and `GET /memory/recall`.
+The tour deliberately drives the same local daemon HTTP API as normal usage
+(`POST /memory/ingest`, `POST /memory/search`, `GET /memory/recall`), but the
+TUI presents each step as the equivalent CLI session the user would type
+(`sm add`, `sm search`, `sm recall`) — command first, output below.
 The browser viewer observes the existing live graph event path; this module
 does not emit graph events itself.
 """
@@ -37,14 +39,17 @@ RECALL_QUERY = "what should I remember when this project starts"
 TOUR_STEP_DWELL_ENV = "SMARTMEMORY_TOUR_STEP_DWELL"
 DEFAULT_TOUR_STEP_DWELL_SECONDS = 4.0
 
+# Facts deliberately reuse entities (Project Atlas, Postgres, GitHub Actions,
+# Staging) so the seeded graph interconnects instead of forming disjoint stars —
+# the viewer shows a linked knowledge graph within the first step.
 DEFAULT_TOUR_FACTS: tuple[str, ...] = (
     "Project Atlas picked Postgres as the application database because reporting queries need joins.",
-    "Deploys go through GitHub Actions; never deploy manually from a laptop.",
-    "Staging rate-limits uploads at 100 requests per minute, so batch the uploader.",
-    "SmartMemory local mode stores data under SMARTMEMORY_DATA_DIR in an isolated SQLite graph.",
-    "The graph viewer listens to /memory/progress/stream and updates as memories are added.",
-    "Use sm recall at session start to restore the relevant project context.",
-    "Architecture decisions should be captured immediately with sm add while the reasoning is fresh.",
+    "Project Atlas deploys go through GitHub Actions; never deploy manually from a laptop.",
+    "GitHub Actions runs the Postgres migrations against Staging before every deploy.",
+    "Staging rate-limits uploads at 100 requests per minute, so the uploader batches its Postgres writes.",
+    "The nightly reporting job on Project Atlas reads the Postgres replica on Staging, never the primary.",
+    "Use sm recall at session start to restore the relevant Project Atlas context.",
+    "Architecture decisions are captured with sm add while the reasoning is fresh.",
     "The support runbook says to restart the daemon with sm restart after changing local providers.",
 )
 
@@ -67,6 +72,9 @@ class TourEvent:
     title: str
     body: str
     command: str = ""
+    # "step" updates the explainer box; "session" updates the typed-session pane
+    # below it (body carries the pane's full text).
+    kind: str = "step"
 
 
 @dataclass(frozen=True)
@@ -225,6 +233,8 @@ class TourArcDriver:
         self.cwd = Path(cwd) if cwd is not None else Path.cwd()
         self.pace_seconds = pace_seconds
         self.step_dwell_seconds = step_dwell_seconds
+        self._session_lines: list[str] = []
+        self._session_step = 0
 
     def run_default_arc(
         self,
@@ -237,32 +247,34 @@ class TourArcDriver:
             emit,
             1,
             "Seed project facts",
-            "Adding the pinned facts one by one. The viewer should grow as the daemon stores them.",
-            'POST /memory/ingest {"content": "...", "memory_type": "semantic"}',
+            "Adding the pinned facts one by one. The viewer grows as the daemon stores them.",
         )
         for fact in self.facts:
+            # Type first, then run: the graph reacts while the command is on screen.
+            self._session_type(emit, f'sm add "{fact}"')
             result = self.client.ingest(fact, memory_type="semantic")
             seeded_ids.append(str(result.get("item_id", "?")))
+            self._session_print(emit, seeded_ids[-1])
             self._emit(
                 emit,
                 1,
                 "Seed project facts",
                 f"Added {len(seeded_ids)}/{len(self.facts)}: {fact}",
-                'POST /memory/ingest {"content": "...", "memory_type": "semantic"}',
             )
             if self.pace_seconds:
                 time.sleep(self.pace_seconds)
 
-        search_response = self.client.search(SEARCH_QUERY, top_k=5)
-        search_text = _format_search_response(search_response)
         self._dwell()
         self._emit(
             emit,
             2,
             "Semantic search",
-            search_text,
-            f'POST /memory/search {{"query": "{SEARCH_QUERY}", "top_k": 5}}',
+            "A question in plain language, answered from the facts just stored.",
         )
+        self._session_type(emit, f'sm search "{SEARCH_QUERY}"')
+        search_response = self.client.search(SEARCH_QUERY, top_k=5)
+        search_text = _format_search_response(search_response)
+        self._session_print(emit, search_text)
 
         recall_response = self.client.recall(
             cwd=str(self.cwd),
@@ -288,7 +300,7 @@ class TourArcDriver:
                     "The tour stops before showing the token receipt because "
                     "the daemon did not return the seeded content."
                 ),
-                f'POST /memory/search; GET /memory/recall?query="{RECALL_QUERY}"',
+                f'sm recall --query "{RECALL_QUERY}"',
             )
             return TourRunResult(
                 data_dir=Path(),
@@ -312,18 +324,19 @@ class TourArcDriver:
             "Token receipt",
             (
                 f"CLAUDE.md-equivalent: {receipt.full_context_tokens} tokens\n"
-                f"Recall payload: {receipt.recall_tokens} tokens"
+                f"Recall payload: {receipt.recall_tokens} tokens\n"
+                "(measured with tiktoken cl100k_base)"
             ),
-            "tiktoken cl100k_base",
         )
         self._dwell()
         self._emit(
             emit,
             4,
             "Cross-session recall",
-            recall_text or "(recall returned no context)",
-            f'GET /memory/recall?top_k=8&query="{RECALL_QUERY}"',
+            "A brand-new session asks what it should remember. Context comes back ranked.",
         )
+        self._session_type(emit, f'sm recall --query "{RECALL_QUERY}"')
+        self._session_print(emit, recall_text or "(recall returned no context)")
 
         imported_claude = False
         imported_search_text = ""
@@ -331,19 +344,20 @@ class TourArcDriver:
         if include_claude_import and claude_path.exists() and claude_path.is_file():
             content = claude_path.read_text(encoding="utf-8", errors="replace").strip()
             if content:
-                self.client.ingest(content, memory_type="semantic")
-                imported_claude = True
-                imported_search_text = _format_search_response(
-                    self.client.search("project instructions", top_k=3)
-                )
                 self._dwell()
                 self._emit(
                     emit,
                     5,
                     "Import your CLAUDE.md",
-                    imported_search_text,
-                    "sm add --all - < ./CLAUDE.md",
+                    "Already keeping a CLAUDE.md? One command imports it, searchable like everything else.",
                 )
+                self._session_type(emit, "sm add --all - < ./CLAUDE.md")
+                self.client.ingest(content, memory_type="semantic")
+                imported_claude = True
+                imported_search_text = _format_search_response(
+                    self.client.search("project instructions", top_k=3)
+                )
+                self._session_print(emit, imported_search_text)
         if not imported_claude:
             self._dwell()
             self._emit(
@@ -390,20 +404,59 @@ class TourArcDriver:
             store_populated=False,
         )
 
-    @staticmethod
     def _emit(
+        self,
         emit: EventCallback | None,
         step: int,
         title: str,
         body: str,
         command: str = "",
     ) -> None:
+        self._session_step = step
         if emit is not None:
             emit(TourEvent(step=step, title=title, body=body, command=command))
 
     def _dwell(self) -> None:
         if self.step_dwell_seconds > 0:
             time.sleep(self.step_dwell_seconds)
+
+    # ── Typed-session pane ────────────────────────────────────────────────────
+    # The pane below the explainer box shows the CLI session AS IT HAPPENS:
+    # each command is typed keystroke by keystroke BEFORE its API call runs, so
+    # the graph viewer grows while the command that caused it is on screen (the
+    # old flow updated the box only after the call returned — the viewer ran
+    # ahead of the terminal). Purely visual, so it is silent in headless/test
+    # runs (pace_seconds == 0) and never changes the step event sequence.
+
+    _SESSION_KEY_SECONDS = 0.03
+    _SESSION_MAX_LINES = 16
+
+    def _session_emit(self, emit: EventCallback | None, partial: str | None = None) -> None:
+        if emit is None or not self.pace_seconds:
+            return
+        lines = self._session_lines[-self._SESSION_MAX_LINES:]
+        if partial is not None:
+            lines = [*lines, partial]
+        emit(TourEvent(step=self._session_step, title="", body="\n".join(lines), kind="session"))
+
+    def _session_type(self, emit: EventCallback | None, command: str) -> None:
+        if emit is None or not self.pace_seconds:
+            return
+        partial = "$ "
+        self._session_emit(emit, partial)
+        for ch in command:
+            partial += ch
+            self._session_emit(emit, partial)
+            time.sleep(self._SESSION_KEY_SECONDS)
+        self._session_lines.append(f"$ {command}")
+        self._session_emit(emit)
+
+    def _session_print(self, emit: EventCallback | None, text: str) -> None:
+        if emit is None or not self.pace_seconds:
+            return
+        self._session_lines.extend(text.splitlines() or [""])
+        self._session_lines.append("")
+        self._session_emit(emit)
 
 
 class TourDaemon:
@@ -682,14 +735,17 @@ class TourScreen(Screen):
     ]
 
     def compose(self) -> ComposeResult:
+        # Explainer box on top (step title + one-line why), live typed session
+        # below — the commands appear keystroke by keystroke and their real
+        # output prints under them, like watching someone drive the CLI.
         yield Header()
         with Center():
             with Vertical(id="tour-box"):
                 yield Static("", id="tour-title")
-                yield Static("", id="tour-body")
                 yield Static("", id="tour-command")
                 with VerticalScroll(id="tour-scroll"):
                     yield Static("", id="tour-output")
+        yield Static("", id="tour-session")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -708,18 +764,22 @@ class TourApp(App):
     CSS = """
     #tour-box {
         width: 88;
-        max-width: 96;
-        height: 34;
-        max-height: 90%;
+        max-width: 100%;
+        /* Fixed height: percentage max-height resolves against the auto-height
+           Center parent and collapses the box (verified empirically 2026-07-10).
+           14 rows = title + explanation + short outputs; the session pane below
+           takes the rest of the screen. */
+        height: 14;
         padding: 1 2;
         border: round $accent;
         background: $surface;
     }
+    #tour-session {
+        height: 1fr;
+        padding: 1 2;
+    }
     #tour-title {
         text-style: bold;
-        margin-bottom: 1;
-    }
-    #tour-body {
         margin-bottom: 1;
     }
     #tour-command {
@@ -781,7 +841,7 @@ class TourApp(App):
                     step=0,
                     title="Starting isolated tour store",
                     body="Launching the local-only daemon for this tour.",
-                    command="smartmemory_app.viewer_server.main(open_browser=False)",
+                    command="",
                 )
             )
             self._run_tour()
@@ -823,17 +883,24 @@ class TourApp(App):
         self._finished = True
 
     def _show_event(self, event: TourEvent) -> None:
-        self.current_step = event.step
-        self.last_output = event.body
         self.event_history.append(event)
         screen = self._tour_screen
+        if event.kind == "session":
+            if screen is not None:
+                screen.query_one("#tour-session", Static).update(event.body)
+            return
+        self.current_step = event.step
+        self.last_output = event.body
         if screen is None:
             return
         screen.query_one("#tour-title", Static).update(
             f"[bold]Step {event.step}: {event.title}[/bold]"
         )
-        screen.query_one("#tour-body", Static).update(event.body)
-        screen.query_one("#tour-command", Static).update(event.command)
+        # Shell commands render with a prompt marker; labels/URLs render as-is.
+        cmd = event.command
+        if cmd.startswith(("sm ", "pip ")) or cmd == "sm":
+            cmd = f"$ {cmd}"
+        screen.query_one("#tour-command", Static).update(cmd)
         screen.query_one("#tour-output", Static).update(event.body)
 
 
