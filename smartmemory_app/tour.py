@@ -372,6 +372,10 @@ class TourArcDriver:
             cheat_sheet,
             "sm tour",
         )
+        # Hold the final teaching screen too: without a trailing dwell the runner
+        # returns immediately and the completion screen replaces the cheat sheet
+        # within the same tick (same flash bug as the receipt).
+        self._dwell()
         return TourRunResult(
             data_dir=Path(),
             port=0,

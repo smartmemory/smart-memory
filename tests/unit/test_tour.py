@@ -221,10 +221,12 @@ def test_arc_driver_step_dwell_runs_before_receipt_and_recall_emits(
     ) as mock_sleep:
         driver.run_default_arc(include_claude_import=False, emit=record_emit)
 
-    assert mock_sleep.call_count == 5
+    # Dwells before steps 2-6 plus the trailing hold on the final cheat-sheet screen.
+    assert mock_sleep.call_count == 6
     assert all(call.args == (1.25,) for call in mock_sleep.call_args_list)
     assert timeline[timeline.index("emit:Token receipt") - 1] == "sleep:1.25"
     assert timeline[timeline.index("emit:Cross-session recall") - 1] == "sleep:1.25"
+    assert timeline[timeline.index("emit:Try it on your project") + 1] == "sleep:1.25"
 
 
 def test_arc_driver_degrades_when_search_or_recall_do_not_return_seeded_content(
@@ -301,7 +303,7 @@ def test_tour_session_runner_uses_step_dwell_env_override(
     with patch("smartmemory_app.tour.time.sleep") as mock_sleep:
         runner.run()
 
-    assert mock_sleep.call_count == 5
+    assert mock_sleep.call_count == 6
     assert all(call.args == (1.5,) for call in mock_sleep.call_args_list)
 
 
