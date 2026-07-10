@@ -173,11 +173,17 @@ class RemoteMemory:
         """POST /memory/search. Returns list[dict] (not MemoryItem objects)."""
         body = {"query": query, "top_k": top_k, "enable_hybrid": True}
         result = self._request("POST", "/memory/search", json=body)
-        # _request() returns a list on success, dict on error, None on 204
-        if isinstance(result, dict) and (err := result.get("error")):
-            # Surface the failure — do NOT return an error-dict that the CLI renders
-            # as "No results", hiding a 30s timeout / unreachable service.
-            raise RemoteBackendError(err)
+        if isinstance(result, dict):
+            if err := result.get("error"):
+                # Surface the failure — do NOT return an error-dict that the CLI renders
+                # as "No results", hiding a 30s timeout / unreachable service.
+                raise RemoteBackendError(err)
+            # CORE-RECALL-LINEAGE-1 SearchResponse envelope: {"results": [...], ...}.
+            # (Expertise-mode bucket maps can't occur here — this body never sets
+            # expertise=true, so "results" is always a flat list per the contract.)
+            rows = result.get("results")
+            return rows if isinstance(rows, list) else []
+        # Pre-LINEAGE-1 services returned a bare top-level array.
         return result if isinstance(result, list) else []
 
     def get(self, item_id: str) -> dict | None:

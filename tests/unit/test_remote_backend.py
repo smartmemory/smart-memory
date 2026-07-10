@@ -68,6 +68,25 @@ def test_search_returns_empty_list_on_none_response(remote):
     assert result == []
 
 
+def test_search_unwraps_lineage_response_envelope(remote):
+    """CORE-RECALL-LINEAGE-1: the service returns {"results": [...], "group_roots": {...}}.
+
+    search() must unwrap the envelope — returning [] here silently rendered every
+    remote-mode `sm search` as "No results" (found live in DEMO-WALKTHROUGH-4 spike 0.1).
+    """
+    items = [{"item_id": "x", "content": "memory"}]
+    envelope = {"results": items, "group_roots": {}}
+    with patch.object(remote, "_request", return_value=envelope):
+        result = remote.search("query")
+    assert result == items
+
+
+def test_search_returns_empty_on_malformed_envelope(remote):
+    """A dict response without a list under "results" degrades to [] (not a crash)."""
+    with patch.object(remote, "_request", return_value={"results": "not-a-list"}):
+        assert remote.search("query") == []
+
+
 # ── get_neighbors ─────────────────────────────────────────────────────────
 
 
