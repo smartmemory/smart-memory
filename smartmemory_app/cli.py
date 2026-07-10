@@ -795,6 +795,170 @@ def search_cmd(ctx, query: str, top_k: int, include_reference: bool) -> None:
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id[:8]}  {content}")
 
 
+def _why_remote_request(cfg, method: str, path: str, **kwargs) -> dict:
+    """Send an authenticated read request to the hosted SmartMemory service."""
+    import httpx
+
+    from smartmemory_app.config import get_api_key
+
+    headers = {
+        "Authorization": f"Bearer {get_api_key()}",
+        "Content-Type": "application/json",
+        "X-Workspace-Id": cfg.team_id,
+    }
+    api_url = cfg.api_url.rstrip("/")
+    try:
+        with httpx.Client(trust_env=False) as client:
+            response = client.request(
+                method,
+                f"{api_url}{path}",
+                headers=headers,
+                timeout=30,
+                **kwargs,
+            )
+        response.raise_for_status()
+        return response.json()
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
+        raise click.ClickException(
+            f"Could not reach the SmartMemory service at {api_url}."
+        )
+    except httpx.ReadTimeout:
+        raise click.ClickException("SmartMemory service did not respond in time.")
+    except httpx.HTTPStatusError as exc:
+        try:
+            detail = exc.response.json().get("detail", exc.response.text)
+        except Exception:
+            detail = exc.response.text
+        raise click.ClickException(str(detail))
+    except httpx.HTTPError as exc:
+        raise click.ClickException(f"SmartMemory service request failed: {exc}")
+
+
+def _why_title(item: dict) -> str:
+    """Return a human-readable title for a decision or memory item."""
+    return str(item.get("content") or item.get("title") or "(untitled)")
+
+
+def _why_date(item: dict) -> str:
+    """Return the most useful available display date for an item."""
+    return str(item.get("created_at") or item.get("updated_at") or "unknown date")
+
+
+def _why_truncate(content: object, limit: int = 100) -> str:
+    """Truncate content to a readable terminal preview."""
+    text = str(content or "")
+    return text if len(text) <= limit else f"{text[: limit - 3]}..."
+
+
+def _render_why_provenance(
+    question: str, provenance: dict, matches: list[dict]
+) -> None:
+    """Render hosted decision provenance in a concise terminal form."""
+    decision = provenance.get("decision") or {}
+    click.echo(f"Q: {question}\n")
+    click.echo(
+        f"DECISION  {_why_title(decision)}  ({decision.get('status', 'unknown')}, {_why_date(decision)})"
+    )
+    rationale = decision.get("rationale") or decision.get("reasoning")
+    if rationale:
+        click.echo(f"  rationale: {rationale}")
+
+    superseded = provenance.get("superseded") or []
+    if superseded:
+        click.echo(
+            "  supersedes: "
+            + ", ".join(
+                f"{_why_title(item)} ({_why_date(item)})" for item in superseded
+            )
+        )
+
+    evidence = provenance.get("evidence") or []
+    if evidence:
+        click.echo("  evidence:")
+        for item in evidence:
+            memory = item.get("memory", item) if isinstance(item, dict) else {}
+            if not isinstance(memory, dict):
+                continue
+            click.echo(
+                f"    - [{memory.get('memory_type', '?')}] "
+                f"{_why_truncate(memory.get('content'))} ({_why_date(memory)})"
+            )
+
+    also_matched = [_why_title(item) for item in matches[1:] if isinstance(item, dict)]
+    if also_matched:
+        click.echo("\nAlso matched: " + ", ".join(also_matched))
+
+
+@cli.command("why")
+@click.argument("question")
+@click.option("--top-k", default=3, show_default=True, type=click.IntRange(min=1))
+@click.option("--json", "as_json", is_flag=True, help="Print raw provenance JSON.")
+def why_cmd(question: str, top_k: int, as_json: bool) -> None:
+    """Explain the closest decision or derivation for QUESTION."""
+    from smartmemory_app.config import load_config
+
+    cfg = load_config()
+    if cfg.mode == "remote":
+        # The service route uses topic/limit and returns {"decisions": [...]}.
+        search = _why_remote_request(
+            cfg,
+            "GET",
+            "/memory/decisions/search",
+            params={"topic": question, "limit": top_k},
+        )
+        matches = search.get("decisions", []) if isinstance(search, dict) else []
+        if not matches:
+            click.echo("No decisions matched that question.", err=True)
+            raise SystemExit(1)
+        decision_id = matches[0].get("decision_id")
+        if not decision_id:
+            raise click.ClickException(
+                "SmartMemory service returned a decision without an ID."
+            )
+        provenance = _why_remote_request(
+            cfg,
+            "GET",
+            f"/memory/decisions/{decision_id}/provenance",
+        )
+        if as_json:
+            click.echo(json.dumps(provenance))
+            return
+        _render_why_provenance(question, provenance, matches)
+        return
+
+    click.echo(
+        "Note: full decision provenance (supersession, evidence) requires service mode; "
+        "showing derivation lineage of the closest match."
+    )
+    results = _daemon_request(
+        "POST", "/memory/search", json={"query": question, "top_k": top_k}
+    )
+    if results is None:
+        raise click.ClickException(_DAEMON_NOT_RUNNING_MSG)
+    hits = results.get("items", []) if isinstance(results, dict) else results or []
+    if not hits:
+        click.echo("No memories matched that question.", err=True)
+        raise SystemExit(1)
+    item_id = hits[0].get("item_id") if isinstance(hits[0], dict) else None
+    if not item_id:
+        raise click.ClickException(
+            "SmartMemory daemon returned a memory without an ID."
+        )
+    lineage_result = _daemon_request("GET", f"/memory/{item_id}/lineage")
+    if lineage_result is None:
+        raise click.ClickException(_DAEMON_NOT_RUNNING_MSG)
+    lineage = (
+        lineage_result.get("lineage", []) if isinstance(lineage_result, dict) else []
+    )
+    for item in lineage:
+        if not isinstance(item, dict):
+            continue
+        click.echo(
+            f"[{item.get('memory_type', '?')}] {item.get('content', '')} "
+            f"({str(item.get('item_id', ''))[:8]})"
+        )
+
+
 @cli.command("get")
 @click.argument("item_id")
 def get_cmd(item_id: str) -> None:
