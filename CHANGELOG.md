@@ -13,6 +13,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - README restructured around an accessible quickstart: install-to-working in the first screen, a guided CLI tour (capture, piping notes in, per-project tagging, daemon, viewer), and new "Use it with Claude Code" / "Use it with Obsidian" sections. Full command reference, evolver/plugin catalogs, and the Python API moved into collapsible sections; no information removed. CLI examples validated against a live install.
 
 ### Fixed
+- `sm tour` now dwells on each guided step so semantic search results and the token receipt
+  are readable in the TUI. The human tour path defaults to 4 seconds per step and can be
+  overridden with `SMARTMEMORY_TOUR_STEP_DWELL`; direct `TourArcDriver` callers still default
+  to no dwell.
 - README command reference showed `smartmemory mcp install claude`; the actual client argument is `claude-code` (choices: `claude-code`, `cursor`, `codex`).
 - DIST-CLI-QUIET-1: the CLI now installs a root logging policy (default WARNING, `SMARTMEMORY_LOG_LEVEL` to override), so cold-start adds stop printing walls of pipeline INFO chatter. Installing the root handler up front also neutralizes import-time `logging.basicConfig()` in dependencies (fastcoref). `sm worker` keeps its INFO progress lines. Pairs with smartmemory-core's DIST-LITE-QUIET-3 fixes.
 

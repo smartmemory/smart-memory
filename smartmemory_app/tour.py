@@ -34,6 +34,8 @@ from textual.widgets import Footer, Header, Static
 
 SEARCH_QUERY = "which database did we pick"
 RECALL_QUERY = "what should I remember when this project starts"
+TOUR_STEP_DWELL_ENV = "SMARTMEMORY_TOUR_STEP_DWELL"
+DEFAULT_TOUR_STEP_DWELL_SECONDS = 4.0
 
 DEFAULT_TOUR_FACTS: tuple[str, ...] = (
     "Project Atlas picked Postgres as the application database because reporting queries need joins.",
@@ -105,6 +107,24 @@ def _cl100k_encoder() -> tiktoken.Encoding:
 def count_tokens(text: str) -> int:
     """Count tokens with the cl100k_base encoder used by the baseline receipt."""
     return len(_cl100k_encoder().encode(text))
+
+
+def _resolve_step_dwell_seconds(value: float | None) -> float:
+    if value is not None:
+        return value
+    env_value = os.environ.get(TOUR_STEP_DWELL_ENV)
+    if env_value is None:
+        return DEFAULT_TOUR_STEP_DWELL_SECONDS
+    try:
+        return float(env_value)
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; using default %.1f seconds",
+            TOUR_STEP_DWELL_ENV,
+            env_value,
+            DEFAULT_TOUR_STEP_DWELL_SECONDS,
+        )
+        return DEFAULT_TOUR_STEP_DWELL_SECONDS
 
 
 def build_claude_md_equivalent(facts: Sequence[str]) -> str:
@@ -197,11 +217,14 @@ class TourArcDriver:
         facts: Sequence[str] = DEFAULT_TOUR_FACTS,
         cwd: str | Path | None = None,
         pace_seconds: float = 0.45,
+        *,
+        step_dwell_seconds: float = 0.0,
     ) -> None:
         self.client = client
         self.facts = tuple(facts)
         self.cwd = Path(cwd) if cwd is not None else Path.cwd()
         self.pace_seconds = pace_seconds
+        self.step_dwell_seconds = step_dwell_seconds
 
     def run_default_arc(
         self,
@@ -232,6 +255,7 @@ class TourArcDriver:
 
         search_response = self.client.search(SEARCH_QUERY, top_k=5)
         search_text = _format_search_response(search_response)
+        self._dwell()
         self._emit(
             emit,
             2,
@@ -281,6 +305,7 @@ class TourArcDriver:
                 degraded_reason=degraded_reason,
             )
 
+        self._dwell()
         self._emit(
             emit,
             3,
@@ -291,6 +316,7 @@ class TourArcDriver:
             ),
             "tiktoken cl100k_base",
         )
+        self._dwell()
         self._emit(
             emit,
             4,
@@ -310,6 +336,7 @@ class TourArcDriver:
                 imported_search_text = _format_search_response(
                     self.client.search("project instructions", top_k=3)
                 )
+                self._dwell()
                 self._emit(
                     emit,
                     5,
@@ -318,6 +345,7 @@ class TourArcDriver:
                     "sm add --all - < ./CLAUDE.md",
                 )
         if not imported_claude:
+            self._dwell()
             self._emit(
                 emit,
                 5,
@@ -336,6 +364,7 @@ class TourArcDriver:
                 "sm viewer",
             ]
         )
+        self._dwell()
         self._emit(
             emit,
             6,
@@ -367,6 +396,10 @@ class TourArcDriver:
     ) -> None:
         if emit is not None:
             emit(TourEvent(step=step, title=title, body=body, command=command))
+
+    def _dwell(self) -> None:
+        if self.step_dwell_seconds > 0:
+            time.sleep(self.step_dwell_seconds)
 
 
 class TourDaemon:
@@ -525,6 +558,7 @@ class TourSessionRunner:
         client_factory: Callable[[str], TourClient] | None = None,
         facts: Sequence[str] = DEFAULT_TOUR_FACTS,
         pace_seconds: float = 0.45,
+        step_dwell_seconds: float | None = None,
         daemon_handle: Any | None = None,
     ) -> None:
         self.keep = keep
@@ -538,6 +572,7 @@ class TourSessionRunner:
         self.client_factory = client_factory or TourHttpClient
         self.facts = tuple(facts)
         self.pace_seconds = pace_seconds
+        self.step_dwell_seconds = _resolve_step_dwell_seconds(step_dwell_seconds)
         self.daemon_handle = daemon_handle
 
     def start_daemon_for_app(self) -> Any | None:
@@ -586,6 +621,7 @@ class TourSessionRunner:
                 facts=self.facts,
                 cwd=self.cwd,
                 pace_seconds=self.pace_seconds,
+                step_dwell_seconds=self.step_dwell_seconds,
             )
             result = driver.run_default_arc(include_claude_import=True, emit=emit)
             if hasattr(handle, "mark_populated"):

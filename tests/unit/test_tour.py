@@ -174,6 +174,59 @@ def test_arc_driver_seeds_searches_recalls_and_receipts(tmp_path: Path) -> None:
     assert result.receipt.recall_tokens == tour.count_tokens(result.recall_text)
 
 
+def test_arc_driver_zero_step_dwell_does_not_sleep_between_receipt_and_recall(
+    tmp_path: Path,
+) -> None:
+    client = FakeHttpClient()
+    events: list[tour.TourEvent] = []
+    driver = tour.TourArcDriver(
+        client=client,
+        facts=tour.DEFAULT_TOUR_FACTS,
+        cwd=tmp_path,
+        pace_seconds=0,
+        step_dwell_seconds=0,
+    )
+
+    with patch("smartmemory_app.tour.time.sleep") as mock_sleep:
+        driver.run_default_arc(include_claude_import=False, emit=events.append)
+
+    mock_sleep.assert_not_called()
+    titles = [event.title for event in events]
+    receipt_index = titles.index("Token receipt")
+    recall_index = titles.index("Cross-session recall")
+    assert receipt_index + 1 == recall_index
+
+
+def test_arc_driver_step_dwell_runs_before_receipt_and_recall_emits(
+    tmp_path: Path,
+) -> None:
+    client = FakeHttpClient()
+    timeline: list[str] = []
+    driver = tour.TourArcDriver(
+        client=client,
+        facts=tour.DEFAULT_TOUR_FACTS,
+        cwd=tmp_path,
+        pace_seconds=0,
+        step_dwell_seconds=1.25,
+    )
+
+    def record_sleep(seconds: float) -> None:
+        timeline.append(f"sleep:{seconds}")
+
+    def record_emit(event: tour.TourEvent) -> None:
+        timeline.append(f"emit:{event.title}")
+
+    with patch(
+        "smartmemory_app.tour.time.sleep", side_effect=record_sleep
+    ) as mock_sleep:
+        driver.run_default_arc(include_claude_import=False, emit=record_emit)
+
+    assert mock_sleep.call_count == 5
+    assert all(call.args == (1.25,) for call in mock_sleep.call_args_list)
+    assert timeline[timeline.index("emit:Token receipt") - 1] == "sleep:1.25"
+    assert timeline[timeline.index("emit:Cross-session recall") - 1] == "sleep:1.25"
+
+
 def test_arc_driver_degrades_when_search_or_recall_do_not_return_seeded_content(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -217,6 +270,7 @@ def test_no_viewer_runner_skips_webbrowser_and_runs_arc(tmp_path: Path) -> None:
             daemon_factory=daemon_factory,
             client_factory=lambda base_url: fake_client,
             pace_seconds=0,
+            step_dwell_seconds=0,
         )
         result = runner.run()
 
@@ -228,6 +282,41 @@ def test_no_viewer_runner_skips_webbrowser_and_runs_arc(tmp_path: Path) -> None:
     assert fake_daemon.store_dir.exists() is False
     assert len(fake_client.ingested) == len(tour.DEFAULT_TOUR_FACTS)
     assert "Postgres" in result.search_text
+
+
+def test_tour_session_runner_uses_step_dwell_env_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SMARTMEMORY_TOUR_STEP_DWELL", "1.5")
+    fake_daemon = FakeDaemon(tmp_path / "tour-store")
+    fake_client = FakeHttpClient()
+
+    runner = tour.TourSessionRunner(
+        no_viewer=True,
+        daemon_factory=lambda port, keep: fake_daemon,
+        client_factory=lambda base_url: fake_client,
+        pace_seconds=0,
+    )
+    with patch("smartmemory_app.tour.time.sleep") as mock_sleep:
+        runner.run()
+
+    assert mock_sleep.call_count == 5
+    assert all(call.args == (1.5,) for call in mock_sleep.call_args_list)
+
+
+def test_tour_session_runner_warns_and_uses_default_for_bad_step_dwell_env(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("SMARTMEMORY_TOUR_STEP_DWELL", "abc")
+
+    with caplog.at_level("WARNING", logger="smartmemory_app.tour"):
+        runner = tour.TourSessionRunner(no_viewer=True, pace_seconds=0)
+
+    assert runner.step_dwell_seconds == 4.0
+    assert "SMARTMEMORY_TOUR_STEP_DWELL" in caplog.text
+    assert "abc" in caplog.text
 
 
 def test_tour_daemon_forces_isolated_local_env_for_popen(tmp_path: Path) -> None:
