@@ -8,6 +8,7 @@ is not running (~22s cold start).
 import logging
 import json
 import os
+from pathlib import Path
 
 import click
 
@@ -1424,7 +1425,7 @@ def admin_group() -> None:
 
 
 @admin_group.command("import")
-@click.argument("path", type=click.Path(exists=True))
+@click.argument("path", type=click.Path(exists=True), metavar="OKF_BUNDLE_DIR")
 @click.option(
     "--mode",
     "import_mode",
@@ -1439,6 +1440,11 @@ def admin_group() -> None:
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
 @click.option("--dry-run", is_flag=True, help="Validate only, don't import")
 @click.option("--domain-filter", default=None, help="Filter by metadata.domain")
+@click.option(
+    "--legacy-jsonl",
+    is_flag=True,
+    help="Read the legacy single-file JSONL corpus instead of an OKF bundle directory",
+)
 def import_cmd(
     path: str,
     import_mode: str,
@@ -1446,19 +1452,34 @@ def import_cmd(
     resume: bool,
     dry_run: bool,
     domain_filter: str | None,
+    legacy_jsonl: bool,
 ) -> None:
-    """Import a corpus JSONL file into SmartMemory."""
-    from smartmemory.corpus.reader import CorpusReader
+    """Import an OKF bundle directory into SmartMemory (default).
+
+    PATH is an OKF bundle directory by default; pass ``--legacy-jsonl`` to read
+    a legacy single-file JSONL corpus.
+    """
     from smartmemory.corpus.importer import CorpusImporter
 
-    reader = CorpusReader(path)
-    header = reader.read_header()
-    click.echo(f"Corpus: source={header.source}, domain={header.domain or '(none)'}")
+    if legacy_jsonl:
+        from smartmemory.corpus.reader import CorpusReader
+
+        reader = CorpusReader(path)
+        header = reader.read_header()
+        click.echo(
+            f"Corpus: source={header.source}, domain={header.domain or '(none)'}"
+        )
+        total = header.item_count or reader.count_records()
+    else:
+        from smartmemory.okf import is_reserved
+
+        total = sum(
+            1 for page in Path(path).rglob("*.md") if not is_reserved(page.name)
+        )
+        click.echo(f"OKF bundle: {total} pages")
 
     if dry_run:
         click.echo("Dry run — validating records...")
-
-    total = header.item_count or reader.count_records()
 
     try:
         from rich.progress import (
@@ -1484,6 +1505,7 @@ def import_cmd(
         mode=import_mode,
         batch_size=batch_size,
         domain_filter=domain_filter,
+        legacy_jsonl=legacy_jsonl,
     )
 
     if use_rich and total > 0:
@@ -1511,16 +1533,25 @@ def import_cmd(
 
 
 @admin_group.command("export")
-@click.argument("path", type=click.Path())
+@click.argument("path", type=click.Path(), metavar="OKF_BUNDLE_DIR")
 @click.option("--memory-type", default=None, help="Filter by memory type")
 @click.option(
     "--include-entities", is_flag=True, help="Include extracted entities/relations"
 )
 @click.option("--limit", default=0, help="Max records to export (0=all)")
 @click.option(
-    "--source", default="smartmemory-export", help="Source tag in corpus header"
+    "--source",
+    default="smartmemory-export",
+    help="Source tag in the legacy JSONL corpus header only",
 )
-@click.option("--domain", default="", help="Domain tag in corpus header")
+@click.option(
+    "--domain", default="", help="Domain tag in the legacy JSONL corpus header only"
+)
+@click.option(
+    "--legacy-jsonl",
+    is_flag=True,
+    help="Write the legacy single-file JSONL corpus instead of an OKF bundle directory",
+)
 def export_cmd(
     path: str,
     memory_type: str | None,
@@ -1528,8 +1559,14 @@ def export_cmd(
     limit: int,
     source: str,
     domain: str,
+    legacy_jsonl: bool,
 ) -> None:
-    """Export memories to a corpus JSONL file."""
+    """Export memories to an OKF bundle directory (default).
+
+    PATH is an OKF bundle directory by default; pass ``--legacy-jsonl`` to
+    write a legacy single-file JSONL corpus. ``--source`` and ``--domain``
+    apply only to legacy JSONL output.
+    """
     from smartmemory.corpus.exporter import CorpusExporter
     from smartmemory_app.storage import get_memory
 
@@ -1539,9 +1576,16 @@ def export_cmd(
         memory_type=memory_type,
         include_entities=include_entities,
         limit=limit,
+        legacy_jsonl=legacy_jsonl,
     )
     count = exporter.run(path, source=source, domain=domain)
-    click.echo(f"Exported {count} records to {path}")
+    output_format = "legacy JSONL" if legacy_jsonl else "OKF bundle"
+    click.echo(f"Exported {count} records to {path} ({output_format})")
+
+
+# `sm export` / `sm import` aliases reuse the administrative command objects.
+cli.add_command(export_cmd, name="export")
+cli.add_command(import_cmd, name="import")
 
 
 # ── Wikidata mining ────────────────────────────────────────────────────────

@@ -226,8 +226,10 @@ smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ### Admin
 
 ```bash
-smartmemory admin export out.jsonl     # Export memories to corpus JSONL
-smartmemory admin import data.jsonl    # Import corpus JSONL into SmartMemory
+smartmemory export ./bundle            # Export memories to an OKF bundle directory (alias: admin export)
+smartmemory import ./bundle            # Import an OKF bundle directory (alias: admin import)
+smartmemory admin export out.jsonl --legacy-jsonl   # Legacy single-file JSONL corpus (read-during-migration)
+smartmemory admin import data.jsonl --legacy-jsonl   # Import a legacy JSONL corpus
 smartmemory admin reindex              # Re-embed all memories with current model
 smartmemory admin reextract            # Re-run entity extraction on all memories
 smartmemory admin list-packs           # List available seed packs
