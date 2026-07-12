@@ -12,6 +12,8 @@ SmartMemory remembers what you and your AI learn while you work: decisions, pref
 
 Works out of the box with **Claude Code**, **Cursor**, and other MCP-compatible tools, or directly from **Python**.
 
+_(new: export and import your whole memory as portable Open Knowledge Format bundles.)_
+
 ## Get started in 2 minutes
 
 ```bash
@@ -442,6 +444,7 @@ This means `sm add` returns instantly while quality improves in the background.
 - **Code indexer**: AST-based Python and TypeScript parser with cross-file call resolution, semantic code search, and memory-to-code graph bridging
 - **Two-tier ingestion**: Instant spaCy extraction plus async LLM enrichment
 - **MCP server**: Works with Claude Code, Cursor, and other MCP-compatible tools
+- **Portable, no lock-in**: Export and import your whole memory as Open Knowledge Format bundles (Google's OKF v0.1), a portable format of Markdown files with YAML frontmatter. The Obsidian plugin reads and writes the same format, so you can round-trip a workspace through a vault without a proprietary converter. `sm export ./bundle` / `sm import ./bundle`
 - **Flexible scoping**: Optional `ScopeProvider` for multi-tenancy or unrestricted usage
 - **Plugin security**: Sandboxing, permissions, and resource limits for safe plugin execution
 
@@ -673,6 +676,8 @@ SmartMemory is dual-licensed to provide flexibility for both open-source and com
 - **Documentation**: https://docs.smartmemory.ai
 - **GitHub**: https://github.com/smart-memory
 - **Issue Tracker**: https://github.com/smart-memory/smart-memory-core/issues
+- **Obsidian plugin**: https://github.com/smartmemory/smartmemory-obsidian
+- **Web capture (browser extension)**: https://github.com/smart-memory/smart-memory-capture
 
 ---
 

@@ -9,6 +9,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - `sm why` rendered evidence memories as "(unknown date)": resolved provenance evidence carries its timestamp in `metadata.created_at` (no top-level `created_at`), which `_why_date` now falls back to (then bi-temporal `transaction_time`).
 
 ### Added
+- Docs: README now surfaces OKF portability (export and import your whole memory as portable Open Knowledge Format bundles, Google's OKF v0.1, with an Obsidian-native round trip), plus Links pointers to the Obsidian plugin and the web capture browser extension.
 - DIST-TOUR-1: `sm tour` now launches a guided onboarding TUI that runs against an isolated local tour store, opens the graph viewer, seeds demo project facts, shows semantic search and cross-session recall, and computes a real `tiktoken` token receipt. `--no-viewer`, `--keep`, `--port`, and the stubbed `--code` branch are wired through the CLI.
 
 ### Changed
