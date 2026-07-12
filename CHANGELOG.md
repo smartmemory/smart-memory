@@ -3,6 +3,9 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Changed (auto, lockstep) — track smartmemory-core==1.4.46 (1.4.46)
+- Version copied from smartmemory-core 1.4.46 release (single-source lockstep).
+
 ### Fixed
 - Remote mode `sm search` always printed "No results": `RemoteMemory.search()` predated the CORE-RECALL-LINEAGE-1 `SearchResponse` envelope (`{"results": [...]}`) and silently degraded every dict response to an empty list. It now unwraps the envelope (bare-array responses from pre-LINEAGE-1 services still work). Found live in DEMO-WALKTHROUGH-4 spike 0.1.
 - Local-mode search 500'd whenever `entity_patterns.jsonl` contained a Wikidata-harvest `_comment` header row: `JSONLPatternStore._read_all()` KeyError'd on rows without `name`. Header/metadata rows are now skipped generically (mirroring core `seed_rom.py`); malformed JSON rows are skipped with a WARNING.
