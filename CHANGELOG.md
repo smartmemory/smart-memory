@@ -3,6 +3,9 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+### Changed (auto, lockstep) — track smartmemory-core==1.4.49 (1.4.49)
+- Version copied from smartmemory-core 1.4.49 release (single-source lockstep).
+
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.48 (1.4.48)
 - Version copied from smartmemory-core 1.4.48 release (single-source lockstep).
 
