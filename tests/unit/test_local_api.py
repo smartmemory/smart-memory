@@ -452,3 +452,24 @@ class TestIngestLLMWarning:
                 r = client.post("/ingest", json={"content": "Carol owns Core", "memory_type": "episodic"})
         assert r.status_code == 200
         assert "warning" not in r.json()  # key present → no downgrade
+
+    def test_keyless_path_runs_tier1_only_not_full_pipeline(self, client):
+        """Regression (keyless-ingest 500): with no LLM key the endpoint MUST call
+        storage.ingest(sync=False) — Tier-1 spaCy only. The default sync=True runs
+        the full core pipeline including llm_extract, which hard-requires a cloud
+        key and 500s on a fresh lite/ollama install. Earlier tests mocked ingest
+        without checking sync=, so the bug slipped through — assert the arg here."""
+        from unittest.mock import MagicMock
+        fake = MagicMock(return_value={"item_id": "itm_lite", "entity_ids": {}})
+        with patch.dict("os.environ", _LLM_ENV, clear=False):
+            for k in list(_LLM_ENV):
+                os.environ.pop(k, None)
+            with patch("smartmemory_app.storage.ingest", fake):
+                r = client.post("/ingest", json={"content": "hello world", "memory_type": "semantic"})
+        assert r.status_code == 200
+        assert r.json()["item_id"] == "itm_lite"
+        assert fake.call_count == 1
+        assert fake.call_args.kwargs.get("sync") is False, (
+            "keyless ingest must run Tier-1 only (sync=False); sync=True would run "
+            "llm_extract and 500 without a cloud key"
+        )

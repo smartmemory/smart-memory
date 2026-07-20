@@ -761,9 +761,15 @@ def ingest_endpoint(body: IngestRequest) -> dict:
         with _rw_lock:
             from smartmemory_app.storage import ingest
             try:
-                item_id = ingest(body.content, memory_type, properties=properties, origin=origin)
+                # Tier-1 ONLY (spaCy + EntityRuler). MUST pass sync=False: the default
+                # sync=True runs the full core pipeline including llm_extract, which
+                # hard-requires a cloud LLM key and 500s on a keyless lite install
+                # (ValueError: No API key found → Stage 'llm_extract' failed). There is
+                # no Tier-2 enqueue here — no key means no enrichment worker to drain it.
+                result = ingest(body.content, memory_type, sync=False, properties=properties, origin=origin)
             except RemoteBackendError as e:
                 raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
+            item_id = result["item_id"] if isinstance(result, dict) else result
         return {
             "item_id": item_id,
             "warning": "No LLM key configured — stored with Tier-1 (spaCy) extraction "
