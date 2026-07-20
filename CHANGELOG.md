@@ -3,6 +3,19 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+
+## [1.4.54] - 2026-07-21
+### Fixed — Keyless lite ingest 500 on a fresh install
+- Local `/ingest` with no LLM API key ran the full core pipeline (including `llm_extract`),
+  which hard-requires a cloud LLM key. On a fresh lite install with no key, every
+  `smartmemory add` returned HTTP 500 (`ValueError: No API key found` →
+  `RuntimeError: Stage 'llm_extract' failed after 3 attempts`). Keyless ingest now runs
+  Tier-1 (spaCy + EntityRuler) only, as it always claimed to. Invisible on dev machines
+  because they carry cloud keys and take the working two-tier path.
+- Note: this does **not** wire a local Ollama model into extraction — `llm_provider=ollama`
+  still does not enable LLM extraction; that remains a separate, unimplemented gap.
+- Released manually (out of CI) because the smart-memory-org publish pipeline is billing-blocked.
+
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.51 (1.4.51)
 - Version copied from smartmemory-core 1.4.51 release (single-source lockstep).
 
