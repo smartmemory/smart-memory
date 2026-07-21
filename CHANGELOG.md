@@ -3,6 +3,8 @@
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+
+## [1.4.55] - 2026-07-21
 ### Added — Local LLM extraction via OpenAI-compatible servers (Ollama, LM Studio, LocalAI)
 - Setting `llm_provider = ollama` (or `lmstudio` / `localai`) now actually runs local LLM
   extraction. An OpenAI-compatible URL *is* the OpenAI path, so no provider-specific client
