@@ -30,6 +30,17 @@ _VALID_MODES = frozenset({"local", "remote"})
 # DeepSeek-only user silently got NO extraction even with a valid key.
 LLM_KEY_ENV_VARS = ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY")
 
+# Local OpenAI-compatible LLM servers → default base URL. These speak the OpenAI
+# Chat Completions API, so extraction needs NO provider-specific code: the core
+# extraction path already routes through the OpenAI client, which honors
+# OPENAI_BASE_URL / OPENAI_API_KEY. Picking one of these providers just means
+# "the OpenAI path, pointed at localhost" — we translate it in _apply_local_llm_env.
+_LOCAL_OPENAI_PROVIDERS = {
+    "ollama": "http://localhost:11434/v1",
+    "lmstudio": "http://localhost:1234/v1",
+    "localai": "http://localhost:8080/v1",
+}
+
 
 class UnconfiguredError(RuntimeError):
     """Raised by storage.get_memory() when no config exists and auto-migration fails.
@@ -48,6 +59,7 @@ class SmartMemoryConfig:
     coreference: bool = False
     llm_provider: str = "none"
     llm_model: str = ""
+    llm_base_url: str = ""  # override for OpenAI-compatible endpoints (ollama/lmstudio/localai); "" = provider default
     embedding_provider: str = "local"  # "local" | "openai" | "ollama"
     spacy_model: str = "en_core_web_sm"  # "en_core_web_sm" | "en_core_web_md" | "en_core_web_lg"
     daemon_port: int = 9014
@@ -98,6 +110,7 @@ def load_config() -> SmartMemoryConfig:
             cfg.coreference = local.get("coreference", False)
             cfg.llm_provider = local.get("llm_provider", "none")
             cfg.llm_model = local.get("llm_model", "")
+            cfg.llm_base_url = local.get("llm_base_url", "")
             cfg.embedding_provider = local.get("embedding_provider", "local")
             cfg.daemon_port = local.get("daemon_port", 9014)
             cfg.data_dir = local.get("data_dir", "~/.smartmemory")
@@ -125,12 +138,46 @@ def load_config() -> SmartMemoryConfig:
         cfg.data_dir = d
     if p := os.environ.get("SMARTMEMORY_LLM_PROVIDER"):
         cfg.llm_provider = p
+    if m := os.environ.get("SMARTMEMORY_LLM_MODEL"):
+        cfg.llm_model = m
+    if b := os.environ.get("SMARTMEMORY_LLM_BASE_URL"):
+        cfg.llm_base_url = b
     if ep := os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         cfg.embedding_provider = ep
     if dp := os.environ.get("SMARTMEMORY_DAEMON_PORT"):
         cfg.daemon_port = int(dp)
 
+    # Translate a local OpenAI-compatible provider into the env vars the core
+    # extraction path already consumes. Done after file+env resolution so config
+    # and env are fully merged first.
+    _apply_local_llm_env(cfg)
+
     return cfg
+
+
+def _apply_local_llm_env(cfg: SmartMemoryConfig) -> None:
+    """Route a local OpenAI-compatible ``llm_provider`` to the standard OpenAI env
+    vars, so local LLMs need no bespoke integration — an OpenAI-compatible URL *is*
+    the OpenAI path.
+
+    Sets (only when unset — never clobbers an explicit user value):
+      - ``OPENAI_BASE_URL``   → ``llm_base_url`` or the provider's localhost default
+      - ``OPENAI_API_KEY``    → a placeholder (local servers ignore auth, but the
+        OpenAI SDK requires a non-empty key AND ``llm_key_present()`` gates Tier-2
+        extraction on a key being present — so this also flips the daemon out of the
+        keyless Tier-1-only downgrade)
+      - ``SMARTMEMORY_LLM_MODEL`` → ``llm_model`` (core's ``get_default_model()`` reads it)
+
+    Child processes (the Tier-2 enrichment worker) inherit these vars. No-op for
+    cloud providers / "none" — those users supply real provider keys themselves.
+    """
+    default_base = _LOCAL_OPENAI_PROVIDERS.get((cfg.llm_provider or "").lower())
+    if not default_base:
+        return
+    os.environ.setdefault("OPENAI_BASE_URL", cfg.llm_base_url or default_base)
+    os.environ.setdefault("OPENAI_API_KEY", "local-llm-no-key")
+    if cfg.llm_model:
+        os.environ.setdefault("SMARTMEMORY_LLM_MODEL", cfg.llm_model)
 
 
 def save_config(cfg: SmartMemoryConfig) -> None:
@@ -142,6 +189,7 @@ def save_config(cfg: SmartMemoryConfig) -> None:
             "coreference": cfg.coreference,
             "llm_provider": cfg.llm_provider,
             "llm_model": cfg.llm_model,
+            "llm_base_url": cfg.llm_base_url,
             "embedding_provider": cfg.embedding_provider,
             "daemon_port": cfg.daemon_port,
             "data_dir": cfg.data_dir,

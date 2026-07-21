@@ -39,6 +39,10 @@ def isolated_config(tmp_path, monkeypatch):
         "SMARTMEMORY_TEAM_ID",
         "SMARTMEMORY_DATA_DIR",
         "SMARTMEMORY_LLM_PROVIDER",
+        "SMARTMEMORY_LLM_MODEL",
+        "SMARTMEMORY_LLM_BASE_URL",
+        "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
     yield tmp_path
@@ -225,3 +229,69 @@ def test_set_api_key_warns_does_not_raise_when_keychain_unavailable():
         warnings.simplefilter("always")
         set_api_key("sk_test")  # must not raise
     assert any("OS keychain unavailable" in str(warning.message) for warning in w)
+
+
+# ── local OpenAI-compatible provider translation (ollama/lmstudio/localai) ──────
+# An OpenAI-compatible URL IS the OpenAI path; picking such a provider must set the
+# env vars the core extraction path already reads, with no provider-specific code.
+
+
+def test_ollama_provider_sets_openai_compatible_env(monkeypatch):
+    """llm_provider=ollama → OPENAI_BASE_URL (localhost default), a placeholder
+    OPENAI_API_KEY (so llm_key_present() flips true and the daemon runs Tier-2),
+    and SMARTMEMORY_LLM_MODEL from llm_model — all consumed by the OpenAI path."""
+    from smartmemory_app.config import llm_key_present
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("SMARTMEMORY_LLM_MODEL", "dolphin-phi:latest")
+    with patch.dict(os.environ, {}, clear=False):  # roll back load_config's setdefault
+        for v in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "SMARTMEMORY_LLM_MODEL"):
+            os.environ.pop(v, None)
+        os.environ["SMARTMEMORY_LLM_MODEL"] = "dolphin-phi:latest"
+        load_config()
+        assert os.environ["OPENAI_BASE_URL"] == "http://localhost:11434/v1"
+        assert os.environ["OPENAI_API_KEY"]  # non-empty placeholder
+        assert os.environ["SMARTMEMORY_LLM_MODEL"] == "dolphin-phi:latest"
+        assert llm_key_present() is True  # daemon will run Tier-2, not keyless Tier-1
+
+
+def test_ollama_never_clobbers_user_env(monkeypatch):
+    """A real OPENAI_API_KEY / OPENAI_BASE_URL the user set must survive (setdefault)."""
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "ollama")
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ["OPENAI_API_KEY"] = "sk-real-user-key"
+        os.environ["OPENAI_BASE_URL"] = "https://my-proxy.example/v1"
+        load_config()
+        assert os.environ["OPENAI_API_KEY"] == "sk-real-user-key"
+        assert os.environ["OPENAI_BASE_URL"] == "https://my-proxy.example/v1"
+
+
+def test_llm_base_url_override_wins_over_default(monkeypatch):
+    """A configured llm_base_url (e.g. remote ollama host) overrides the localhost default."""
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("SMARTMEMORY_LLM_BASE_URL", "http://gpu-box.lan:11434/v1")
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("OPENAI_BASE_URL", None)
+        load_config()
+        assert os.environ["OPENAI_BASE_URL"] == "http://gpu-box.lan:11434/v1"
+
+
+def test_cloud_provider_is_noop(monkeypatch):
+    """Cloud providers / 'none' must NOT get a placeholder key or a base_url — those
+    users supply real provider keys. (Guards against hijacking real OpenAI usage.)"""
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
+    with patch.dict(os.environ, {}, clear=False):
+        for v in ("OPENAI_BASE_URL", "OPENAI_API_KEY"):
+            os.environ.pop(v, None)
+        load_config()
+        assert "OPENAI_BASE_URL" not in os.environ
+        assert "OPENAI_API_KEY" not in os.environ
+
+
+def test_llm_base_url_round_trips_through_save(monkeypatch):
+    """llm_base_url persists via save_config → load_config."""
+    save_config(SmartMemoryConfig(mode="local", llm_provider="ollama",
+                                  llm_model="qwen2.5:7b", llm_base_url="http://h:11434/v1"))
+    with patch.dict(os.environ, {}, clear=False):
+        cfg = load_config()
+        assert cfg.llm_base_url == "http://h:11434/v1"
+        assert cfg.llm_model == "qwen2.5:7b"
