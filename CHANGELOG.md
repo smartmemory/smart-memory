@@ -4,6 +4,14 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.56] - 2026-07-21
+### Fixed (via core) — local llama/mixtral-named models on ollama/lmstudio no longer misroute
+- Follow-up to 1.4.55: a local model whose name starts with `llama`/`mixtral`/`gemini`/`claude`
+  was still routed to the matching cloud provider and 500'd (e.g. `ollama run llama3.2` — the
+  most common Ollama model). Fixed in smartmemory-core 1.4.56: `call_llm` now honors an explicit
+  OpenAI-compatible endpoint (`OPENAI_BASE_URL`, set by `llm_provider=ollama`) over guessing the
+  provider from the model name. Every local model now works, not just non-cloud-named ones.
+
 ## [1.4.55] - 2026-07-21
 ### Added — Local LLM extraction via OpenAI-compatible servers (Ollama, LM Studio, LocalAI)
 - Setting `llm_provider = ollama` (or `lmstudio` / `localai`) now actually runs local LLM
