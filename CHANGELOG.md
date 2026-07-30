@@ -4,6 +4,24 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.57] - 2026-07-30
+### Fixed (via core) — scoped vector search silently returned too few results
+- On a shared vector index, a search scoped to one workspace fetched a fixed number of
+  candidates, threw away everything belonging to other workspaces, and returned whatever
+  survived. A workspace owning a small slice of the index got a short answer, or no answer at
+  all, with nothing in the logs to say so. Measured against a real backend, only 4 of 10
+  available matches came back (recall@10 of 0.400).
+- Fixed in smartmemory-core 1.4.57: the search now widens its candidate window when a page
+  comes back under-filled, and stops only when the backend itself confirms the index has been
+  read in full or a configurable ceiling is reached (`VECTOR_MAX_SEARCH_CANDIDATES`, default
+  512). The same query now returns all 10 of 10 matches (recall@10 of 1.000). Unscoped and
+  global reads are unaffected, as are collections smaller than a single fetch.
+- Under-filled pages now log a warning once per collection and workspace instead of degrading
+  in silence, and a `top_k` larger than the ceiling warns rather than truncating quietly.
+- Behaviour change: the FalkorDB backend's text search now honors its `top_k` argument
+  exactly. It previously requested twice that internally, an undocumented doubling the other
+  backend never had.
+
 ## [1.4.56] - 2026-07-21
 ### Fixed (via core) — local llama/mixtral-named models on ollama/lmstudio no longer misroute
 - Follow-up to 1.4.55: a local model whose name starts with `llama`/`mixtral`/`gemini`/`claude`
