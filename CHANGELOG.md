@@ -4,6 +4,23 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.58] - 2026-08-04
+### Fixed (via core) — background sweeps, write-path serialization, hidden profiler memories
+- Decay and compaction sweeps now enumerate items through a scoped graph reader instead of a
+  wildcard search, so they work on lightweight (CRUD-only) memory handles and no longer skip
+  the corpus silently.
+- Compaction treats an item with no activation telemetry as "no signal yet" and skips it,
+  instead of reading it as maximally cold and tombstoning it.
+- Metadata containing sub-dicts keyed by non-identifier strings (UUIDs, entity names) no
+  longer makes an item permanently unwritable: both the sync and async graph write paths keep
+  such subtrees whole instead of flattening them into invalid property names.
+- Trait memories written by the Maya psychology profiler (`profiler:*` origins) are now
+  registered as recall-visible; previously they fell through to the hidden infrastructure
+  tier and the feature was a silent no-op.
+- Also via core 1.4.58: vector rows now carry workspace scoping on write, the vector
+  relevance floor is calibrated per embedding model, stale vector indexes are detected
+  instead of silently disabling semantic recall, and the DSPy dependency is gone.
+
 ## [1.4.57] - 2026-07-30
 ### Fixed (via core) — scoped vector search silently returned too few results
 - On a shared vector index, a search scoped to one workspace fetched a fixed number of
