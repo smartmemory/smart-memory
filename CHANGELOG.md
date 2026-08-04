@@ -4,6 +4,11 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.59] - 2026-08-04
+
+### Added (via core) — auditable memory (PLAT-AUDITABLE-MEMORY-1)
+Core 1.4.59 delivers the auditable-memory surface: `explain()` single-call provenance, hash-chained version audit with supersession lineage, and as-of (transaction-time) recall. No wrapper-specific changes.
+
 ## [1.4.58] - 2026-08-04
 ### Fixed (via core) — background sweeps, write-path serialization, hidden profiler memories
 - Decay and compaction sweeps now enumerate items through a scoped graph reader instead of a
