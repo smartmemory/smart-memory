@@ -375,8 +375,24 @@ def search(
     # Only forward kwargs the core engine understands; silently drop the
     # rest (e.g. MCP's enable_hybrid) so a richer caller contract degrades
     # to plain semantic search instead of crashing.
+    #
+    # CORE-RETRACTED-RECALL-1 (2026-08-05): the lifecycle-visibility and
+    # transaction-time params were MISSING from this list, so the MCP local
+    # backend — whose only path to core is this function — silently dropped
+    # every one of them. `include_superseded` and `as_of_date`/`as_of_strict`
+    # had been dropped since PLAT-AUDITABLE-MEMORY-1 despite that feature's MCP
+    # changelog claiming they were "forwarded through both backends"; a local-
+    # mode agent asking for an as-of audit answer got plain present-day search
+    # with no error. `include_retracted` would have been the fourth victim.
+    #
+    # Note the failure mode this allowlist creates: an unknown key is dropped
+    # rather than raising, so a param is either wired here or it silently means
+    # nothing. Anything added to SmartMemory.search() that callers can set MUST
+    # be added here in the same change.
     _ALLOWED = ("decompose_query", "channel_weights", "multi_hop",
-                "max_hops", "budget_ms", "semantic_hops")
+                "max_hops", "budget_ms", "semantic_hops",
+                "include_superseded", "include_retracted",
+                "as_of_date", "as_of_strict")
     core_kwargs = {k: v for k, v in search_kwargs.items()
                    if k in _ALLOWED and v is not None}
     if memory_type:

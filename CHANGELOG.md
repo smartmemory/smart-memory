@@ -4,6 +4,25 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed — local-mode search silently ignored four documented params (CORE-RETRACTED-RECALL-1)
+
+`smartmemory_app.storage.search()` forwards kwargs to core through an allowlist, and an
+unknown key is **dropped rather than rejected**. Four params callers can legitimately set
+were missing from that list, so in local mode they silently meant nothing:
+
+- `as_of_date` / `as_of_strict` and `include_superseded` — missing since
+  PLAT-AUDITABLE-MEMORY-1, whose MCP changelog stated they were "forwarded through both
+  backends". They were not: this function is the MCP **local** backend's only path to core.
+  A local-mode agent asking for an as-of audit answer received plain present-day search
+  results, with nothing indicating the request had been ignored.
+- `include_retracted` — new in core 1.4.60, would have been the fourth.
+
+All four are now forwarded, with a regression test. Remote mode was unaffected (it builds
+the POST body separately). **If you add a parameter to `SmartMemory.search()` that callers
+can set, add it to this allowlist in the same change** — the drop-don't-raise design means
+nothing will tell you it is missing.
+
+
 ## [1.4.59] - 2026-08-04
 
 ### Added (via core) — auditable memory (PLAT-AUDITABLE-MEMORY-1)

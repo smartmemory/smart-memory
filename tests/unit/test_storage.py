@@ -227,6 +227,48 @@ def test_search_accepts_mcp_recall_kwargs():
     assert "enable_hybrid" not in received_kwargs
 
 
+def test_search_forwards_lifecycle_and_asof_params():
+    """CORE-RETRACTED-RECALL-1: the visibility / time-travel params must reach core.
+
+    This function is the MCP LOCAL backend's only path to core, so a param missing
+    from the allowlist does not raise — it silently means nothing. All four were
+    missing: `include_superseded` and `as_of_date`/`as_of_strict` since
+    PLAT-AUDITABLE-MEMORY-1 (whose MCP changelog claimed they were forwarded), and
+    `include_retracted` would have been the fourth.
+
+    The user-visible failure: a local-mode agent asks for an as-of audit answer and
+    receives plain present-day search results, with nothing indicating the request
+    was ignored.
+    """
+    import smartmemory_app.storage as storage
+
+    received_kwargs = {}
+
+    class FakeResult:
+        def to_dict(self):
+            return {"item_id": "x", "content": "hello", "memory_type": "decision"}
+
+    class FakeMem:
+        def search(self, query, **kwargs):
+            received_kwargs.update(kwargs)
+            return [FakeResult()]
+
+    with patch("smartmemory_app.storage.get_memory", return_value=FakeMem()):
+        storage.search(
+            "q",
+            top_k=3,
+            include_superseded=True,
+            include_retracted=True,
+            as_of_date="2026-01-01T00:00:00Z",
+            as_of_strict=True,
+        )
+
+    assert received_kwargs.get("include_retracted") is True
+    assert received_kwargs.get("include_superseded") is True
+    assert received_kwargs.get("as_of_date") == "2026-01-01T00:00:00Z"
+    assert received_kwargs.get("as_of_strict") is True
+
+
 def test_ingest_acquires_lock(tmp_path):
     """ingest() acquires FileLock before calling mem.ingest() in local mode."""
     import smartmemory_app.storage as storage
