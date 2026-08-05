@@ -269,6 +269,34 @@ def test_search_forwards_lifecycle_and_asof_params():
     assert received_kwargs.get("as_of_strict") is True
 
 
+def test_wildcard_search_hides_superseded_and_retracted_by_default():
+    """CORE-RETRACTED-RECALL-1: the "*" branch never reaches core, so it must filter itself.
+
+    `search("*")` short-circuits to _list_all_memories() and returns without calling
+    mem.search(), so core's lifecycle filters cannot run. Without an equivalent filter
+    here, wildcard was the one local-mode surface still handing back withdrawn and
+    replaced beliefs by default.
+    """
+    import smartmemory_app.storage as storage
+
+    rows = [
+        {"item_id": "live", "content": "a", "metadata": {"status": "active"}},
+        {"item_id": "gone", "content": "b", "metadata": {"status": "retracted"}},
+        {"item_id": "old", "content": "c", "metadata": {"status": "superseded"}},
+        {"item_id": "flagged", "content": "d", "metadata": {"superseded": True}},
+    ]
+
+    with patch("smartmemory_app.storage.get_memory", return_value=MagicMock()), \
+         patch("smartmemory_app.storage._list_all_memories", return_value=list(rows)):
+        default = storage.search("*")
+        with_retracted = storage.search("*", include_retracted=True)
+        with_both = storage.search("*", include_retracted=True, include_superseded=True)
+
+    assert [r["item_id"] for r in default] == ["live"]
+    assert sorted(r["item_id"] for r in with_retracted) == ["gone", "live"]
+    assert sorted(r["item_id"] for r in with_both) == ["flagged", "gone", "live", "old"]
+
+
 def test_ingest_acquires_lock(tmp_path):
     """ingest() acquires FileLock before calling mem.ingest() in local mode."""
     import smartmemory_app.storage as storage

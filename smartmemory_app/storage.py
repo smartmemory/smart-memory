@@ -423,6 +423,30 @@ def search(
         # CORE-PROPS-1 Phase 6: exclude reference data from wildcard by default
         if not include_reference:
             all_items = [r for r in all_items if not r.get("reference", False)]
+        # CORE-RETRACTED-RECALL-1 / CORE-SUPERSEDE-DIALECT-SPLIT-1: this branch
+        # never reaches core `search()`, so core's lifecycle filters cannot run —
+        # wildcard would otherwise be the one local-mode surface still handing back
+        # withdrawn and replaced beliefs by default, which is exactly what those
+        # features exist to stop. Applied here to match the default core applies,
+        # and honouring the same opt-ins so `memory_search("*",
+        # include_retracted=True)` still works.
+        _want_superseded = bool(search_kwargs.get("include_superseded"))
+        _want_retracted = bool(search_kwargs.get("include_retracted"))
+        if not (_want_superseded and _want_retracted):
+            def _status(r: dict) -> str | None:
+                s = r.get("status") or r.get("metadata", {}).get("status")
+                return s if isinstance(s, str) else None
+
+            def _keep(r: dict) -> bool:
+                if not _want_superseded:
+                    meta = r.get("metadata", {}) or {}
+                    if r.get("superseded") or meta.get("superseded") or _status(r) == "superseded":
+                        return False
+                if not _want_retracted and _status(r) == "retracted":
+                    return False
+                return True
+
+            all_items = [r for r in all_items if _keep(r)]
         return all_items
     if not filters:
         results = mem.search(query, top_k=top_k, include_reference=include_reference, **core_kwargs)
