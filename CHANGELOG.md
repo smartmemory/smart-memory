@@ -1,8 +1,24 @@
 # Changelog — smartmemory
 
-Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see [`smartmemory-core`'s CHANGELOG](https://github.com/smart-memory/smart-memory-core/blob/main/CHANGELOG.md). Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
+Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+
+### Changed (2026-08-07) — README: remove open-source framing and dead repo links
+
+The README renders publicly on the PyPI project page. GitHub is blocking the org from
+publishing any repository, so every repo URL in it 404s for outside readers, and the
+open-source claim was unverifiable.
+
+- License section no longer says "dual-licensed ... for both open-source and commercial
+  use"; it points at the bundled LICENSE file without characterizing the terms. **The
+  LICENSE file itself is unchanged.**
+- Links: GitHub, Issue Tracker, Obsidian plugin, and Web capture repo URLs replaced with
+  a support address (all four 404 publicly, verified).
+- Obsidian section: the plugin repo link is unlinked, and the BRAT install instructions
+  are replaced with a support contact — BRAT installs by repo slug, so those steps could
+  not work while the repo is private.
+- This file's header no longer links to core's CHANGELOG on GitHub.
 
 ## [1.4.60] - 2026-08-06
 

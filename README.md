@@ -132,9 +132,9 @@ Using Cursor as your editor? `smartmemory setup --for cursor` configures it in o
 
 ## Use it with Obsidian
 
-The [SmartMemory Obsidian plugin](https://github.com/smartmemory/smartmemory-obsidian) brings the same memory to your vault: every note becomes a structured memory with extracted entities, entity chips link every note that mentions the same person or project, a graph pane shows the neighborhood around the active note, and `Cmd+Shift+R` runs multi-hop semantic search across the whole vault. It can also propose `[[wikilinks]]` for entity mentions and warn you inline when a note contradicts something newer.
+The SmartMemory Obsidian plugin brings the same memory to your vault: every note becomes a structured memory with extracted entities, entity chips link every note that mentions the same person or project, a graph pane shows the neighborhood around the active note, and `Cmd+Shift+R` runs multi-hop semantic search across the whole vault. It can also propose `[[wikilinks]]` for entity mentions and warn you inline when a note contradicts something newer.
 
-The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). Install it with [BRAT](https://github.com/TfTHacker/obsidian42-brat) by adding `smartmemory/smartmemory-obsidian`, then paste your API key from [app.smartmemory.ai](https://app.smartmemory.ai) into Settings → SmartMemory.
+The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). For access, write to support@smartmemory.ai, then paste your API key from [app.smartmemory.ai](https://app.smartmemory.ai) into Settings → SmartMemory.
 
 ## What happens when you add a memory
 
@@ -667,17 +667,14 @@ PYTHONPATH=. pytest tests/e2e/
 
 ## License
 
-SmartMemory is dual-licensed to provide flexibility for both open-source and commercial use. See [LICENSE](LICENSE) for details.
+See the [LICENSE](LICENSE) file included with this package for the terms that govern use.
 
 ## Links
 
 - **PyPI Package**: https://pypi.org/project/smartmemory/
 - **Core Library**: https://pypi.org/project/smartmemory-core/
 - **Documentation**: https://docs.smartmemory.ai
-- **GitHub**: https://github.com/smart-memory
-- **Issue Tracker**: https://github.com/smart-memory/smart-memory-core/issues
-- **Obsidian plugin**: https://github.com/smartmemory/smartmemory-obsidian
-- **Web capture (browser extension)**: https://github.com/smart-memory/smart-memory-capture
+- **Support**: support@smartmemory.ai
 
 ---
 
