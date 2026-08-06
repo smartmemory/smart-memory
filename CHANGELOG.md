@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.60] - 2026-08-06
+
 ### Fixed — local-mode search silently ignored four documented params (CORE-RETRACTED-RECALL-1)
 
 `smartmemory_app.storage.search()` forwards kwargs to core through an allowlist, and an
