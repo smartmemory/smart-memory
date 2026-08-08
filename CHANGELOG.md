@@ -4,6 +4,29 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.62] - 2026-08-08
+
+### Fixed — local extraction could silently learn nothing
+
+If you had `OPENAI_BASE_URL` pointed at an OpenAI-compatible provider (Groq and similar)
+**and** the Claude Agent SDK installed, SmartMemory picked a model name that endpoint
+could not serve and sent it anyway. Extraction then produced **no entities and no
+relations, with no error** — memory appeared to work while learning nothing from your
+text. Hosted endpoints also failed to pick up their own API key (`GROQ_API_KEY`), falling
+back to a local placeholder and returning 401.
+
+Both are fixed: model selection now honours your configured endpoint, and a hosted
+endpoint resolves the matching provider key. Local servers (Ollama, LM Studio, vLLM) are
+unaffected. If you worked around this by setting `SMARTMEMORY_LLM_MODEL`, that still takes
+precedence and needs no change.
+
+### Fixed — relationship extraction missed common phrases
+
+Nearly half of the built-in relationship patterns could never match, including everyday
+structural phrasing such as "depends on", "part of", "is a type of", and "causes". Those
+now work. This affects the opt-in rule-based relation extractor, so no default behaviour
+changes.
+
 ### Changed (2026-08-07) — README: remove open-source framing and dead repo links
 
 The README renders publicly on the PyPI project page. GitHub is blocking the org from
