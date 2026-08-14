@@ -30,6 +30,34 @@ cd "$(dirname "$0")/.."   # repo root
 VER="$(python3 -c "import tomllib,sys; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
 echo ">> smartmemory (wrapper) release ${VER}"
 
+# Resolve the uploader BEFORE building: a stale twine should cost zero build time.
+if [ "${DRY_RUN}" -eq 0 ] && [ "${CHECK_ONLY}" -eq 0 ]; then
+  # ---- twine resolution + version gate (added 2026-08-15) ------------------------------
+  # Do NOT use `python3 -m twine`: that binds the upload to whichever interpreter is first
+  # on PATH (here, the conda base env), which is exactly how a stale twine got used. twine
+  # is a standalone CLI and belongs in its own environment (pipx), independent of any
+  # project interpreter.
+  #
+  # The version floor is load-bearing. The wrapper builds with hatchling, which emits
+  # `Metadata-Version: 2.5`; twine validates that field against its bundled `packaging`,
+  # and twine < 7 ships a packaging too old to know 2.5, so it rejects a VALID wheel with
+  # "'2.5' is not a valid metadata version". Fail here with an actionable message rather
+  # than after a full multi-wheel build.
+  TWINE_BIN="${TWINE:-$(command -v twine || true)}"
+  if [ -z "${TWINE_BIN}" ]; then
+    echo "FATAL: twine not found. Install it isolated:  pipx install twine" >&2
+    exit 1
+  fi
+  TWINE_MAJOR="$("${TWINE_BIN}" --version 2>/dev/null | sed -n 's/.*twine version \([0-9][0-9]*\).*/\1/p')"
+  if [ -z "${TWINE_MAJOR}" ] || [ "${TWINE_MAJOR}" -lt 7 ]; then
+    echo "FATAL: twine >= 7 required (found: $("${TWINE_BIN}" --version 2>&1 | head -1))." >&2
+    echo "       Older twine rejects hatchling's Metadata-Version 2.5 on a valid wheel." >&2
+    echo "       Fix:  pipx install twine   (or: pipx upgrade twine)" >&2
+    exit 1
+  fi
+  echo ">> twine: ${TWINE_BIN} ($("${TWINE_BIN}" --version 2>&1 | head -1 | cut -d, -f1))"
+fi
+
 if [ "${CHECK_ONLY}" -eq 0 ]; then
   rm -rf dist build
   echo ">> building py3-none-any wheel (--wheel only, never sdist)"
@@ -73,5 +101,5 @@ if [ "${DRY_RUN}" -eq 1 ] || [ "${CHECK_ONLY}" -eq 1 ]; then
 fi
 
 echo ">> uploading wheel to PyPI (~/.pypirc token)"
-env -u TWINE_USERNAME -u TWINE_PASSWORD python3 -m twine upload --non-interactive dist/*.whl
+env -u TWINE_USERNAME -u TWINE_PASSWORD "${TWINE_BIN}" upload --non-interactive dist/*.whl
 echo ">> done: smartmemory ${VER} (wheel only)"
