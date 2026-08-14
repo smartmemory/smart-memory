@@ -4,6 +4,32 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.66] - 2026-08-15
+
+### Fixed — extraction stopped working when Groq retired its Llama models
+
+Groq shut down `llama-3.3-70b-versatile` and `llama-3.1-8b-instant` on 2026-08-16.
+Those were the defaults SmartMemory picked whenever a `GROQ_API_KEY` was present, so
+on that date extraction would have started failing for anyone relying on them. The
+defaults are now `openai/gpt-oss-120b` (Groq's recommended replacement, and cheaper at
+$0.15/$0.60 per million tokens against the retired model's $0.59/$0.79) and
+`openai/gpt-oss-20b` for the fast tier.
+
+Provider detection was rebuilt around an explicit model table rather than guessing from
+the model name. The replacement models are vendor-namespaced (`openai/gpt-oss-120b`), so
+name-based guessing would have read them as OpenAI models and sent them to OpenAI with
+the wrong key.
+
+### Fixed — a configured OpenAI key could break calls to other providers
+
+When you pointed SmartMemory at an OpenAI-compatible endpoint (via `OPENAI_BASE_URL` or
+an explicit `api_base`), it used `OPENAI_API_KEY` before checking which provider the
+endpoint actually belonged to. If that key was set but not valid for the destination,
+every such call failed with `Invalid API Key`, even though the correct provider key was
+configured. Keys are now matched to the endpoint first, falling back to `OPENAI_API_KEY`.
+Local servers such as Ollama and LM Studio are unaffected.
+
+
 ## [1.4.62] - 2026-08-08
 
 ### Fixed — local extraction could silently learn nothing
