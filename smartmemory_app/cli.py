@@ -1023,6 +1023,31 @@ def lifecycle_orient() -> None:
         click.echo(result)
 
 
+def _as_text(value) -> str:
+    """Coerce a hook payload field to text.
+
+    Claude Code sends `tool_response` (and some `error` payloads) as a JSON
+    OBJECT, not a string. The lifecycle phases build their memory text by
+    slicing this value, and slicing a dict raises
+    ``KeyError: slice(None, N, None)`` — which fires BEFORE the defensive
+    try/except inside those phases, so the "Observe ingest failed" warning
+    never runs. The hook wrapper then swallows it (`2>/dev/null`, `&`,
+    `exit 0`), and the phase writes nothing while reporting success.
+
+    That is why `hook:observe` / `hook:learn` items were absent from every
+    graph: the path was crashing, not disabled. Coerce here, at the boundary
+    where the untyped JSON body is read, so the phases keep a `str` contract.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 @lifecycle_group.command("recall")
 def lifecycle_recall() -> None:
     """Recall phase: inject prompt-relevant context."""
@@ -1060,7 +1085,7 @@ def lifecycle_observe() -> None:
     lc.observe(
         tool_name=body.get("tool_name", "unknown"),
         tool_input=body.get("tool_input", {}),
-        tool_result=body.get("tool_response", ""),
+        tool_result=_as_text(body.get("tool_response")),
         transcript_path=body.get("transcript_path"),
         cwd=body.get("cwd"),
     )
@@ -1099,7 +1124,7 @@ def lifecycle_learn() -> None:
     )
     lc.learn(
         tool_name=body.get("tool_name", "unknown"),
-        error=body.get("error", body.get("tool_response", "")),
+        error=_as_text(body.get("error") or body.get("tool_response")),
     )
 
 

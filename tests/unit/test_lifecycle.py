@@ -68,7 +68,9 @@ class TestLifecycleConfig:
 
     def test_apply_overrides(self):
         cfg = LifecycleConfig()
-        overridden = cfg.apply_overrides({"recall_strategy": "every_prompt", "orient_budget": 3000})
+        overridden = cfg.apply_overrides(
+            {"recall_strategy": "every_prompt", "orient_budget": 3000}
+        )
         assert overridden.recall_strategy == RecallStrategy.EVERY_PROMPT
         assert overridden.orient_budget == 3000
         # Original unchanged
@@ -78,7 +80,9 @@ class TestLifecycleConfig:
 class TestOrient:
     @patch("smartmemory_app.storage.search", return_value=[])
     @patch("smartmemory_app.storage.recall", return_value="## Context\n- item 1")
-    def test_orient_returns_context(self, mock_recall, mock_search, tmp_data_dir, config):
+    def test_orient_returns_context(
+        self, mock_recall, mock_search, tmp_data_dir, config
+    ):
         lc = MemoryLifecycle("test-session", config)
         result = lc.orient("/some/path")
         assert "Context" in result
@@ -99,9 +103,12 @@ class TestOrient:
 
 
 class TestRecall:
-    @patch("smartmemory_app.storage.search", return_value=[
-        {"content": "relevant memory", "memory_type": "semantic"},
-    ])
+    @patch(
+        "smartmemory_app.storage.search",
+        return_value=[
+            {"content": "relevant memory", "memory_type": "semantic"},
+        ],
+    )
     def test_recall_returns_context(self, mock_search, tmp_data_dir, config):
         lc = MemoryLifecycle("test-session", config)
         # First call with no prior injection → always fires
@@ -278,7 +285,72 @@ class TestFormatting:
 
     def test_recall_block_respects_budget(self, tmp_data_dir, config):
         lc = MemoryLifecycle("test-session", config)
-        results = [{"content": f"memory {i}", "memory_type": "semantic"} for i in range(100)]
+        results = [
+            {"content": f"memory {i}", "memory_type": "semantic"} for i in range(100)
+        ]
         result = lc._format_recall_block(results)
         # Should not include all 100 — budget limits it
         assert result.count("memory") < 100
+
+
+class TestHookPayloadCoercion:
+    """DIST-AGENT-HOOKS-1 regression: Claude Code sends `tool_response` as a JSON
+    OBJECT, not a string.
+
+    `observe` built its text with `(tool_result or "")[:300]` and `learn` with
+    `error[:500]`. Slicing a dict raises `KeyError: slice(None, N, None)`, and
+    that fires BEFORE the defensive try/except inside each phase — so the
+    "ingest failed" warning never ran. The hook wrapper then swallowed it
+    (`2>/dev/null`, `&`, `exit 0`), leaving the phase silently writing nothing
+    while reporting success. Result: zero `hook:observe` / `hook:learn` items in
+    every graph, local and production, for months.
+
+    Fixed by coercing at the CLI boundary where the untyped JSON body is read.
+    """
+
+    def test_as_text_passes_str_through(self):
+        from smartmemory_app.cli import _as_text
+
+        assert _as_text("already text") == "already text"
+
+    def test_as_text_coerces_dict(self):
+        from smartmemory_app.cli import _as_text
+
+        out = _as_text({"stdout": "hi", "exit_code": 0})
+        assert isinstance(out, str)
+        assert "stdout" in out
+
+    def test_as_text_handles_none_and_unserializable(self):
+        from smartmemory_app.cli import _as_text
+
+        assert _as_text(None) == ""
+        assert isinstance(_as_text(object()), str)
+
+    def test_as_text_output_is_sliceable(self):
+        """The actual failure mode: the phases slice this value."""
+        from smartmemory_app.cli import _as_text
+
+        assert len(_as_text({"a": "x" * 999})[:300]) == 300
+
+    @patch("smartmemory_app.storage.ingest")
+    def test_observe_survives_dict_result(self, mock_ingest, tmp_data_dir, config):
+        """End to end: a dict tool_response must still produce one hook:observe write."""
+        from smartmemory_app.cli import _as_text
+
+        lc = MemoryLifecycle("dict-payload", config)
+        lc.observe(
+            tool_name="Bash",
+            tool_input={"command": "echo hi"},
+            tool_result=_as_text({"stdout": "hi", "exit_code": 0}),
+        )
+        assert mock_ingest.called, "observe wrote nothing on a dict tool_response"
+        assert "hook:observe" in str(mock_ingest.call_args)
+
+    @patch("smartmemory_app.storage.ingest")
+    def test_learn_survives_dict_error(self, mock_ingest, tmp_data_dir, config):
+        from smartmemory_app.cli import _as_text
+
+        lc = MemoryLifecycle("dict-payload", config)
+        lc.learn(tool_name="Bash", error=_as_text({"error": "boom", "code": 2}))
+        assert mock_ingest.called, "learn wrote nothing on a dict error payload"
+        assert "hook:learn" in str(mock_ingest.call_args)

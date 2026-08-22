@@ -4,6 +4,20 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed — automatic memory lifecycle silently recorded nothing
+
+The `observe` and `learn` phases of the automatic lifecycle never wrote a memory.
+Claude Code sends a tool's result as a JSON object, and both phases built their text by
+slicing that value as if it were a string, which raised an error. The error escaped
+before the surrounding failure handler could catch it, and the hook script discards its
+own errors and always reports success, so nothing surfaced anywhere: no warning, no
+failed hook, no items. Tool observations and error captures were absent from every
+install for months while the feature reported itself as enabled.
+
+Result payloads are now converted to text where the hook input is first read, so both
+phases keep working whatever shape the payload arrives in. Regression tests cover the
+object payload end to end for both phases.
+
 ## [1.4.66] - 2026-08-15
 
 ### Fixed — extraction stopped working when Groq retired its Llama models
