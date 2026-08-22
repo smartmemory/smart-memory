@@ -4,6 +4,16 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.69] - 2026-08-22
+
+Version-only release to carry core 1.4.69. No wrapper code changed.
+
+Core 1.4.69 fixes a crash in Studio workflow mode (a real evolution workflow raised
+`AttributeError` on every run) and completes the retirement of the never-functional
+CORE-EVO-LIVE-1 incremental evolution layer. See the core changelog for detail,
+including the corrected scope note: the service sleep daemon schedules only a named
+subset of evolvers, not the full auto-run set.
+
 ## [1.4.68] - 2026-08-22
 
 ### Fixed — automatic memory lifecycle silently recorded nothing
