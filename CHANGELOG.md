@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.68] - 2026-08-22
+
 ### Fixed — automatic memory lifecycle silently recorded nothing
 
 The `observe` and `learn` phases of the automatic lifecycle never wrote a memory.
