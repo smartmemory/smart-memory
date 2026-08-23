@@ -4,6 +4,18 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.70] - 2026-08-23
+
+Version-only release to carry core 1.4.70. No wrapper code changed.
+
+Core 1.4.70 fixes a search-ranking bug with a user-visible symptom: **the same query
+against the same data could return a different top-5.** Item ids are random UUIDs, and
+ranking broke ties on them, so re-ingesting identical content reshuffled which of two
+equally-scored memories took the last slot. Ties now break on a digest of the item's
+content, which is stable across ingests. Retrieval quality is unchanged — the fix only
+reorders items already tied on score — but results are now reproducible. See the core
+changelog for the measurement and the full list of affected ranking paths.
+
 ## [1.4.69] - 2026-08-22
 
 Version-only release to carry core 1.4.69. No wrapper code changed.
