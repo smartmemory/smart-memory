@@ -4,6 +4,21 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.71] - 2026-08-25
+
+Version-only release to carry core 1.4.71. No wrapper code changed.
+
+Core 1.4.71 closes CORE-ASYNC-STAGE-DIVERGENCE-1. **Async ingest used to accept content
+and silently discard it**: `mode=async` wrote one queue message nobody consumed and
+answered `queued`. It now returns 503 unless a live consumer is draining every stage,
+and the new `async_preferred` mode falls back to synchronous processing and says so in
+the response. Accepted runs get a deadline and a terminal `abandoned` status instead of
+vanishing after an hour. A poison queue message that used to retry forever is now
+dead-lettered. The pipeline's stage list lives in one import-free catalog
+(`smartmemory.pipeline.stage_catalog`) that both the sync and async paths derive from,
+and `stage_retry_policies` overlays naming a stage that does not exist are rejected
+instead of silently ignored. Full detail in the core changelog.
+
 ## [1.4.70] - 2026-08-23
 
 Version-only release to carry core 1.4.70. No wrapper code changed.
