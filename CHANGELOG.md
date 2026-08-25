@@ -4,6 +4,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed
+- **`smartmemory-mcp` pin advanced 1.4.51 -> 1.4.67.** The pin had drifted 16 releases behind because `smartmemory-mcp` is not part of the core release sync chain, and nothing checked it. The comment claiming it "moves in lockstep with the wrapper" was wrong and has been corrected: it tracks the latest published `smartmemory-mcp`, and `smartmemory-mcp` does not depend on `smartmemory-core`, so the two pins cannot conflict.
+- **`scripts/release.sh` now checks the mcp pin.** It fails closed if the pinned version is not published on PyPI (an uninstallable wheel), and warns when a newer one exists, so a deliberate hold-back stays possible but a silent drift does not.
+
 ## [1.4.71] - 2026-08-25
 
 Version-only release to carry core 1.4.71. No wrapper code changed.

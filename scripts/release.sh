@@ -95,6 +95,43 @@ if not any(f"=={ver}" in p for p in pins):
 print(f">> guards passed: {base}, no sdist, pins core =={ver}")
 PY
 
+# ---- smartmemory-mcp pin freshness (added 2026-08-26) ---------------------------------
+# The core pin above is guarded fail-closed and has never drifted. The mcp pin had NO
+# guard and rotted 16 releases (1.4.51 while 1.4.67 was published) because smartmemory-mcp
+# is NOT in the core release sync chain — nothing bumps it for you and nothing complained.
+# This cannot be a lockstep check (mcp does not track the wrapper version), so it is a
+# WARNING, not a gate: a deliberate hold-back is legitimate, a silent 16-version drift is
+# not. Fails closed only if the pinned version does not exist on PyPI at all.
+python3 - <<'PY' || exit 1
+import json, re, sys, tomllib, urllib.request
+
+deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
+pin = next((d for d in deps if d.replace(" ", "").startswith("smartmemory-mcp==")), None)
+if pin is None:
+    print(">> smartmemory-mcp: no exact pin found — skipping freshness check.")
+    sys.exit(0)
+pinned = pin.split("==", 1)[1].strip()
+
+try:
+    data = json.load(urllib.request.urlopen("https://pypi.org/pypi/smartmemory-mcp/json", timeout=15))
+except Exception as exc:
+    print(f">> smartmemory-mcp: PyPI unreachable ({exc}) — freshness UNCHECKED.")
+    sys.exit(0)
+
+released = set(data["releases"])
+if pinned not in released:
+    sys.exit(f"FATAL: pinned smartmemory-mcp=={pinned} is not published on PyPI. "
+             "The wheel would be uninstallable.")
+
+key = lambda v: [int(x) for x in re.findall(r"\d+", v)]
+latest = max(released, key=key)
+if key(latest) > key(pinned):
+    print(f">> WARNING: smartmemory-mcp pinned at {pinned}, but {latest} is published. "
+          "Bump the pin in pyproject.toml, or hold it back deliberately.")
+else:
+    print(f">> smartmemory-mcp pin {pinned} is current.")
+PY
+
 if [ "${DRY_RUN}" -eq 1 ] || [ "${CHECK_ONLY}" -eq 1 ]; then
   echo ">> dry-run/check-only — not uploading."
   exit 0
