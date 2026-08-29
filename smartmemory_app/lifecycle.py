@@ -77,18 +77,24 @@ class MemoryLifecycle:
         self._turn_count = 0
         self._observation_count = 0
 
-        from smartmemory_app.storage import recall, search
+        from smartmemory_app.storage import recall
 
         # Get recent + relevant memories
         context = recall(cwd, top_k=10)
 
-        # Also search for patterns and decisions if cwd provided
-        patterns: list[dict] = []
+        # Also look for patterns and decisions if cwd provided. This MUST go
+        # through the workspace-scoped recall path, not storage.search: search
+        # takes no cwd, so in remote mode it sends only the config team_id and
+        # returns the shared team's memories regardless of which project this
+        # session is in (the sibling of the recall-hook leak fixed in 7bbeb63).
+        patterns = ""
         if cwd:
             try:
-                patterns = search(
-                    f"patterns conventions decisions for {os.path.basename(cwd)}",
+                patterns = recall(
+                    cwd,
                     top_k=5,
+                    query=f"patterns conventions decisions for {os.path.basename(cwd)}",
+                    include_snapshot=False,
                 )
             except Exception:
                 pass  # non-critical
@@ -350,8 +356,13 @@ class MemoryLifecycle:
 
     # ── Formatting ─────────────────────────────────────────────────────
 
-    def _format_orient_block(self, context: str, patterns: list[dict]) -> str:
-        """Build layered Orient context block within budget."""
+    def _format_orient_block(self, context: str, patterns: str) -> str:
+        """Build layered Orient context block within budget.
+
+        `patterns` is a pre-formatted recall block (header line + `- ` entries)
+        from the workspace-scoped storage.recall path; its header is dropped and
+        the entries re-hung under `## Patterns`.
+        """
         budget = self._config.orient_budget
         lines: list[str] = []
 
@@ -365,10 +376,9 @@ class MemoryLifecycle:
         # Layer 2: Patterns/decisions (if budget remains)
         if patterns and budget > 100:
             pattern_lines = []
-            for p in patterns:
-                content = p.get("content", "") if isinstance(p, dict) else str(p)
-                mtype = p.get("memory_type", "?") if isinstance(p, dict) else "?"
-                line = f"- [{mtype}] {content[:150]}"
+            for line in patterns.splitlines():
+                if not line.startswith("- "):
+                    continue  # drop the block header
                 line_tokens = _estimate_tokens(line)
                 if budget - line_tokens < 0:
                     break

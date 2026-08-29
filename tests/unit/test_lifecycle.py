@@ -78,15 +78,39 @@ class TestLifecycleConfig:
 
 
 class TestOrient:
-    @patch("smartmemory_app.storage.search", return_value=[])
     @patch("smartmemory_app.storage.recall", return_value="## Context\n- item 1")
-    def test_orient_returns_context(
-        self, mock_recall, mock_search, tmp_data_dir, config
-    ):
+    def test_orient_returns_context(self, mock_recall, tmp_data_dir, config):
         lc = MemoryLifecycle("test-session", config)
         result = lc.orient("/some/path")
         assert "Context" in result
-        mock_recall.assert_called_once()
+        # Layer 1 (recency) + layer 2 (patterns), both workspace-scoped by cwd.
+        assert mock_recall.call_count == 2
+        assert all(c.args[0] == "/some/path" for c in mock_recall.call_args_list)
+
+    @patch("smartmemory_app.storage.search")
+    @patch("smartmemory_app.storage.recall", return_value="")
+    def test_orient_never_uses_unscoped_search(
+        self, mock_recall, mock_search, tmp_data_dir, config
+    ):
+        # Regression: storage.search takes no cwd, so in remote mode it sends
+        # only the config team_id and returns the shared team's memories for
+        # every project (sibling of the recall-hook leak fixed in 7bbeb63).
+        lc = MemoryLifecycle("test-session", config)
+        lc.orient("/some/path")
+        mock_search.assert_not_called()
+
+    @patch("smartmemory_app.storage.recall")
+    def test_orient_patterns_rehung_under_header(self, mock_recall, tmp_data_dir, config):
+        mock_recall.side_effect = [
+            "## SmartMemory Context\n- [semantic] recent thing",
+            "## SmartMemory Context\n- [decision] we use pnpm",
+        ]
+        lc = MemoryLifecycle("test-session", config)
+        out = lc.orient("/some/path")
+        assert "## Patterns" in out
+        assert "- [decision] we use pnpm" in out
+        # The second block's own header must not survive into the output.
+        assert out.count("## SmartMemory Context") == 1
 
     def test_orient_disabled_returns_empty(self, tmp_data_dir, disabled_config):
         lc = MemoryLifecycle("test-session", disabled_config)
