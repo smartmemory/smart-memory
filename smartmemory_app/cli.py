@@ -719,7 +719,7 @@ def retag_cmd(
         click.echo(f"  {iid[:12]} {preview!r}")
 
     if dry_run:
-        click.echo(f"(dry run — pass --no-dry-run to retag with origin={new_origin!r})")
+        click.echo(f"(dry run — re-run without --dry-run to retag with origin={new_origin!r})")
         return
 
     for iid, _ in matched:
