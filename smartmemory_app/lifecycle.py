@@ -97,8 +97,13 @@ class MemoryLifecycle:
         self._save_state()
         return output
 
-    def recall(self, prompt: str) -> str:
+    def recall(self, prompt: str, cwd: str | None = None) -> str:
         """Phase 2: Per-prompt recall — always captures prompt, optionally injects context.
+
+        Scoped by `cwd` → workspace (HOOK-RECALL-RELEVANCE-1). Routing through
+        storage.recall (not storage.search) matters in remote mode: search sends
+        only the config team_id, so every session recalled from the shared team
+        (the Cabbage demo corpus leaked into forge sessions, 2026-08-23..27).
 
         Always stores prompt as _current_user_turn for distill pairing.
         Returns formatted context if recall gate passes, empty string otherwise.
@@ -115,20 +120,20 @@ class MemoryLifecycle:
             self._save_state()
             return ""
 
-        from smartmemory_app.storage import search
+        from smartmemory_app.storage import recall as scoped_recall
 
         try:
-            results = search(prompt, top_k=5)
+            block = scoped_recall(cwd, top_k=5, query=prompt, include_snapshot=False)
         except Exception as e:
             log.warning("Recall search failed: %s", e)
             self._save_state()
             return ""
 
-        if not results:
+        if not block:
             self._save_state()
             return ""
 
-        output = self._format_recall_block(results)
+        output = self._trim_to_budget(block)
 
         # Cache prompt for dedup and topic comparison
         self._last_recalled_prompt = prompt
@@ -374,6 +379,22 @@ class MemoryLifecycle:
                 lines.extend(pattern_lines)
 
         return "\n".join(lines) if lines else ""
+
+    def _trim_to_budget(self, block: str) -> str:
+        """Cap a pre-formatted recall block (header + `- ` lines) at recall_budget."""
+        budget = self._config.recall_budget
+        lines = block.splitlines()
+        if not lines:
+            return ""
+        kept = [lines[0]]
+        used = _estimate_tokens(lines[0])
+        for line in lines[1:]:
+            t = _estimate_tokens(line)
+            if used + t > budget:
+                break
+            kept.append(line)
+            used += t
+        return "\n".join(kept) if len(kept) > 1 else ""
 
     def _format_recall_block(self, results: list[dict]) -> str:
         """Build Recall context block within budget."""

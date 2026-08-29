@@ -5,6 +5,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ## [Unreleased]
 
 ### Fixed
+- **Recall hook now scopes by workspace in remote mode.** `smartmemory lifecycle recall` called `storage.search` with no cwd, which in remote mode sent only the config `team_id`, so every Claude Code session (any project) recalled from the shared team's memories. With a demo tenant configured, its fixture corpus was injected into unrelated coding sessions. The hook now routes through the workspace-scoped `storage.recall(cwd, query=...)` path, and the recall trace (`hook-recall.jsonl`) finally records what was actually emitted.
 - **`smartmemory-mcp` pin advanced 1.4.51 -> 1.4.67.** The pin had drifted 16 releases behind because `smartmemory-mcp` is not part of the core release sync chain, and nothing checked it. The comment claiming it "moves in lockstep with the wrapper" was wrong and has been corrected: it tracks the latest published `smartmemory-mcp`, and `smartmemory-mcp` does not depend on `smartmemory-core`, so the two pins cannot conflict.
 - **`scripts/release.sh` now checks the mcp pin.** It fails closed if the pinned version is not published on PyPI (an uninstallable wheel), and warns when a newer one exists, so a deliberate hold-back stays possible but a silent drift does not.
 

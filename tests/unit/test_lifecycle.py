@@ -104,17 +104,37 @@ class TestOrient:
 
 class TestRecall:
     @patch(
-        "smartmemory_app.storage.search",
-        return_value=[
-            {"content": "relevant memory", "memory_type": "semantic"},
-        ],
+        "smartmemory_app.storage.recall",
+        return_value="## SmartMemory Context\n- [semantic] relevant memory",
     )
-    def test_recall_returns_context(self, mock_search, tmp_data_dir, config):
+    def test_recall_returns_context(self, mock_recall, tmp_data_dir, config):
         lc = MemoryLifecycle("test-session", config)
         # First call with no prior injection → always fires
-        result = lc.recall("how does auth work?")
+        result = lc.recall("how does auth work?", cwd="/repo/forge")
         assert "relevant memory" in result
         assert lc._current_user_turn == "how does auth work?"
+        # Regression: recall must go through the workspace-scoped path with cwd
+        # (storage.search ignores cwd; in remote mode it searched the config
+        # team_id, leaking the shared-team corpus into every session).
+        mock_recall.assert_called_once()
+        assert mock_recall.call_args.args[0] == "/repo/forge"
+        assert mock_recall.call_args.kwargs["query"] == "how does auth work?"
+
+    @patch("smartmemory_app.storage.recall", return_value="")
+    def test_recall_empty_scope_returns_empty(self, mock_recall, tmp_data_dir, config):
+        lc = MemoryLifecycle("test-session", config)
+        assert lc.recall("how does auth work?", cwd="/repo/empty") == ""
+
+    @patch("smartmemory_app.storage.recall")
+    def test_recall_trims_to_budget(self, mock_recall, tmp_data_dir):
+        cfg = LifecycleConfig(recall_strategy=RecallStrategy.EVERY_PROMPT, recall_budget=40)
+        mock_recall.return_value = "## SmartMemory Context\n" + "\n".join(
+            f"- [semantic] {'x' * 100} {i}" for i in range(10)
+        )
+        lc = MemoryLifecycle("test-session", cfg)
+        out = lc.recall("how does auth work?", cwd="/repo")
+        assert out.startswith("## SmartMemory Context")
+        assert out.count("\n- ") < 10
 
     def test_recall_always_captures_prompt(self, tmp_data_dir):
         cfg = LifecycleConfig(recall_strategy=RecallStrategy.SESSION_ONLY)

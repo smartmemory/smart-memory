@@ -1063,7 +1063,7 @@ def lifecycle_recall() -> None:
     lc = MemoryLifecycle(
         session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
     )
-    result = lc.recall(prompt)
+    result = lc.recall(prompt, cwd=body.get("cwd"))
     if result:
         click.echo(result)
 
