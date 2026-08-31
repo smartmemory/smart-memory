@@ -12,7 +12,7 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from smartmemory_app.lifecycle import MemoryLifecycle
+from smartmemory_app.lifecycle import MemoryLifecycle, as_text
 from smartmemory_app.lifecycle_config import LifecycleConfig
 
 log = logging.getLogger(__name__)
@@ -59,7 +59,12 @@ async def recall(request: Request):
     body = await request.json()
     lc = _get_lifecycle(body)
     prompt = body.get("prompt", "")
-    result = lc.recall(prompt)
+    # cwd is load-bearing: MemoryLifecycle.recall scopes the search to the
+    # workspace it resolves (HOOK-RECALL-RELEVANCE-1). Dropping it here made the
+    # daemon path recall from the shared team instead of the session's workspace
+    # — the same class of leak as the Cabbage demo corpus bleeding into forge
+    # sessions (2026-08-23..27). The CLI path always passed it; this one did not.
+    result = lc.recall(prompt, cwd=body.get("cwd"))
     return {"context": result}
 
 
@@ -70,7 +75,7 @@ async def observe(request: Request):
     lc.observe(
         tool_name=body.get("tool_name", "unknown"),
         tool_input=body.get("tool_input", {}),
-        tool_result=body.get("tool_response", ""),
+        tool_result=as_text(body.get("tool_response")),
         transcript_path=body.get("transcript_path"),
         cwd=body.get("cwd"),
     )
@@ -91,7 +96,7 @@ async def learn(request: Request):
     lc = _get_lifecycle(body)
     lc.learn(
         tool_name=body.get("tool_name", "unknown"),
-        error=body.get("error", body.get("tool_response", "")),
+        error=as_text(body.get("error") or body.get("tool_response")),
     )
     return {"status": "ok"}
 

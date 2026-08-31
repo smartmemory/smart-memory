@@ -146,6 +146,31 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             )
 
 
+def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
+    """POST one lifecycle phase to the warm daemon. Returns parsed JSON, or None.
+
+    DIST-DAEMON-1 promised every memory command tries the daemon first and falls
+    back to direct storage; the `lifecycle` group never got wired up, so every
+    hook fired a fresh interpreter and paid the ~12-14s embedder cold start. That
+    is what made UserPromptSubmit cross Claude Code's 30s kill line (measured over
+    120 prompts: median 4.9s, p90 15.2s, max 28.4s).
+
+    Deliberately NOT `_daemon_request`: this is the hook critical path, so it is
+    fail-fast rather than resilient — no 2s retry sleep, short timeout, and silent
+    on stderr. Any failure returns None and the caller runs the phase in-process,
+    exactly as before. The daemon is an accelerator here, never a dependency.
+    """
+    try:
+        import httpx
+
+        with httpx.Client(trust_env=False) as client:
+            r = client.post(f"{_daemon_url()}{path}", json=body, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
 @click.group()
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
 def cli() -> None:
@@ -1017,43 +1042,34 @@ def lifecycle_orient() -> None:
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
-    session_id = body.get("session_id", "unknown")
-    cwd = body.get("cwd")
 
-    from smartmemory_app.lifecycle import MemoryLifecycle
-    from smartmemory_app.lifecycle_config import LifecycleConfig
+    out = _lifecycle_via_daemon("/lifecycle/orient", body)
+    if out is not None:
+        result = out.get("context") or ""
+    else:
+        session_id = body.get("session_id", "unknown")
+        cwd = body.get("cwd")
 
-    lc = MemoryLifecycle(
-        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-    )
-    result = lc.orient(cwd=cwd)
+        from smartmemory_app.lifecycle import MemoryLifecycle
+        from smartmemory_app.lifecycle_config import LifecycleConfig
+
+        lc = MemoryLifecycle(
+            session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
+        )
+        result = lc.orient(cwd=cwd)
     if result:
         click.echo(result)
 
 
 def _as_text(value) -> str:
-    """Coerce a hook payload field to text.
+    """Deprecated shim — canonical implementation lives in lifecycle.as_text.
 
-    Claude Code sends `tool_response` (and some `error` payloads) as a JSON
-    OBJECT, not a string. The lifecycle phases build their memory text by
-    slicing this value, and slicing a dict raises
-    ``KeyError: slice(None, N, None)`` — which fires BEFORE the defensive
-    try/except inside those phases, so the "Observe ingest failed" warning
-    never runs. The hook wrapper then swallows it (`2>/dev/null`, `&`,
-    `exit 0`), and the phase writes nothing while reporting success.
-
-    That is why `hook:observe` / `hook:learn` items were absent from every
-    graph: the path was crashing, not disabled. Coerce here, at the boundary
-    where the untyped JSON body is read, so the phases keep a `str` contract.
+    Kept so the daemon path (lifecycle_api) and the in-process path cannot drift
+    apart again; see that docstring for the dict-slicing crash it prevents.
     """
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, default=str)
-    except (TypeError, ValueError):
-        return str(value)
+    from smartmemory_app.lifecycle import as_text
+
+    return as_text(value)
 
 
 @lifecycle_group.command("recall")
@@ -1062,16 +1078,21 @@ def lifecycle_recall() -> None:
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
-    session_id = body.get("session_id", "unknown")
-    prompt = body.get("prompt", "")
 
-    from smartmemory_app.lifecycle import MemoryLifecycle
-    from smartmemory_app.lifecycle_config import LifecycleConfig
+    out = _lifecycle_via_daemon("/lifecycle/recall", body)
+    if out is not None:
+        result = out.get("context") or ""
+    else:
+        session_id = body.get("session_id", "unknown")
+        prompt = body.get("prompt", "")
 
-    lc = MemoryLifecycle(
-        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-    )
-    result = lc.recall(prompt, cwd=body.get("cwd"))
+        from smartmemory_app.lifecycle import MemoryLifecycle
+        from smartmemory_app.lifecycle_config import LifecycleConfig
+
+        lc = MemoryLifecycle(
+            session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
+        )
+        result = lc.recall(prompt, cwd=body.get("cwd"))
     if result:
         click.echo(result)
 
@@ -1082,6 +1103,10 @@ def lifecycle_observe() -> None:
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+
+    if _lifecycle_via_daemon("/lifecycle/observe", body) is not None:
+        return
+
     session_id = body.get("session_id", "unknown")
 
     from smartmemory_app.lifecycle import MemoryLifecycle
@@ -1105,6 +1130,10 @@ def lifecycle_distill() -> None:
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+
+    if _lifecycle_via_daemon("/lifecycle/distill", body) is not None:
+        return
+
     session_id = body.get("session_id", "unknown")
 
     from smartmemory_app.lifecycle import MemoryLifecycle
@@ -1122,6 +1151,10 @@ def lifecycle_learn() -> None:
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+
+    if _lifecycle_via_daemon("/lifecycle/learn", body) is not None:
+        return
+
     session_id = body.get("session_id", "unknown")
 
     from smartmemory_app.lifecycle import MemoryLifecycle
@@ -1142,6 +1175,10 @@ def lifecycle_persist() -> None:
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+
+    if _lifecycle_via_daemon("/lifecycle/persist", body) is not None:
+        return
+
     session_id = body.get("session_id", "unknown")
 
     from smartmemory_app.lifecycle import MemoryLifecycle
