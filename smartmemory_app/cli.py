@@ -763,6 +763,14 @@ def search_cmd(ctx, query: str, top_k: int, include_reference: bool) -> None:
         from smartmemory_app.storage import search
         from smartmemory_app.remote_backend import RemoteBackendError
 
+        # One-shot in-process search: this interpreter exits right after the
+        # query, so the reranker's background load can never finish in time —
+        # "async" here means every result comes back in fusion order with a
+        # cold-fallback warning. Opt into the synchronous load instead; on top
+        # of the ~3.5s embed load this path already blocks on, the marginal
+        # cost is ~0.25s (measured 2026-08-31). The daemon path above stays
+        # async — a long-lived process warms at boot (CORE-SEARCH-WARMSTART-1).
+        os.environ.setdefault("SMARTMEMORY_RERANK_BLOCK", "1")
         try:
             results = search(
                 query, top_k, filters=props, include_reference=include_reference
