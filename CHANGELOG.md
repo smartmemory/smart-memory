@@ -8,6 +8,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - **The lite WebSocket events server on `:9015` is gone (PLAT-PUSH-SSE-1).** No browser client had read it since the graph package moved to Server-Sent Events, and it was the second transport for a stream already published over SSE. The `websockets` dependency and the hidden `events-server` CLI command went with it. Real-time updates now reach the local viewer only over `GET /memory/progress/stream` on the daemon port.
 
 ### Added
+- **`POST /memory/ask` relations now carry `source_id` and `target_id`.** Labels are what a reader sees; ids are what a UI focuses. `AskPanel` in `@smartmemory/graph` addresses the edge as `${source_id}->${target_id}:${type}`, and a pair of display labels cannot address a graph element. Additive — the existing `source` / `type` / `target` fields are unchanged. Contract: `docs/features/DIST-LITE-9/ask-contract.json`.
 - **`sm ask "QUESTION"` answers from lite-mode memory evidence and graph relations.** It semantically retrieves the matching memories, follows their entity neighbors to collect the relevant relation edges, and makes one configured LLM call for a direct, grounded answer. The CLI prints only the direct answer by default (with a hint); `--reasoning` adds the model's reasoning, the exact evidence memory IDs, and the relations used. The endpoint returns `answer` and `reasoning` as separate fields. It refuses with a clear 503 when no supported LLM key is configured; it never fabricates a fallback answer.
 
 ### Fixed

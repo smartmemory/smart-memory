@@ -1099,11 +1099,18 @@ def _ask_relations(hits: list[dict]) -> list[dict[str, str]]:
                 if key in seen:
                     continue
                 seen.add(key)
+                # DIST-LITE-9: labels are what a reader sees, ids are what a UI focuses.
+                # `AskPanel` addresses the edge as `${source_id}->${target_id}:${type}`,
+                # the same id the graph package's normalizer builds — a label pair cannot
+                # address a graph element. Contract:
+                # smart-memory-docs/docs/features/DIST-LITE-9/ask-contract.json
                 relations.append(
                     {
                         "source": _node_label(source_id),
                         "type": relation_type,
                         "target": _node_label(target_id),
+                        "source_id": source_id,
+                        "target_id": target_id,
                     }
                 )
     return relations

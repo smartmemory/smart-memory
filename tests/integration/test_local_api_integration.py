@@ -121,10 +121,23 @@ class TestAskIntegration:
         assert body["evidence"] == [
             {"item_id": "memory-1", "content": "Xavier saw Yara steal an amulet."}
         ]
-        assert {tuple(relation.values()) for relation in body["relations"]} == {
+        assert {
+            (relation["source"], relation["type"], relation["target"])
+            for relation in body["relations"]
+        } == {
             ("Zed", "distrusts", "Xavier"),
             ("Zed", "trusts", "Yara"),
             ("Xavier", "witnessed_theft_by", "Yara"),
+        }
+        # DIST-LITE-9: every row also carries the node ids that address the edge, so a UI
+        # can focus it. A label pair cannot address a graph element.
+        assert {
+            (relation["source_id"], relation["type"], relation["target_id"])
+            for relation in body["relations"]
+        } == {
+            ("zed", "distrusts", "xavier"),
+            ("zed", "trusts", "yara"),
+            ("xavier", "witnessed_theft_by", "yara"),
         }
         assert len(llm_calls) == 1
         assert "Xavier saw Yara steal an amulet." in llm_calls[0]["user_content"]
