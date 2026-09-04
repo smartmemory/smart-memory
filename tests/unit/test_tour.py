@@ -577,7 +577,7 @@ def test_arc_driver_ask_step_shows_the_answer(tmp_path: Path) -> None:
 
     driver.run_default_arc(include_claude_import=False, emit=events.append)
 
-    assert tour.TOUR_VERSION == 2
+    assert tour.TOUR_VERSION >= 2  # bumped when the ask step landed; later steps bump it further
     steps = {e.title: e.step for e in events}
     assert steps["Ask a question"] == 6
     assert steps["Try it on your project"] == 7

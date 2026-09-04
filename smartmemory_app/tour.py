@@ -44,7 +44,7 @@ from textual.containers import Center, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
-TOUR_VERSION = 2
+TOUR_VERSION = 3
 
 SEARCH_QUERY = "which database did we pick"
 ASK_QUESTION = "why did we pick that database"
@@ -411,6 +411,7 @@ class TourArcDriver:
                 "sm add - < notes.txt",
                 "sm add --all - < CLAUDE.md",
                 "sm viewer",
+                "sm explore  # walk the graph in the terminal",
             ]
         )
         self._dwell()

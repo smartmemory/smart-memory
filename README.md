@@ -100,6 +100,21 @@ sm viewer
 
 This opens an interactive graph in your browser. Every memory appears linked to the people, projects, and concepts inside it, and memories that share entities cluster together. After a few days of real use it reads like a map of your work. If the default port is taken, use `sm viewer --port 8080`.
 
+Over SSH, or when you would rather not leave the terminal:
+
+```bash
+sm explore                     # opens on the search box
+sm explore "amulet"            # opens on the best match for a term
+```
+
+`sm explore` is a graph browser rather than a graph picture. A terminal cannot lay out a
+force-directed graph legibly once there are more than a few dozen nodes, so instead you get
+one focused memory, its relations grouped by type, and a walk. Press up and down to move,
+Enter to walk to the other end of a relation, Backspace to go back, `/` to search, `?` to ask
+a question, and `q` to quit. A breadcrumb across the top shows the path you took. The right
+pane tails the daemon live, one line per event, and flashes when something touches the memory
+you are looking at. It needs the daemon running, and says so plainly if it is not.
+
 ## Use it with Claude Code
 
 If you ran `smartmemory setup`, this is already working. Setup installs six hooks that follow the rhythm of a coding session:
@@ -168,6 +183,7 @@ sm search "query"              # Find memories by meaning
 sm search "*"                  # List everything
 sm ask "what did we decide?"   # Direct answer; add --reasoning for why + evidence
 sm viewer                      # Open the knowledge graph in your browser
+sm explore                     # Walk the knowledge graph in the terminal
 sm status                      # Daemon health and memory count
 sm config                      # View settings
 sm clear                       # Start over (deletes all memories)

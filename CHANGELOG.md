@@ -8,6 +8,16 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - **`sm` tells you when a newer release is out (DIST-UPDATE-HINT-1).** Any command can end with one dim line, `smartmemory 1.4.87 available — pip install -U smartmemory`. The version is read from PyPI at most once every 24 hours with a 2 second timeout, cached in the data directory, and a failed lookup is silent and backs off for a day, so the check never delays or breaks a command. Nothing is printed when output is not a terminal, when `--json` was asked for, on the hook commands that feed a model prompt (`sm recall`, `sm lifecycle`), or when `SMARTMEMORY_NO_UPDATE_CHECK=1` is set.
 - **First run and upgrades now point at the tour.** A first `smartmemory setup` ends with `All done. Run 'sm tour' if this is your first time.` After an upgrade, the next command prints `Updated to <version>` once, and adds `Run 'sm tour' to see what's new` only when the tour gained a step, so a routine patch release does not re-advertise a tour you have already seen.
 - **The tour has an `sm ask` step.** Between cross-session recall and the closing cheat sheet, the tour asks a question in plain language and shows the grounded answer, so the capability shipped alongside search is visible on the first run.
+- **`sm explore` browses the knowledge graph from the terminal (DIST-LITE-10).** A memory in
+  focus, its relations grouped by type, and a walk: up and down to move, Enter to follow a
+  relation, Backspace to go back, `/` to search, `?` to ask, `q` to quit, with a breadcrumb
+  showing the path taken. A live pane tails the daemon's event stream, one line per event, and
+  flashes when an event touches the memory in focus. Deliberately not a drawn graph, because a
+  terminal cannot lay one out legibly past a few dozen nodes, and the browser viewer already
+  does that well. It adds no new endpoint, reads the daemon that is already running, and
+  refuses with a clear message naming `sm start` when that daemon is not healthy. Structural
+  edges are filtered out the way `sm ask` filters them, and the semantic edges of a memory's
+  entities are walked in their place so a memory is never a dead end.
 
 ## [1.4.86] - 2026-09-04
 

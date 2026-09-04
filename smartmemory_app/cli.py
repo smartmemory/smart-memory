@@ -1063,6 +1063,42 @@ def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
             )
 
 
+@cli.command("explore")
+@click.argument("target", required=False)
+def explore_cmd(target: str | None) -> None:
+    """Browse the memory graph in the terminal (DIST-LITE-10).
+
+    TARGET is a memory id or a search term; without it the browser opens on the
+    search box. Requires the daemon — this is a live view, not a snapshot.
+    """
+    try:
+        from smartmemory_app.tui.app import ExploreApp
+        from smartmemory_app.tui.client import ExploreClient, ExploreUnavailable
+    except ImportError as exc:  # textual ships by default; an install can still lack it
+        raise click.ClickException(
+            f"`sm explore` needs the TUI extra: pip install 'smartmemory[tui]' ({exc})"
+        )
+
+    client = ExploreClient(_daemon_url())
+    try:
+        try:
+            client.health()
+        except ExploreUnavailable as exc:
+            raise click.ClickException(
+                f"{_DAEMON_NOT_RUNNING_MSG}  ({exc}; check {_DAEMON_LOG_HINT})"
+            )
+        start_id = None
+        if target:
+            start_id = client.resolve(target)
+            if start_id is None:
+                raise click.ClickException(
+                    f"Nothing in memory matches {target!r}. Try `sm search {target!r}` first."
+                )
+        ExploreApp(client, start_id).run()
+    finally:
+        client.close()
+
+
 @cli.command("get")
 @click.argument("item_id")
 def get_cmd(item_id: str) -> None:
