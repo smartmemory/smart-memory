@@ -281,6 +281,20 @@ class TestAsk:
         assert response.status_code == 503
         assert "requires a configured LLM key" in response.json()["detail"]
 
+    def test_split_answer_uses_markers_and_falls_back_to_paragraphs(self):
+        """The reply is split into a direct answer and separate reasoning."""
+        from smartmemory_app.local_api import _split_answer
+
+        assert _split_answer("ANSWER: No.\nREASONING: Zed distrusts Xavier.") == (
+            "No.",
+            "Zed distrusts Xavier.",
+        )
+        assert _split_answer("ANSWER: No.") == ("No.", "")
+        assert _split_answer("No, he does not.\n\nBecause he distrusts Xavier.") == (
+            "No, he does not.",
+            "Because he distrusts Xavier.",
+        )
+
 
 # ---------------------------------------------------------------------------
 # GET /{memory_id}/neighbors

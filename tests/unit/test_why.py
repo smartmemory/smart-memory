@@ -170,6 +170,7 @@ def test_ask_renders_answer_evidence_and_relations(monkeypatch) -> None:
     """Lite `sm ask` renders the daemon's evidence trail below the direct answer."""
     payload = {
         "answer": "No. Zed distrusts Xavier and trusts Yara.",
+        "reasoning": "Zed distrusts the source of the claim and trusts Yara.",
         "evidence": [
             {"item_id": "memory-123", "content": "Xavier saw Yara steal an amulet."}
         ],
@@ -188,11 +189,19 @@ def test_ask_renders_answer_evidence_and_relations(monkeypatch) -> None:
 
     result = CliRunner().invoke(
         cli_module.cli,
-        ["ask", "Does Zed believe Xavier's theft account?", "--limit", "3"],
+        [
+            "ask",
+            "Does Zed believe Xavier's theft account?",
+            "--limit",
+            "3",
+            "--reasoning",
+        ],
     )
 
     assert result.exit_code == 0, result.output
     assert result.output.startswith("No. Zed distrusts Xavier and trusts Yara.")
+    assert "  Reasoning:" in result.output
+    assert "    Zed distrusts the source of the claim and trusts Yara." in result.output
     assert "  Evidence:" in result.output
     assert "    - memory-123: Xavier saw Yara steal an amulet." in result.output
     assert "  Relations:" in result.output
@@ -208,3 +217,23 @@ def test_ask_renders_answer_evidence_and_relations(monkeypatch) -> None:
             },
         )
     ]
+
+
+def test_ask_hides_reasoning_by_default(monkeypatch) -> None:
+    """Without --reasoning, `sm ask` prints the answer and a hint only."""
+    payload = {
+        "answer": "No.",
+        "reasoning": "Zed distrusts Xavier.",
+        "evidence": [{"item_id": "memory-123", "content": "..."}],
+        "relations": [{"source": "Zed", "type": "distrusts", "target": "Xavier"}],
+    }
+    monkeypatch.setattr(cli_module, "_daemon_request", lambda *a, **k: payload)
+
+    result = CliRunner().invoke(cli_module.cli, ["ask", "Does Zed believe it?"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("No.")
+    assert "(add --reasoning to see why)" in result.output
+    assert "Zed distrusts Xavier" not in result.output
+    assert "Evidence:" not in result.output
+    assert "Relations:" not in result.output

@@ -19,6 +19,7 @@ All endpoints acquire _rw_lock for thread safety under uvicorn's thread pool.
 """
 
 import logging
+import re
 import threading
 from typing import Any, Optional
 
@@ -992,9 +993,25 @@ def _ask_prompt(question: str, evidence: list[dict], relations: list[dict]) -> s
         f"Question: {question}\n\n"
         f"Retrieved memories:\n{memories}\n\n"
         f"Graph relations:\n{edges}\n\n"
-        "Answer the question directly using only this evidence. State the answer first, "
-        "then give concise reasoning. If the evidence is insufficient, say so plainly."
+        "Answer using only this evidence. Respond in exactly this format:\n"
+        "ANSWER: <one or two plain sentences that answer the question directly>\n"
+        "REASONING: <concise reasoning that cites the memories and relations used>\n"
+        "If the evidence is insufficient, say so plainly in ANSWER."
     )
+
+
+def _split_answer(text: str) -> tuple[str, str]:
+    """Split the model reply into (answer, reasoning) on the ANSWER:/REASONING: markers.
+
+    Falls back to (first paragraph, remainder) when the model ignores the format,
+    so the CLI never shows an empty answer.
+    """
+    body = text.strip()
+    m = re.search(r"ANSWER:\s*(.*?)\s*(?:REASONING:\s*(.*))?$", body, re.S | re.I)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), (m.group(2) or "").strip()
+    parts = re.split(r"\n\s*\n", body, maxsplit=1)
+    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
 
 
 @api.post("/ask")
@@ -1040,7 +1057,13 @@ def ask_endpoint(body: AskRequest) -> dict:
             status_code=502,
             detail="The configured LLM returned no answer; no fallback answer was generated.",
         )
-    return {"answer": answer.strip(), "evidence": evidence, "relations": relations}
+    direct, reasoning = _split_answer(answer)
+    return {
+        "answer": direct,
+        "reasoning": reasoning,
+        "evidence": evidence,
+        "relations": relations,
+    }
 
 
 # LAUNCH-METRICS-1: daemon-side ingest. Remote mode forwards to the configured

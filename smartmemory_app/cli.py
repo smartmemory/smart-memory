@@ -1010,8 +1010,16 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
 @cli.command("ask")
 @click.argument("question")
 @click.option("--limit", default=5, show_default=True, type=click.IntRange(min=1))
-def ask_cmd(question: str, limit: int) -> None:
-    """Answer QUESTION from matching memories and their graph relations (lite mode)."""
+@click.option(
+    "--reasoning",
+    is_flag=True,
+    help="Also print the reasoning, the memories used as evidence, and the graph relations.",
+)
+def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
+    """Answer QUESTION from matching memories and their graph relations (lite mode).
+
+    Prints only the direct answer by default; pass --reasoning to see why.
+    """
     result = _daemon_request(
         "POST", "/memory/ask", json={"question": question, "limit": limit}
     )
@@ -1023,6 +1031,14 @@ def ask_cmd(question: str, limit: int) -> None:
         )
 
     click.echo(result["answer"])
+    if not reasoning:
+        click.echo(click.style("  (add --reasoning to see why)", dim=True))
+        return
+    why = result.get("reasoning")
+    if isinstance(why, str) and why.strip():
+        click.echo(click.style("  Reasoning:", dim=True))
+        for line in why.strip().splitlines():
+            click.echo(click.style(f"    {line}", dim=True))
     evidence = result.get("evidence") or []
     if evidence:
         click.echo(click.style("  Evidence:", dim=True))
