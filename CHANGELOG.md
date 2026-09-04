@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.86] - 2026-09-04
+
 ### Removed
 - **The lite WebSocket events server on `:9015` is gone (PLAT-PUSH-SSE-1).** No browser client had read it since the graph package moved to Server-Sent Events, and it was the second transport for a stream already published over SSE. The `websockets` dependency and the hidden `events-server` CLI command went with it. Real-time updates now reach the local viewer only over `GET /memory/progress/stream` on the daemon port.
 
