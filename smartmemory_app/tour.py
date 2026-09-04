@@ -449,12 +449,16 @@ class TourArcDriver:
         """
         ask = getattr(self.client, "ask", None)
         if ask is None:
-            logger.warning("SmartMemory tour: client has no ask(); showing the command only.")
+            logger.warning(
+                "SmartMemory tour: client has no ask(); showing the command only."
+            )
             return "(ask unavailable: this tour client does not implement ask)"
         try:
             response = ask(question, 5)
         except Exception as exc:
-            logger.warning("SmartMemory tour: sm ask failed (%s); showing the command only.", exc)
+            logger.warning(
+                "SmartMemory tour: sm ask failed (%s); showing the command only.", exc
+            )
             return f"(ask unavailable: {exc})"
         answer = response.get("answer") if isinstance(response, dict) else None
         if not isinstance(answer, str) or not answer.strip():
@@ -489,13 +493,19 @@ class TourArcDriver:
     _SESSION_KEY_SECONDS = 0.03
     _SESSION_MAX_LINES = 16
 
-    def _session_emit(self, emit: EventCallback | None, partial: str | None = None) -> None:
+    def _session_emit(
+        self, emit: EventCallback | None, partial: str | None = None
+    ) -> None:
         if emit is None or not self.pace_seconds:
             return
-        lines = self._session_lines[-self._SESSION_MAX_LINES:]
+        lines = self._session_lines[-self._SESSION_MAX_LINES :]
         if partial is not None:
             lines = [*lines, partial]
-        emit(TourEvent(step=self._session_step, title="", body="\n".join(lines), kind="session"))
+        emit(
+            TourEvent(
+                step=self._session_step, title="", body="\n".join(lines), kind="session"
+            )
+        )
 
     def _session_type(self, emit: EventCallback | None, command: str) -> None:
         if emit is None or not self.pace_seconds:

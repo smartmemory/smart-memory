@@ -14,6 +14,7 @@ DIST-SETUP-TUI-1: When running interactively with textual installed,
   launches a Textual TUI with arrow-key selection. Falls back to click
   prompts when non-interactive, flags provided, or textual unavailable.
 """
+
 import json
 import os
 import shutil
@@ -40,6 +41,7 @@ class SetupResult:
     spacy_model: str = "en_core_web_sm"
     coreference: bool = False
     data_dir: str = "~/.smartmemory"
+
 
 HOOKS_SRC = Path(__file__).parent / "hooks"
 SKILLS_SRC = Path(__file__).parent / "skills"
@@ -71,11 +73,23 @@ _LEGACY_HOOK_REGISTRATIONS = {
     # Pre-DIST-AGENT-HOOKS-1 registrations to clean up
     "SessionStart": {"command": "bash", "args": [str(HOOKS_DEST / "session-start.sh")]},
     "Stop": {"command": "bash", "args": [str(HOOKS_DEST / "session-end.sh")]},
-    "PostToolUseFailure": {"command": "bash", "args": [str(HOOKS_DEST / "post-tool-failure.sh")]},
+    "PostToolUseFailure": {
+        "command": "bash",
+        "args": [str(HOOKS_DEST / "post-tool-failure.sh")],
+    },
     # Also clean old namespaced variants
-    "_legacy_SessionStart": {"command": "bash", "args": [str(HOOKS_DEST / "smartmemory-session-start.sh")]},
-    "_legacy_Stop": {"command": "bash", "args": [str(HOOKS_DEST / "smartmemory-session-end.sh")]},
-    "_legacy_PostToolUseFailure": {"command": "bash", "args": [str(HOOKS_DEST / "smartmemory-post-tool-failure.sh")]},
+    "_legacy_SessionStart": {
+        "command": "bash",
+        "args": [str(HOOKS_DEST / "smartmemory-session-start.sh")],
+    },
+    "_legacy_Stop": {
+        "command": "bash",
+        "args": [str(HOOKS_DEST / "smartmemory-session-end.sh")],
+    },
+    "_legacy_PostToolUseFailure": {
+        "command": "bash",
+        "args": [str(HOOKS_DEST / "smartmemory-post-tool-failure.sh")],
+    },
 }
 
 
@@ -89,27 +103,57 @@ def _get_hook_registrations() -> dict:
     return {
         "SessionStart": {
             "matcher": "",
-            "hooks": [{"type": "command", "command": f"bash {HOOKS_DEST / 'smartmemory-orient.sh'}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {HOOKS_DEST / 'smartmemory-orient.sh'}",
+                }
+            ],
         },
         "UserPromptSubmit": {
             "matcher": "",
-            "hooks": [{"type": "command", "command": f"bash {HOOKS_DEST / 'smartmemory-recall.sh'}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {HOOKS_DEST / 'smartmemory-recall.sh'}",
+                }
+            ],
         },
         "PostToolUse": {
             "matcher": "",
-            "hooks": [{"type": "command", "command": f"bash {HOOKS_DEST / 'smartmemory-observe.sh'}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {HOOKS_DEST / 'smartmemory-observe.sh'}",
+                }
+            ],
         },
         "Stop": {
             "matcher": "",
-            "hooks": [{"type": "command", "command": f"bash {HOOKS_DEST / 'smartmemory-distill.sh'}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {HOOKS_DEST / 'smartmemory-distill.sh'}",
+                }
+            ],
         },
         "PostToolUseFailure": {
             "matcher": "",
-            "hooks": [{"type": "command", "command": f"bash {HOOKS_DEST / 'smartmemory-learn.sh'}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {HOOKS_DEST / 'smartmemory-learn.sh'}",
+                }
+            ],
         },
         "SessionEnd": {
             "matcher": "",
-            "hooks": [{"type": "command", "command": f"bash {HOOKS_DEST / 'smartmemory-persist.sh'}"}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"bash {HOOKS_DEST / 'smartmemory-persist.sh'}",
+                }
+            ],
         },
     }
 
@@ -165,6 +209,7 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     if _can_run_tui():
         try:
             from smartmemory_app.setup_tui import run_setup_tui
+
             result = run_setup_tui()
             if result is None:
                 click.echo("Setup cancelled.")
@@ -175,6 +220,7 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
                 click.echo("\nSetup complete.")
                 try:
                     from smartmemory_app.launch_metrics import emit as _lm_emit
+
                     _lm_emit("setup.complete", {"mode": "remote"})
                 except Exception:
                     pass
@@ -182,6 +228,7 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
                 # TUI ProgressScreen already ran config + hooks + daemon
                 try:
                     from smartmemory_app.launch_metrics import emit as _lm_emit
+
                     _lm_emit("setup.complete", {"mode": "local"})
                 except Exception:
                     pass
@@ -214,6 +261,7 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
         click.echo("\nSetup complete.")
         try:
             from smartmemory_app.launch_metrics import emit as _lm_emit
+
             _lm_emit("setup.complete", {"mode": "remote"})
         except Exception:
             pass
@@ -222,6 +270,7 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
         _start_daemon_local()
         try:
             from smartmemory_app.launch_metrics import emit as _lm_emit
+
             _lm_emit("setup.complete", {"mode": "local"})
         except Exception:
             pass
@@ -237,6 +286,7 @@ def _can_run_tui() -> bool:
         return False
     try:
         import textual  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -256,6 +306,7 @@ def _start_daemon_local() -> None:
         click.echo("\nWaiting for launchd to start daemon...")
         try:
             from smartmemory_app.daemon import is_running
+
             for _ in range(60):
                 if is_running():
                     break
@@ -270,13 +321,18 @@ def _start_daemon_local() -> None:
         click.echo("\nStarting SmartMemory daemon...")
         try:
             from smartmemory_app.daemon import start_daemon
+
             start_daemon()
             click.echo("SmartMemory is running.")
         except Exception as e:
-            click.echo(f"Warning: daemon start failed ({e}). Start manually: smartmemory start")
+            click.echo(
+                f"Warning: daemon start failed ({e}). Start manually: smartmemory start"
+            )
 
 
-def _apply_setup_result(result: SetupResult, on_step: Callable[[str], None] | None = None) -> None:
+def _apply_setup_result(
+    result: SetupResult, on_step: Callable[[str], None] | None = None
+) -> None:
     """Apply a SetupResult from TUI. Saves config + runs post-config steps.
 
     Args:
@@ -434,7 +490,10 @@ def _setup_local() -> None:
         if not existing:
             try:
                 import keyring
-                existing = (keyring.get_password("smartmemory", key_envvar) or "").strip()
+
+                existing = (
+                    keyring.get_password("smartmemory", key_envvar) or ""
+                ).strip()
                 if existing:
                     os.environ[key_envvar] = existing  # load into current process
             except Exception:
@@ -445,7 +504,9 @@ def _setup_local() -> None:
             if existing:
                 os.environ[key_envvar] = existing
         if existing:
-            masked = existing[:8] + "..." + existing[-4:] if len(existing) > 12 else "***"
+            masked = (
+                existing[:8] + "..." + existing[-4:] if len(existing) > 12 else "***"
+            )
             api_key = click.prompt(
                 f"\n{key_envvar} ({masked}). Press Enter to keep, or paste new key",
                 default="",
@@ -460,6 +521,7 @@ def _setup_local() -> None:
             # Also store in OS keychain so daemon can load it without sourcing shell
             try:
                 import keyring
+
                 keyring.set_password("smartmemory", key_envvar, api_key.strip())
                 click.echo("  Also stored in OS keychain.")
             except Exception:
@@ -502,10 +564,12 @@ def _setup_local() -> None:
 
     # Start (or restart) daemon so it picks up the new config + keys
     from smartmemory_app.daemon import is_running, stop_daemon, start_daemon
+
     if is_running(require_healthy=False):
         click.echo("\nRestarting daemon with new config...")
         stop_daemon()
         import time
+
         time.sleep(2)
     click.echo("Starting daemon...")
     start_daemon()
@@ -562,7 +626,9 @@ def _setup_remote(api_key: str | None) -> None:
 def _setup_tool_config(tool: str) -> None:
     """Emit tool-specific MCP config snippet."""
     click.echo(f"\nTool config for {tool}:")
-    click.echo('  Add to your MCP config: {"command": "smartmemory", "args": ["server"]}')
+    click.echo(
+        '  Add to your MCP config: {"command": "smartmemory", "args": ["server"]}'
+    )
 
 
 # ── Uninstall command ─────────────────────────────────────────────────────────
@@ -580,6 +646,7 @@ def uninstall(keep_data: bool) -> None:
     # Stop daemon before removing anything
     try:
         from smartmemory_app.daemon import stop_daemon
+
         stop_daemon()
     except Exception:
         pass
@@ -605,6 +672,7 @@ _SPACY_MODEL_SIZES = {
 def _ensure_spacy(model: str = "en_core_web_sm") -> None:
     try:
         import spacy
+
         spacy.load(model)
     except (ImportError, OSError):
         size = _SPACY_MODEL_SIZES.get(model, "")
@@ -653,18 +721,35 @@ def _register_hooks() -> None:
         filtered = [h for h in existing if h != legacy_entry]
         # Also remove old-format entries pointing to legacy filenames
         filtered = [
-            h for h in filtered
-            if not (isinstance(h, dict) and "command" in h and "args" in h and any("session-start.sh" in str(a) or "session-end.sh" in str(a) or "post-tool-failure.sh" in str(a) for a in h.get("args", [])))
+            h
+            for h in filtered
+            if not (
+                isinstance(h, dict)
+                and "command" in h
+                and "args" in h
+                and any(
+                    "session-start.sh" in str(a)
+                    or "session-end.sh" in str(a)
+                    or "post-tool-failure.sh" in str(a)
+                    for a in h.get("args", [])
+                )
+            )
         ]
         # Also remove new-format entries pointing to legacy (non-namespaced) filenames
         filtered = [
-            h for h in filtered
-            if not (isinstance(h, dict) and "hooks" in h and any(
-                "hooks/session-start.sh" in hh.get("command", "") or
-                "hooks/session-end.sh" in hh.get("command", "") or
-                "hooks/post-tool-failure.sh" in hh.get("command", "")
-                for hh in h.get("hooks", []) if isinstance(hh, dict)
-            ))
+            h
+            for h in filtered
+            if not (
+                isinstance(h, dict)
+                and "hooks" in h
+                and any(
+                    "hooks/session-start.sh" in hh.get("command", "")
+                    or "hooks/session-end.sh" in hh.get("command", "")
+                    or "hooks/post-tool-failure.sh" in hh.get("command", "")
+                    for hh in h.get("hooks", [])
+                    if isinstance(hh, dict)
+                )
+            )
         ]
         if len(filtered) != len(existing):
             hooks[event] = filtered
@@ -698,7 +783,10 @@ def _seed_data_dir(data_dir: str | None = None) -> None:
         resolved = Path(raw) if raw else DATA_DIR
     resolved.mkdir(parents=True, exist_ok=True)
     from smartmemory_app.patterns import JSONLPatternStore
-    JSONLPatternStore(resolved)  # seeds entity_patterns.jsonl if absent (side effect of __init__)
+
+    JSONLPatternStore(
+        resolved
+    )  # seeds entity_patterns.jsonl if absent (side effect of __init__)
 
 
 def _install_launchd_plist() -> bool:
@@ -713,14 +801,18 @@ def _install_launchd_plist() -> bool:
     Returns False on non-macOS, missing template, or launchctl failure.
     """
     import platform
+
     if platform.system() != "Darwin":
         return False  # launchd is macOS-only
 
     if not PLIST_TEMPLATE.exists():
-        click.echo("Warning: launchd plist template not found — skipping auto-start setup.")
+        click.echo(
+            "Warning: launchd plist template not found — skipping auto-start setup."
+        )
         return False
 
     from smartmemory_app.config import load_config
+
     cfg = load_config()
 
     python_path = sys.executable
@@ -735,6 +827,7 @@ def _install_launchd_plist() -> bool:
     if not groq_key:
         try:
             import keyring
+
             groq_key = keyring.get_password("smartmemory", "groq_api_key") or ""
         except Exception:
             pass
@@ -779,12 +872,15 @@ def _install_launchd_plist() -> bool:
 
         result = subprocess.run(
             ["launchctl", "load", str(plist_dest)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0:
             click.echo(f"Installed launchd plist: {plist_dest}")
         else:
-            click.echo(f"Warning: launchctl load failed for {label}: {result.stderr.strip()}")
+            click.echo(
+                f"Warning: launchctl load failed for {label}: {result.stderr.strip()}"
+            )
             click.echo(f"Load manually: launchctl load {plist_dest}")
             all_ok = False
 
@@ -793,13 +889,16 @@ def _install_launchd_plist() -> bool:
         if groq_key:
             click.echo("Enrichment worker enabled (GROQ_API_KEY found).")
         else:
-            click.echo("Warning: GROQ_API_KEY not found — enrichment worker won't extract relations.")
+            click.echo(
+                "Warning: GROQ_API_KEY not found — enrichment worker won't extract relations."
+            )
     return all_ok
 
 
 def _uninstall_launchd_plist() -> None:
     """Unload and remove daemon + worker launchd plists (macOS only)."""
     import platform
+
     if platform.system() != "Darwin":
         return
 
@@ -836,10 +935,22 @@ def _deregister_hooks() -> None:
         filtered = [h for h in existing if h != entry]
         # Also catch any entry referencing smartmemory hook files
         filtered = [
-            h for h in filtered
-            if not (isinstance(h, dict) and any(
-                "smartmemory-" in str(v) for v in (h.get("args", []) + [hh.get("command", "") for hh in h.get("hooks", []) if isinstance(hh, dict)])
-            ))
+            h
+            for h in filtered
+            if not (
+                isinstance(h, dict)
+                and any(
+                    "smartmemory-" in str(v)
+                    for v in (
+                        h.get("args", [])
+                        + [
+                            hh.get("command", "")
+                            for hh in h.get("hooks", [])
+                            if isinstance(hh, dict)
+                        ]
+                    )
+                )
+            )
         ]
         if len(filtered) != len(existing):
             hooks[event] = filtered
