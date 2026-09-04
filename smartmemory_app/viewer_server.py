@@ -1,10 +1,11 @@
-"""DIST-DAEMON-1: SmartMemory daemon — HTTP API + static viewer + events WebSocket.
+"""DIST-DAEMON-1: SmartMemory daemon — HTTP API + static viewer + progress SSE.
 
 Single uvicorn process serving:
-  GET  /health     →  daemon health check (root app, not /memory sub-app)
-  GET  /           →  static/index.html (LocalApp.jsx build)
-  /memory/*        →  local_api.py (graph + ingest + search + recall + clear)
-  ws://:9015       →  events_server.start_background() (DIST-LITE-3, daemon thread)
+  GET  /health                  →  daemon health check (root app, not /memory sub-app)
+  GET  /                        →  static/index.html (LocalApp.jsx build)
+  /memory/*                     →  local_api.py (graph + ingest + search + recall + clear)
+  GET  /memory/progress/stream  →  SSE, fed by events_server.start_background()
+                                   (PLAT-PUSH-SSE-1, daemon thread)
 
 The module-level ``app = _build_app()`` is side-effect-free — it does not start uvicorn
 or the events server. This makes the module safely importable by tests.
@@ -259,13 +260,12 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # its graceful shutdown (drain active requests, then exit → atexit fires).
     atexit.register(_cleanup)
 
-    # Start events WebSocket server as background daemon thread.
-    # Events port tracks the API port (port+1) so a non-default daemon
-    # (e.g. an isolated demo on 9114) gets its own events server (9115)
-    # instead of colliding with the default :9015. Default 9014 -> 9015
-    # is unchanged.
+    # Start the sink drain loop as a background daemon thread. It binds no
+    # port of its own: PLAT-PUSH-SSE-1 deleted the ws://:9015 server, so
+    # events reach the browser only over GET /memory/progress/stream on this
+    # same uvicorn port.
     from smartmemory_app.events_server import start_background
-    start_background(port + 1)
+    start_background()
 
     # Enrichment is handled by a separate worker process (smartmemory worker --loop).
     # The ingest endpoint enqueues to a SQLite table; the worker drains it.

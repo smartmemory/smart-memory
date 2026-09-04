@@ -2027,14 +2027,5 @@ def server_cmd() -> None:
     click.echo("Run: smartmemory-mcp")
 
 
-@cli.command("events-server", hidden=True)
-@click.option("--port", default=9015, show_default=True, help="WebSocket port")
-def events_server_cmd(port: int) -> None:
-    """Run the lite WebSocket events server standalone (debugging only)."""
-    from smartmemory_app.events_server import main
-
-    main(port=port)
-
-
 if __name__ == "__main__":
     cli()

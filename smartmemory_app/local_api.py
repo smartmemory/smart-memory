@@ -24,7 +24,7 @@ import re
 import threading
 from typing import Any, Literal, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -218,14 +218,25 @@ def list_memories(limit: int = 200, offset: int = 0) -> dict:
 
 
 @api.get("/progress/stream")
-async def progress_stream(request: Request):
+async def progress_stream(
+    request: Request,
+    run_id: str = Query(
+        None, description="Filter to a single run. Required when from_seq is present."
+    ),
+    from_seq: int = Query(
+        None, description="Per-run replay starting point. Must accompany run_id."
+    ),
+    since: str = Query(
+        None, description="Event ID to resume from. Mutually exclusive with from_seq."
+    ),
+):
     """SSE progress stream for the graph viewer (lite-mode parity).
 
-    smart-memory-graph's useGraphStream migrated WS -> SSE; this is the
-    lite daemon's /memory/progress/stream. It registers a per-connection
-    queue with events_server, which fans out reshaped ProgressEvent frames
-    at the single sink drain point (the ws://:9015 broadcast is untouched,
-    so the recorder's settled() still works).
+    PLAT-PUSH-SSE-1: same wire contract as the hosted route
+    (`progress-event-contract.json` SSEEndpoint) — `id:` line, all three
+    query modes, the documented 400/404 errors. Frames are produced by the
+    events_server drain loop; replay is served from its bounded history
+    ring instead of a Redis stream.
 
     Declared BEFORE /{memory_id} routes — FastAPI matches in declaration
     order and the bare /{memory_id} would otherwise be ambiguous.
@@ -235,24 +246,73 @@ async def progress_stream(request: Request):
 
     from smartmemory_app import events_server
 
+    # Honor Last-Event-ID for reconnect (maps to the scope_resume mode), the
+    # same precedence rule the hosted route applies.
+    last_event_id = request.headers.get("last-event-id") or request.headers.get(
+        "Last-Event-ID"
+    )
+    if last_event_id:
+        since = last_event_id
+        from_seq = None
+
+    # Query validation — mirrors the hosted route's 400 cases. Unsupported
+    # combinations are refused, never silently ignored.
+    if from_seq is not None and run_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="from_seq requires run_id. Provide run_id=lite with from_seq.",
+        )
+    if from_seq is not None and since is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="from_seq and since are mutually exclusive.",
+        )
+    if run_id is not None and run_id != events_server.LITE_RUN_ID:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No events for run_id={run_id!r}. The lite daemon emits a single "
+                f"run: {events_server.LITE_RUN_ID!r}."
+            ),
+        )
+
+    replay: list = []
+    if since is not None:
+        replay = events_server.history_since(since)
+    elif from_seq is not None:
+        replay = events_server.history_from_seq(from_seq)
+
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
     entry = events_server.register_sse_subscriber(loop, queue)
+
+    def _sse_frame(event_id: str, frame: dict) -> str:
+        return f"id: {event_id}\ndata: {json.dumps(frame)}\n\n"
 
     async def _gen():
         try:
             # Immediate comment so the client's onopen fires without waiting
             # for the first graph event.
             yield ": connected\n\n"
+            replayed_ids = set()
+            for event_id, frame in replay:
+                if await request.is_disconnected():
+                    return
+                replayed_ids.add(event_id)
+                yield _sse_frame(event_id, frame)
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    frame = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    event_id, frame = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"  # per contract SSE keepalive
                     continue
-                yield f"data: {json.dumps(frame)}\n\n"
+                # A frame can land in both the replay snapshot and the live
+                # queue if it was emitted between the two; dedupe on id.
+                if event_id in replayed_ids:
+                    continue
+                yield _sse_frame(event_id, frame)
         finally:
             events_server.unregister_sse_subscriber(entry)
 
@@ -489,9 +549,14 @@ def clear_all() -> dict:
 
 
 class InternalGraphEvent(BaseModel):
-    """A graph mutation already committed by the process-separated worker."""
+    """A graph mutation already committed by the process-separated worker.
 
-    operation: Literal["add_node", "add_edge"]
+    PLAT-PUSH-SSE-1: deletes and clears are representable. Before, the bridge
+    accepted adds only, so a worker-side delete never reached the viewer and
+    the graph drifted out of sync with the store.
+    """
+
+    operation: Literal["add_node", "add_edge", "delete_node", "delete_edge", "clear"]
     data: dict[str, Any]
 
 
@@ -518,16 +583,18 @@ def publish_internal_events(body: InternalEventsRequest, request: Request) -> di
     sink = get_event_sink()
     for event in body.events:
         data = dict(event.data)
-        if event.operation == "add_node" and not (
+        if event.operation in ("add_node", "delete_node") and not (
             data.get("memory_id") or data.get("item_id")
         ):
-            raise HTTPException(status_code=422, detail="add_node event requires an id")
-        if event.operation == "add_edge" and not (
+            raise HTTPException(
+                status_code=422, detail=f"{event.operation} event requires an id"
+            )
+        if event.operation in ("add_edge", "delete_edge") and not (
             data.get("source_id") and data.get("target_id")
         ):
             raise HTTPException(
                 status_code=422,
-                detail="add_edge event requires source_id and target_id",
+                detail=f"{event.operation} event requires source_id and target_id",
             )
         sink.emit(
             "span",

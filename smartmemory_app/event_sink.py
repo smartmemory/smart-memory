@@ -2,7 +2,7 @@
 
 get_event_sink() is called from two threads:
   - main thread (via storage.get_memory())
-  - daemon thread (via events_server._serve())
+  - daemon thread (via events_server._serve(), the SSE drain loop)
 
 Double-checked locking ensures exactly one InProcessQueueSink is created.
 Without the lock, both threads can race past the ``_sink is None`` check and

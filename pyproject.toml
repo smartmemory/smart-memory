@@ -17,7 +17,6 @@ dependencies = [
     "httpx>=0.27",             # remote API calls (DIST-LITE-5)
     "fastapi>=0.110",          # DIST-LITE-4: local graph API + viewer
     "uvicorn>=0.29",           # DIST-LITE-4: viewer HTTP server
-    "websockets>=12.0",        # DIST-LITE-3: lite WebSocket events server
     "click>=8.0",
     "keyring>=24.0",           # DIST-LITE-5: OS credential store for API keys
     "tomli-w>=1.0",            # DIST-LITE-5: TOML config writing (tomllib stdlib reads only)
