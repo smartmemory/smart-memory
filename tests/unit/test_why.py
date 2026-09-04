@@ -164,3 +164,47 @@ def test_why_no_results_exits_one_in_remote_and_local_modes(monkeypatch) -> None
     assert "No decisions matched that question." in remote.output
     assert local.exit_code == 1
     assert "No memories matched that question." in local.output
+
+
+def test_ask_renders_answer_evidence_and_relations(monkeypatch) -> None:
+    """Lite `sm ask` renders the daemon's evidence trail below the direct answer."""
+    payload = {
+        "answer": "No. Zed distrusts Xavier and trusts Yara.",
+        "evidence": [
+            {"item_id": "memory-123", "content": "Xavier saw Yara steal an amulet."}
+        ],
+        "relations": [
+            {"source": "Zed", "type": "distrusts", "target": "Xavier"},
+            {"source": "Zed", "type": "trusts", "target": "Yara"},
+        ],
+    }
+    calls = []
+
+    def daemon_request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return payload
+
+    monkeypatch.setattr(cli_module, "_daemon_request", daemon_request)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["ask", "Does Zed believe Xavier's theft account?", "--limit", "3"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("No. Zed distrusts Xavier and trusts Yara.")
+    assert "  Evidence:" in result.output
+    assert "    - memory-123: Xavier saw Yara steal an amulet." in result.output
+    assert "  Relations:" in result.output
+    assert "    - Zed --distrusts--> Xavier" in result.output
+    assert calls == [
+        (
+            ("POST", "/memory/ask"),
+            {
+                "json": {
+                    "question": "Does Zed believe Xavier's theft account?",
+                    "limit": 3,
+                }
+            },
+        )
+    ]

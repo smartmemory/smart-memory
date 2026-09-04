@@ -8,6 +8,7 @@ Mounting pattern (mirrors viewer_server.py mount):
     app.mount("/memory", local_api)
     client = TestClient(app)
 """
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -24,6 +25,7 @@ from smartmemory_app.local_api import api as local_api
 def backend():
     """Real in-memory SQLiteBackend for each test."""
     from smartmemory.graph.backends.sqlite import SQLiteBackend
+
     b = SQLiteBackend(db_path=":memory:")
     yield b
     b.close()
@@ -33,6 +35,7 @@ def backend():
 def client(backend, monkeypatch):
     """TestClient with local_api mounted at /memory, backed by the in-memory SQLiteBackend."""
     import smartmemory_app.local_api as _mod
+
     monkeypatch.setattr(_mod, "_get_backend", lambda: backend)
 
     wrapper = FastAPI()
@@ -50,7 +53,9 @@ def _add_node(backend, item_id: str, label: str, memory_type: str = "semantic") 
     return item_id
 
 
-def _add_edge(backend, source_id: str, target_id: str, edge_type: str = "related_to") -> None:
+def _add_edge(
+    backend, source_id: str, target_id: str, edge_type: str = "related_to"
+) -> None:
     backend.add_edge(
         source_id=source_id,
         target_id=target_id,
@@ -58,6 +63,63 @@ def _add_edge(backend, source_id: str, target_id: str, edge_type: str = "related
         properties={},
         memory_type="semantic",
     )
+
+
+class TestAskIntegration:
+    def test_answers_from_seeded_memories_and_entity_relations(
+        self, client, backend, monkeypatch
+    ):
+        """`/ask` supplies search hits and one-hop entity edges to the LLM."""
+        _add_node(backend, "memory-1", "Amulet account", "episodic")
+        _add_node(backend, "zed", "Zed", "entity")
+        _add_node(backend, "xavier", "Xavier", "entity")
+        _add_node(backend, "yara", "Yara", "entity")
+        _add_edge(backend, "memory-1", "zed", "mentions")
+        _add_edge(backend, "memory-1", "xavier", "mentions")
+        _add_edge(backend, "memory-1", "yara", "mentions")
+        _add_edge(backend, "zed", "xavier", "distrusts")
+        _add_edge(backend, "zed", "yara", "trusts")
+        _add_edge(backend, "xavier", "yara", "witnessed_theft_by")
+
+        import smartmemory_app.local_api as local_api
+
+        monkeypatch.setattr(
+            "smartmemory_app.storage.search",
+            lambda query, top_k, filters=None: [
+                {
+                    "item_id": "memory-1",
+                    "content": "Xavier saw Yara steal an amulet.",
+                }
+            ],
+        )
+        monkeypatch.setattr(local_api, "llm_key_present", lambda: True)
+        llm_calls = []
+
+        def fake_call_llm(**kwargs):
+            llm_calls.append(kwargs)
+            return None, "No. Zed distrusts Xavier and trusts Yara."
+
+        monkeypatch.setattr("smartmemory.utils.llm.call_llm", fake_call_llm)
+
+        response = client.post(
+            "/memory/ask",
+            json={"question": "Does Zed believe Xavier's theft account?", "limit": 3},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["answer"] == "No. Zed distrusts Xavier and trusts Yara."
+        assert body["evidence"] == [
+            {"item_id": "memory-1", "content": "Xavier saw Yara steal an amulet."}
+        ]
+        assert {tuple(relation.values()) for relation in body["relations"]} == {
+            ("Zed", "distrusts", "Xavier"),
+            ("Zed", "trusts", "Yara"),
+            ("Xavier", "witnessed_theft_by", "Yara"),
+        }
+        assert len(llm_calls) == 1
+        assert "Xavier saw Yara steal an amulet." in llm_calls[0]["user_content"]
+        assert "Zed --distrusts--> Xavier" in llm_calls[0]["user_content"]
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +153,9 @@ class TestGetGraphFullIntegration:
         _add_node(backend, "n1", "Flat check")
         body = client.get("/memory/graph/full").json()
         n = body["nodes"][0]
-        assert "properties" not in n, "Node must not contain nested 'properties' after flattening"
+        assert "properties" not in n, (
+            "Node must not contain nested 'properties' after flattening"
+        )
 
     def test_three_nodes_ingested(self, client, backend):
         for i in range(3):

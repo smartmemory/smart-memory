@@ -17,18 +17,19 @@ DELETE /graph/nodes/{id} → /memory/graph/nodes/{id} (405 — entity-node ops s
 
 All endpoints acquire _rw_lock for thread safety under uvicorn's thread pool.
 """
+
 import logging
 import threading
 from typing import Any, Optional
-
-log = logging.getLogger(__name__)
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from smartmemory_app.config import UnconfiguredError
+from smartmemory_app.config import UnconfiguredError, llm_key_present
 from smartmemory_app.storage import get_memory
+
+log = logging.getLogger(__name__)
 
 # DIST-DAEMON-1: All endpoints serialize through this lock. Uvicorn runs sync
 # endpoints in a thread pool — without locking, concurrent ingest+clear or
@@ -45,11 +46,18 @@ api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
 # Fields that normalizeAPIResponse reads at top level (normalize.js:38,46).
 # Also includes entity-detection fields (normalize.js:38): node_category, entity_type.
 # Everything else from the properties blob lands in metadata.
-_TOP_LEVEL_FIELDS = frozenset({
-    "label", "content", "memory_type", "category",
-    "confidence", "created_at",
-    "node_category", "entity_type",
-})
+_TOP_LEVEL_FIELDS = frozenset(
+    {
+        "label",
+        "content",
+        "memory_type",
+        "category",
+        "confidence",
+        "created_at",
+        "node_category",
+        "entity_type",
+    }
+)
 
 
 def _get_mem():
@@ -96,20 +104,18 @@ def _flatten_node(raw: dict) -> dict:
     """
     props = raw.get("properties", {})
     return {
-        "item_id":       raw.get("item_id") or raw.get("id", ""),
+        "item_id": raw.get("item_id") or raw.get("id", ""),
         # memory_type is a column (stripped from blob at add_node:153) — read from raw
-        "memory_type":   raw.get("memory_type", props.get("memory_type", "semantic")),
-        "created_at":    raw.get("created_at", props.get("created_at", "")),
+        "memory_type": raw.get("memory_type", props.get("memory_type", "semantic")),
+        "created_at": raw.get("created_at", props.get("created_at", "")),
         # All other viewer fields live inside the properties blob
-        "label":         props.get("label", ""),
-        "content":       props.get("content", ""),
-        "category":      props.get("category"),
+        "label": props.get("label", ""),
+        "content": props.get("content", ""),
+        "category": props.get("category"),
         "node_category": props.get("node_category"),
-        "entity_type":   props.get("entity_type"),
-        "confidence":    props.get("confidence", 1.0),
-        "metadata": {
-            k: v for k, v in props.items() if k not in _TOP_LEVEL_FIELDS
-        },
+        "entity_type": props.get("entity_type"),
+        "confidence": props.get("confidence", 1.0),
+        "metadata": {k: v for k, v in props.items() if k not in _TOP_LEVEL_FIELDS},
     }
 
 
@@ -117,6 +123,7 @@ def _flatten_node(raw: dict) -> dict:
 def get_graph_full() -> dict:
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         return mem.get_graph_full()
     with _rw_lock:
@@ -134,7 +141,8 @@ def get_graph_full() -> dict:
         node_ids.add(n["item_id"])
     # Only include edges where both endpoints exist in the filtered node set
     edges = [
-        e for e in snapshot.get("edges", [])
+        e
+        for e in snapshot.get("edges", [])
         if e.get("source_id") in node_ids and e.get("target_id") in node_ids
     ]
     return {
@@ -154,6 +162,7 @@ def get_edges_bulk(body: EdgesBulkRequest) -> dict:
     """Matches createFetchAdapter.getEdgesBulk — POST with {node_ids} body (fetchAdapter.js:35)."""
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         return mem.get_edges_bulk(body.node_ids)
     with _rw_lock:
@@ -187,16 +196,22 @@ api.include_router(_graph_router, prefix="/graph")
 def list_memories(limit: int = 200, offset: int = 0) -> dict:
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         full = mem.get_graph_full()
         nodes = full.get("nodes", [])
-        paginated = nodes[offset: offset + limit]
-        return {"items": paginated, "total": len(nodes), "limit": limit, "offset": offset}
+        paginated = nodes[offset : offset + limit]
+        return {
+            "items": paginated,
+            "total": len(nodes),
+            "limit": limit,
+            "offset": offset,
+        }
     with _rw_lock:
         backend = _get_backend()
         snapshot = backend.serialize()
     nodes = [_flatten_node(n) for n in snapshot.get("nodes", [])]
-    paginated = nodes[offset: offset + limit]
+    paginated = nodes[offset : offset + limit]
     return {"items": paginated, "total": len(nodes), "limit": limit, "offset": offset}
 
 
@@ -254,6 +269,7 @@ async def progress_stream(request: Request):
 # FastAPI matches in declaration order — the bare /{memory_id} would otherwise
 # capture /neighbors as the memory_id value.
 
+
 @api.get("/recall")
 def recall_endpoint(
     cwd: str = None,
@@ -272,8 +288,10 @@ def recall_endpoint(
     """
     with _rw_lock:
         from smartmemory_app.storage import recall
+
         context = recall(
-            cwd, top_k,
+            cwd,
+            top_k,
             query=query,
             workspace_id=workspace_id or None,
             include_snapshot=include_snapshot,
@@ -300,37 +318,7 @@ def get_neighbors(memory_id: str) -> dict:
     Adapter contract preserved: createFetchAdapter.getNeighbors reads
     res?.neighbors || [] — still a list, just with richer entries.
     """
-    mem = _get_mem()
-    from smartmemory_app.remote_backend import RemoteMemory
-    if isinstance(mem, RemoteMemory):
-        return mem.get_neighbors(memory_id)
-    with _rw_lock:
-        backend = _get_backend()
-        edges = backend.get_edges_for_node(memory_id)
-
-    # Walk edges to assign direction. The daemon's adjacency-list
-    # get_edges_for_node returns both legs in one query, so this is a single
-    # pass — simpler than the service's two-call get_neighbors approach.
-    seen: set = set()
-    formatted = []
-    for e in edges:
-        src = e.get("source_id")
-        tgt = e.get("target_id")
-        link_type = e.get("edge_type") or e.get("link_type")
-        if not link_type:
-            continue  # malformed edge — skip rather than emit link_type=None
-        if src == memory_id and tgt and tgt != memory_id:
-            direction, other = "outgoing", tgt
-        elif tgt == memory_id and src and src != memory_id:
-            direction, other = "incoming", src
-        else:
-            continue  # self-loop or malformed
-        key = (other, str(link_type), direction)
-        if key in seen:
-            continue
-        seen.add(key)
-        formatted.append({"item_id": other, "link_type": link_type, "direction": direction})
-    return {"neighbors": formatted, "edges": edges}
+    return _get_neighbor_payload(memory_id)
 
 
 @api.get("/{memory_id}/links")
@@ -344,6 +332,7 @@ def get_links(memory_id: str) -> dict:
     """
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         # RemoteMemory carries raw edges on its neighbors payload; reshape.
         edges = mem.get_neighbors(memory_id).get("edges", []) or []
@@ -355,11 +344,13 @@ def get_links(memory_id: str) -> dict:
         link_type = e.get("edge_type") or e.get("link_type")
         if not link_type:
             continue  # malformed edge — skip rather than emit link_type=None
-        links.append({
-            "source_id": e.get("source_id"),
-            "target_id": e.get("target_id"),
-            "link_type": link_type,
-        })
+        links.append(
+            {
+                "source_id": e.get("source_id"),
+                "target_id": e.get("target_id"),
+                "link_type": link_type,
+            }
+        )
     return {"links": links}
 
 
@@ -375,6 +366,7 @@ def get_lineage(memory_id: str) -> dict:
     """
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     is_remote = isinstance(mem, RemoteMemory)
 
     def _get_node(node_id: str) -> Optional[dict]:
@@ -392,13 +384,15 @@ def get_lineage(memory_id: str) -> dict:
         if node is None:
             break
         derived_from = node.get("derived_from")
-        chain.append({
-            "item_id": node.get("item_id") or node.get("id") or current_id,
-            "content": (node.get("content") or "")[:200],
-            "memory_type": node.get("memory_type"),
-            "derived_from": derived_from,
-            "confidence": node.get("confidence"),
-        })
+        chain.append(
+            {
+                "item_id": node.get("item_id") or node.get("id") or current_id,
+                "content": (node.get("content") or "")[:200],
+                "memory_type": node.get("memory_type"),
+                "derived_from": derived_from,
+                "confidence": node.get("confidence"),
+            }
+        )
         current_id = derived_from
     return {"lineage": chain, "depth": len(chain)}
 
@@ -408,6 +402,7 @@ def get_memory_item(memory_id: str) -> dict[str, Any]:
     """get_node() uses _row_to_node() — output is already flat, no transformation needed."""
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         node = mem.get_node(memory_id)
         if node is None:
@@ -430,14 +425,22 @@ def clear_all() -> dict:
     """
     with _rw_lock:
         from smartmemory_app.storage import _resolve_data_dir, _shutdown
+
         _shutdown()
 
         data_path = _resolve_data_dir()
         removed = 0
         if data_path.exists():
             for pattern in [
-                "*.db", "*.db-shm", "*.db-wal", "*.db-journal",
-                "*.usearch", "*.json", "*.jsonl", "*.log", ".write.lock",
+                "*.db",
+                "*.db-shm",
+                "*.db-wal",
+                "*.db-journal",
+                "*.usearch",
+                "*.json",
+                "*.jsonl",
+                "*.log",
+                ".write.lock",
             ]:
                 for f in data_path.glob(pattern):
                     try:
@@ -448,23 +451,29 @@ def clear_all() -> dict:
 
         # Re-seed patterns
         from smartmemory_app.setup import _seed_data_dir
+
         _seed_data_dir()
 
         # Flush pending enrichment jobs INSIDE lock — prevents a concurrent
         # ingest from enqueuing a job between clear and flush
         from smartmemory_app.async_enrichment import reset_queue
+
         reset_queue()
 
     # Publish graph_cleared event (outside lock — emit is thread-safe)
     try:
         from smartmemory_app.event_sink import get_event_sink
+
         sink = get_event_sink()
-        sink.emit("span", {
-            "component": "graph",
-            "operation": "clear_all",
-            "name": "graph.clear_all",
-            "nuclear": True,
-        })
+        sink.emit(
+            "span",
+            {
+                "component": "graph",
+                "operation": "clear_all",
+                "name": "graph.clear_all",
+                "nuclear": True,
+            },
+        )
     except Exception:
         pass
 
@@ -509,7 +518,9 @@ def reindex() -> dict:
         # Delete old vector index — will be recreated at new dimension
         from smartmemory.stores.vector.backends.usearch import UsearchVectorBackend
 
-        backend = UsearchVectorBackend(persist_directory=data_dir, collection_name="memory")
+        backend = UsearchVectorBackend(
+            persist_directory=data_dir, collection_name="memory"
+        )
 
         t0 = time.time()
         embedded = 0
@@ -522,7 +533,11 @@ def reindex() -> dict:
                 continue
             try:
                 vec = svc.embed(content[:512])
-                backend.upsert(item_id=item_id, embedding=vec.tolist(), metadata={"content": content[:200]})
+                backend.upsert(
+                    item_id=item_id,
+                    embedding=vec.tolist(),
+                    metadata={"content": content[:200]},
+                )
                 embedded += 1
             except Exception:
                 skipped += 1
@@ -562,8 +577,17 @@ def reextract_entities() -> dict:
         # Read all user memory nodes (skip entity/relation/Version)
         db_path = os.path.join(data_dir, "memory.db")
         db = sqlite3.connect(db_path)
-        user_types = ("semantic", "episodic", "procedural", "pending", "zettel",
-                      "reasoning", "opinion", "observation", "decision")
+        user_types = (
+            "semantic",
+            "episodic",
+            "procedural",
+            "pending",
+            "zettel",
+            "reasoning",
+            "opinion",
+            "observation",
+            "decision",
+        )
         placeholders = ",".join("?" * len(user_types))
         rows = db.execute(
             f"SELECT item_id, properties, memory_type FROM nodes "
@@ -626,14 +650,16 @@ def reextract_entities() -> dict:
                     etype = ent.get("entity_type", "concept")
                     if not name:
                         continue
-                    entity_nodes.append({
-                        "entity_type": etype,
-                        "properties": {
-                            "name": name,
-                            "confidence": ent.get("confidence", 0.85),
-                            "source": "reextract",
-                        },
-                    })
+                    entity_nodes.append(
+                        {
+                            "entity_type": etype,
+                            "properties": {
+                                "name": name,
+                                "confidence": ent.get("confidence", 0.85),
+                                "source": "reextract",
+                            },
+                        }
+                    )
 
                 if entity_nodes:
                     # Create entity nodes + edges (memory node already exists)
@@ -643,19 +669,26 @@ def reextract_entities() -> dict:
                         canonical_key = f"{ename.lower()}::{etype.lower()}"
 
                         # Find or create entity node
-                        existing_eid = backend._find_entity_by_canonical_key(canonical_key)
+                        existing_eid = backend._find_entity_by_canonical_key(
+                            canonical_key
+                        )
                         if existing_eid:
                             eid = existing_eid
                         else:
                             import uuid
+
                             eid = str(uuid.uuid4())
-                            backend.add_node(eid, {
-                                "content": ename,
-                                "name": ename,
-                                "entity_type": etype,
-                                "canonical_key": canonical_key,
-                                "memory_type": "entity",
-                            }, memory_type="entity")
+                            backend.add_node(
+                                eid,
+                                {
+                                    "content": ename,
+                                    "name": ename,
+                                    "entity_type": etype,
+                                    "canonical_key": canonical_key,
+                                    "memory_type": "entity",
+                                },
+                                memory_type="entity",
+                            )
                             entities_created += 1
 
                         backend.add_edge(item_id, eid, "CONTAINS_ENTITY", {})
@@ -685,9 +718,15 @@ class IngestRequest(BaseModel):
     memory_type: str = "episodic"
     context: Optional[dict] = None
     properties: Optional[dict] = None  # user-supplied key-value properties
-    profile_name: Optional[str] = None  # accepted for service contract alignment, ignored in lite
-    extractor_name: Optional[str] = None  # DIST-OBSIDIAN-LITE-1: SDK contract; ignored in lite (env-driven tier split decides)
-    cwd: Optional[str] = None  # HOOK-RECALL-RELEVANCE-1 G3.B: workspace_id derivation source
+    profile_name: Optional[str] = (
+        None  # accepted for service contract alignment, ignored in lite
+    )
+    extractor_name: Optional[str] = (
+        None  # DIST-OBSIDIAN-LITE-1: SDK contract; ignored in lite (env-driven tier split decides)
+    )
+    cwd: Optional[str] = (
+        None  # HOOK-RECALL-RELEVANCE-1 G3.B: workspace_id derivation source
+    )
     workspace_id: Optional[str] = None  # explicit override; else derived from cwd
 
 
@@ -726,6 +765,7 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     from smartmemory_app.config import llm_key_present
     from smartmemory_app.remote_backend import RemoteBackendError
     from fastapi import HTTPException
+
     has_llm = llm_key_present()
 
     if has_llm:
@@ -733,16 +773,28 @@ def ingest_endpoint(body: IngestRequest) -> dict:
         # A separate worker process drains the queue — no threading issues.
         with _rw_lock:
             from smartmemory_app.storage import ingest
+
             try:
-                result = ingest(body.content, memory_type, sync=False, properties=properties, origin=origin)
+                result = ingest(
+                    body.content,
+                    memory_type,
+                    sync=False,
+                    properties=properties,
+                    origin=origin,
+                )
             except RemoteBackendError as e:
-                raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
+                raise HTTPException(
+                    status_code=502, detail=f"Hosted SmartMemory API error: {e}"
+                )
             item_id = result["item_id"] if isinstance(result, dict) else result
             raw_ids = result.get("entity_ids", {}) if isinstance(result, dict) else {}
             entity_ids = {k.lower(): v for k, v in raw_ids.items()} if raw_ids else {}
-            already_queued = result.get("queued", False) if isinstance(result, dict) else False
+            already_queued = (
+                result.get("queued", False) if isinstance(result, dict) else False
+            )
             if not already_queued:
                 from smartmemory_app.enrichment_queue import enqueue
+
                 enqueue(item_id, entity_ids)
         return {"item_id": item_id}
     else:
@@ -760,21 +812,30 @@ def ingest_endpoint(body: IngestRequest) -> dict:
             _llm_warned = True
         with _rw_lock:
             from smartmemory_app.storage import ingest
+
             try:
                 # Tier-1 ONLY (spaCy + EntityRuler). MUST pass sync=False: the default
                 # sync=True runs the full core pipeline including llm_extract, which
                 # hard-requires a cloud LLM key and 500s on a keyless lite install
                 # (ValueError: No API key found → Stage 'llm_extract' failed). There is
                 # no Tier-2 enqueue here — no key means no enrichment worker to drain it.
-                result = ingest(body.content, memory_type, sync=False, properties=properties, origin=origin)
+                result = ingest(
+                    body.content,
+                    memory_type,
+                    sync=False,
+                    properties=properties,
+                    origin=origin,
+                )
             except RemoteBackendError as e:
-                raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
+                raise HTTPException(
+                    status_code=502, detail=f"Hosted SmartMemory API error: {e}"
+                )
             item_id = result["item_id"] if isinstance(result, dict) else result
         return {
             "item_id": item_id,
             "warning": "No LLM key configured — stored with Tier-1 (spaCy) extraction "
-                       "only; entity extraction and enrichment are disabled. "
-                       "Run `smartmemory setup` to add a key.",
+            "only; entity extraction and enrichment are disabled. "
+            "Run `smartmemory setup` to add a key.",
         }
 
 
@@ -783,12 +844,13 @@ class SearchRequest(BaseModel):
     top_k: int = 5
     filters: Optional[dict] = None  # property filters (e.g. {"project": "atlas"})
     enable_hybrid: bool = True  # DIST-OBSIDIAN-LITE-1: SDK contract; no-op in lite (FTS5+vector always on)
-    memory_type: Optional[str] = None  # DIST-OBSIDIAN-LITE-1: SDK contract; folded into filters
+    memory_type: Optional[str] = (
+        None  # DIST-OBSIDIAN-LITE-1: SDK contract; folded into filters
+    )
 
 
-@api.post("/search")
-def search_endpoint(body: SearchRequest) -> dict:
-    """Search memories. Returns {items: [...]} matching post-CORE-CRUD-LIST service contract."""
+def _search_items(body: SearchRequest) -> list[dict]:
+    """Run the shared semantic-search path for search and ask requests."""
     from fastapi import HTTPException
 
     # DIST-OBSIDIAN-LITE-1: fold memory_type into filters so storage.search sees
@@ -800,13 +862,185 @@ def search_endpoint(body: SearchRequest) -> dict:
     with _rw_lock:
         from smartmemory_app.storage import search
         from smartmemory_app.remote_backend import RemoteBackendError
+
         try:
             results = search(body.query, body.top_k, filters=filters or None)
         except NotImplementedError as e:
             raise HTTPException(status_code=501, detail=str(e))
         except RemoteBackendError as e:
-            raise HTTPException(status_code=502, detail=f"Hosted SmartMemory API error: {e}")
-    return {"items": results}
+            raise HTTPException(
+                status_code=502, detail=f"Hosted SmartMemory API error: {e}"
+            )
+    return results
+
+
+@api.post("/search")
+def search_endpoint(body: SearchRequest) -> dict:
+    """Search memories. Returns {items: [...]} matching post-CORE-CRUD-LIST service contract."""
+    return {"items": _search_items(body)}
+
+
+class AskRequest(BaseModel):
+    question: str
+    limit: int = 5
+
+
+def _get_neighbor_payload(memory_id: str) -> dict:
+    """Return the same neighbor-and-edge payload exposed by ``/{id}/neighbors``."""
+    mem = _get_mem()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        return mem.get_neighbors(memory_id)
+    with _rw_lock:
+        backend = _get_backend()
+        edges = backend.get_edges_for_node(memory_id)
+
+    seen: set[tuple[str, str, str]] = set()
+    neighbors = []
+    for edge in edges:
+        source_id = edge.get("source_id")
+        target_id = edge.get("target_id")
+        link_type = edge.get("edge_type") or edge.get("link_type")
+        if not link_type:
+            continue
+        if source_id == memory_id and target_id and target_id != memory_id:
+            direction, other_id = "outgoing", target_id
+        elif target_id == memory_id and source_id and source_id != memory_id:
+            direction, other_id = "incoming", source_id
+        else:
+            continue
+        key = (other_id, str(link_type), direction)
+        if key in seen:
+            continue
+        seen.add(key)
+        neighbors.append(
+            {"item_id": other_id, "link_type": link_type, "direction": direction}
+        )
+    return {"neighbors": neighbors, "edges": edges}
+
+
+def _node_label(item_id: str) -> str:
+    """Resolve a graph-node ID to its human-readable label when available."""
+    mem = _get_mem()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        node = mem.get_node(item_id)
+    else:
+        with _rw_lock:
+            node = _get_backend().get_node(item_id)
+    if not isinstance(node, dict):
+        return item_id
+    return str(node.get("label") or node.get("name") or node.get("content") or item_id)
+
+
+def _ask_relations(hits: list[dict]) -> list[dict[str, str]]:
+    """Collect one-hop entity relation edges for the memories used as evidence."""
+    relations: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for hit in hits:
+        memory_id = hit.get("item_id") or hit.get("id")
+        if not isinstance(memory_id, str) or not memory_id:
+            continue
+        neighbors = _get_neighbor_payload(memory_id).get("neighbors", [])
+        for neighbor in neighbors:
+            entity_id = neighbor.get("item_id") if isinstance(neighbor, dict) else None
+            if not isinstance(entity_id, str) or not entity_id:
+                continue
+            for edge in _get_neighbor_payload(entity_id).get("edges", []):
+                if not isinstance(edge, dict):
+                    continue
+                source_id = edge.get("source_id")
+                target_id = edge.get("target_id")
+                relation_type = edge.get("edge_type") or edge.get("link_type")
+                if (
+                    not isinstance(source_id, str)
+                    or not isinstance(target_id, str)
+                    or not isinstance(relation_type, str)
+                    or memory_id in (source_id, target_id)
+                ):
+                    continue
+                key = (source_id, relation_type, target_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                relations.append(
+                    {
+                        "source": _node_label(source_id),
+                        "type": relation_type,
+                        "target": _node_label(target_id),
+                    }
+                )
+    return relations
+
+
+def _ask_prompt(question: str, evidence: list[dict], relations: list[dict]) -> str:
+    """Format retrieved memories and graph edges as the model's grounded evidence."""
+    memories = (
+        "\n".join(f"- [{item['item_id']}] {item['content']}" for item in evidence)
+        or "- (no matching memories)"
+    )
+    edges = (
+        "\n".join(
+            f"- {edge['source']} --{edge['type']}--> {edge['target']}"
+            for edge in relations
+        )
+        or "- (no graph relations found)"
+    )
+    return (
+        f"Question: {question}\n\n"
+        f"Retrieved memories:\n{memories}\n\n"
+        f"Graph relations:\n{edges}\n\n"
+        "Answer the question directly using only this evidence. State the answer first, "
+        "then give concise reasoning. If the evidence is insufficient, say so plainly."
+    )
+
+
+@api.post("/ask")
+def ask_endpoint(body: AskRequest) -> dict:
+    """Answer a question from semantic memories plus their one-hop graph relations."""
+    if not llm_key_present():
+        raise HTTPException(
+            status_code=503,
+            detail="`sm ask` requires a configured LLM key (for example GROQ_API_KEY). "
+            "Run `smartmemory setup` or set a supported provider key.",
+        )
+
+    hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
+    evidence = [
+        {
+            "item_id": str(hit.get("item_id") or hit.get("id") or ""),
+            "content": str(hit.get("content") or ""),
+        }
+        for hit in hits
+        if isinstance(hit, dict) and (hit.get("item_id") or hit.get("id"))
+    ]
+    relations = _ask_relations(hits)
+
+    try:
+        from smartmemory.utils.llm import call_llm
+
+        _, answer = call_llm(
+            system_prompt=(
+                "You are SmartMemory's evidence-grounded question-answering assistant. "
+                "Do not invent facts beyond the provided memories and graph relations."
+            ),
+            user_content=_ask_prompt(body.question, evidence, relations),
+            max_output_tokens=500,
+            temperature=0,
+        )
+    except Exception as exc:
+        log.exception("sm ask LLM request failed")
+        raise HTTPException(
+            status_code=502, detail=f"Unable to answer with the configured LLM: {exc}"
+        )
+    if not isinstance(answer, str) or not answer.strip():
+        raise HTTPException(
+            status_code=502,
+            detail="The configured LLM returned no answer; no fallback answer was generated.",
+        )
+    return {"answer": answer.strip(), "evidence": evidence, "relations": relations}
 
 
 # LAUNCH-METRICS-1: daemon-side ingest. Remote mode forwards to the configured
@@ -822,6 +1056,7 @@ def ingest_launch_event(body: dict) -> dict:
     event_type = body.get("event_type")
     if not event_type:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail="event_type required")
     props = body.get("props") or {}
 
@@ -851,7 +1086,8 @@ def ingest_launch_event(body: dict) -> dict:
                 return r.json()
             except Exception as exc:
                 log.warning(
-                    "launch_metrics: remote forward failed, falling back to local JSONL: %s", exc
+                    "launch_metrics: remote forward failed, falling back to local JSONL: %s",
+                    exc,
                 )
         else:
             log.warning(
@@ -866,6 +1102,7 @@ def ingest_launch_event(body: dict) -> dict:
     }
     try:
         from smartmemory_app.storage import _resolve_data_dir
+
         data_path = _resolve_data_dir()
         data_path.mkdir(parents=True, exist_ok=True)
         path = data_path / "launch_events.jsonl"
@@ -874,6 +1111,7 @@ def ingest_launch_event(body: dict) -> dict:
     except Exception as exc:
         log.warning("launch_metrics: daemon write failed: %s", exc)
         from fastapi import HTTPException
+
         raise HTTPException(status_code=503, detail=str(exc))
     return {"event_id": record["event_id"], "event_type": event_type}
 
@@ -886,6 +1124,7 @@ def ingest_launch_event(body: dict) -> dict:
 
 class UpdateRequest(BaseModel):
     """CORE-CRUD-UPDATE-1 contract; matches SDK MemoryAPI.update body."""
+
     content: Optional[str] = None
     metadata: Optional[dict] = None
     properties: Optional[dict] = None
@@ -901,10 +1140,13 @@ def update_memory_item(memory_id: str, body: UpdateRequest) -> dict:
     """
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         # RemoteMemory has no update_node — proxy mode is out of scope for
         # DIST-OBSIDIAN-LITE-1. Surface explicitly rather than AttributeError.
-        raise HTTPException(status_code=501, detail="PATCH not available in remote-proxy mode")
+        raise HTTPException(
+            status_code=501, detail="PATCH not available in remote-proxy mode"
+        )
     with _rw_lock:
         # CORE-CRUD-UPDATE-1: properties wins over content/metadata conveniences
         props = dict(body.properties or {})
@@ -916,7 +1158,9 @@ def update_memory_item(memory_id: str, body: UpdateRequest) -> dict:
             for k, v in body.metadata.items():
                 props.setdefault(k, v)
         try:
-            mem.update_properties(memory_id, props, write_mode=body.write_mode or "merge")
+            mem.update_properties(
+                memory_id, props, write_mode=body.write_mode or "merge"
+            )
         except ValueError as e:
             # smart_memory.py:2012 → memory/pipeline/stages/crud.py:409 raises
             # ValueError("Node {item_id} not found in graph.") on missing item.
@@ -943,8 +1187,11 @@ def delete_memory_item(memory_id: str) -> Response:
     """
     mem = _get_mem()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
-        return Response(status_code=501, content="DELETE not available in remote-proxy mode")
+        return Response(
+            status_code=501, content="DELETE not available in remote-proxy mode"
+        )
     with _rw_lock:
         # SmartMemory.delete() at smart_memory.py:2182 delegates to crud.delete()
         # at crud.py:287, which already cascades to vector store + Vec_* nodes.

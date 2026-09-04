@@ -4,6 +4,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Added
+- **`sm ask "QUESTION"` answers from lite-mode memory evidence and graph relations.** It semantically retrieves the matching memories, follows their entity neighbors to collect the relevant relation edges, and makes one configured LLM call for a direct, grounded answer. The CLI prints the answer followed by the exact evidence memory IDs and relations used. It refuses with a clear 503 when no supported LLM key is configured; it never fabricates a fallback answer.
+
 ### Fixed
 - **Lifecycle hooks now use the warm daemon instead of cold-starting a model every time.** `DIST-DAEMON-1` promised every memory command tries the daemon HTTP API first and falls back to direct storage, but the `lifecycle` group was never wired up. Each of the six hooks (orient, recall, observe, distill, learn, persist) spawned a fresh interpreter and paid the embedder cold start on every single fire — and `observe` fires on every tool call. Measured over 120 real prompts, recall ran a 4.9s median with a 15.2s p90 and a 28.4s max, against Claude Code's 30s hook kill line, so under load `UserPromptSubmit` failed visibly and discarded its output. All six now POST to the daemon and fall back in-process unchanged when it is not running. Warm recall measures 0.34s against 5.3s cold on an idle machine, and the loaded-machine tail disappears because no model is loaded on the hook path at all.
 - **The daemon's `/lifecycle/recall` dropped `cwd`, undoing the workspace scoping fix below.** The CLI passed it and the HTTP endpoint did not, so recall through the daemon searched the config team instead of the session's workspace — the same leak that put a demo fixture corpus into unrelated coding sessions. The endpoint now forwards `cwd` like the CLI always did.

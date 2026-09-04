@@ -12,6 +12,7 @@ Tests cover:
 
 All tests mock _get_backend() to avoid touching the filesystem.
 """
+
 import os
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,7 @@ def client():
 # ---------------------------------------------------------------------------
 # Helper: canned serialize() output (nested properties — as serialize() returns)
 # ---------------------------------------------------------------------------
+
 
 def _make_serialize_node(
     item_id: str = "node-1",
@@ -243,16 +245,41 @@ class TestListMemories:
 
 class TestRecallRoute:
     def test_recall_named_route_is_not_captured_by_memory_id(self, client):
-        with patch("smartmemory_app.storage.recall", return_value="## SmartMemory Context\n- hello") as mock_recall:
+        with patch(
+            "smartmemory_app.storage.recall",
+            return_value="## SmartMemory Context\n- hello",
+        ) as mock_recall:
             r = client.get("/recall")
 
         assert r.status_code == 200
         assert r.json()["context"].startswith("## SmartMemory Context")
         # HOOK-RECALL-RELEVANCE-1: /recall accepts query/workspace_id/include_snapshot/strict
         mock_recall.assert_called_once_with(
-            None, 10,
-            query=None, workspace_id=None, include_snapshot=True, strict=False,
+            None,
+            10,
+            query=None,
+            workspace_id=None,
+            include_snapshot=True,
+            strict=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# POST /ask
+# ---------------------------------------------------------------------------
+
+
+class TestAsk:
+    def test_requires_llm_key_without_generating_a_fallback(self, client, monkeypatch):
+        """Question answering is unavailable, rather than invented, without a provider key."""
+        import smartmemory_app.local_api as local_api
+
+        monkeypatch.setattr(local_api, "llm_key_present", lambda: False)
+
+        response = client.post("/ask", json={"question": "What did we decide?"})
+
+        assert response.status_code == 503
+        assert "requires a configured LLM key" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +361,12 @@ class TestDeleteEndpoints:
         mock_mem = MagicMock()
         mock_mem.delete.return_value = True
         # Avoid the RemoteMemory branch
-        with patch("smartmemory_app.local_api._get_mem", return_value=mock_mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mock_mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
             r = client.delete("/some-memory-id")
         assert r.status_code == 204
         mock_mem.delete.assert_called_once_with("some-memory-id")
@@ -344,8 +375,12 @@ class TestDeleteEndpoints:
         """When SmartMemory.delete returns False, surface as 404."""
         mock_mem = MagicMock()
         mock_mem.delete.return_value = False
-        with patch("smartmemory_app.local_api._get_mem", return_value=mock_mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mock_mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
             r = client.delete("/nonexistent-id")
         assert r.status_code == 404
 
@@ -369,6 +404,7 @@ class TestUnconfiguredReturns503:
 
     def test_graph_full_returns_503_when_unconfigured(self, client):
         from smartmemory_app.config import UnconfiguredError
+
         with patch(
             "smartmemory_app.local_api.get_memory",
             side_effect=UnconfiguredError("not configured"),
@@ -379,6 +415,7 @@ class TestUnconfiguredReturns503:
 
     def test_graph_edges_returns_503_when_unconfigured(self, client):
         from smartmemory_app.config import UnconfiguredError
+
         with patch(
             "smartmemory_app.local_api.get_memory",
             side_effect=UnconfiguredError("not configured"),
@@ -388,6 +425,7 @@ class TestUnconfiguredReturns503:
 
     def test_memory_item_returns_503_when_unconfigured(self, client):
         from smartmemory_app.config import UnconfiguredError
+
         with patch(
             "smartmemory_app.local_api.get_memory",
             side_effect=UnconfiguredError("not configured"),
@@ -399,7 +437,9 @@ class TestUnconfiguredReturns503:
         """SMARTMEMORY_MODE=<typo> raises ValueError → _get_mem() converts to HTTP 400."""
         with patch(
             "smartmemory_app.local_api.get_memory",
-            side_effect=ValueError("Invalid SMARTMEMORY_MODE='remtoe'. Expected one of: local, remote"),
+            side_effect=ValueError(
+                "Invalid SMARTMEMORY_MODE='remtoe'. Expected one of: local, remote"
+            ),
         ):
             r = client.get("/graph/full")
         assert r.status_code == 400
@@ -423,7 +463,10 @@ class TestIngestLLMWarning:
             for k in list(_LLM_ENV):
                 os.environ.pop(k, None)
             with patch("smartmemory_app.storage.ingest", return_value="itm_123"):
-                r = client.post("/ingest", json={"content": "Alice leads Atlas", "memory_type": "episodic"})
+                r = client.post(
+                    "/ingest",
+                    json={"content": "Alice leads Atlas", "memory_type": "episodic"},
+                )
         assert r.status_code == 200
         body = r.json()
         assert body["item_id"] == "itm_123"
@@ -436,20 +479,28 @@ class TestIngestLLMWarning:
                 "smartmemory_app.storage.ingest",
                 return_value={"item_id": "itm_456", "entity_ids": {}, "queued": True},
             ):
-                r = client.post("/ingest", json={"content": "Bob ships Beta", "memory_type": "episodic"})
+                r = client.post(
+                    "/ingest",
+                    json={"content": "Bob ships Beta", "memory_type": "episodic"},
+                )
         assert r.status_code == 200
         assert "warning" not in r.json()
 
     def test_anthropic_only_key_is_recognised(self, client):
         """Regression: Anthropic-only used to be silently treated as no-key (Tier-2 skipped)."""
-        with patch.dict("os.environ", {**_LLM_ENV, "ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False):
+        with patch.dict(
+            "os.environ", {**_LLM_ENV, "ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False
+        ):
             for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
                 os.environ.pop(k, None)
             with patch(
                 "smartmemory_app.storage.ingest",
                 return_value={"item_id": "itm_789", "entity_ids": {}, "queued": True},
             ):
-                r = client.post("/ingest", json={"content": "Carol owns Core", "memory_type": "episodic"})
+                r = client.post(
+                    "/ingest",
+                    json={"content": "Carol owns Core", "memory_type": "episodic"},
+                )
         assert r.status_code == 200
         assert "warning" not in r.json()  # key present → no downgrade
 
@@ -460,12 +511,16 @@ class TestIngestLLMWarning:
         key and 500s on a fresh lite/ollama install. Earlier tests mocked ingest
         without checking sync=, so the bug slipped through — assert the arg here."""
         from unittest.mock import MagicMock
+
         fake = MagicMock(return_value={"item_id": "itm_lite", "entity_ids": {}})
         with patch.dict("os.environ", _LLM_ENV, clear=False):
             for k in list(_LLM_ENV):
                 os.environ.pop(k, None)
             with patch("smartmemory_app.storage.ingest", fake):
-                r = client.post("/ingest", json={"content": "hello world", "memory_type": "semantic"})
+                r = client.post(
+                    "/ingest",
+                    json={"content": "hello world", "memory_type": "semantic"},
+                )
         assert r.status_code == 200
         assert r.json()["item_id"] == "itm_lite"
         assert fake.call_count == 1

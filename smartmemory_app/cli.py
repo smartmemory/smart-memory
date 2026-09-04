@@ -744,7 +744,9 @@ def retag_cmd(
         click.echo(f"  {iid[:12]} {preview!r}")
 
     if dry_run:
-        click.echo(f"(dry run — re-run without --dry-run to retag with origin={new_origin!r})")
+        click.echo(
+            f"(dry run — re-run without --dry-run to retag with origin={new_origin!r})"
+        )
         return
 
     for iid, _ in matched:
@@ -1003,6 +1005,50 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
             f"[{item.get('memory_type', '?')}] {item.get('content', '')} "
             f"({str(item.get('item_id', ''))[:8]})"
         )
+
+
+@cli.command("ask")
+@click.argument("question")
+@click.option("--limit", default=5, show_default=True, type=click.IntRange(min=1))
+def ask_cmd(question: str, limit: int) -> None:
+    """Answer QUESTION from matching memories and their graph relations (lite mode)."""
+    result = _daemon_request(
+        "POST", "/memory/ask", json={"question": question, "limit": limit}
+    )
+    if result is None:
+        raise click.ClickException(_DAEMON_NOT_RUNNING_MSG)
+    if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
+        raise click.ClickException(
+            "SmartMemory daemon returned an invalid ask response."
+        )
+
+    click.echo(result["answer"])
+    evidence = result.get("evidence") or []
+    if evidence:
+        click.echo(click.style("  Evidence:", dim=True))
+        for item in evidence:
+            if not isinstance(item, dict):
+                continue
+            click.echo(
+                click.style(
+                    f"    - {item.get('item_id', '?')}: {item.get('content', '')}",
+                    dim=True,
+                )
+            )
+    relations = result.get("relations") or []
+    if relations:
+        click.echo(click.style("  Relations:", dim=True))
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            click.echo(
+                click.style(
+                    "    - "
+                    f"{relation.get('source', '?')} --{relation.get('type', '?')}--> "
+                    f"{relation.get('target', '?')}",
+                    dim=True,
+                )
+            )
 
 
 @cli.command("get")

@@ -166,6 +166,7 @@ memory = create_lite_memory(pipeline_profile=PipelineConfig.lite(llm_enabled=Fal
 sm add "text"                  # Remember something
 sm search "query"              # Find memories by meaning
 sm search "*"                  # List everything
+sm ask "what did we decide?"   # Answer from matching memories and graph relations
 sm viewer                      # Open the knowledge graph in your browser
 sm status                      # Daemon health and memory count
 sm config                      # View settings
@@ -188,6 +189,7 @@ smartmemory search "query"             # Semantic search
 smartmemory search "*"                 # List all memories
 smartmemory search --top-k 20 "query"  # Control result count (default: 5)
 smartmemory search --project atlas "q" # Filter by property
+smartmemory ask "what did we decide?"  # Grounded answer with memory and graph evidence
 
 smartmemory get <item_id>              # Fetch a single memory by ID
 smartmemory retag --content "x" --origin seed:demo --dry-run  # Re-tag matched items' origin
