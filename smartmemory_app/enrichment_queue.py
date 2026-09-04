@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS enrichment_queue (
     workspace_id TEXT DEFAULT '',
     enqueued_at REAL NOT NULL,
     status TEXT DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    store_generation TEXT DEFAULT '',
     started_at REAL,
     completed_at REAL,
     error TEXT
@@ -32,6 +34,7 @@ CREATE TABLE IF NOT EXISTS enrichment_queue (
 
 def _db_path() -> Path:
     from smartmemory_app.config import load_config
+
     data_dir = Path(load_config().data_dir).expanduser()
     return data_dir / "memory.db"
 
@@ -41,16 +44,46 @@ def _get_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(_CREATE_TABLE)
+    for name, definition in (
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("store_generation", "TEXT DEFAULT ''"),
+    ):
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(enrichment_queue)")
+        }
+        if name in columns:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE enrichment_queue ADD COLUMN {name} {definition}")
+        except sqlite3.OperationalError:
+            # A daemon ingest and worker poll can race on first access after an
+            # upgrade. Ignore only the duplicate-column result from that race.
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(enrichment_queue)")
+            }
+            if name not in columns:
+                raise
+    conn.commit()
     return conn
 
 
 def enqueue(item_id: str, entity_ids: dict, workspace_id: str = "") -> None:
     """Add a job to the enrichment queue. Called by the ingest endpoint."""
+    from smartmemory_app.store_generation import read_store_generation
+
     conn = _get_conn()
     try:
         conn.execute(
-            "INSERT INTO enrichment_queue (item_id, entity_ids, workspace_id, enqueued_at) VALUES (?, ?, ?, ?)",
-            (item_id, json.dumps(entity_ids), workspace_id, time.time()),
+            "INSERT INTO enrichment_queue "
+            "(item_id, entity_ids, workspace_id, enqueued_at, store_generation) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                item_id,
+                json.dumps(entity_ids),
+                workspace_id,
+                time.time(),
+                read_store_generation() or "",
+            ),
         )
         conn.commit()
     finally:
@@ -62,8 +95,8 @@ def dequeue(batch_size: int = 1) -> list[dict]:
     conn = _get_conn()
     try:
         cursor = conn.execute(
-            "SELECT id, item_id, entity_ids, workspace_id FROM enrichment_queue "
-            "WHERE status = 'pending' ORDER BY enqueued_at LIMIT ?",
+            "SELECT id, item_id, entity_ids, workspace_id, attempts, store_generation "
+            "FROM enrichment_queue WHERE status = 'pending' ORDER BY enqueued_at LIMIT ?",
             (batch_size,),
         )
         rows = cursor.fetchall()
@@ -74,15 +107,20 @@ def dequeue(batch_size: int = 1) -> list[dict]:
         ids = []
         for row in rows:
             ids.append(row[0])
-            jobs.append({
-                "queue_id": row[0],
-                "item_id": row[1],
-                "entity_ids": json.loads(row[2] or "{}"),
-                "workspace_id": row[3] or "",
-            })
+            jobs.append(
+                {
+                    "queue_id": row[0],
+                    "item_id": row[1],
+                    "entity_ids": json.loads(row[2] or "{}"),
+                    "workspace_id": row[3] or "",
+                    "attempts": row[4] + 1,
+                    "_store_generation": row[5] or None,
+                }
+            )
 
         conn.execute(
-            f"UPDATE enrichment_queue SET status = 'processing', started_at = ? "
+            f"UPDATE enrichment_queue SET status = 'processing', started_at = ?, "
+            f"attempts = attempts + 1 "
             f"WHERE id IN ({','.join('?' * len(ids))})",
             [time.time()] + ids,
         )
@@ -96,7 +134,7 @@ def mark_done(queue_id: int) -> None:
     conn = _get_conn()
     try:
         conn.execute(
-            "UPDATE enrichment_queue SET status = 'done', completed_at = ? WHERE id = ?",
+            "UPDATE enrichment_queue SET status = 'done', completed_at = ?, error = NULL WHERE id = ?",
             (time.time(), queue_id),
         )
         conn.commit()
@@ -110,6 +148,20 @@ def mark_failed(queue_id: int, error: str) -> None:
         conn.execute(
             "UPDATE enrichment_queue SET status = 'failed', completed_at = ?, error = ? WHERE id = ?",
             (time.time(), error, queue_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def mark_retry(queue_id: int, error: str) -> None:
+    """Return a claimed job to pending while retaining the last failure status."""
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE enrichment_queue SET status = 'pending', started_at = NULL, "
+            "completed_at = NULL, error = ? WHERE id = ?",
+            (error, queue_id),
         )
         conn.commit()
     finally:

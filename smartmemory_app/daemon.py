@@ -3,6 +3,7 @@
 Not a server itself — just functions for managing the daemon process.
 The daemon IS viewer_server.main() running in a detached subprocess.
 """
+
 import logging
 import os
 import signal
@@ -18,6 +19,7 @@ log = logging.getLogger(__name__)
 def _data_dir() -> Path:
     """Resolve data dir from config (respects data_dir setting and SMARTMEMORY_DATA_DIR env)."""
     from smartmemory_app.storage import _resolve_data_dir
+
     return _resolve_data_dir()
 
 
@@ -27,6 +29,7 @@ def _pid_file() -> Path:
 
 def _port() -> int:
     from smartmemory_app.config import load_config
+
     return load_config().daemon_port
 
 
@@ -52,7 +55,8 @@ def _launchd_loaded(label: str) -> bool:
     try:
         r = subprocess.run(
             ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return r.returncode == 0
     except Exception:
@@ -77,7 +81,7 @@ def _launchd_bootout(label: str) -> bool:
     return False
 
 
-def _launchd_bootstrap(label: str) -> bool:
+def _launchd_bootstrap(label: str, errors: Optional[list[str]] = None) -> bool:
     """Load a launchd job from its plist (RunAtLoad starts it). Idempotent; macOS only."""
     if sys.platform != "darwin":
         return False
@@ -90,16 +94,26 @@ def _launchd_bootstrap(label: str) -> bool:
         ["launchctl", "load", str(plist)],
     ):
         try:
-            if subprocess.run(cmd, capture_output=True, text=True).returncode == 0:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
                 return True
-        except Exception:
+            if errors is not None:
+                detail = (result.stderr or result.stdout or "").strip()
+                errors.append(
+                    f"{' '.join(cmd)}: {detail or f'exit code {result.returncode}'}"
+                )
+        except Exception as exc:
+            if errors is not None:
+                errors.append(f"{' '.join(cmd)}: {exc}")
             continue
     return False
 
 
 def _launchd_manages_daemon() -> bool:
     """True if the daemon plist is installed — launchd, not a subprocess, owns it."""
-    return sys.platform == "darwin" and _launchd_plist_path(_LAUNCHD_DAEMON_LABEL).exists()
+    return (
+        sys.platform == "darwin" and _launchd_plist_path(_LAUNCHD_DAEMON_LABEL).exists()
+    )
 
 
 def is_running(require_healthy: bool = True) -> bool:
@@ -113,6 +127,7 @@ def is_running(require_healthy: bool = True) -> bool:
     """
     try:
         import httpx
+
         with httpx.Client(trust_env=False) as client:
             r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
         data = r.json()
@@ -125,7 +140,9 @@ def is_running(require_healthy: bool = True) -> bool:
         return False
 
 
-def _stream_new_log_lines(log_path: Path, last_pos: int, emit: Callable[[str], None]) -> int:
+def _stream_new_log_lines(
+    log_path: Path, last_pos: int, emit: Callable[[str], None]
+) -> int:
     """Emit complete new lines from log_path past last_pos; return the new position.
 
     Used by start_daemon to surface the daemon's own startup progress (which it
@@ -152,7 +169,63 @@ def _stream_new_log_lines(log_path: Path, last_pos: int, emit: Callable[[str], N
         return last_pos
 
 
-def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] = None) -> None:
+def _tail_log_lines(log_path: Path, limit: int = 20) -> list[str]:
+    """Read a bounded daemon-log tail for startup error reporting."""
+    try:
+        return log_path.read_text(encoding="utf-8", errors="replace").splitlines()[
+            -limit:
+        ]
+    except OSError:
+        return []
+
+
+def _launchd_job_summary(label: str) -> list[str]:
+    """Return only non-secret launchd state lines for diagnostics."""
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        return [f"launchctl print failed: {exc}"]
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        return [f"launchctl print: {detail or f'exit code {result.returncode}'}"]
+    safe_prefixes = ("state =", "pid =", "runs =", "last exit code =")
+    return [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip().startswith(safe_prefixes)
+    ]
+
+
+def _launchd_failure_message(
+    summary: str,
+    log_path: Path,
+    *,
+    command_errors: Optional[list[str]] = None,
+    include_job_state: bool = False,
+) -> str:
+    """Build an actionable startup failure without exposing launchd environment values."""
+    details = [summary]
+    if command_errors:
+        details.append("launchctl errors:\n  " + "\n  ".join(command_errors))
+    if include_job_state:
+        state = _launchd_job_summary(_LAUNCHD_DAEMON_LABEL)
+        if state:
+            details.append("launchd state:\n  " + "\n  ".join(state))
+    tail = _tail_log_lines(log_path)
+    if tail:
+        details.append(f"Last {len(tail)} lines of {log_path}:\n  " + "\n  ".join(tail))
+    else:
+        details.append(f"No daemon log was written at {log_path}")
+    return "\n".join(details)
+
+
+def start_daemon(
+    num_workers: int = 1, on_log: Optional[Callable[[str], None]] = None
+) -> None:
     """Start the daemon and enrichment workers.
 
     Blocks until daemon is ready (health check passes) or timeout.
@@ -169,6 +242,7 @@ def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] =
     data = _data_dir()
     data.mkdir(parents=True, exist_ok=True)
     log_path = data / "daemon.log"
+    log_path.touch(exist_ok=True)
     # Stream only NEW startup lines — skip whatever was already in daemon.log.
     _log_pos = log_path.stat().st_size if log_path.exists() else 0
 
@@ -183,9 +257,20 @@ def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] =
     # mode switch actually takes effect. Falls through to the subprocess path on
     # non-macOS or when no plist is installed (dev/CI).
     if _launchd_manages_daemon():
+        bootstrap_errors: list[str] = []
         for label in (_LAUNCHD_DAEMON_LABEL, _LAUNCHD_WORKER_LABEL):
             if _launchd_plist_path(label).exists() and not _launchd_loaded(label):
-                _launchd_bootstrap(label)
+                label_errors: list[str] = []
+                if not _launchd_bootstrap(label, label_errors):
+                    bootstrap_errors.extend(label_errors)
+                    raise RuntimeError(
+                        _launchd_failure_message(
+                            f"Failed to bootstrap launchd job {label}.",
+                            log_path,
+                            command_errors=bootstrap_errors,
+                            include_job_state=True,
+                        )
+                    )
         for _ in range(120):  # up to 60s for launchd to bring it healthy
             _pump()
             if is_running(require_healthy=False):
@@ -193,7 +278,12 @@ def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] =
                 return
             time.sleep(0.5)
         raise TimeoutError(
-            f"launchd daemon did not become healthy within 60s. Check {log_path}"
+            _launchd_failure_message(
+                "launchd daemon did not become healthy within 60s.",
+                log_path,
+                command_errors=bootstrap_errors,
+                include_job_state=True,
+            )
         )
 
     port = _port()
@@ -203,8 +293,11 @@ def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] =
     # Inherit PYTHONPATH so editable installs work in dev.
     env = os.environ.copy()
     proc = subprocess.Popen(
-        [sys.executable, "-c",
-         f"from smartmemory_app.viewer_server import main; main(port={port}, open_browser=False)"],
+        [
+            sys.executable,
+            "-c",
+            f"from smartmemory_app.viewer_server import main; main(port={port}, open_browser=False)",
+        ],
         stdout=open(log_path, "a"),
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -213,6 +306,7 @@ def start_daemon(num_workers: int = 1, on_log: Optional[Callable[[str], None]] =
 
     # Phase 1: Wait for port to open (fast socket check, no httpx timeout)
     import socket
+
     for _ in range(120):  # 60s max
         if proc.poll() is not None:
             _pump()  # surface whatever the daemon logged before it died
@@ -255,6 +349,7 @@ def _start_workers(num_workers: int = 1) -> None:
         num_workers: Number of worker processes to start (default 1).
     """
     from smartmemory_app.config import LLM_KEY_ENV_VARS, llm_key_present
+
     if not llm_key_present():
         # no-silent-degradation: this fallback disables Tier-2 entirely, so say so.
         log.warning(
@@ -357,7 +452,8 @@ def stop_daemon() -> None:
             # Verify it's actually a smartmemory process before killing
             result = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             if "smartmemory" in result.stdout:
                 os.kill(pid, signal.SIGTERM)
@@ -372,6 +468,7 @@ def get_status() -> dict | None:
         return None
     try:
         import httpx
+
         with httpx.Client(trust_env=False) as client:
             r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=3)
         return r.json()

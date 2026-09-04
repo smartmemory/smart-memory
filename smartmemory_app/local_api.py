@@ -18,10 +18,11 @@ DELETE /graph/nodes/{id} → /memory/graph/nodes/{id} (405 — entity-node ops s
 All endpoints acquire _rw_lock for thread safety under uvicorn's thread pool.
 """
 
+import ipaddress
 import logging
 import re
 import threading
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -440,7 +441,6 @@ def clear_all() -> dict:
                 "*.usearch",
                 "*.json",
                 "*.jsonl",
-                "*.log",
                 ".write.lock",
             ]:
                 for f in data_path.glob(pattern):
@@ -461,6 +461,13 @@ def clear_all() -> dict:
 
         reset_queue()
 
+        # Publish replacement only after the new data directory is ready. A
+        # process-separated worker compares this marker before every read/write
+        # and closes any SQLite handle still pointing at the unlinked old file.
+        from smartmemory_app.store_generation import bump_store_generation
+
+        bump_store_generation()
+
     # Publish graph_cleared event (outside lock — emit is thread-safe)
     try:
         from smartmemory_app.event_sink import get_event_sink
@@ -479,6 +486,59 @@ def clear_all() -> dict:
         pass
 
     return {"cleared": removed}
+
+
+class InternalGraphEvent(BaseModel):
+    """A graph mutation already committed by the process-separated worker."""
+
+    operation: Literal["add_node", "add_edge"]
+    data: dict[str, Any]
+
+
+class InternalEventsRequest(BaseModel):
+    events: list[InternalGraphEvent]
+
+
+@api.post("/_internal/events")
+def publish_internal_events(body: InternalEventsRequest, request: Request) -> dict:
+    """Bridge loopback Tier-2 notifications into the daemon's viewer sink."""
+    client_host = request.client.host if request.client is not None else ""
+    try:
+        is_loopback = ipaddress.ip_address(client_host).is_loopback
+    except ValueError:
+        is_loopback = False
+    if not is_loopback:
+        raise HTTPException(
+            status_code=403,
+            detail="Internal event publication is restricted to loopback clients.",
+        )
+
+    from smartmemory_app.event_sink import get_event_sink
+
+    sink = get_event_sink()
+    for event in body.events:
+        data = dict(event.data)
+        if event.operation == "add_node" and not (
+            data.get("memory_id") or data.get("item_id")
+        ):
+            raise HTTPException(status_code=422, detail="add_node event requires an id")
+        if event.operation == "add_edge" and not (
+            data.get("source_id") and data.get("target_id")
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="add_edge event requires source_id and target_id",
+            )
+        sink.emit(
+            "span",
+            {
+                **data,
+                "component": "graph",
+                "operation": event.operation,
+                "name": f"graph.{event.operation}",
+            },
+        )
+    return {"accepted": len(body.events)}
 
 
 @api.post("/reindex")
@@ -886,6 +946,11 @@ class AskRequest(BaseModel):
     limit: int = 5
 
 
+_STRUCTURAL_EDGE_TYPES = frozenset(
+    {"GROUNDED_IN", "CONTAINS_ENTITY", "MENTIONED_IN", "HAS_VERSION"}
+)
+
+
 def _get_neighbor_payload(memory_id: str) -> dict:
     """Return the same neighbor-and-edge payload exposed by ``/{id}/neighbors``."""
     mem = _get_mem()
@@ -960,6 +1025,7 @@ def _ask_relations(hits: list[dict]) -> list[dict[str, str]]:
                     or not isinstance(target_id, str)
                     or not isinstance(relation_type, str)
                     or memory_id in (source_id, target_id)
+                    or relation_type.upper() in _STRUCTURAL_EDGE_TYPES
                 ):
                     continue
                 key = (source_id, relation_type, target_id)

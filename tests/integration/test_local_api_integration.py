@@ -74,12 +74,21 @@ class TestAskIntegration:
         _add_node(backend, "zed", "Zed", "entity")
         _add_node(backend, "xavier", "Xavier", "entity")
         _add_node(backend, "yara", "Yara", "entity")
+        _add_node(backend, "wikipedia:zed", "Wikipedia Zed", "entity")
         _add_edge(backend, "memory-1", "zed", "mentions")
         _add_edge(backend, "memory-1", "xavier", "mentions")
         _add_edge(backend, "memory-1", "yara", "mentions")
         _add_edge(backend, "zed", "xavier", "distrusts")
         _add_edge(backend, "zed", "yara", "trusts")
         _add_edge(backend, "xavier", "yara", "witnessed_theft_by")
+        structural_edges = {
+            "GROUNDED_IN": ("zed", "wikipedia:zed"),
+            "CONTAINS_ENTITY": ("memory-1", "zed"),
+            "MENTIONED_IN": ("yara", "memory-1"),
+            "HAS_VERSION": ("memory-1", "wikipedia:zed"),
+        }
+        for edge_type, (source_id, target_id) in structural_edges.items():
+            _add_edge(backend, source_id, target_id, edge_type)
 
         import smartmemory_app.local_api as local_api
 
@@ -120,6 +129,9 @@ class TestAskIntegration:
         assert len(llm_calls) == 1
         assert "Xavier saw Yara steal an amulet." in llm_calls[0]["user_content"]
         assert "Zed --distrusts--> Xavier" in llm_calls[0]["user_content"]
+        for edge_type in structural_edges:
+            assert edge_type not in llm_calls[0]["user_content"]
+            assert all(relation["type"] != edge_type for relation in body["relations"])
 
 
 # ---------------------------------------------------------------------------

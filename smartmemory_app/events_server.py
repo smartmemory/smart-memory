@@ -13,6 +13,7 @@ Correctness constraints (all present):
 - Thread is daemon=True — exits automatically with the process
 - OSError caught in _serve() → log warning, do not re-raise
 """
+
 import asyncio
 import logging
 import threading
@@ -23,11 +24,20 @@ log = logging.getLogger(__name__)
 # Span-envelope fields that belong at the message top level.
 # Everything else in a queue item becomes the nested ``data`` payload
 # that classifyEvent.js reads from ``raw.data``.
-_SPAN_STRUCTURAL_FIELDS = frozenset({
-    "event_type", "component", "operation", "name",
-    "trace_id", "span_id", "parent_span_id", "duration_ms",
-    "error", "status",
-})
+_SPAN_STRUCTURAL_FIELDS = frozenset(
+    {
+        "event_type",
+        "component",
+        "operation",
+        "name",
+        "trace_id",
+        "span_id",
+        "parent_span_id",
+        "duration_ms",
+        "error",
+        "status",
+    }
+)
 
 
 def _to_viewer_message(item: dict) -> dict:
@@ -121,6 +131,8 @@ def _to_progress_event(item: dict, seq: int) -> dict | None:
         kind = "graph.node"
     elif op == "add_edge":
         kind = "graph.edge"
+    elif op == "clear_all":
+        kind = "graph.cleared"
     else:
         return None
     now = time.time()
@@ -154,6 +166,7 @@ def _fanout_sse(item: dict) -> None:
     if frame is None:
         return
     for sub_loop, q in subs:
+
         def _push(q=q, frame=frame) -> None:
             try:
                 q.put_nowait(frame)
@@ -183,6 +196,7 @@ async def _broadcast(sink, clients: set) -> None:
     _fanout_sse(item)
 
     import json
+
     message = json.dumps(_to_viewer_message(item))
     if clients:
         await asyncio.gather(
@@ -224,7 +238,9 @@ async def _serve(port: int = 9015) -> None:
                 clients.discard(ws)
                 log.info("events-server: client disconnected (total: %d)", len(clients))
 
-        async with websockets.serve(_handler, "localhost", port, subprotocols=["sm.v1"]):
+        async with websockets.serve(
+            _handler, "localhost", port, subprotocols=["sm.v1"]
+        ):
             log.info("events-server: listening on ws://localhost:%d", port)
             while not _stop_event.is_set():
                 await _broadcast(sink, clients)
@@ -257,7 +273,9 @@ def start_background(port: int = 9015) -> None:
         def _run() -> None:
             asyncio.run(_serve(port=port))
 
-        _server_thread = threading.Thread(target=_run, daemon=True, name="smartmemory-events-server")
+        _server_thread = threading.Thread(
+            target=_run, daemon=True, name="smartmemory-events-server"
+        )
         _server_thread.start()
         log.info("events-server: background thread started (port %d)", port)
 

@@ -8,9 +8,9 @@ Tests cover:
   - Broadcaster: broken client does not kill loop (return_exceptions=True)
   - stop_event causes broadcaster to exit
 """
+
 import asyncio
 import threading
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -25,14 +25,17 @@ class TestGetEventSink:
     def setup_method(self):
         """Reset singleton before each test."""
         import smartmemory_app.event_sink as _mod
+
         _mod._sink = None
 
     def teardown_method(self):
         import smartmemory_app.event_sink as _mod
+
         _mod._sink = None
 
     def test_sequential_calls_return_same_instance(self):
         from smartmemory_app.event_sink import get_event_sink
+
         a = get_event_sink()
         b = get_event_sink()
         assert a is b
@@ -50,8 +53,10 @@ class TestGetEventSink:
 
         t1 = threading.Thread(target=_worker)
         t2 = threading.Thread(target=_worker)
-        t1.start(); t2.start()
-        t1.join(timeout=5); t2.join(timeout=5)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
 
         assert len(results) == 2
         # Both must be the exact same object
@@ -66,11 +71,13 @@ class TestGetEventSink:
 class TestStartBackground:
     def setup_method(self):
         import smartmemory_app.events_server as _mod
+
         _mod._server_thread = None
         _mod._stop_event.clear()
 
     def teardown_method(self):
         import smartmemory_app.events_server as _mod
+
         _mod._stop_event.set()
         if _mod._server_thread is not None:
             _mod._server_thread.join(timeout=2)
@@ -112,8 +119,10 @@ class TestStartBackground:
 
             t1 = threading.Thread(target=_caller)
             t2 = threading.Thread(target=_caller)
-            t1.start(); t2.start()
-            t1.join(timeout=5); t2.join(timeout=5)
+            t1.start()
+            t2.start()
+            t1.join(timeout=5)
+            t2.join(timeout=5)
 
         # Both callers should observe the same thread object
         assert len(threads_spawned) == 2
@@ -188,7 +197,9 @@ class TestServe:
             mock_ws_server.__aexit__ = AsyncMock(return_value=False)
 
             with (
-                patch("smartmemory_app.event_sink.get_event_sink", return_value=mock_sink),
+                patch(
+                    "smartmemory_app.event_sink.get_event_sink", return_value=mock_sink
+                ),
                 patch("websockets.serve", return_value=mock_ws_server),
                 patch("smartmemory_app.events_server.log"),
             ):
@@ -249,6 +260,88 @@ class TestBroadcast:
 
         asyncio.run(_run())
 
+
+class TestInternalWorkerEvents:
+    def test_loopback_worker_event_reaches_sink_as_viewer_frame(self):
+        """A Tier-2 worker notification becomes the same graph frame as Tier 1."""
+        import smartmemory_app.events_server as events_server
+        import smartmemory_app.local_api as local_api
+        from smartmemory.observability.events import InProcessQueueSink
+        from starlette.requests import Request
+
+        async def _run():
+            sink = InProcessQueueSink()
+            sink.attach_loop(asyncio.get_running_loop())
+            request = Request({"type": "http", "client": ("127.0.0.1", 50000)})
+            body = local_api.InternalEventsRequest(
+                events=[
+                    local_api.InternalGraphEvent(
+                        operation="add_node",
+                        data={
+                            "memory_id": "bo",
+                            "label": "Bo",
+                            "memory_type": "entity",
+                            "node_category": "entity",
+                            "entity_type": "person",
+                        },
+                    ),
+                    local_api.InternalGraphEvent(
+                        operation="add_edge",
+                        data={
+                            "source_id": "zed",
+                            "target_id": "bo",
+                            "edge_type": "TRUSTS",
+                        },
+                    ),
+                ]
+            )
+            with patch("smartmemory_app.event_sink.get_event_sink", return_value=sink):
+                result = local_api.publish_internal_events(body, request)
+            assert result == {"accepted": 2}
+            await asyncio.sleep(0)
+            node_raw = await asyncio.wait_for(sink._q.get(), timeout=1)
+            edge_raw = await asyncio.wait_for(sink._q.get(), timeout=1)
+            node_frame = events_server._to_progress_event(node_raw, 1)
+            edge_frame = events_server._to_progress_event(edge_raw, 2)
+            assert node_frame["kind"] == "graph.node"
+            assert node_frame["payload"]["data"]["memory_id"] == "bo"
+            assert edge_frame["kind"] == "graph.edge"
+            assert edge_frame["payload"]["data"] == {
+                "source_id": "zed",
+                "target_id": "bo",
+                "edge_type": "TRUSTS",
+            }
+
+        asyncio.run(_run())
+
+    def test_non_loopback_worker_event_is_rejected(self):
+        import smartmemory_app.local_api as local_api
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        request = Request({"type": "http", "client": ("203.0.113.10", 50000)})
+        body = local_api.InternalEventsRequest(events=[])
+        with pytest.raises(HTTPException, match="loopback"):
+            local_api.publish_internal_events(body, request)
+
+    def test_clear_event_projects_to_supported_graph_cleared_frame(self):
+        import smartmemory_app.events_server as events_server
+
+        frame = events_server._to_progress_event(
+            {
+                "event_type": "span",
+                "component": "graph",
+                "operation": "clear_all",
+                "name": "graph.clear_all",
+                "nuclear": True,
+            },
+            7,
+        )
+        assert frame["kind"] == "graph.cleared"
+        assert frame["seq"] == 7
+
+
+class TestBroadcastResilience:
     def test_broken_client_does_not_kill_loop(self):
         """return_exceptions=True: an exception from one client doesn't crash the broadcast."""
         import smartmemory_app.events_server as _mod

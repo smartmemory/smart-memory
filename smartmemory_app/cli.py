@@ -1944,7 +1944,6 @@ def clear_cmd() -> None:
         "*.usearch",
         "*.json",
         "*.jsonl",
-        "*.log",
         ".write.lock",
     ]:
         for f in data_path.glob(pattern):
@@ -1959,6 +1958,9 @@ def clear_cmd() -> None:
     from smartmemory_app.setup import _seed_data_dir
 
     _seed_data_dir()
+    from smartmemory_app.store_generation import bump_store_generation
+
+    bump_store_generation()
     click.echo("Re-seeded entity patterns.")
 
 
