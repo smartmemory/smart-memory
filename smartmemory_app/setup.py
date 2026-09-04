@@ -21,8 +21,7 @@ import subprocess
 from pathlib import Path
 import sys
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 import click
 
@@ -148,6 +147,12 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     Three self-contained branches — each handles config, post-config, AND daemon
     start. No shared post-branch code to avoid double-start bugs.
     """
+    from smartmemory_app.config import config_path
+
+    # DIST-UPDATE-HINT-1: whether this is a first install, read before any branch
+    # writes a config. The TUI branch owns its own completion screen, so the
+    # first-run line is echoed here for it; the click branch echoes its own.
+    first_run = not config_path().exists()
     # Branch 1: Flags provided — use click flow directly
     # _setup_click() already handles daemon start for local mode internally
     if mode is not None:
@@ -180,6 +185,8 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
                     _lm_emit("setup.complete", {"mode": "local"})
                 except Exception:
                     pass
+                if first_run:
+                    click.echo("All done. Run 'sm tour' if this is your first time.")
             if for_tool:
                 _setup_tool_config(for_tool)
             return
@@ -388,7 +395,10 @@ def _setup_local() -> None:
     All local deps (smartmemory-core, spaCy, usearch, filelock) are already
     installed as part of `pip install smartmemory` — no extra install step needed.
     """
-    from smartmemory_app.config import SmartMemoryConfig, save_config
+    from smartmemory_app.config import SmartMemoryConfig, config_path, save_config
+
+    # DIST-UPDATE-HINT-1: read before save_config writes one.
+    was_first_run = not config_path().exists()
 
     coref = click.confirm(
         "\nEnable coreference resolution? "
@@ -451,7 +461,7 @@ def _setup_local() -> None:
             try:
                 import keyring
                 keyring.set_password("smartmemory", key_envvar, api_key.strip())
-                click.echo(f"  Also stored in OS keychain.")
+                click.echo("  Also stored in OS keychain.")
             except Exception:
                 pass  # keyring optional — shell profile is the primary store
 
@@ -499,7 +509,13 @@ def _setup_local() -> None:
         time.sleep(2)
     click.echo("Starting daemon...")
     start_daemon()
-    click.echo("Done. SmartMemory is ready.")
+    if was_first_run:
+        # DIST-UPDATE-HINT-1: the tour nudge belongs to the first run only. On a
+        # re-run of setup the user has seen it, and the upgrade notice in
+        # update_check owns any later mention.
+        click.echo("All done. Run 'sm tour' if this is your first time.")
+    else:
+        click.echo("Done. SmartMemory is ready.")
 
 
 def _setup_remote(api_key: str | None) -> None:

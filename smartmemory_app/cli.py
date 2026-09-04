@@ -39,32 +39,9 @@ def _configure_cli_logging() -> None:
 MIN_CORE_VERSION = "1.0.0"
 
 
-def _version_lt(a: str, b: str) -> bool:
-    """Return True if version string `a` is strictly less than `b`.
-
-    Prefers packaging.version (an indirect dep) for PEP 440 correctness; falls
-    back to a tuple-of-ints compare so doctor never hard-fails on a missing dep.
-    """
-    try:
-        from packaging.version import Version
-
-        return Version(a) < Version(b)
-    except Exception:
-
-        def _tuple(v: str) -> tuple[int, ...]:
-            # Take the leading numeric release segment ("1.4.32rc1" -> (1, 4, 32)).
-            parts: list[int] = []
-            for chunk in v.split(".")[:3]:
-                num = ""
-                for ch in chunk:
-                    if ch.isdigit():
-                        num += ch
-                    else:
-                        break
-                parts.append(int(num) if num else 0)
-            return tuple(parts)
-
-        return _tuple(a) < _tuple(b)
+# Canonical implementation lives in update_check (which must not import this
+# module), so `doctor` and the update hint can never disagree on ordering.
+from smartmemory_app.update_check import version_lt as _version_lt  # noqa: E402
 
 
 def _parse_extra_props(args: list[str]) -> dict[str, str]:
@@ -176,6 +153,25 @@ def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
     _configure_cli_logging()
+
+
+@cli.result_callback()
+@click.pass_context
+def _print_trailing_notices(ctx, result, **_kwargs) -> None:
+    """DIST-UPDATE-HINT-1: one dim trailing line per notice, after any command.
+
+    Everything about whether to print at all (opt-out, TTY, hook commands,
+    --json, the 24 h cache) lives in update_check.trailing_notices; this only
+    renders. It must never change a command's outcome, hence the blanket
+    except: a failed hint is not a failed command.
+    """
+    try:
+        from smartmemory_app.update_check import trailing_notices
+
+        for line in trailing_notices(ctx.invoked_subcommand):
+            click.echo(click.style(line, dim=True))
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("trailing notices failed: %s", exc)
 
 
 # Register setup/uninstall commands from setup module

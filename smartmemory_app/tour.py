@@ -6,6 +6,16 @@ TUI presents each step as the equivalent CLI session the user would type
 (`sm add`, `sm search`, `sm recall`) — command first, output below.
 The browser viewer observes the existing live graph event path; this module
 does not emit graph events itself.
+
+``TOUR_VERSION`` (DIST-UPDATE-HINT-1) is the content version of the arc below.
+**Bump it whenever a tour step is added, removed, or materially changed.** It is
+the only thing that decides whether an upgraded user is told to re-run `sm tour`:
+`smartmemory_app.update_check` appends "Run 'sm tour' to see what's new" to the
+upgrade notice only when this number differs from the one last shown. Leave it
+alone for a wording tweak; bump it for a new capability.
+
+  1 — original DIST-TOUR-1 arc (seed, search, receipt, recall, CLAUDE.md import)
+  2 — adds the `sm ask` step (DIST-UPDATE-HINT-1)
 """
 
 from __future__ import annotations
@@ -34,7 +44,10 @@ from textual.containers import Center, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
+TOUR_VERSION = 2
+
 SEARCH_QUERY = "which database did we pick"
+ASK_QUESTION = "why did we pick that database"
 RECALL_QUERY = "what should I remember when this project starts"
 TOUR_STEP_DWELL_ENV = "SMARTMEMORY_TOUR_STEP_DWELL"
 DEFAULT_TOUR_STEP_DWELL_SECONDS = 4.0
@@ -103,6 +116,8 @@ class TourClient(Protocol):
     def recall(
         self, cwd: str | None = None, top_k: int = 8, query: str | None = None
     ) -> dict: ...
+
+    def ask(self, question: str, limit: int = 5) -> dict: ...
 
     def close(self) -> None: ...
 
@@ -208,6 +223,14 @@ class TourHttpClient:
                 "include_snapshot": "true",
                 "strict": "false",
             },
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def ask(self, question: str, limit: int = 5) -> dict:
+        response = self._client.post(
+            "/memory/ask",
+            json={"question": question, "limit": limit},
         )
         response.raise_for_status()
         return response.json()
@@ -368,10 +391,22 @@ class TourArcDriver:
                 "sm add --all - < ./CLAUDE.md",
             )
 
+        self._dwell()
+        self._emit(
+            emit,
+            6,
+            "Ask a question",
+            "Search returns memories. Ask answers the question from them and the relations between them.",
+        )
+        self._session_type(emit, f'sm ask "{ASK_QUESTION}"')
+        answer = self._ask_answer(ASK_QUESTION)
+        self._session_print(emit, answer)
+
         cheat_sheet = "\n".join(
             [
                 'sm add "We chose Postgres for reporting queries"',
                 'sm search "which database did we pick"',
+                'sm ask "why did we pick that database"',
                 "sm recall --query 'startup context'",
                 "sm add - < notes.txt",
                 "sm add --all - < CLAUDE.md",
@@ -381,7 +416,7 @@ class TourArcDriver:
         self._dwell()
         self._emit(
             emit,
-            6,
+            7,
             "Try it on your project",
             cheat_sheet,
             "sm tour",
@@ -403,6 +438,29 @@ class TourArcDriver:
             store_was_empty=False,
             store_populated=False,
         )
+
+    def _ask_answer(self, question: str) -> str:
+        """The `sm ask` answer, or a stated reason why there is none.
+
+        Ask needs an LLM the tour cannot assume is configured, so a failure here
+        must not abort an otherwise-good tour. It is a display degradation, not a
+        data one: the reason is logged at WARNING and shown on screen, never
+        swallowed (no-silent-degradation.md).
+        """
+        ask = getattr(self.client, "ask", None)
+        if ask is None:
+            logger.warning("SmartMemory tour: client has no ask(); showing the command only.")
+            return "(ask unavailable: this tour client does not implement ask)"
+        try:
+            response = ask(question, 5)
+        except Exception as exc:
+            logger.warning("SmartMemory tour: sm ask failed (%s); showing the command only.", exc)
+            return f"(ask unavailable: {exc})"
+        answer = response.get("answer") if isinstance(response, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            logger.warning("SmartMemory tour: sm ask returned no answer.")
+            return "(ask returned no answer)"
+        return answer.strip()
 
     def _emit(
         self,
@@ -871,7 +929,7 @@ class TourApp(App):
         self._result = result
         self._show_event(
             TourEvent(
-                step=6 if result.success else 3,
+                step=7 if result.success else 3,
                 title="Tour complete" if result.success else "Tour degraded",
                 body=_completion_body(result, keep=getattr(self.runner, "keep", None)),
                 command="Press Enter to exit.",

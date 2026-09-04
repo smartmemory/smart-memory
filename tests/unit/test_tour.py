@@ -35,6 +35,10 @@ class FakeHttpClient:
     ) -> dict:
         return {"context": "\n".join(self.ingested[:top_k])}
 
+    def ask(self, question: str, limit: int = 5) -> dict:
+        assert question == tour.ASK_QUESTION
+        return {"answer": "Postgres, because reporting queries need joins."}
+
     def close(self) -> None:
         self.closed = True
 
@@ -264,8 +268,8 @@ def test_arc_driver_step_dwell_runs_before_receipt_and_recall_emits(
     ) as mock_sleep:
         driver.run_default_arc(include_claude_import=False, emit=record_emit)
 
-    # Dwells before steps 2-6 plus the trailing hold on the final cheat-sheet screen.
-    assert mock_sleep.call_count == 6
+    # Dwells before steps 2-7 plus the trailing hold on the final cheat-sheet screen.
+    assert mock_sleep.call_count == 7
     assert all(call.args == (1.25,) for call in mock_sleep.call_args_list)
     assert timeline[timeline.index("emit:Token receipt") - 1] == "sleep:1.25"
     assert timeline[timeline.index("emit:Cross-session recall") - 1] == "sleep:1.25"
@@ -346,7 +350,7 @@ def test_tour_session_runner_uses_step_dwell_env_override(
     with patch("smartmemory_app.tour.time.sleep") as mock_sleep:
         runner.run()
 
-    assert mock_sleep.call_count == 6
+    assert mock_sleep.call_count == 7
     assert all(call.args == (1.5,) for call in mock_sleep.call_args_list)
 
 
@@ -558,3 +562,55 @@ def test_cli_tour_invokes_run_tour() -> None:
         port=19000,
         no_viewer=True,
     )
+
+
+def test_arc_driver_ask_step_shows_the_answer(tmp_path: Path) -> None:
+    """DIST-UPDATE-HINT-1: the tour gained an `sm ask` step (TOUR_VERSION 2)."""
+    client = FakeHttpClient()
+    events: list[tour.TourEvent] = []
+    driver = tour.TourArcDriver(
+        client=client,
+        facts=tour.DEFAULT_TOUR_FACTS,
+        cwd=tmp_path,
+        pace_seconds=0,
+    )
+
+    driver.run_default_arc(include_claude_import=False, emit=events.append)
+
+    assert tour.TOUR_VERSION == 2
+    steps = {e.title: e.step for e in events}
+    assert steps["Ask a question"] == 6
+    assert steps["Try it on your project"] == 7
+    assert 'sm ask "why did we pick that database"' in next(
+        e.body for e in events if e.title == "Try it on your project"
+    )
+    assert (
+        driver._ask_answer(tour.ASK_QUESTION)
+        == "Postgres, because reporting queries need joins."
+    )
+
+
+def test_arc_driver_ask_failure_is_logged_not_swallowed(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ask needs an LLM; a failure degrades the step but never aborts the tour."""
+
+    class AskFailsClient(FakeHttpClient):
+        def ask(self, question: str, limit: int = 5) -> dict:
+            raise RuntimeError("no LLM key configured")
+
+    driver = tour.TourArcDriver(
+        client=AskFailsClient(),
+        facts=tour.DEFAULT_TOUR_FACTS,
+        cwd=tmp_path,
+        pace_seconds=0,
+    )
+
+    with caplog.at_level("WARNING", logger="smartmemory_app.tour"):
+        result = driver.run_default_arc(include_claude_import=False, emit=None)
+        answer = driver._ask_answer(tour.ASK_QUESTION)
+
+    assert result.success is True
+    assert answer == "(ask unavailable: no LLM key configured)"
+    assert "no LLM key configured" in caplog.text

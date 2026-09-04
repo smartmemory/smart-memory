@@ -227,6 +227,14 @@ smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
 
+Once a day, any `sm` command may end with one dim line telling you a newer release is on PyPI:
+
+```
+smartmemory 1.4.87 available — pip install -U smartmemory
+```
+
+The check runs at most once every 24 hours, times out after 2 seconds, and stays quiet when it fails, when output is piped, and on the commands that feed context to a model. Set `SMARTMEMORY_NO_UPDATE_CHECK=1` to switch it off. After an upgrade, the next command says `Updated to <version>`, and suggests re-running `sm tour` only when the tour itself gained something.
+
 ### Admin
 
 ```bash
@@ -650,6 +658,7 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_EMBEDDING_PROVIDER` | Embedding provider (`local`, `openai`, `ollama`) |
 | `SMARTMEMORY_DAEMON_PORT` | Daemon port (default: `9014`) |
 | `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
+| `SMARTMEMORY_NO_UPDATE_CHECK` | Set to `1` to turn off the daily update-available hint |
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
 | `GROQ_API_KEY` | Groq API key, an alternative to OpenAI for LLM extraction |
 
