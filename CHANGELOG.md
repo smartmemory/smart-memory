@@ -4,6 +4,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Changed
+- **Lite is light (DIST-LITE-HARDEN-1, core 1.4.91).** `pip install smartmemory` no longer pulls torch. The same all-MiniLM-L6-v2 model now runs on ONNX Runtime by default (about 150 MB, sub-second cold start, identical vectors); `pip install "smartmemory-core[gpu]"` restores the torch stack and uses CUDA automatically. Local memory storage moved to format v2 (metadata in SQLite, vectors only in the index, atomic saves); existing stores migrate on first open. `sm` keeps downloading models on first run; library callers get a hermetic `MissingModelError` instead.
+
 ### Added
 - **`sm` tells you when a newer release is out (DIST-UPDATE-HINT-1).** Any command can end with one dim line, `smartmemory 1.4.87 available — pip install -U smartmemory`. The version is read from PyPI at most once every 24 hours with a 2 second timeout, cached in the data directory, and a failed lookup is silent and backs off for a day, so the check never delays or breaks a command. Nothing is printed when output is not a terminal, when `--json` was asked for, on the hook commands that feed a model prompt (`sm recall`, `sm lifecycle`), or when `SMARTMEMORY_NO_UPDATE_CHECK=1` is set.
 - **First run and upgrades now point at the tour.** A first `smartmemory setup` ends with `All done. Run 'sm tour' if this is your first time.` After an upgrade, the next command prints `Updated to <version>` once, and adds `Run 'sm tour' to see what's new` only when the tour gained a step, so a routine patch release does not re-advertise a tour you have already seen.

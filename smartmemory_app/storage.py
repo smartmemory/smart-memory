@@ -117,6 +117,11 @@ def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
             entity_ruler_patterns=pattern_manager,
             pipeline_profile=profile,
             event_sink=get_event_sink(),    # DIST-LITE-3
+            # DIST-LITE-HARDEN-1 P1: core's factory is hermetic by default (a missing
+            # spaCy model raises MissingModelError instead of pip-installing at import).
+            # The `sm` CLI is the interactive first-run surface, so it keeps the
+            # download-on-first-use behaviour; library embedders get the hermetic default.
+            auto_download_models=True,
         )
         atexit.register(_shutdown)
         # DIST-LITE-WARMSTART-1: warm the local embedder in the background so the

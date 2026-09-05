@@ -294,7 +294,12 @@ smartmemory lifecycle status           # Show lifecycle config and session stats
 ```bash
 pip install smartmemory                  # Everything: local memory + MCP server + graph viewer + CLI
 pip install smartmemory-core[lite]       # Core library only, no CLI/MCP/viewer
+pip install smartmemory-core[gpu]        # Add the torch stack; CUDA is used automatically when present
 ```
+
+The default install embeds with all-MiniLM-L6-v2 on ONNX Runtime: about 150 MB and a
+sub-second cold start, no torch. The `[gpu]` or `[torch]` extra swaps the runtime, not the
+model, so vectors and existing stores are interchangeable.
 
 > **`smartmemory`** is the distribution package. A single install bundles `smartmemory-core[lite]` (local SQLite + usearch storage), the unified MCP server, the graph viewer, and the CLI. You pick **local** or **remote** mode at `smartmemory setup` time, not at install time.
 > **`smartmemory-core`** is the core library for developers building on top of SmartMemory.
