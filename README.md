@@ -699,7 +699,13 @@ PYTHONPATH=. pytest tests/e2e/
 
 ## License
 
-See the [LICENSE](LICENSE) file included with this package for the terms that govern use.
+SmartMemory Lite is distributed as a compiled runtime under the SmartMemory Lite Runtime License (see [LICENSE](LICENSE)).
+
+- Free for personal use, internal tools, evaluation, research, development, and non-commercial applications.
+- Shipping the runtime inside a commercial product requires a Lite Redistribution Agreement, free during early access and for organizations below the revenue threshold in the agreement. Ask at help@smartmemory.ai.
+- No source disclosure is required for your application.
+
+The hosted service and platform are licensed separately.
 
 ## Links
 

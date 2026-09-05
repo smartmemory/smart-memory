@@ -5,6 +5,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ## [Unreleased]
 
 ### Changed
+- **License.** `smartmemory` now ships under the SmartMemory Lite Runtime License instead of AGPL: free for personal, internal, evaluation, and non-commercial use; shipping it inside a commercial product needs a Lite Redistribution Agreement (free during early access). See LICENSE.
 - **Lite is light (DIST-LITE-HARDEN-1, core 1.4.91).** `pip install smartmemory` no longer pulls torch. The same all-MiniLM-L6-v2 model now runs on ONNX Runtime by default (about 150 MB, sub-second cold start, identical vectors); `pip install "smartmemory-core[gpu]"` restores the torch stack and uses CUDA automatically. Local memory storage moved to format v2 (metadata in SQLite, vectors only in the index, atomic saves); existing stores migrate on first open. `sm` keeps downloading models on first run; library callers get a hermetic `MissingModelError` instead.
 
 ### Added

@@ -1,31 +1,104 @@
-### Open Source License (AGPL v3)
-For open-source projects, SmartMemory is licensed under the **GNU Affero General Public License v3.0**. This ensures that any derivative works or applications using SmartMemory must also be open-sourced under compatible terms.
+SmartMemory Lite Runtime License
+Version 1.0, September 2026
 
-- ✅ **Free for open-source projects**
-- ✅ **Full access to source code**
-- ⚠️ **Requires open-sourcing your application**
-- ⚠️ **AGPL copyleft provisions apply**
+Copyright (c) 2025-2026 SmartMemory. All rights reserved.
 
-### Commercial License
-For commercial and proprietary applications, we offer commercial licenses that remove the copyleft restrictions:
+This license governs the SmartMemory Lite Runtime: the compiled software
+distributed by SmartMemory under the package names "smartmemory" and
+"smartmemory-core", together with any bundled model, pattern, or
+configuration files (the "Runtime").
 
-- ✅ **Use in proprietary applications**
-- ✅ **No source code disclosure required**
-- ✅ **Flexible licensing terms**
-- ✅ **Commercial support available**
+1. Definitions
 
-**Contact us for commercial licensing**: help@smartmemory.ai
+"Application" means software that incorporates, links to, or communicates
+with the Runtime.
 
-### Which License Do I Need?
+"Commercial Redistribution" means distributing the Runtime, in whole or in
+part, to third parties as a component of an Application that is sold,
+licensed for a fee, monetized through subscriptions, advertising, or
+usage charges, or otherwise distributed in the course of a business.
 
-| Use Case | License Required |
-|----------|------------------|
-| Open-source project | AGPL v3 (free) |
-| Academic research | AGPL v3 (free) |
-| Internal company tools | AGPL v3 (free) |
-| Commercial SaaS product | Commercial license |
-| Proprietary software distribution | Commercial license |
-| White-label solutions | Commercial license |
+"Redistribution Agreement" means the SmartMemory Lite Redistribution
+Agreement, available at https://smartmemory.ai/licensing or from
+help@smartmemory.ai.
 
-See [LICENSE](LICENSE.agpl-v3) for AGPL v3 terms.
-For a commercial license [email](info@smartmemory.ai) us.
+2. Grant of use
+
+Subject to this license, SmartMemory grants you a worldwide, royalty-free,
+non-exclusive, non-transferable license to install and use the unmodified
+Runtime, for any purpose, including:
+
+  (a) personal use,
+  (b) internal use within your organization, including internal tools and
+      services that are not distributed to third parties,
+  (c) evaluation, research, and education,
+  (d) development and testing of Applications, and
+  (e) distribution as a component of a non-commercial Application that is
+      made available free of charge.
+
+3. Commercial Redistribution
+
+Commercial Redistribution requires a Redistribution Agreement. Until you
+have one, this license does not permit it. Redistribution Agreements are
+available at no charge for early access participants and for organizations
+below the revenue threshold stated in the Agreement. No other terms of this
+license are changed by a Redistribution Agreement unless it says so.
+
+4. Restrictions
+
+You may not:
+
+  (a) modify, translate, decompile, disassemble, or reverse engineer the
+      Runtime, except to the extent applicable law prohibits this
+      restriction,
+  (b) distribute the Runtime on its own, or as the primary value of an
+      Application whose purpose is to provide memory, retrieval, or
+      knowledge-graph capabilities as a product or service,
+  (c) remove or alter any copyright, license, or attribution notice,
+  (d) sublicense, rent, lease, or lend the Runtime, or
+  (e) use the Runtime to build a service that competes with the SmartMemory
+      hosted service.
+
+5. No source obligation
+
+Nothing in this license requires you to disclose, license, or distribute
+the source code of your Application.
+
+6. Separate products
+
+The SmartMemory hosted service, server components, SDKs, and the full
+SmartMemory platform are licensed separately and are not covered by this
+license. The Python client library and the JavaScript SDK carry their own
+licenses.
+
+7. Models and third-party software
+
+Model weights and third-party packages bundled with or downloaded by the
+Runtime remain under their own licenses, which you must also comply with.
+
+8. Trademarks
+
+This license grants no rights to the SmartMemory name or logos other than a
+factual statement that your Application uses SmartMemory Lite.
+
+9. Termination
+
+This license terminates automatically if you breach it. On termination you
+must stop using and distributing the Runtime. Copies of an Application
+already delivered to end users before termination are not affected.
+
+10. Disclaimer of warranty
+
+THE RUNTIME IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+11. Limitation of liability
+
+IN NO EVENT SHALL SMARTMEMORY BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+LIABILITY, WHETHER IN CONTRACT, TORT, OR OTHERWISE, ARISING FROM OR IN
+CONNECTION WITH THE RUNTIME OR ITS USE.
+
+12. Contact
+
+Licensing questions and Redistribution Agreements: help@smartmemory.ai
