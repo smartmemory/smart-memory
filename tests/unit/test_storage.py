@@ -32,7 +32,9 @@ def test_get_memory_singleton(tmp_path):
     with (
         patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
         patch("smartmemory_app.patterns.JSONLPatternStore", return_value=mock_store),
-        patch("smartmemory.ontology.pattern_manager.PatternManager", return_value=mock_pm),
+        patch(
+            "smartmemory.ontology.pattern_manager.PatternManager", return_value=mock_pm
+        ),
         patch("smartmemory.tools.factory.create_lite_memory", return_value=mock_mem),
     ):
         m1 = storage.get_memory()
@@ -53,7 +55,9 @@ def test_get_memory_registers_atexit(tmp_path):
     with (
         patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
         patch("smartmemory_app.patterns.JSONLPatternStore", return_value=mock_store),
-        patch("smartmemory.ontology.pattern_manager.PatternManager", return_value=mock_pm),
+        patch(
+            "smartmemory.ontology.pattern_manager.PatternManager", return_value=mock_pm
+        ),
         patch("smartmemory.tools.factory.create_lite_memory", return_value=mock_mem),
         patch("atexit.register") as mock_register,
     ):
@@ -170,7 +174,9 @@ def test_get_remote_memory_singleton(tmp_path):
     import smartmemory_app.storage as storage
     from smartmemory_app.config import SmartMemoryConfig
 
-    cfg = SmartMemoryConfig(mode="remote", api_url="https://api.example.com", team_id="t1")
+    cfg = SmartMemoryConfig(
+        mode="remote", api_url="https://api.example.com", team_id="t1"
+    )
     # RemoteMemory is lazily imported inside _get_remote_memory — patch at source module
     with patch("smartmemory_app.remote_backend.RemoteMemory") as MockRemote:
         m1 = storage._get_remote_memory(cfg)
@@ -190,7 +196,7 @@ def test_search_accepts_mcp_recall_kwargs():
     Asserts:
     - No TypeError is raised
     - The underlying mem.search() receives memory_type in its kwargs (forwarded)
-    - The underlying mem.search() does NOT receive enable_hybrid (allowlist drop)
+    - The underlying mem.search() receives enable_hybrid (documented core kwarg)
     """
     import smartmemory_app.storage as storage
 
@@ -210,7 +216,7 @@ def test_search_accepts_mcp_recall_kwargs():
             "q",
             top_k=3,
             memory_type="decision",
-            enable_hybrid=True,   # unknown — must be dropped
+            enable_hybrid=True,  # documented core search option
             decompose_query=False,
             multi_hop=False,
             max_hops=3,
@@ -223,8 +229,8 @@ def test_search_accepts_mcp_recall_kwargs():
     # memory_type forwarded into core_kwargs
     assert received_kwargs.get("memory_type") == "decision"
 
-    # enable_hybrid is NOT in the allowlist — must be silently dropped
-    assert "enable_hybrid" not in received_kwargs
+    # SEARCH-HOP-STRATEGY-SURFACE-1 closes known option drops.
+    assert received_kwargs["enable_hybrid"] is True
 
 
 def test_search_forwards_lifecycle_and_asof_params():
@@ -286,8 +292,10 @@ def test_wildcard_search_hides_superseded_and_retracted_by_default():
         {"item_id": "flagged", "content": "d", "metadata": {"superseded": True}},
     ]
 
-    with patch("smartmemory_app.storage.get_memory", return_value=MagicMock()), \
-         patch("smartmemory_app.storage._list_all_memories", return_value=list(rows)):
+    with (
+        patch("smartmemory_app.storage.get_memory", return_value=MagicMock()),
+        patch("smartmemory_app.storage._list_all_memories", return_value=list(rows)),
+    ):
         default = storage.search("*")
         with_retracted = storage.search("*", include_retracted=True)
         with_both = storage.search("*", include_retracted=True, include_superseded=True)
@@ -313,10 +321,14 @@ def test_ingest_acquires_lock(tmp_path):
         patch("smartmemory_app.storage.get_memory", return_value=mock_mem),
         patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
         # _get_lock_file() does the lazy filelock import — patch at that boundary
-        patch("smartmemory_app.storage._get_lock_file", return_value=mock_lock_instance),
+        patch(
+            "smartmemory_app.storage._get_lock_file", return_value=mock_lock_instance
+        ),
     ):
         result = storage.ingest("test content")
 
     mock_lock_instance.__enter__.assert_called_once()
-    mock_mem.ingest.assert_called_once_with("test content", context={"memory_type": "episodic"}, sync=True)
+    mock_mem.ingest.assert_called_once_with(
+        "test content", context={"memory_type": "episodic"}, sync=True
+    )
     assert result == "item-123"

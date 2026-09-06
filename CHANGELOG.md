@@ -4,6 +4,22 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Added (2026-09-06) — search windows and hop flags on the CLI (SEARCH-TIME-RANGE-1, SEARCH-HOP-STRATEGY-SURFACE-1)
+
+- `sm search` gains `--since`/`--until` creation windows and `--multi-hop`, `--max-hops`,
+  `--hop-strategy`, forwarded through the daemon, local and remote paths. A strategy without
+  `--multi-hop` is rejected rather than silently ignored.
+
+### Fixed (2026-09-06) — the kwargs allowlist dropped real search options
+
+- `smartmemory_app/storage.py` filtered forwarded kwargs against an allowlist that omitted
+  `hop_strategy`, `cleanup`, `origin`, `exclude_origins`, `include_archived` and
+  `consolidation_first`. It is the only path from the MCP local backend and the CLI fallback
+  into core, so those keys were dropped with no error — its own comment recorded having done
+  this to four params for months. The allowlist now enumerates every explicit core search
+  parameter and a guard test fails when a new one is added without being forwarded.
+
+
 ### Changed
 - **`smartmemory-mcp` pin bumped 1.4.67 → 1.4.91.** The wrapper installs the current MCP server again (release.sh had been warning about the drift).
 - **License.** `smartmemory` now ships under the SmartMemory Lite Runtime License instead of AGPL: free for personal, internal, evaluation, and non-commercial use; shipping it inside a commercial product needs a Lite Redistribution Agreement (free during early access). See LICENSE.

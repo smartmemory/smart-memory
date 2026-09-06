@@ -7,6 +7,7 @@ because the return types differ (MemoryItem vs dict, sort_by support, etc.).
 
 Local deps (smartmemory-core, filelock) are hard dependencies — always available.
 """
+
 from __future__ import annotations
 
 import atexit
@@ -39,7 +40,9 @@ _init_lock = threading.Lock()
 _remote_memory: "RemoteMemory | None" = None
 _remote_init_lock = threading.Lock()
 
-WRITE_LOCK_TIMEOUT = 2.0  # seconds — daemon ingest only, worker uses SmartMemory.add() (no lock)
+WRITE_LOCK_TIMEOUT = (
+    2.0  # seconds — daemon ingest only, worker uses SmartMemory.add() (no lock)
+)
 
 
 # --- Directory & lock resolution -------------------------------------------------
@@ -91,7 +94,9 @@ def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
         # silently routed elsewhere. Mirrors the embedding pin; an explicit
         # SMARTMEMORY_LLM_MODEL env var still wins.
         if not os.environ.get("SMARTMEMORY_LLM_MODEL"):
-            _llm_model = cfg.llm_model or ("gemini/gemini-2.0-flash" if cfg.llm_provider == "gemini" else None)
+            _llm_model = cfg.llm_model or (
+                "gemini/gemini-2.0-flash" if cfg.llm_provider == "gemini" else None
+            )
             if _llm_model:
                 os.environ["SMARTMEMORY_LLM_MODEL"] = _llm_model
 
@@ -116,7 +121,7 @@ def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
             data_dir=str(data_path),
             entity_ruler_patterns=pattern_manager,
             pipeline_profile=profile,
-            event_sink=get_event_sink(),    # DIST-LITE-3
+            event_sink=get_event_sink(),  # DIST-LITE-3
             # DIST-LITE-HARDEN-1 P1: core's factory is hermetic by default (a missing
             # spaCy model raises MissingModelError instead of pip-installing at import).
             # The `sm` CLI is the interactive first-run surface, so it keeps the
@@ -145,6 +150,7 @@ def _get_remote_memory(cfg: SmartMemoryConfig) -> "RemoteMemory":
         if _remote_memory is not None:
             return _remote_memory
         from smartmemory_app.remote_backend import RemoteMemory
+
         _remote_memory = RemoteMemory(api_url=cfg.api_url, team_id=cfg.team_id)
         return _remote_memory
 
@@ -262,6 +268,7 @@ def ingest(
     """
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         return mem.ingest(content, memory_type)  # TODO: pass properties to remote API
     # Reserved keys that user properties must not overwrite.
@@ -269,8 +276,19 @@ def ingest(
     # AND precedence guards, so it must be set only by the producer (the explicit `origin`
     # param), never via user-supplied properties (which would let a caller claim a
     # privileged origin, e.g. import:vault, and bypass attribution/tiering).
-    _RESERVED = frozenset({"memory_type", "node_category", "item_id", "content",
-                           "embedding", "created_at", "valid_from", "valid_to", "origin"})
+    _RESERVED = frozenset(
+        {
+            "memory_type",
+            "node_category",
+            "item_id",
+            "content",
+            "embedding",
+            "created_at",
+            "valid_from",
+            "valid_to",
+            "origin",
+        }
+    )
     ctx: dict = {"memory_type": memory_type}
     if origin:
         ctx["origin"] = origin
@@ -334,10 +352,23 @@ def _list_all_memories(mem) -> list[dict]:
         if nc in ("entity", "relation"):
             continue
         # Include user metadata so property filters work on wildcard results
-        metadata = {k: v for k, v in props.items()
-                    if k not in {"content", "label", "memory_type", "node_category",
-                                 "entity_type", "embedding", "category",
-                                 "confidence", "stale", "reference"}}
+        metadata = {
+            k: v
+            for k, v in props.items()
+            if k
+            not in {
+                "content",
+                "label",
+                "memory_type",
+                "node_category",
+                "entity_type",
+                "embedding",
+                "category",
+                "confidence",
+                "stale",
+                "reference",
+            }
+        }
         item = {
             "item_id": raw.get("item_id", ""),
             "content": props.get("content", props.get("label", "")),
@@ -354,6 +385,40 @@ def _list_all_memories(mem) -> list[dict]:
     return items
 
 
+# All explicit caller-settable SmartMemory.search parameters, plus documented kwargs.
+# The contract test enumerates the live facade signature; unknown keys still drop.
+_ALLOWED = frozenset(
+    {
+        "conversation_context",
+        "decompose_query",
+        "channel_weights",
+        "multi_hop",
+        "max_hops",
+        "budget_ms",
+        "semantic_hops",
+        "hop_strategy",
+        "cleanup",
+        "origin",
+        "exclude_origins",
+        "include_archived",
+        "consolidation_first",
+        "expertise",
+        "attention_fusion",
+        "include_consolidated",
+        "include_superseded",
+        "include_retracted",
+        "as_of_date",
+        "as_of_strict",
+        "since",
+        "until",
+        "enable_hybrid",
+        "use_ssg",
+        "domain",
+        "sort_by",
+    }
+)
+
+
 def search(
     query: str,
     top_k: int = 5,
@@ -361,7 +426,7 @@ def search(
     include_reference: bool = False,
     memory_type: str | None = None,
     **search_kwargs,
-) -> list[dict]:
+) -> list[dict] | dict[str, list[dict]]:
     """Search memories by semantic similarity with optional property filters.
 
     Args:
@@ -377,9 +442,8 @@ def search(
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
     mem = get_memory()
-    # Only forward kwargs the core engine understands; silently drop the
-    # rest (e.g. MCP's enable_hybrid) so a richer caller contract degrades
-    # to plain semantic search instead of crashing.
+    # Forward documented core options. Unknown extension keys still drop, while
+    # the enumerating contract test prevents known facade parameters being lost.
     #
     # CORE-RETRACTED-RECALL-1 (2026-08-05): the lifecycle-visibility and
     # transaction-time params were MISSING from this list, so the MCP local
@@ -394,37 +458,42 @@ def search(
     # rather than raising, so a param is either wired here or it silently means
     # nothing. Anything added to SmartMemory.search() that callers can set MUST
     # be added here in the same change.
-    _ALLOWED = ("decompose_query", "channel_weights", "multi_hop",
-                "max_hops", "budget_ms", "semantic_hops",
-                "include_superseded", "include_retracted",
-                "as_of_date", "as_of_strict")
-    core_kwargs = {k: v for k, v in search_kwargs.items()
-                   if k in _ALLOWED and v is not None}
+    core_kwargs = {
+        k: v for k, v in search_kwargs.items() if k in _ALLOWED and v is not None
+    }
     if memory_type:
         core_kwargs["memory_type"] = memory_type
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         if filters:
             raise NotImplementedError(
-                "Property filters are not supported in remote mode. "
-                "Use local mode or remove --<property> flags."
+                "Property filters are not supported in remote mode. Use local mode or remove --<property> flags."
             )
-        return mem.search(query, top_k)
+        return mem.search(query, top_k, **core_kwargs)
     # Wildcard: return ALL memory nodes (not entity/relation/pattern nodes).
     # top_k is intentionally not applied — "*" means "list everything".
-    if query.strip() == "*":
+    if query.strip() == "*" and set(core_kwargs) <= {
+        "include_superseded",
+        "include_retracted",
+    }:
         all_items = _list_all_memories(mem)
         if filters:
             all_items = [
-                r for r in all_items
+                r
+                for r in all_items
                 if all(
                     r.get("metadata", {}).get(k) == v or r.get(k) == v
                     for k, v in filters.items()
                 )
             ]
         if memory_type:
-            all_items = [r for r in all_items
-                         if (r.get("memory_type") or r.get("metadata", {}).get("memory_type")) == memory_type]
+            all_items = [
+                r
+                for r in all_items
+                if (r.get("memory_type") or r.get("metadata", {}).get("memory_type"))
+                == memory_type
+            ]
         # CORE-PROPS-1 Phase 6: exclude reference data from wildcard by default
         if not include_reference:
             all_items = [r for r in all_items if not r.get("reference", False)]
@@ -438,6 +507,7 @@ def search(
         _want_superseded = bool(search_kwargs.get("include_superseded"))
         _want_retracted = bool(search_kwargs.get("include_retracted"))
         if not (_want_superseded and _want_retracted):
+
             def _status(r: dict) -> str | None:
                 s = r.get("status") or r.get("metadata", {}).get("status")
                 return s if isinstance(s, str) else None
@@ -445,7 +515,11 @@ def search(
             def _keep(r: dict) -> bool:
                 if not _want_superseded:
                     meta = r.get("metadata", {}) or {}
-                    if r.get("superseded") or meta.get("superseded") or _status(r) == "superseded":
+                    if (
+                        r.get("superseded")
+                        or meta.get("superseded")
+                        or _status(r) == "superseded"
+                    ):
                         return False
                 if not _want_retracted and _status(r) == "retracted":
                     return False
@@ -454,7 +528,11 @@ def search(
             all_items = [r for r in all_items if _keep(r)]
         return all_items
     if not filters:
-        results = mem.search(query, top_k=top_k, include_reference=include_reference, **core_kwargs)
+        results = mem.search(
+            query, top_k=top_k, include_reference=include_reference, **core_kwargs
+        )
+        if isinstance(results, dict):
+            return {key: [r.to_dict() for r in items] for key, items in results.items()}
         return [r.to_dict() for r in results]
     # With filters: fetch a wider window, then post-filter. If still short,
     # widen progressively to avoid missing sparse matches.
@@ -463,7 +541,8 @@ def search(
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
         items = [r.to_dict() for r in results]
         matched = [
-            r for r in items
+            r
+            for r in items
             if all(
                 r.get("metadata", {}).get(k) == v or r.get(k) == v
                 for k, v in filters.items()
@@ -498,23 +577,34 @@ def recall(
     """
     from smartmemory.origin_policy import filter_by_tiers, get_default_tiers
     from smartmemory_app.recall_format import (
-        _item_to_recall_dict, _trace, derive_workspace_id,
-        format_recall_lines, time_ms,
+        _item_to_recall_dict,
+        _trace,
+        derive_workspace_id,
+        format_recall_lines,
+        time_ms,
     )
 
     t0 = time_ms()
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         return mem.recall(
-            cwd, top_k,
-            query=query, include_snapshot=include_snapshot,
-            workspace_id=workspace_id, strict=strict,
+            cwd,
+            top_k,
+            query=query,
+            include_snapshot=include_snapshot,
+            workspace_id=workspace_id,
+            strict=strict,
         )
 
     workspace_id = workspace_id or derive_workspace_id(cwd)
     if strict is None:
-        strict = os.environ.get("SMARTMEMORY_RECALL_STRICT", "").lower() in ("1", "true", "yes")
+        strict = os.environ.get("SMARTMEMORY_RECALL_STRICT", "").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
     # 1. Optional snapshot frame (graph-mirrored markdown from CORE-SUMMARY-1)
     frame = ""
@@ -531,9 +621,9 @@ def recall(
             # backend may not — and we don't want to render a non-snapshot as a frame.
             if getattr(snap, "memory_type", None) == "snapshot":
                 snap_meta = getattr(snap, "metadata", None) or {}
-                ws_match = (
-                    workspace_id is None
-                    or snap_meta.get("workspace_id") in (None, workspace_id)
+                ws_match = workspace_id is None or snap_meta.get("workspace_id") in (
+                    None,
+                    workspace_id,
                 )
                 if ws_match and _snapshot_is_fresh(snap, max_days=7):
                     frame = (getattr(snap, "content", "") or "").strip()
@@ -610,6 +700,7 @@ def recall(
 def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:
     """True if the snapshot's created_at is within max_days. Defaults open on parse failure."""
     from datetime import datetime, timezone
+
     meta = getattr(snap, "metadata", None) or {}
     created_str = meta.get("created_at") if isinstance(meta, dict) else None
     if not created_str:
@@ -631,6 +722,7 @@ def get(item_id: str) -> dict:
     """
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
+
     if isinstance(mem, RemoteMemory):
         return mem.get(item_id) or {}  # already a dict
     item = mem.get(item_id)

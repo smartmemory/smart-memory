@@ -271,8 +271,7 @@ async def progress_stream(
         raise HTTPException(
             status_code=404,
             detail=(
-                f"No events for run_id={run_id!r}. The lite daemon emits a single "
-                f"run: {events_server.LITE_RUN_ID!r}."
+                f"No events for run_id={run_id!r}. The lite daemon emits a single run: {events_server.LITE_RUN_ID!r}."
             ),
         )
 
@@ -635,8 +634,7 @@ def reindex() -> dict:
         db_path = os.path.join(data_dir, "memory.db")
         db = sqlite3.connect(db_path)
         rows = db.execute(
-            "SELECT item_id, properties FROM nodes "
-            "WHERE memory_type IS NOT NULL AND memory_type != 'Version'"
+            "SELECT item_id, properties FROM nodes WHERE memory_type IS NOT NULL AND memory_type != 'Version'"
         ).fetchall()
         db.close()
 
@@ -718,8 +716,7 @@ def reextract_entities() -> dict:
         )
         placeholders = ",".join("?" * len(user_types))
         rows = db.execute(
-            f"SELECT item_id, properties, memory_type FROM nodes "
-            f"WHERE memory_type IN ({placeholders})",
+            f"SELECT item_id, properties, memory_type FROM nodes WHERE memory_type IN ({placeholders})",
             user_types,
         ).fetchall()
         db.close()
@@ -968,6 +965,11 @@ def ingest_endpoint(body: IngestRequest) -> dict:
 
 
 class SearchRequest(BaseModel):
+    multi_hop: bool = False
+    max_hops: int = 3
+    hop_strategy: str | None = None
+    since: str | None = None
+    until: str | None = None
     query: str
     top_k: int = 5
     filters: Optional[dict] = None  # property filters (e.g. {"project": "atlas"})
@@ -992,7 +994,24 @@ def _search_items(body: SearchRequest) -> list[dict]:
         from smartmemory_app.remote_backend import RemoteBackendError
 
         try:
-            results = search(body.query, body.top_k, filters=filters or None)
+            results = search(
+                body.query,
+                body.top_k,
+                filters=filters or None,
+                **{
+                    k: v
+                    for k, v in {
+                        "since": body.since,
+                        "until": body.until,
+                        "multi_hop": True if body.multi_hop else None,
+                        "max_hops": body.max_hops if body.multi_hop else None,
+                        "hop_strategy": body.hop_strategy,
+                    }.items()
+                    if v is not None
+                },
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except NotImplementedError as e:
             raise HTTPException(status_code=501, detail=str(e))
         except RemoteBackendError as e:
@@ -1005,7 +1024,24 @@ def _search_items(body: SearchRequest) -> list[dict]:
 @api.post("/search")
 def search_endpoint(body: SearchRequest) -> dict:
     """Search memories. Returns {items: [...]} matching post-CORE-CRUD-LIST service contract."""
-    return {"items": _search_items(body)}
+    from smartmemory.search import search_window_coverage
+
+    if body.hop_strategy is not None and body.hop_strategy not in (
+        "consensus",
+        "relevance",
+        "semantic",
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="hop_strategy must be consensus, relevance, semantic",
+        )
+    result = {"items": _search_items(body)}
+    if body.hop_strategy is not None and not body.multi_hop:
+        result["inert_parameters"] = {"hop_strategy": "multi_hop is false"}
+    coverage = search_window_coverage(body.since, body.until)
+    if coverage:
+        result["coverage"] = coverage
+    return result
 
 
 class AskRequest(BaseModel):

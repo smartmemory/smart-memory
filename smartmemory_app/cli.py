@@ -491,8 +491,7 @@ def _warm_notice() -> None:
 
     if not is_warm():
         click.echo(
-            "First run: loading local models (~10–40s, one-time). "
-            "Tip: run 'smartmemory warm' to pre-load.",
+            "First run: loading local models (~10–40s, one-time). Tip: run 'smartmemory warm' to pre-load.",
             err=True,
         )
         _warm_notice_shown = True
@@ -772,14 +771,46 @@ def retag_cmd(
     default=False,
     help="Include reference data in results",
 )
+@click.option("--since", help="Inclusive creation time: ISO-8601 or 7d, 24h, 30m")
+@click.option("--until", help="Exclusive creation time: ISO-8601 or relative duration")
+@click.option(
+    "--multi-hop", is_flag=True, help="Follow related entities across search hops"
+)
+@click.option("--max-hops", type=click.IntRange(1, 10), default=3, show_default=True)
+@click.option(
+    "--hop-strategy",
+    type=click.Choice(["consensus", "relevance", "semantic"]),
+    help="consensus: shared entities; relevance: best-result bridges; semantic: asks an LLM",
+)
 @click.pass_context
-def search_cmd(ctx, query: str, top_k: int, include_reference: bool) -> None:
+def search_cmd(
+    ctx,
+    query: str,
+    top_k: int,
+    include_reference: bool,
+    since: str | None,
+    until: str | None,
+    multi_hop: bool,
+    max_hops: int,
+    hop_strategy: str | None,
+) -> None:
     """Search memories by semantic similarity. Use '*' to list all.
 
     Supports property filters: --project atlas --domain legal
     """
+    from smartmemory.search import resolve_search_window
+
+    if hop_strategy is not None and not multi_hop:
+        raise click.ClickException("--hop-strategy requires --multi-hop")
+    hop_options = {"multi_hop": True, "max_hops": max_hops} if multi_hop else {}
+    if hop_strategy is not None:
+        hop_options["hop_strategy"] = hop_strategy
+    try:
+        window = resolve_search_window(since, until, relative=True)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     props = _parse_extra_props(ctx.args)
-    body: dict = {"query": query, "top_k": top_k}
+    body: dict = {"query": query, "top_k": top_k, **window, **hop_options}
     if props:
         body["filters"] = props
     if include_reference:
@@ -799,7 +830,12 @@ def search_cmd(ctx, query: str, top_k: int, include_reference: bool) -> None:
         os.environ.setdefault("SMARTMEMORY_RERANK_BLOCK", "1")
         try:
             results = search(
-                query, top_k, filters=props, include_reference=include_reference
+                query,
+                top_k,
+                filters=props,
+                include_reference=include_reference,
+                **window,
+                **hop_options,
             )
         except NotImplementedError as e:
             raise click.ClickException(str(e))
@@ -927,8 +963,7 @@ def _render_why_provenance(
             if not isinstance(memory, dict):
                 continue
             click.echo(
-                f"    - [{memory.get('memory_type', '?')}] "
-                f"{_why_truncate(memory.get('content'))} ({_why_date(memory)})"
+                f"    - [{memory.get('memory_type', '?')}] {_why_truncate(memory.get('content'))} ({_why_date(memory)})"
             )
 
     also_matched = [_why_title(item) for item in matches[1:] if isinstance(item, dict)]
@@ -1001,8 +1036,7 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
         if not isinstance(item, dict):
             continue
         click.echo(
-            f"[{item.get('memory_type', '?')}] {item.get('content', '')} "
-            f"({str(item.get('item_id', ''))[:8]})"
+            f"[{item.get('memory_type', '?')}] {item.get('content', '')} ({str(item.get('item_id', ''))[:8]})"
         )
 
 

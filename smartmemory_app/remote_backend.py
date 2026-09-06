@@ -14,6 +14,7 @@ Critical invariants:
   - recall() is fully client-side — no /memory/recall endpoint exists in the hosted API
   - get_node() maps to GET /memory/{id} — no dedicated entity-node endpoint
 """
+
 from __future__ import annotations
 
 import logging
@@ -104,8 +105,9 @@ class RemoteMemory:
             r.raise_for_status()
             return r.json() if r.status_code != 204 else None
         except httpx.ConnectError:
-            return {"error": f"SmartMemory API unreachable at {self._api_url}. "
-                             "Check SMARTMEMORY_API_URL."}
+            return {
+                "error": f"SmartMemory API unreachable at {self._api_url}. Check SMARTMEMORY_API_URL."
+            }
         except httpx.HTTPStatusError as e:
             return {"error": f"API error {e.response.status_code}: {e.response.text}"}
         except Exception as e:
@@ -135,9 +137,12 @@ class RemoteMemory:
             return f"API key validation failed ({e.response.status_code}): {e.response.text}"
         except Exception as e:
             return f"Login failed: {e}"
-        set_api_key(api_key)  # persist to OS keychain (warns if unavailable, never raises)
+        set_api_key(
+            api_key
+        )  # persist to OS keychain (warns if unavailable, never raises)
         # Persist team_id to config so next startup uses the correct workspace
         from smartmemory_app.config import load_config, save_config
+
         cfg = load_config()
         cfg.team_id = self._team_id
         save_config(cfg)
@@ -169,9 +174,9 @@ class RemoteMemory:
             raise RemoteBackendError(err)
         return result.get("item_id", "unknown")
 
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
+    def search(self, query: str, top_k: int = 5, **kwargs) -> list[dict]:
         """POST /memory/search. Returns list[dict] (not MemoryItem objects)."""
-        body = {"query": query, "top_k": top_k, "enable_hybrid": True}
+        body = {"query": query, "top_k": top_k, "enable_hybrid": True, **kwargs}
         result = self._request("POST", "/memory/search", json=body)
         if isinstance(result, dict):
             if err := result.get("error"):
@@ -212,14 +217,20 @@ class RemoteMemory:
         import os
         from smartmemory.origin_policy import get_default_tiers, get_tier
         from smartmemory_app.recall_format import (
-            _trace, derive_workspace_id, format_recall_lines, time_ms,
+            _trace,
+            derive_workspace_id,
+            format_recall_lines,
+            time_ms,
         )
 
         t0 = time_ms()
         workspace_id = workspace_id or derive_workspace_id(cwd)
         if strict is None:
-            strict = os.environ.get(
-                "SMARTMEMORY_RECALL_STRICT", "").lower() in ("1", "true", "yes")
+            strict = os.environ.get("SMARTMEMORY_RECALL_STRICT", "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
         recall_tiers = get_default_tiers("recall")
 
         # 1. Optional snapshot frame (graph-mirrored)
@@ -227,19 +238,27 @@ class RemoteMemory:
         if include_snapshot:
             try:
                 snaps = self._request(
-                    "POST", "/memory/search",
+                    "POST",
+                    "/memory/search",
                     workspace_id=workspace_id,
-                    json={"query": "", "memory_type": "snapshot",
-                          "sort_by": "recency", "top_k": 1},
+                    json={
+                        "query": "",
+                        "memory_type": "snapshot",
+                        "sort_by": "recency",
+                        "top_k": 1,
+                    },
                 )
-                rows = snaps if isinstance(snaps, list) else (snaps or {}).get("results", [])
+                rows = (
+                    snaps
+                    if isinstance(snaps, list)
+                    else (snaps or {}).get("results", [])
+                )
                 if rows:
                     snap = rows[0]
                     snap_meta = snap.get("metadata") or {}
-                    ws_match = (
-                        workspace_id is None
-                        or snap_meta.get("workspace_id") in (None, workspace_id)
-                    )
+                    ws_match = workspace_id is None or snap_meta.get(
+                        "workspace_id"
+                    ) in (None, workspace_id)
                     if ws_match:
                         frame = (snap.get("content") or "").strip()
             except Exception:
@@ -256,7 +275,11 @@ class RemoteMemory:
                 recent_k = max(1, (requested + 1) // 2)
                 semantic_k = max(0, requested - recent_k)
                 recent = self.search("", top_k=recent_k) or []
-                semantic = self.search(cwd or "", top_k=semantic_k) if cwd and semantic_k else []
+                semantic = (
+                    self.search(cwd or "", top_k=semantic_k)
+                    if cwd and semantic_k
+                    else []
+                )
                 results = list(recent) + list(semantic)
         except RemoteBackendError as e:
             log.warning("Remote recall search failed — returning empty recall: %s", e)
@@ -269,6 +292,7 @@ class RemoteMemory:
             if origin == "unknown":
                 return True
             return get_tier(origin) in recall_tiers
+
         results = [r for r in results if _tier_ok(r)]
 
         # 4. Workspace metadata filter (strict drops legacy untagged items).
@@ -286,8 +310,10 @@ class RemoteMemory:
         # 5. Confidence floor + reference exclusion (preserved)
         recall_floor = float(os.environ.get("SMARTMEMORY_RECALL_FLOOR", "0.3"))
         results = [
-            r for r in results
-            if (r.get("confidence") if r.get("confidence") is not None else 1.0) >= recall_floor
+            r
+            for r in results
+            if (r.get("confidence") if r.get("confidence") is not None else 1.0)
+            >= recall_floor
         ]
         results = [r for r in results if not r.get("reference", False)]
 
@@ -324,12 +350,20 @@ class RemoteMemory:
         """GET /memory/graph/full — same response shape as local get_graph_full()."""
         result = self._request("GET", "/memory/graph/full")
         if err := (result or {}).get("error"):
-            return {"nodes": [], "edges": [], "node_count": 0, "edge_count": 0, "error": err}
+            return {
+                "nodes": [],
+                "edges": [],
+                "node_count": 0,
+                "edge_count": 0,
+                "error": err,
+            }
         return result
 
     def get_edges_bulk(self, node_ids: list[str]) -> dict:
         """POST /memory/graph/edges — same response shape as local get_edges_bulk()."""
-        result = self._request("POST", "/memory/graph/edges", json={"node_ids": node_ids})
+        result = self._request(
+            "POST", "/memory/graph/edges", json={"node_ids": node_ids}
+        )
         if err := (result or {}).get("error"):
             return {"edges": [], "error": err}
         return result
