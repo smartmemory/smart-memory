@@ -33,10 +33,13 @@ def _configure_cli_logging() -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
-# DIST-INSTALL-RESOLVE-1: conservative floor for smartmemory-core. A core BELOW
-# this is from the dead-`/auth/me` era — a pip-backtracked install (e.g. wrapper
-# 1.1.5 → core 0.7.1) that 401s at first API call. `smartmemory doctor` flags it.
-MIN_CORE_VERSION = "1.0.0"
+# DIST-INSTALL-RESOLVE-1: floor for smartmemory-core. Every wrapper AND core
+# release below 1.4.39 is yanked on PyPI, so a fresh `pip install smartmemory`
+# can no longer backtrack across the dead-`/auth/me` API boundary (e.g. wrapper
+# 1.1.5 → core 0.7.1, which 401s at first API call). A core BELOW this floor is
+# therefore a stale or explicitly pinned install; `smartmemory doctor` flags it.
+# Keep this equal to the oldest UNYANKED smartmemory-core release.
+MIN_CORE_VERSION = "1.4.39"
 
 
 # Canonical implementation lives in update_check (which must not import this
