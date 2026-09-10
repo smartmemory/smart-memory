@@ -158,6 +158,38 @@ def cli() -> None:
     _configure_cli_logging()
 
 
+@cli.command("rebuild")
+@click.option(
+    "--lexical", is_flag=True, required=True, help="Repair the lexical index."
+)
+@click.option(
+    "--backend",
+    type=click.Choice(["sqlite", "falkordb"]),
+    default="sqlite",
+    show_default=True,
+)
+@click.option(
+    "--data-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Lite data directory.",
+)
+def rebuild_cmd(lexical, backend, data_dir) -> None:
+    """Repair lexical data. FalkorDB may recreate retained Item RANGE indexes.
+
+    VECTOR indexes and application data are preserved. The default target is lite.
+    """
+    from smartmemory.cli import main as core_cli
+
+    args = (["--data-dir", data_dir] if data_dir else []) + [
+        "rebuild",
+        "--lexical",
+        "--backend",
+        backend,
+    ]
+    core_cli.main(args=args, prog_name="sm", standalone_mode=False)
+
+
 @cli.result_callback()
 @click.pass_context
 def _print_trailing_notices(ctx, result, **_kwargs) -> None:
