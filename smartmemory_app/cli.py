@@ -8,6 +8,8 @@ is not running (~22s cold start).
 import logging
 import json
 import os
+import tarfile
+import tempfile
 from pathlib import Path
 
 import click
@@ -1497,8 +1499,103 @@ def models_cmd(provider: str | None) -> None:
             )
 
 
+def _download_diagnostics_bundle(url: str, output_path: Path) -> None:
+    """Stream a superadmin support bundle to an atomically replaced local file."""
+    import httpx
+
+    from smartmemory_app.config import get_api_key
+
+    api_key = get_api_key()
+    if not api_key:
+        raise click.ClickException(
+            "No API key available. Set SMARTMEMORY_API_KEY or configure remote authentication."
+        )
+
+    bundle_url = f"{url.rstrip('/')}/superadmin/diagnostics/bundle"
+    temporary_path: Path | None = None
+    try:
+        with httpx.Client(trust_env=False) as client:
+            with client.stream(
+                "GET",
+                bundle_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=30,
+            ) as response:
+                if not response.is_success:
+                    log.warning(
+                        "Diagnostics bundle download failed with HTTP status %s",
+                        response.status_code,
+                    )
+                    raise click.ClickException(
+                        f"Diagnostics bundle download failed (HTTP {response.status_code})."
+                    )
+
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=output_path.parent,
+                    prefix=f".{output_path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temporary_file:
+                    temporary_path = Path(temporary_file.name)
+                    for chunk in response.iter_bytes():
+                        temporary_file.write(chunk)
+
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+    except httpx.ReadTimeout as exc:
+        log.warning("Diagnostics bundle download timed out")
+        raise click.ClickException("Diagnostics bundle download timed out.") from exc
+    except httpx.HTTPError as exc:
+        log.warning(
+            "Diagnostics bundle download transport failed: %s", type(exc).__name__
+        )
+        raise click.ClickException("Could not download diagnostics bundle.") from exc
+    except OSError as exc:
+        log.warning(
+            "Diagnostics bundle download could not write its output: %s",
+            type(exc).__name__,
+        )
+        raise click.ClickException(
+            "Could not write diagnostics bundle output."
+        ) from exc
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+            log.warning(
+                "Diagnostics bundle download failed; temporary output was removed"
+            )
+
+    try:
+        with tarfile.open(output_path, mode="r:gz") as archive:
+            member_names = [
+                member.name for member in archive.getmembers() if member.isfile()
+            ]
+    except (tarfile.TarError, OSError) as exc:
+        log.warning(
+            "Downloaded diagnostics bundle could not be read: %s", type(exc).__name__
+        )
+        raise click.ClickException(
+            "Downloaded diagnostics bundle could not be read."
+        ) from exc
+
+    click.echo(
+        f"Downloaded diagnostics bundle to {output_path} ({output_path.stat().st_size} bytes)."
+    )
+    click.echo(f"Members: {', '.join(member_names)}")
+
+
 @cli.command("doctor")
-def doctor_cmd() -> None:
+@click.option(
+    "--bundle", is_flag=True, help="Download the superadmin diagnostics bundle."
+)
+@click.option("--url", help="SmartMemory service base URL for --bundle.")
+@click.option(
+    "--out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Local output path for --bundle.",
+)
+def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     """Diagnose a broken install (DIST-INSTALL-RESOLVE-1).
 
     Detects the pip-backtracked-wrapper trap: a fresh `pip install smartmemory`
@@ -1507,6 +1604,12 @@ def doctor_cmd() -> None:
     Checks the installed core against a conservative floor and reports the
     Python version.
     """
+    if bundle:
+        if not url or out is None:
+            raise click.UsageError("--bundle requires both --url and --out.")
+        _download_diagnostics_bundle(url, out)
+        return
+
     import sys
     from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
