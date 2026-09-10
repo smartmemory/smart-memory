@@ -720,3 +720,11 @@ The hosted service and platform are licensed separately.
 pip install smartmemory
 smartmemory setup
 ```
+
+## Lexical search migration
+
+Search uses `lexical` with default weight 0.8. Replace removed `contains` and `keyword-bm25` channel weights explicitly. A zero weight disables lexical, and omission preserves the existing default/profile behavior. Required lexical unavailability fails the whole search. Service callers receive 400 for query/name validation and 503 for unavailable indexes.
+
+Lite is single-tenant. Graph-first retrieval conditionally fills from FTS5 lexical and vector search. Bounded refill can underfill, and regex-text still scans. CORE-FACT-INDEX-1 separately owns deferred fact ranking and path expansion.
+
+Quiesce old writers before first-open indexing. Verify the engine capability pin and use `sm rebuild --lexical` for recovery. [Migration, targets and measured limitations](https://github.com/smart-memory/smart-memory-docs/blob/main/docs/features/CORE-LEXICAL-INDEX-1/migration.md).
