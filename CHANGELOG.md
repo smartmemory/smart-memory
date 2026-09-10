@@ -4,6 +4,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.94] - 2026-09-10
+
+- Core 1.4.94: Lite update check with anonymous install ping and redistribution license keys (DIST-LITE-UPDATE-CHECK-1). Opt out with `SMARTMEMORY_NO_UPDATE_CHECK=1` or `DO_NOT_TRACK=1`.
+
 ### Added (2026-09-06) — search windows and hop flags on the CLI (SEARCH-TIME-RANGE-1, SEARCH-HOP-STRATEGY-SURFACE-1)
 
 - `sm search` gains `--since`/`--until` creation windows and `--multi-hop`, `--max-hops`,
