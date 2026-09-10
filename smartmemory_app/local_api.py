@@ -973,7 +973,8 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = 5
     filters: Optional[dict] = None  # property filters (e.g. {"project": "atlas"})
-    enable_hybrid: bool = True  # DIST-OBSIDIAN-LITE-1: SDK contract; no-op in lite (FTS5+vector always on)
+    # Lite uses FTS5 lexical fill plus vector search; enable_hybrid does not select the lite dispatch path.
+    enable_hybrid: bool = True
     memory_type: Optional[str] = (
         None  # DIST-OBSIDIAN-LITE-1: SDK contract; folded into filters
     )
