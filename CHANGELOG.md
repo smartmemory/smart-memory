@@ -4,6 +4,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Added (2026-09-11) — DIST-BYOC-1 diagnostics download
+
+- `sm doctor --bundle --url --out` downloads the authenticated, allowlisted metadata-only diagnostics bundle for support.
+
 ### Changed: CORE-LEXICAL-INDEX-1 consumer cutover
 
 - Use one `lexical` channel with default weight 0.8. Removed channel names fail validation, explicit zero is preserved, and unavailable required lexical search fails without partial success.
