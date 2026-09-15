@@ -4,6 +4,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed (2026-09-15) — 1.4.101: hardened Lite update check (DIST-LITE-UPDATE-CHECK-1)
+
+- `smartmemory-core` 1.4.101 pin. The anonymous update check now takes an OS advisory lock so concurrent processes sharing one `SMARTMEMORY_HOME` send exactly one request, validates the on-disk install id (foreign-owned or unreadable ids disable the check, owned ids are secured to mode `0600`), and treats unknown cache states and malformed responses as a backoff rather than a retry. The server side has been live since core 1.4.100; this release brings the client up to the reviewed behaviour.
+
 ### Added (2026-09-15) — 1.4.100: Lite vector backend hygiene (DIST-LITE-VECTOR-HYGIENE-1)
 
 - `smartmemory-core` 1.4.100 pin (first publish since 1.4.96, so this release also carries core 1.4.97 through 1.4.99). Lite's usearch vector backend gains a public `close()` (also reachable through `SmartMemory.close()` / `with SmartMemory(...)`), one `<collection>.fts.db` per collection with an automatic migration off the shared `fts.db`, and `SMARTMEMORY_LICENSE_KEY` is pinned by test as read only by the update check.
