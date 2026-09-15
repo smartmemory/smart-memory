@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smartmemory"
-version = "1.4.96"
+version = "1.4.100"
 requires-python = ">=3.11"
 dependencies = [
-    "smartmemory-core[lite]==1.4.96",  # EXACT pin — wrapper and core versions move in lockstep
+    "smartmemory-core[lite]==1.4.100",  # EXACT pin — wrapper and core versions move in lockstep
     "filelock>=3.12",                    # cross-process SQLite write locking
-    "smartmemory-mcp==1.4.91",        # EXACT pin. NOT in the core release sync chain (unlike
+    "smartmemory-mcp==1.4.96",        # EXACT pin. NOT in the core release sync chain (unlike
                                      # smartmemory-core above) — nothing bumps this for you, so it
                                      # tracks the latest PUBLISHED smartmemory-mcp, not this version.
                                      # release.sh warns when a newer one exists. mcp does not depend
