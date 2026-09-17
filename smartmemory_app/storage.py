@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -75,6 +76,66 @@ def _timed_startup_step(
     result = action()
     on_progress(f"{finished} ({time.perf_counter() - started:.1f}s)")
     return result
+
+
+def _run_startup_warmups(
+    on_progress: Callable[[str], None],
+    ensure_spacy: Callable[[], object],
+    require_embedding: Callable[[], object],
+) -> None:
+    """Run independent model prerequisites concurrently with truthful progress.
+
+    Progress callbacks stay on the caller thread: both steps are announced before
+    submission, and each completion is emitted only after its future resolves. All
+    futures are inspected so one failure can never hide a sibling failure.
+    """
+    steps = (
+        (
+            "Loading language tools (spaCy)",
+            "Language tools ready",
+            ensure_spacy,
+        ),
+        (
+            "Checking the local AI model",
+            "Local AI model ready",
+            require_embedding,
+        ),
+    )
+    for starting, _finished, _action in steps:
+        on_progress(f"{starting}...")
+
+    started_at: dict[int, float] = {}
+    failures: dict[int, BaseException] = {}
+    with ThreadPoolExecutor(
+        max_workers=len(steps), thread_name_prefix="smartmemory-warmup"
+    ) as executor:
+        futures = {}
+        for index, (_starting, _finished, action) in enumerate(steps):
+            started_at[index] = time.perf_counter()
+            futures[executor.submit(action)] = index
+
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                future.result()
+            except BaseException as exc:
+                failures[index] = exc
+            else:
+                finished = steps[index][1]
+                elapsed = time.perf_counter() - started_at[index]
+                on_progress(f"{finished} ({elapsed:.1f}s)")
+
+    ordered_failures = [failures[index] for index in sorted(failures)]
+    if len(ordered_failures) == 1:
+        raise ordered_failures[0]
+    if ordered_failures:
+        if all(isinstance(exc, Exception) for exc in ordered_failures):
+            raise ExceptionGroup(
+                "Startup prerequisite warmups failed", ordered_failures
+            )
+        raise BaseExceptionGroup(
+            "Startup prerequisite warmups failed", ordered_failures
+        )
 
 
 def _get_local_memory(
@@ -156,16 +217,9 @@ def _get_local_memory(
                 _require_embedding_model,
             )
 
-            _timed_startup_step(
+            _run_startup_warmups(
                 on_progress,
-                "Loading language tools (spaCy)",
-                "Language tools ready",
                 _ensure_spacy_model,
-            )
-            _timed_startup_step(
-                on_progress,
-                "Checking the local AI model",
-                "Local AI model ready",
                 lambda: _require_embedding_model(allow_download=True),
             )
             _memory = _timed_startup_step(

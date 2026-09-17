@@ -29,6 +29,34 @@ from smartmemory_app.local_api import api as _local_api
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 9014
 log = logging.getLogger(__name__)
+_startup_state_lock = threading.Lock()
+_startup_status: str | None = None
+_startup_reason: str | None = None
+_last_warmup_failure: str | None = None
+
+
+def _set_startup_state(status: str | None, reason: str | None = None) -> None:
+    """Publish the daemon's observed startup state for ``/health``."""
+    global _startup_status, _startup_reason
+    with _startup_state_lock:
+        _startup_status = status
+        _startup_reason = reason
+
+
+def _get_startup_state() -> tuple[str | None, str | None]:
+    with _startup_state_lock:
+        return _startup_status, _startup_reason
+
+
+def _set_last_warmup_failure(reason: str | None) -> None:
+    global _last_warmup_failure
+    with _startup_state_lock:
+        _last_warmup_failure = reason
+
+
+def _get_last_warmup_failure() -> str | None:
+    with _startup_state_lock:
+        return _last_warmup_failure
 
 
 def _safe_degraded_reason(exc: Exception) -> str:
@@ -50,6 +78,29 @@ def _safe_degraded_reason(exc: Exception) -> str:
     message = re.sub(r"(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\s'\";,)]*)", "<path>", message)
     summary = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
     return summary[:240]
+
+
+def _safe_warmup_reason(exc: BaseException) -> str:
+    """Flatten grouped warmup failures into one redacted health-safe summary."""
+    if isinstance(exc, BaseExceptionGroup):
+        return "; ".join(_safe_warmup_reason(item) for item in exc.exceptions)[:480]
+    if isinstance(exc, Exception):
+        return _safe_degraded_reason(exc)
+    return type(exc).__name__
+
+
+def _capabilities(mode: str) -> dict[str, bool]:
+    remote = mode == "remote"
+    return {
+        "delete": not remote,
+        "patch": not remote,
+        "neighbors_direction": True,
+        "quota": False,
+        "auth": False,
+        "lineage": True,
+        "links": True,
+        "decisions": False,
+    }
 
 
 def _build_app() -> FastAPI:
@@ -103,6 +154,30 @@ def _build_app() -> FastAPI:
         from smartmemory_app.config import load_config
 
         cfg = load_config()
+        startup_status, startup_reason = _get_startup_state()
+        if startup_status in {"warming", "degraded"}:
+            from smartmemory_app.config import llm_key_present
+
+            mode = "remote" if cfg.mode == "remote" else "lite"
+            response = {
+                "service": "smartmemory",
+                "status": startup_status,
+                "memories": -1,
+                "llm_provider": cfg.llm_provider,
+                "llm_key_present": llm_key_present(),
+                "embedding_provider": cfg.embedding_provider,
+                "pid": os.getpid(),
+                "async_enrichment": {"enabled": False},
+                "mode": mode,
+                "capabilities": _capabilities(mode),
+            }
+            if startup_status == "degraded":
+                response["degraded_reason"] = (
+                    startup_reason
+                    or "SmartMemory startup warmup did not complete. Run sm doctor."
+                )
+            return response
+
         backend_ok = False
         degraded_reason = None
         node_count = -1
@@ -153,37 +228,8 @@ def _build_app() -> FastAPI:
         # should branch on this rather than infer from llm_provider, etc.
         from smartmemory_app.remote_backend import RemoteMemory as _RM
 
-        if isinstance(mem, _RM):
-            mode = "remote"
-            capabilities = {
-                "delete": False,
-                "patch": False,
-                "neighbors_direction": True,
-                "quota": False,
-                "auth": False,
-                # DIST-OBSIDIAN-LITE-PARITY-1: lineage + per-node links are
-                # served by the daemon (built from get_node / neighbors edges).
-                "lineage": True,
-                "links": True,
-                # Decisions are a hosted-service subsystem (transitive
-                # provenance walk + decision store) the daemon does not
-                # replicate. False → clients degrade the panel explicitly
-                # instead of 404'ing.
-                "decisions": False,
-            }
-        else:
-            mode = "lite"
-            capabilities = {
-                "delete": True,
-                "patch": True,
-                "neighbors_direction": True,
-                "quota": False,
-                "auth": False,
-                # DIST-OBSIDIAN-LITE-PARITY-1: see remote block above.
-                "lineage": True,
-                "links": True,
-                "decisions": False,
-            }
+        mode = "remote" if isinstance(mem, _RM) else "lite"
+        capabilities = _capabilities(mode)
 
         from smartmemory_app.config import llm_key_present
 
@@ -232,11 +278,19 @@ def _warm_backend() -> bool:
     _startup_line("Loading SmartMemory...")
     started = time.perf_counter()
     backend_ok = True
+    failure_reasons: list[str] = []
+    _set_last_warmup_failure(None)
     with discrete_huggingface_progress(_startup_line):
         try:
             get_memory(on_progress=_startup_line)
-        except Exception:
+        except Exception as exc:
             backend_ok = False
+            reason = _safe_warmup_reason(exc)
+            failure_reasons.append(reason)
+            log.warning(
+                "Saved memories and startup model prerequisites are unavailable: %s",
+                reason,
+            )
             _startup_line(
                 "Warning: SmartMemory could not open saved memories. "
                 "Run sm doctor after startup for help."
@@ -254,13 +308,17 @@ def _warm_backend() -> bool:
             _startup_line(
                 f"Search model ready ({time.perf_counter() - model_started:.1f}s)"
             )
-        except Exception:
+        except Exception as exc:
             backend_ok = False
+            reason = _safe_warmup_reason(exc)
+            failure_reasons.append(reason)
+            log.warning("The warmed search model is unavailable: %s", reason)
             _startup_line(
                 "Warning: The search model could not start. "
                 "Run sm doctor after startup for help."
             )
 
+    _set_last_warmup_failure("; ".join(failure_reasons) or None)
     elapsed = time.perf_counter() - started
     if backend_ok:
         _startup_line(f"SmartMemory startup complete ({elapsed:.1f}s)")
@@ -269,12 +327,67 @@ def _warm_backend() -> bool:
     return backend_ok
 
 
+def _sync_hooks() -> None:
+    """Refresh installed hooks, warning explicitly when that upgrade is lost."""
+    try:
+        from smartmemory_app.setup import _copy_hooks
+
+        _copy_hooks()
+    except Exception as exc:
+        reason = _safe_degraded_reason(exc)
+        log.warning(
+            "Hook sync failed; updated hook scripts were not installed: %s", reason
+        )
+        _startup_line(f"Warning: hook sync failed ({reason})")
+
+
+def _start_background_warmup() -> threading.Thread:
+    """Start model/backend warmup and publish only states actually observed."""
+    _set_startup_state("warming")
+
+    def run() -> None:
+        try:
+            backend_ok = _warm_backend()
+            _sync_hooks()
+        except BaseException as exc:
+            reason = _safe_warmup_reason(exc)
+            log.warning(
+                "Background startup failed; saved memories remain unavailable: %s",
+                reason,
+            )
+            _set_startup_state("degraded", reason)
+            return
+
+        if backend_ok:
+            _set_startup_state("ok")
+        else:
+            _set_startup_state(
+                "degraded",
+                _get_last_warmup_failure()
+                or "SmartMemory startup warmup did not complete. Run sm doctor.",
+            )
+
+    thread = threading.Thread(
+        target=run,
+        name="smartmemory-backend-warmup",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as exc:
+        log.warning(
+            "Background warmup unavailable; startup will block while models load: %s",
+            _safe_degraded_reason(exc),
+        )
+        run()
+    return thread
+
+
 def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """Start the SmartMemory daemon.
 
-    Eagerly warms the memory backend (spaCy + embedding model load) before
-    starting uvicorn so the first API request doesn't time out.
-    Writes a PID file before serving for daemon lifecycle management.
+    Starts HTTP serving while the memory backend warms in a background thread.
+    ``/health`` reports ``warming`` until model/backend setup has really finished.
     """
     from smartmemory_app.storage import _shutdown, _resolve_data_dir
 
@@ -326,19 +439,8 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             flush=True,
         )
 
-    _warm_backend()
-
-    # Sync hook scripts from package → ~/.claude/hooks/ on every daemon start.
-    # Ensures pip upgrades that change hook content (e.g. persist→add rename)
-    # take effect without requiring users to re-run `smartmemory setup`.
-    try:
-        from smartmemory_app.setup import _copy_hooks
-
-        _copy_hooks()
-    except Exception as e:
-        print(f"Warning: hook sync failed ({e})", flush=True)
-
-    # Write PID file after warmup
+    # Publish the process marker before warmup so stop/status lifecycle commands
+    # refer to the same process that serves the observed warming health response.
     pid_file.write_text(str(os.getpid()))
 
     def _cleanup():
@@ -366,6 +468,11 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         "Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)",
         flush=True,
     )
+
+    # Warm only after all process-level lifecycle pieces are installed. The health
+    # route sees the state set immediately before the thread starts; it never guesses
+    # that a process with only a PID marker is warming.
+    _start_background_warmup()
 
     if open_browser:
         threading.Timer(

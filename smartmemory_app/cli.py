@@ -302,6 +302,10 @@ def _report_start_status(info: dict | None, *, just_started: bool = True) -> Non
     if info.get("status") == "ok":
         click.echo("SmartMemory is ready.")
         return
+    if info.get("status") == "warming":
+        click.echo("SmartMemory is warming up.")
+        click.echo("Check readiness with: sm status")
+        return
     if info.get("status") == "degraded":
         reason = info.get("degraded_reason") or "No reason was reported."
         state = "started" if just_started else "is running"
@@ -314,13 +318,19 @@ def _report_start_status(info: dict | None, *, just_started: bool = True) -> Non
     )
 
 
-def _start_with_progress(*, num_workers: int, message: str) -> dict | None:
+def _start_with_progress(
+    *, num_workers: int, message: str, wait_until_ready: bool
+) -> dict | None:
     """Start while displaying terminal-safe elapsed progress and daemon lines."""
     from smartmemory_app.daemon import start_daemon
     from smartmemory_app.progress import startup_progress
 
     with startup_progress(message, emit=click.echo) as on_log:
-        return start_daemon(num_workers=num_workers, on_log=on_log)
+        return start_daemon(
+            num_workers=num_workers,
+            on_log=on_log,
+            wait_until_ready=wait_until_ready,
+        )
 
 
 @cli.command("start")
@@ -330,7 +340,12 @@ def _start_with_progress(*, num_workers: int, message: str) -> dict | None:
     show_default=True,
     help="Number of enrichment worker processes.",
 )
-def start_cmd(num_workers: int) -> None:
+@click.option(
+    "--wait",
+    is_flag=True,
+    help="Wait for models and saved memories to be fully ready.",
+)
+def start_cmd(num_workers: int, wait: bool) -> None:
     """Start the SmartMemory daemon and enrichment workers."""
     from smartmemory_app.daemon import get_status
 
@@ -338,14 +353,16 @@ def start_cmd(num_workers: int) -> None:
     if current is not None:
         if current.get("status") == "ok":
             click.echo("SmartMemory is already running.")
-        else:
+            return
+        if current.get("status") != "warming" or not wait:
             _report_start_status(current, just_started=False)
-        return
+            return
     click.echo("Starting SmartMemory (loading models)...")
     try:
         info = _start_with_progress(
             num_workers=num_workers,
             message="Starting SmartMemory",
+            wait_until_ready=wait,
         )
     except click.ClickException:
         raise
@@ -390,6 +407,7 @@ def restart_cmd(num_workers: int) -> None:
         info = _start_with_progress(
             num_workers=num_workers,
             message="Starting SmartMemory",
+            wait_until_ready=True,
         )
     except click.ClickException:
         raise
@@ -442,6 +460,9 @@ def status_cmd() -> None:
         return
     status = info.get("status", "?")
     click.echo(f"SmartMemory daemon: {status}")
+    if status == "warming":
+        click.echo("  Models are still loading. Check again with: sm status")
+        return
     if status == "degraded":
         reason = info.get("degraded_reason") or "No reason was reported."
         click.echo(

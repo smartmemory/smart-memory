@@ -6,6 +6,14 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed (2026-09-17) — readable recovery from stale installs
 
+- Daemon startup now checks the spaCy and embedding-model prerequisites in
+  parallel. Both steps are announced as in flight, each completion keeps its own
+  elapsed time, and failures are collected so one failed check cannot hide the
+  other.
+- `/health` now reports an observed `warming` state while the daemon loads its
+  backend. `sm start` returns as soon as that response is reachable, `sm status`
+  distinguishes warming from a broken background process, and `sm start --wait`
+  retains the ready-blocking behavior used by setup and programmatic callers.
 - Startup now reports each timed model/backend step, shows throttled newline-only
   model-download progress, and uses an elapsed spinner only on interactive terminals.
   The setup TUI shows the same live startup state. `sm start` and `sm restart` now

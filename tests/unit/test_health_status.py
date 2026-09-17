@@ -1,6 +1,7 @@
 """Health-reporting regressions for a backend that cannot initialize."""
 
 import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -76,6 +77,78 @@ def test_health_is_ok_without_degraded_reason_when_backend_succeeds(
     assert body["memories"] == 1
     assert "degraded_reason" not in body
     assert "memory count is unavailable" not in caplog.text
+
+
+def test_health_reports_observed_warming_without_opening_storage(tmp_path, monkeypatch):
+    from smartmemory_app import viewer_server
+
+    client = _health_client(tmp_path, monkeypatch)
+    config = SimpleNamespace(
+        mode="local",
+        llm_provider="none",
+        embedding_provider="local",
+    )
+
+    viewer_server._set_startup_state("warming")
+    try:
+        with (
+            patch("smartmemory_app.config.load_config", return_value=config),
+            patch("smartmemory_app.config.llm_key_present", return_value=False),
+            patch("smartmemory_app.storage.get_memory") as get_memory,
+        ):
+            body = client.get("/health").json()
+    finally:
+        viewer_server._set_startup_state(None)
+
+    assert body["service"] == "smartmemory"
+    assert body["status"] == "warming"
+    assert body["memories"] == -1
+    get_memory.assert_not_called()
+
+
+def test_background_warmup_exposes_warming_then_flips_to_ok(monkeypatch):
+    from smartmemory_app import viewer_server
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def warm_backend() -> bool:
+        entered.set()
+        assert release.wait(timeout=1)
+        return True
+
+    monkeypatch.setattr(viewer_server, "_warm_backend", warm_backend)
+    monkeypatch.setattr(viewer_server, "_sync_hooks", lambda: None)
+
+    thread = viewer_server._start_background_warmup()
+    assert entered.wait(timeout=1)
+    assert viewer_server._get_startup_state()[0] == "warming"
+
+    release.set()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert viewer_server._get_startup_state()[0] == "ok"
+    viewer_server._set_startup_state(None)
+
+
+def test_background_warmup_never_flips_a_failed_warmup_to_ok(monkeypatch):
+    from smartmemory_app import viewer_server
+
+    def failed_warmup() -> bool:
+        viewer_server._set_last_warmup_failure("embedding model unavailable")
+        return False
+
+    monkeypatch.setattr(viewer_server, "_warm_backend", failed_warmup)
+    monkeypatch.setattr(viewer_server, "_sync_hooks", lambda: None)
+
+    thread = viewer_server._start_background_warmup()
+    thread.join(timeout=1)
+
+    assert viewer_server._get_startup_state() == (
+        "degraded",
+        "embedding model unavailable",
+    )
+    viewer_server._set_startup_state(None)
 
 
 def test_status_prints_reason_and_next_step_when_degraded(runner):
@@ -179,3 +252,17 @@ def test_status_omits_reason_lines_when_healthy(runner):
     assert "SmartMemory daemon: ok" in result.output
     assert "Problem:" not in result.output
     assert "Next step:" not in result.output
+
+
+def test_status_renders_warming_without_broken_restart_guidance(runner):
+    from smartmemory_app.cli import cli
+
+    info = {"service": "smartmemory", "status": "warming", "pid": 1234}
+    with patch("smartmemory_app.daemon.get_status", return_value=info):
+        result = runner.invoke(cli, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory daemon: warming" in result.output
+    assert "models are still loading" in result.output.lower()
+    assert "should be running" not in result.output
+    assert "sm restart" not in result.output

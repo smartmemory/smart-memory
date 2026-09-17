@@ -408,6 +408,65 @@ def test_launchd_start_waits_through_keepalive_throttle_gap(tmp_path):
         assert daemon.start_daemon() == health
 
 
+def test_launchd_start_can_return_observed_warming(tmp_path):
+    from smartmemory_app import daemon
+
+    plist = tmp_path / "ai.smartmemory.daemon.plist"
+    plist.write_text("plist")
+    warming = {"service": "smartmemory", "status": "warming"}
+
+    with (
+        patch.object(daemon, "get_status", side_effect=[None, warming]),
+        patch.object(daemon, "_data_dir", return_value=tmp_path),
+        patch.object(daemon, "_launchd_manages_daemon", return_value=True),
+        patch.object(daemon, "_launchd_plist_path", return_value=plist),
+        patch.object(daemon, "_launchd_loaded", return_value=True),
+        patch("time.sleep"),
+    ):
+        assert daemon.start_daemon(wait_until_ready=False) == warming
+
+
+def test_subprocess_start_can_return_observed_warming(tmp_path):
+    from smartmemory_app import daemon
+
+    warming = {"service": "smartmemory", "status": "warming"}
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    fake_socket = MagicMock()
+    fake_socket.connect_ex.return_value = 0
+
+    def fake_popen(*_args, **kwargs):
+        kwargs["stdout"].close()
+        return fake_proc
+
+    with (
+        patch.object(daemon, "get_status", side_effect=[None, warming]),
+        patch.object(daemon, "_data_dir", return_value=tmp_path),
+        patch.object(daemon, "_launchd_manages_daemon", return_value=False),
+        patch.object(daemon, "_port", return_value=19015),
+        patch.object(daemon, "_start_workers") as start_workers,
+        patch("subprocess.Popen", side_effect=fake_popen),
+        patch("socket.socket", return_value=fake_socket),
+    ):
+        assert daemon.start_daemon(wait_until_ready=False) == warming
+
+    start_workers.assert_called_once_with(1)
+
+
+def test_start_daemon_default_waits_past_existing_warming(tmp_path):
+    from smartmemory_app import daemon
+
+    warming = {"service": "smartmemory", "status": "warming"}
+    health = {"service": "smartmemory", "status": "ok"}
+
+    with (
+        patch.object(daemon, "get_status", side_effect=[warming, warming, health]),
+        patch.object(daemon, "_data_dir", return_value=tmp_path),
+        patch("time.sleep"),
+    ):
+        assert daemon.start_daemon() == health
+
+
 # ── Startup progress and truthful outcomes ───────────────────────────────────
 
 
@@ -427,6 +486,60 @@ def test_start_commands_report_verified_healthy_result(runner, command):
 
     assert result.exit_code == 0, result.output
     assert "SmartMemory is ready." in result.output
+
+
+def test_start_returns_on_observed_warming_by_default(runner):
+    """Ordinary start is fast but reports only the state observed from /health."""
+    from smartmemory_app.cli import cli
+
+    warming = {"service": "smartmemory", "status": "warming"}
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch(
+            "smartmemory_app.daemon.start_daemon", return_value=warming
+        ) as start_daemon,
+    ):
+        result = runner.invoke(cli, ["start"])
+
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory is warming up." in result.output
+    assert "SmartMemory is ready." not in result.output
+    assert start_daemon.call_args.kwargs["wait_until_ready"] is False
+
+
+def test_start_wait_blocks_until_verified_ready(runner):
+    from smartmemory_app.cli import cli
+
+    health = {"service": "smartmemory", "status": "ok"}
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch(
+            "smartmemory_app.daemon.start_daemon", return_value=health
+        ) as start_daemon,
+    ):
+        result = runner.invoke(cli, ["start", "--wait"])
+
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory is ready." in result.output
+    assert start_daemon.call_args.kwargs["wait_until_ready"] is True
+
+
+def test_start_waits_when_existing_daemon_is_warming(runner):
+    from smartmemory_app.cli import cli
+
+    warming = {"service": "smartmemory", "status": "warming"}
+    health = {"service": "smartmemory", "status": "ok"}
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=warming),
+        patch(
+            "smartmemory_app.daemon.start_daemon", return_value=health
+        ) as start_daemon,
+    ):
+        result = runner.invoke(cli, ["start", "--wait"])
+
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory is ready." in result.output
+    assert start_daemon.call_args.kwargs["wait_until_ready"] is True
 
 
 @pytest.mark.parametrize("command", ["start", "restart"])

@@ -229,12 +229,17 @@ def _startup_failure_message(
 
 
 def start_daemon(
-    num_workers: int = 1, on_log: Optional[Callable[[str], None]] = None
+    num_workers: int = 1,
+    on_log: Optional[Callable[[str], None]] = None,
+    *,
+    wait_until_ready: bool = True,
 ) -> dict | None:
     """Start the daemon and enrichment workers.
 
-    Blocks until the daemon returns its health payload or the startup times out.
-    The caller decides whether that payload is healthy or degraded.
+    By default, blocks until the daemon returns a terminal health payload or the
+    startup times out. With ``wait_until_ready=False``, an observed ``warming``
+    payload is returnable so interactive startup can finish as soon as HTTP is up.
+    The caller decides how to render healthy, warming, or degraded states.
     Then starts num_workers background enrichment worker processes.
 
     Warmup takes ~22s cold (first run), ~2s warm (model cached). When `on_log` is
@@ -243,7 +248,9 @@ def start_daemon(
     silent hang. Idempotent — returns immediately if already running.
     """
     existing = get_status()
-    if existing is not None:
+    if existing is not None and (
+        not wait_until_ready or existing.get("status") != "warming"
+    ):
         return existing
 
     data = _data_dir()
@@ -257,6 +264,28 @@ def start_daemon(
         nonlocal _log_pos
         if on_log is not None:
             _log_pos = _stream_new_log_lines(log_path, _log_pos, on_log)
+
+    def _returnable(status: dict | None) -> bool:
+        return status is not None and (
+            not wait_until_ready or status.get("status") != "warming"
+        )
+
+    # Another caller may already have launched this daemon. Blocking callers keep
+    # observing that process; they must not fall through and launch a duplicate.
+    if existing is not None:
+        for _ in range(120):
+            _pump()
+            status = get_status()
+            if _returnable(status):
+                _pump()
+                return status
+            time.sleep(0.5)
+        raise TimeoutError(
+            _startup_failure_message(
+                "SmartMemory did not finish warming within 60 seconds.",
+                log_path,
+            )
+        )
 
     # launchd-managed install (macOS): let launchd own the process via the plist
     # (RunAtLoad/KeepAlive). bootstrap re-loads it after a `sm stop` bootout and
@@ -284,7 +313,7 @@ def start_daemon(
         for _ in range(120):  # up to 60s for launchd to answer /health
             _pump()
             status = get_status()
-            if status is not None:
+            if _returnable(status):
                 _pump()
                 return status
             time.sleep(0.5)
@@ -355,6 +384,30 @@ def start_daemon(
                 log_path,
             )
         )
+
+    if not _returnable(status):
+        for _ in range(120):
+            if proc.poll() is not None:
+                _pump()
+                raise RuntimeError(
+                    _startup_failure_message(
+                        f"SmartMemory stopped during warmup (code {proc.returncode}).",
+                        log_path,
+                    )
+                )
+            _pump()
+            status = get_status()
+            if _returnable(status):
+                break
+            time.sleep(0.5)
+        else:
+            proc.terminate()
+            raise TimeoutError(
+                _startup_failure_message(
+                    "SmartMemory did not finish warming within 60 seconds.",
+                    log_path,
+                )
+            )
 
     # Phase 3: Start enrichment worker(s)
     _start_workers(num_workers)
