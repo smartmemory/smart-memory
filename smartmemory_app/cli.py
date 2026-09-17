@@ -37,6 +37,7 @@ def _configure_cli_logging() -> None:
 
 from smartmemory_app.install_check import (  # noqa: E402
     MIN_CORE_VERSION,
+    SOCKS_PROXY_ERROR,
     check_installation,
 )
 
@@ -1600,8 +1601,8 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     Detects the pip-backtracked-wrapper trap: a fresh `pip install smartmemory`
     in a polluted environment can backtrack to an ancient wrapper that pins a
     `smartmemory-core` from the dead-`/auth/me` era, which 401s at first use.
-    Checks the installed core against a conservative floor and reports the
-    Python version.
+    Checks the installed core against a conservative floor, reports the Python
+    version, and catches a configured SOCKS proxy without httpx SOCKS support.
     """
     if bundle:
         if not url or out is None:
@@ -1648,7 +1649,14 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         else:
             click.echo(f"✓ smartmemory-core {core} OK")
 
-    if not status.ok:
+    # ── outbound SOCKS proxy support ────────────────────────────────────────
+    if status.socks_proxy_configured:
+        if status.socks_support_ok:
+            click.echo("✓ SOCKS proxy support is installed")
+        else:
+            click.echo(f"✗ {SOCKS_PROXY_ERROR}", err=True)
+
+    if not status.doctor_ok:
         raise SystemExit(1)
     click.echo("\nAll checks passed.")
 

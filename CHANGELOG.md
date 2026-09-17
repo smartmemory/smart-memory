@@ -6,6 +6,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed (2026-09-17) — readable recovery from stale installs
 
+- `sm doctor` now detects a configured SOCKS proxy without the optional httpx
+  transport, exits unsuccessfully, and gives the exact install command. `smartmemory
+  setup` reports the same problem but continues so cached-model and offline recovery
+  remain available. Hook-fed and ordinary memory commands stay silent.
 - `smartmemory setup` now runs the same Python and `smartmemory-core` compatibility check as `sm doctor` before doing any setup work. An old or incomplete install stops with copy-paste recovery commands instead of reaching daemon startup and exposing a traceback. Hook-fed commands remain unchanged and silent.
 - Subprocess daemon startup failures now include the recent daemon log output when available. A missing or unreadable log leaves the original startup error intact.
 - macOS background jobs now switch themselves off if a bare `pip uninstall smartmemory` removes the package first. This stops macOS from restarting a permanently broken job and filling the daemon log forever; rerunning `smartmemory setup` after upgrading replaces older background jobs with the protected versions.

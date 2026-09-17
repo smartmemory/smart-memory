@@ -26,7 +26,7 @@ from typing import Callable
 
 import click
 
-from smartmemory_app.install_check import check_installation
+from smartmemory_app.install_check import SOCKS_PROXY_ERROR, check_installation
 from smartmemory_app.daemon import (
     _LAUNCHD_DAEMON_LABEL,
     _LAUNCHD_WORKER_LABEL,
@@ -209,8 +209,11 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     Three self-contained branches — each handles config, post-config, AND daemon
     start. No shared post-branch code to avoid double-start bugs.
     """
-    if not check_installation().ok:
+    installation = check_installation()
+    if not installation.ok:
         raise click.ClickException(_SETUP_INSTALLATION_ERROR)
+    if not installation.socks_support_ok:
+        click.echo(f"Warning: {SOCKS_PROXY_ERROR}", err=True)
 
     from smartmemory_app.config import config_path
 

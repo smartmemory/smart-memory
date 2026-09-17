@@ -20,11 +20,26 @@ from smartmemory_app.cli import MIN_CORE_VERSION, cli
 from smartmemory_app.setup import setup as setup_cmd
 
 _VersionInfo = namedtuple("_VersionInfo", "major minor micro releaselevel serial")
+_PROXY_ENV_VARS = (
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+)
 
 
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolated_proxy_environment(monkeypatch):
+    """Never let doctor tests inherit the developer machine's proxy settings."""
+    for name in _PROXY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _fake_pkg_version(core: str | None):
@@ -49,6 +64,70 @@ def test_doctor_passes_on_current_core(runner):
     assert result.exit_code == 0, result.output
     assert f"✓ smartmemory-core {MIN_CORE_VERSION} OK" in result.output
     assert "All checks passed." in result.output
+
+
+def test_doctor_fails_when_lowercase_socks_proxy_lacks_support(runner, monkeypatch):
+    monkeypatch.setenv("all_proxy", "socks5h://proxy.example:1080")
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch(
+            "smartmemory_app.install_check._socksio_is_importable",
+            return_value=False,
+            create=True,
+        ),
+    ):
+        result = runner.invoke(cli, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "SmartMemory cannot use your network's SOCKS proxy" in result.output
+    assert "pip install httpx[socks]" in result.output
+    assert "All checks passed." not in result.output
+
+
+def test_doctor_passes_when_socks_proxy_support_is_installed(runner, monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "socks4://proxy.example:1080")
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch(
+            "smartmemory_app.install_check._socksio_is_importable",
+            return_value=True,
+            create=True,
+        ),
+    ):
+        result = runner.invoke(cli, ["doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "\u2713 SOCKS proxy support is installed" in result.output
+    assert "All checks passed." in result.output
+
+
+def test_doctor_passes_without_a_proxy_and_does_not_import_socksio(runner):
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch(
+            "smartmemory_app.install_check._socksio_is_importable", create=True
+        ) as socksio_is_importable,
+    ):
+        result = runner.invoke(cli, ["doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "SOCKS proxy" not in result.output
+    socksio_is_importable.assert_not_called()
+
+
+def test_doctor_ignores_http_proxy(runner, monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch(
+            "smartmemory_app.install_check._socksio_is_importable", create=True
+        ) as socksio_is_importable,
+    ):
+        result = runner.invoke(cli, ["doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "SOCKS proxy" not in result.output
+    socksio_is_importable.assert_not_called()
 
 
 def test_doctor_fails_on_backtracked_core(runner):
@@ -143,6 +222,28 @@ def test_setup_proceeds_on_healthy_core(runner, tmp_path):
         result = runner.invoke(setup_cmd, ["--mode", "local"])
 
     assert result.exit_code == 0, result.output
+    setup_click.assert_called_once_with("local", None)
+
+
+def test_setup_warns_but_proceeds_when_socks_proxy_support_is_missing(
+    runner, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example:1080")
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch(
+            "smartmemory_app.install_check._socksio_is_importable",
+            return_value=False,
+            create=True,
+        ),
+        patch("smartmemory_app.config.config_path", return_value=tmp_path / "config"),
+        patch("smartmemory_app.setup._setup_click") as setup_click,
+    ):
+        result = runner.invoke(setup_cmd, ["--mode", "local"])
+
+    assert result.exit_code == 0, result.output
+    assert "Warning: SmartMemory cannot use your network's SOCKS proxy" in result.output
+    assert "pip install httpx[socks]" in result.output
     setup_click.assert_called_once_with("local", None)
 
 
