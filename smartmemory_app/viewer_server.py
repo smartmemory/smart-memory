@@ -10,8 +10,11 @@ Single uvicorn process serving:
 The module-level ``app = _build_app()`` is side-effect-free — it does not start uvicorn
 or the events server. This makes the module safely importable by tests.
 """
+
 import atexit
+import logging
 import os
+import re
 import threading
 import time
 import webbrowser
@@ -25,6 +28,28 @@ from smartmemory_app.local_api import api as _local_api
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 9014
+log = logging.getLogger(__name__)
+
+
+def _safe_degraded_reason(exc: Exception) -> str:
+    """Return a short exception summary without paths or credential values."""
+    message = " ".join(str(exc).split())
+    message = re.sub(
+        r"(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@",
+        r"\1<redacted>@",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b(api[_ -]?key|token|password|secret|authorization)\b"
+        r"(?:\s*[:=]\s*|\s+)(?:bearer\s+)?[^\s,;]+",
+        r"\1=<redacted>",
+        message,
+    )
+    message = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer <redacted>", message)
+    message = re.sub(r"(?<![A-Za-z0-9:/])/(?:[^\s'\";,)]*)", "<path>", message)
+    message = re.sub(r"(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\s'\";,)]*)", "<path>", message)
+    summary = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+    return summary[:240]
 
 
 def _build_app() -> FastAPI:
@@ -36,6 +61,7 @@ def _build_app() -> FastAPI:
     _startup_versions: dict[str, str] = {}
     try:
         from importlib.metadata import version as _pkg_version
+
         _startup_versions = {
             "smartmemory": _pkg_version("smartmemory"),
             "smartmemory-core": _pkg_version("smartmemory-core"),
@@ -57,10 +83,14 @@ def _build_app() -> FastAPI:
         if _startup_versions and _version_check_counter % 10 == 0:
             try:
                 from importlib.metadata import version as _pkg_version
+
                 for pkg, startup_ver in _startup_versions.items():
                     current = _pkg_version(pkg)
                     if current != startup_ver:
-                        print(f"{pkg} version changed ({startup_ver} → {current}), restarting...", flush=True)
+                        print(
+                            f"{pkg} version changed ({startup_ver} → {current}), restarting...",
+                            flush=True,
+                        )
                         os._exit(0)
             except Exception:
                 pass
@@ -71,30 +101,47 @@ def _build_app() -> FastAPI:
         """Daemon health check. Used by daemon.is_running() to verify ownership."""
 
         from smartmemory_app.config import load_config
+
         cfg = load_config()
         backend_ok = False
+        degraded_reason = None
         node_count = -1
         mem = None
         try:
             from smartmemory_app.storage import get_memory
+
             mem = get_memory()
             backend_ok = mem is not None
             from smartmemory_app.remote_backend import RemoteMemory
+
             if not isinstance(mem, RemoteMemory):
                 try:
                     from smartmemory_app.local_api import _rw_lock
+
                     with _rw_lock:
                         snapshot = mem._graph.backend.serialize()
                     nodes = snapshot.get("nodes", [])
-                    node_count = len([n for n in nodes if n.get("memory_type") != "Version"])
+                    node_count = len(
+                        [n for n in nodes if n.get("memory_type") != "Version"]
+                    )
                 except Exception:
                     node_count = 0  # backend exists but empty/new — still healthy
-        except Exception:
-            pass
+        except Exception as exc:
+            degraded_reason = _safe_degraded_reason(exc)
+        if not backend_ok:
+            degraded_reason = (
+                degraded_reason or "SmartMemory could not open saved memories."
+            )
+            log.warning(
+                "SmartMemory could not open saved memories; status is degraded "
+                "and the memory count is unavailable: %s",
+                degraded_reason,
+            )
         # Enrichment queue status (SQLite-backed, separate worker process)
         async_info: dict = {"enabled": False}
         try:
             from smartmemory_app.enrichment_queue import stats as queue_stats
+
             qs = queue_stats()
             async_info = {"enabled": True, **qs}
         except Exception:
@@ -105,6 +152,7 @@ def _build_app() -> FastAPI:
         # operations are available. `mode` is the source of truth — clients
         # should branch on this rather than infer from llm_provider, etc.
         from smartmemory_app.remote_backend import RemoteMemory as _RM
+
         if isinstance(mem, _RM):
             mode = "remote"
             capabilities = {
@@ -138,7 +186,8 @@ def _build_app() -> FastAPI:
             }
 
         from smartmemory_app.config import llm_key_present
-        return {
+
+        response = {
             "service": "smartmemory",
             "status": "ok" if backend_ok else "degraded",
             "memories": node_count,
@@ -150,9 +199,13 @@ def _build_app() -> FastAPI:
             "mode": mode,
             "capabilities": capabilities,
         }
+        if degraded_reason:
+            response["degraded_reason"] = degraded_reason
+        return response
 
     # DIST-AGENT-HOOKS-1: Mount lifecycle API at /lifecycle on root app
     from smartmemory_app.lifecycle_api import lifecycle_router
+
     app.include_router(lifecycle_router, prefix="/lifecycle")
 
     # Mount local_api at /memory — sub-app routes (e.g. /graph/full) become /memory/graph/full,
@@ -183,12 +236,14 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # setup stores keys in all three locations. Keychain and profile
     # are available immediately without sourcing .zshrc in a new shell.
     from smartmemory_app.config import LLM_KEY_ENV_VARS, llm_key_present
+
     for key_name in LLM_KEY_ENV_VARS:
         if os.environ.get(key_name):
             continue
         # Try keychain
         try:
             import keyring
+
             stored = keyring.get_password("smartmemory", key_name)
             if stored:
                 os.environ[key_name] = stored
@@ -199,6 +254,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         # Try shell profile
         try:
             from smartmemory_app.setup import _read_env_from_profile
+
             stored = _read_env_from_profile(key_name)
             if stored:
                 os.environ[key_name] = stored
@@ -226,16 +282,23 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         get_memory()
         print(f"Backend ready ({time.time() - t0:.1f}s)", flush=True)
     except Exception as e:
-        print(f"Warning: backend init failed ({e}) — daemon running in degraded mode", flush=True)
+        print(
+            f"Warning: backend init failed ({e}) — daemon running in degraded mode",
+            flush=True,
+        )
 
     # Warm embedding model — first embed() triggers lazy model load (~3-5s).
     # Do it here so the first ingest/search request doesn't time out.
     try:
         from smartmemory.plugins.embedding import EmbeddingService
+
         t1 = time.time()
         svc = EmbeddingService()
         svc.embed("warmup")
-        print(f"Embedding model ready ({time.time() - t1:.1f}s, provider={svc.provider})", flush=True)
+        print(
+            f"Embedding model ready ({time.time() - t1:.1f}s, provider={svc.provider})",
+            flush=True,
+        )
     except Exception as e:
         print(f"Warning: embedding warmup failed ({e})", flush=True)
 
@@ -244,6 +307,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # take effect without requiring users to re-run `smartmemory setup`.
     try:
         from smartmemory_app.setup import _copy_hooks
+
         _copy_hooks()
     except Exception as e:
         print(f"Warning: hook sync failed ({e})", flush=True)
@@ -265,16 +329,22 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # events reach the browser only over GET /memory/progress/stream on this
     # same uvicorn port.
     from smartmemory_app.events_server import start_background
+
     start_background()
 
     # Enrichment is handled by a separate worker process (smartmemory worker --loop).
     # The ingest endpoint enqueues to a SQLite table; the worker drains it.
     # No in-process threading — avoids the _drain_running import bug and
     # keeps the daemon process stable.
-    print("Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)", flush=True)
+    print(
+        "Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)",
+        flush=True,
+    )
 
     if open_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+        threading.Timer(
+            1.0, lambda: webbrowser.open(f"http://localhost:{port}")
+        ).start()
 
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 

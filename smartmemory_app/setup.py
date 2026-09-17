@@ -27,6 +27,10 @@ from typing import Callable
 import click
 
 from smartmemory_app.install_check import check_installation
+from smartmemory_app.daemon import (
+    _LAUNCHD_DAEMON_LABEL,
+    _LAUNCHD_WORKER_LABEL,
+)
 
 
 _SETUP_INSTALLATION_ERROR = """Setup stopped because your SmartMemory version is old or incomplete.
@@ -66,8 +70,8 @@ HOOKS_DEST = CLAUDE_DIR / "hooks"
 SETTINGS = CLAUDE_DIR / "settings.json"
 DATA_DIR = Path.home() / ".smartmemory"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
-PLIST_NAME = "ai.smartmemory.daemon.plist"
-WORKER_PLIST_NAME = "ai.smartmemory.worker.plist"
+PLIST_NAME = f"{_LAUNCHD_DAEMON_LABEL}.plist"
+WORKER_PLIST_NAME = f"{_LAUNCHD_WORKER_LABEL}.plist"
 
 # Maps source filename (in package) → namespaced dest filename (in ~/.claude/hooks/)
 _HOOK_FILE_MAP = {
@@ -862,18 +866,46 @@ def _install_launchd_plist() -> bool:
 
     # Install both daemon and worker plists
     templates = [
-        (PLIST_TEMPLATE, PLIST_NAME, "daemon"),
+        (
+            PLIST_TEMPLATE,
+            PLIST_NAME,
+            _LAUNCHD_DAEMON_LABEL,
+            "daemon",
+            "smartmemory_app.viewer_server",
+            f"main(port={cfg.daemon_port}, open_browser=False)",
+        ),
     ]
     if WORKER_PLIST_TEMPLATE.exists():
-        templates.append((WORKER_PLIST_TEMPLATE, WORKER_PLIST_NAME, "worker"))
+        templates.append(
+            (
+                WORKER_PLIST_TEMPLATE,
+                WORKER_PLIST_NAME,
+                _LAUNCHD_WORKER_LABEL,
+                "worker",
+                "smartmemory_app.enrichment_worker",
+                "main()",
+            )
+        )
 
-    for template_path, plist_name, label in templates:
+    for (
+        template_path,
+        plist_name,
+        job_label,
+        display_name,
+        module,
+        main_call,
+    ) in templates:
         if not template_path.exists():
-            click.echo(f"Warning: {label} plist template not found — skipping.")
+            click.echo(f"Warning: {display_name} plist template not found — skipping.")
             continue
 
         content = template_path.read_text()
-        for placeholder, value in replacements.items():
+        job_replacements = {
+            **replacements,
+            "{LAUNCHD_LABEL}": job_label,
+            "{LAUNCHD_COMMAND}": _launchd_command(job_label, module, main_call),
+        }
+        for placeholder, value in job_replacements.items():
             content = content.replace(placeholder, value)
 
         plist_dest = LAUNCH_AGENTS_DIR / plist_name
@@ -896,7 +928,8 @@ def _install_launchd_plist() -> bool:
             click.echo(f"Installed launchd plist: {plist_dest}")
         else:
             click.echo(
-                f"Warning: launchctl load failed for {label}: {result.stderr.strip()}"
+                f"Warning: launchctl load failed for {display_name}: "
+                f"{result.stderr.strip()}"
             )
             click.echo(f"Load manually: launchctl load {plist_dest}")
             all_ok = False
@@ -910,6 +943,30 @@ def _install_launchd_plist() -> bool:
                 "Warning: GROQ_API_KEY not found — enrichment worker won't extract relations."
             )
     return all_ok
+
+
+def _launchd_command(label: str, module: str, main_call: str) -> str:
+    """Build a standalone import guard that remains embedded in the installed plist."""
+    return f'''import os
+import subprocess
+try:
+    import smartmemory_app
+except (ModuleNotFoundError, ImportError) as exc:
+    if getattr(exc, "name", None) != "smartmemory_app":
+        raise
+    job_label = "{label}"
+    message = f"SmartMemory was removed; background job {{job_label}} switched itself off."
+    data_dir = os.environ.get("SMARTMEMORY_DATA_DIR", os.path.expanduser("~/.smartmemory"))
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        with open(os.path.join(data_dir, "daemon.log"), "a", encoding="utf-8") as log_file:
+            log_file.write(message + "\\n")
+    except OSError:
+        print(message, flush=True)
+    subprocess.run(["launchctl", "bootout", f"gui/{{os.getuid()}}/{{job_label}}"], check=False)
+else:
+    from {module} import main
+    {main_call}'''
 
 
 def _uninstall_launchd_plist() -> None:

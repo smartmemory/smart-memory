@@ -1,33 +1,44 @@
 """Tests for DIST-DAEMON-1 Task 10: launchd plist template + install/uninstall."""
 
-import platform
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 
-PLIST_TEMPLATE = Path(__file__).parent.parent.parent / "smartmemory_app" / "data" / "ai.smartmemory.daemon.plist"
+PLIST_TEMPLATE = (
+    Path(__file__).parent.parent.parent
+    / "smartmemory_app"
+    / "data"
+    / "ai.smartmemory.daemon.plist"
+)
 
 
 class TestPlistTemplate:
     def test_template_exists(self):
-        assert PLIST_TEMPLATE.exists(), "Plist template must be shipped in smartmemory_app/data/"
+        assert PLIST_TEMPLATE.exists(), (
+            "Plist template must be shipped in smartmemory_app/data/"
+        )
 
     def test_template_is_valid_xml(self):
         import xml.etree.ElementTree as ET
+
         tree = ET.parse(PLIST_TEMPLATE)
         root = tree.getroot()
         assert root.tag == "plist"
 
     def test_template_has_required_placeholders(self):
         content = PLIST_TEMPLATE.read_text()
-        for placeholder in ["{PYTHON_PATH}", "{DAEMON_PORT}", "{DATA_DIR}", "{BIN_DIR}"]:
+        for placeholder in [
+            "{PYTHON_PATH}",
+            "{DATA_DIR}",
+            "{BIN_DIR}",
+            "{LAUNCHD_LABEL}",
+            "{LAUNCHD_COMMAND}",
+        ]:
             assert placeholder in content, f"Template must contain {placeholder}"
 
-    def test_template_label_is_correct(self):
+    def test_template_label_is_installed_from_shared_constant(self):
         content = PLIST_TEMPLATE.read_text()
-        assert "ai.smartmemory.daemon" in content
+        assert "<string>{LAUNCHD_LABEL}</string>" in content
 
     def test_template_has_keepalive(self):
         content = PLIST_TEMPLATE.read_text()
@@ -57,6 +68,7 @@ class TestInstallLaunchdPlist:
         ):
             mock_run.return_value = MagicMock(returncode=0)
             from smartmemory_app.setup import _install_launchd_plist
+
             result = _install_launchd_plist()
 
         assert result is True
@@ -93,11 +105,14 @@ class TestInstallLaunchdPlist:
         ):
             mock_run.return_value = MagicMock(returncode=0)
             from smartmemory_app.setup import _install_launchd_plist
+
             _install_launchd_plist()
 
         content = (launch_agents / "ai.smartmemory.daemon.plist").read_text()
         assert str(custom_dir) in content, "Plist must use config data_dir, not env var"
-        assert "env-override" not in content, "Plist must NOT use SMARTMEMORY_DATA_DIR env var"
+        assert "env-override" not in content, (
+            "Plist must NOT use SMARTMEMORY_DATA_DIR env var"
+        )
 
     def test_install_calls_launchctl_load(self, tmp_path, monkeypatch):
         """_install_launchd_plist() calls launchctl load on the installed plist."""
@@ -117,13 +132,11 @@ class TestInstallLaunchdPlist:
         ):
             mock_run.return_value = MagicMock(returncode=0)
             from smartmemory_app.setup import _install_launchd_plist
+
             _install_launchd_plist()
 
         # Find the launchctl load call
-        load_calls = [
-            c for c in mock_run.call_args_list
-            if "load" in str(c)
-        ]
+        load_calls = [c for c in mock_run.call_args_list if "load" in str(c)]
         assert len(load_calls) >= 1, "Must call launchctl load"
 
     def test_install_returns_false_non_darwin(self, tmp_path, monkeypatch):
@@ -134,6 +147,7 @@ class TestInstallLaunchdPlist:
 
         with patch("platform.system", return_value="Linux"):
             from smartmemory_app.setup import _install_launchd_plist
+
             result = _install_launchd_plist()
 
         assert result is False
@@ -157,6 +171,7 @@ class TestInstallLaunchdPlist:
         ):
             mock_run.return_value = MagicMock(returncode=1, stderr="permission denied")
             from smartmemory_app.setup import _install_launchd_plist
+
             result = _install_launchd_plist()
 
         assert result is False
@@ -181,6 +196,7 @@ class TestInstallLaunchdPlist:
         ):
             mock_run.return_value = MagicMock(returncode=0)
             from smartmemory_app.setup import _install_launchd_plist
+
             _install_launchd_plist()
 
         # First call should be unload, second should be load
@@ -205,6 +221,7 @@ class TestUninstallLaunchdPlist:
         ):
             mock_run.return_value = MagicMock(returncode=0)
             from smartmemory_app.setup import _uninstall_launchd_plist
+
             _uninstall_launchd_plist()
 
         assert not plist.exists(), "Plist file must be removed after uninstall"
@@ -223,6 +240,7 @@ class TestUninstallLaunchdPlist:
             patch("platform.system", return_value="Darwin"),
         ):
             from smartmemory_app.setup import _uninstall_launchd_plist
+
             _uninstall_launchd_plist()
 
         mock_run.assert_not_called()
@@ -231,4 +249,5 @@ class TestUninstallLaunchdPlist:
         """_uninstall_launchd_plist() is a no-op on non-macOS."""
         with patch("platform.system", return_value="Linux"):
             from smartmemory_app.setup import _uninstall_launchd_plist
+
             _uninstall_launchd_plist()  # should not raise

@@ -8,6 +8,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 - `smartmemory setup` now runs the same Python and `smartmemory-core` compatibility check as `sm doctor` before doing any setup work. An old or incomplete install stops with copy-paste recovery commands instead of reaching daemon startup and exposing a traceback. Hook-fed commands remain unchanged and silent.
 - Subprocess daemon startup failures now include the recent daemon log output when available. A missing or unreadable log leaves the original startup error intact.
+- macOS background jobs now switch themselves off if a bare `pip uninstall smartmemory` removes the package first. This stops macOS from restarting a permanently broken job and filling the daemon log forever; rerunning `smartmemory setup` after upgrading replaces older background jobs with the protected versions.
+- `sm status` now explains why a daemon is degraded and gives the copy-paste next step `sm doctor`. The `/health` response and daemon warning log carry the same short, redacted reason without exposing a traceback, credentials, or local file paths.
 
 ### Fixed (2026-09-15) — 1.4.101: hardened Lite update check (DIST-LITE-UPDATE-CHECK-1)
 

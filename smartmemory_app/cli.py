@@ -384,7 +384,14 @@ def status_cmd() -> None:
         click.echo("SmartMemory daemon is not running.")
         click.echo("Start with: smartmemory start")
         return
-    click.echo(f"SmartMemory daemon: {info.get('status', '?')}")
+    status = info.get("status", "?")
+    click.echo(f"SmartMemory daemon: {status}")
+    if status == "degraded":
+        reason = info.get("degraded_reason") or "No reason was reported."
+        click.echo(
+            f"  Problem:    SmartMemory could not open your saved memories: {reason}"
+        )
+        click.echo("  Next step:  Run: sm doctor")
     # DIST-LOCAL-REMOTE-AWARENESS-1: surface lite-vs-cloud detachment. The daemon
     # /health response reports mode ("lite" | "remote"); in lite mode the store is
     # a local SQLite graph on THIS machine, not the cloud account — so a cloud
