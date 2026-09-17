@@ -200,7 +200,7 @@ def _launchd_job_summary(label: str) -> list[str]:
     ]
 
 
-def _launchd_failure_message(
+def _startup_failure_message(
     summary: str,
     log_path: Path,
     *,
@@ -264,7 +264,7 @@ def start_daemon(
                 if not _launchd_bootstrap(label, label_errors):
                     bootstrap_errors.extend(label_errors)
                     raise RuntimeError(
-                        _launchd_failure_message(
+                        _startup_failure_message(
                             f"Failed to bootstrap launchd job {label}.",
                             log_path,
                             command_errors=bootstrap_errors,
@@ -278,7 +278,7 @@ def start_daemon(
                 return
             time.sleep(0.5)
         raise TimeoutError(
-            _launchd_failure_message(
+            _startup_failure_message(
                 "launchd daemon did not become healthy within 60s.",
                 log_path,
                 command_errors=bootstrap_errors,
@@ -311,7 +311,10 @@ def start_daemon(
         if proc.poll() is not None:
             _pump()  # surface whatever the daemon logged before it died
             raise RuntimeError(
-                f"Daemon exited during startup (code {proc.returncode}). Check {log_path}"
+                _startup_failure_message(
+                    f"SmartMemory stopped during startup (code {proc.returncode}).",
+                    log_path,
+                )
             )
         _pump()
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -323,14 +326,22 @@ def start_daemon(
         time.sleep(0.5)
     else:
         proc.terminate()
-        raise TimeoutError(f"Daemon failed to bind port within 60s. Check {log_path}")
+        raise TimeoutError(
+            _startup_failure_message(
+                "SmartMemory did not open its port within 60s.",
+                log_path,
+            )
+        )
 
     # Phase 2: Verify it's actually SmartMemory responding
     if not is_running(require_healthy=False):
         proc.terminate()
         raise RuntimeError(
-            f"Port {port} is in use (possibly another SmartMemory daemon or process); "
-            f"check `sm status` after fixing. (See {log_path})"
+            _startup_failure_message(
+                f"SmartMemory could not start because port {port} is in use. "
+                "Stop the other process, then run `sm status`.",
+                log_path,
+            )
         )
 
     # Phase 3: Start enrichment worker(s)

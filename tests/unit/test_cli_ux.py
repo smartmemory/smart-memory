@@ -29,6 +29,7 @@ def test_version_flag(runner):
     assert result.exit_code == 0
     # Output should contain a version string (digits and dots)
     import re
+
     assert re.search(r"\d+\.\d+\.\d+", result.output), (
         f"Expected version string in output, got: {result.output!r}"
     )
@@ -120,12 +121,18 @@ def test_get_status_uses_trust_env_false():
 
         def get(self, url, **kwargs):
             resp = MagicMock(spec=httpx.Response)
-            resp.json.return_value = {"service": "smartmemory", "status": "ok", "memories": 5}
+            resp.json.return_value = {
+                "service": "smartmemory",
+                "status": "ok",
+                "memories": 5,
+            }
             return resp
 
     # Patch is_running to return True so get_status proceeds to the httpx call
-    with patch("smartmemory_app.daemon.is_running", return_value=True), \
-         patch("httpx.Client", FakeClient):
+    with (
+        patch("smartmemory_app.daemon.is_running", return_value=True),
+        patch("httpx.Client", FakeClient),
+    ):
         result = get_status()
 
     assert captured_kwargs.get("trust_env") is False, (
@@ -157,8 +164,7 @@ def test_daemon_request_connect_error_returns_none_with_notice(capsys):
         def request(self, *args, **kwargs):
             raise httpx.ConnectError("Connection refused")
 
-    with patch("httpx.Client", FakeClient), \
-         patch("time.sleep"):  # skip the retry sleep
+    with patch("httpx.Client", FakeClient), patch("time.sleep"):  # skip the retry sleep
         result = _daemon_request("GET", "/memory/test")
 
     assert result is None
@@ -187,8 +193,7 @@ def test_daemon_request_connect_timeout_returns_none_with_notice(capsys):
         def request(self, *args, **kwargs):
             raise httpx.ConnectTimeout("Timed out connecting")
 
-    with patch("httpx.Client", FakeClient), \
-         patch("time.sleep"):
+    with patch("httpx.Client", FakeClient), patch("time.sleep"):
         result = _daemon_request("GET", "/memory/test")
 
     assert result is None
@@ -223,7 +228,9 @@ def test_daemon_request_read_timeout_raises_friendly_message():
 
     msg = exc_info.value.format_message()
     assert "daemon" in msg.lower(), f"Expected daemon mention, got: {msg!r}"
-    assert _DAEMON_LOG_HINT in msg, f"Expected log hint '{_DAEMON_LOG_HINT}' in: {msg!r}"
+    assert _DAEMON_LOG_HINT in msg, (
+        f"Expected log hint '{_DAEMON_LOG_HINT}' in: {msg!r}"
+    )
 
 
 def test_daemon_request_http_5xx_adds_log_hint():
@@ -305,11 +312,13 @@ def test_daemon_request_http_4xx_no_log_hint():
 # ── Port-conflict message ──────────────────────────────────────────────────────
 
 
-def test_start_daemon_port_conflict_message():
+def test_start_daemon_port_conflict_message_includes_log_tail(tmp_path):
     """start_daemon raises RuntimeError with the port-conflict hint when port is open
     but health check fails (another process is using the port)."""
     from smartmemory_app.daemon import start_daemon
-    import socket
+
+    log_path = tmp_path / "daemon.log"
+    log_path.write_text("Loading backend...\nfatal startup detail\n")
 
     # Simulate: launchd doesn't manage it, subprocess starts but port opens immediately,
     # but is_running returns False (another process, not SmartMemory).
@@ -324,11 +333,17 @@ def test_start_daemon_port_conflict_message():
     fake_socket.__exit__ = MagicMock(return_value=False)
     fake_socket.connect_ex = fake_connect_ex
 
-    with patch("smartmemory_app.daemon._launchd_manages_daemon", return_value=False), \
-         patch("smartmemory_app.daemon.is_running", return_value=False), \
-         patch("subprocess.Popen", return_value=fake_proc), \
-         patch("socket.socket", return_value=fake_socket), \
-         patch("builtins.open", MagicMock()):
+    def fake_popen(*_args, **kwargs):
+        kwargs["stdout"].close()
+        return fake_proc
+
+    with (
+        patch("smartmemory_app.daemon._data_dir", return_value=tmp_path),
+        patch("smartmemory_app.daemon._launchd_manages_daemon", return_value=False),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        patch("socket.socket", return_value=fake_socket),
+    ):
         with pytest.raises(RuntimeError) as exc_info:
             start_daemon()
 
@@ -336,3 +351,37 @@ def test_start_daemon_port_conflict_message():
     assert "in use" in msg.lower() or "sm status" in msg, (
         f"Expected port-conflict hint in RuntimeError, got: {msg!r}"
     )
+    assert "fatal startup detail" in msg
+    assert str(log_path) in msg
+
+
+def test_start_daemon_timeout_survives_missing_log(tmp_path):
+    """A missing daemon log never masks the original startup timeout."""
+    from smartmemory_app.daemon import start_daemon
+
+    log_path = tmp_path / "daemon.log"
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    fake_socket = MagicMock()
+    fake_socket.connect_ex.return_value = 1
+
+    def fake_popen(*_args, **kwargs):
+        kwargs["stdout"].close()
+        log_path.unlink()
+        return fake_proc
+
+    with (
+        patch("smartmemory_app.daemon._data_dir", return_value=tmp_path),
+        patch("smartmemory_app.daemon._launchd_manages_daemon", return_value=False),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch("subprocess.Popen", side_effect=fake_popen),
+        patch("socket.socket", return_value=fake_socket),
+        patch("time.sleep"),
+    ):
+        with pytest.raises(TimeoutError) as exc_info:
+            start_daemon()
+
+    msg = str(exc_info.value)
+    assert "within 60s" in msg
+    assert "No daemon log was written" in msg
+    assert str(log_path) in msg

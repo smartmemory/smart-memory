@@ -26,6 +26,20 @@ from typing import Callable
 
 import click
 
+from smartmemory_app.install_check import check_installation
+
+
+_SETUP_INSTALLATION_ERROR = """Setup stopped because your SmartMemory version is old or incomplete.
+
+Run these commands one at a time. The first command stops the old SmartMemory background process so it cannot restart during the upgrade.
+
+smartmemory uninstall
+pip install -U smartmemory
+sm doctor
+smartmemory setup
+
+After `sm doctor`, look for `All checks passed.` That means the upgrade worked."""
+
 
 # ── SetupResult — contract between TUI and business logic ─────────────────
 
@@ -191,6 +205,9 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     Three self-contained branches — each handles config, post-config, AND daemon
     start. No shared post-branch code to avoid double-start bugs.
     """
+    if not check_installation().ok:
+        raise click.ClickException(_SETUP_INSTALLATION_ERROR)
+
     from smartmemory_app.config import config_path
 
     # DIST-UPDATE-HINT-1: whether this is a first install, read before any branch

@@ -10,11 +10,14 @@ from collections import namedtuple
 from importlib.metadata import PackageNotFoundError
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 from smartmemory_app import cli as cli_mod
+from smartmemory_app import setup as setup_mod
 from smartmemory_app.cli import MIN_CORE_VERSION, cli
+from smartmemory_app.setup import setup as setup_cmd
 
 _VersionInfo = namedtuple("_VersionInfo", "major minor micro releaselevel serial")
 
@@ -89,6 +92,67 @@ def test_doctor_fails_on_old_python(runner, monkeypatch):
 
 def test_doctor_uses_shared_version_ordering():
     """doctor and the update hint must agree on ordering (same version_lt)."""
-    from smartmemory_app import update_check
+    from smartmemory_app import install_check, update_check
 
-    assert cli_mod._version_lt is update_check.version_lt
+    assert install_check.version_lt is update_check.version_lt
+
+
+def test_doctor_and_setup_share_installation_check():
+    """doctor and setup must use one compatibility check and one core floor."""
+    from smartmemory_app import install_check
+
+    assert cli_mod.check_installation is install_check.check_installation
+    assert setup_mod.check_installation is install_check.check_installation
+    assert cli_mod.MIN_CORE_VERSION == install_check.MIN_CORE_VERSION
+
+
+def test_setup_aborts_on_too_old_core(runner):
+    with patch("importlib.metadata.version", _fake_pkg_version("1.4.36")):
+        result = runner.invoke(setup_cmd, ["--mode", "local"])
+
+    assert result.exit_code == 1
+    assert "Setup stopped because your SmartMemory version is old or incomplete." in (
+        result.output
+    )
+    assert (
+        "smartmemory uninstall\n"
+        "pip install -U smartmemory\n"
+        "sm doctor\n"
+        "smartmemory setup"
+    ) in result.output
+    assert "All checks passed." in result.output
+    assert "Traceback" not in result.output
+
+
+def test_setup_aborts_when_core_missing(runner):
+    with patch("importlib.metadata.version", _fake_pkg_version(None)):
+        result = runner.invoke(setup_cmd, ["--mode", "local"])
+
+    assert result.exit_code == 1
+    assert "old or incomplete" in result.output
+    assert "pip install -U smartmemory" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_setup_proceeds_on_healthy_core(runner, tmp_path):
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch("smartmemory_app.config.config_path", return_value=tmp_path / "config"),
+        patch("smartmemory_app.setup._setup_click") as setup_click,
+    ):
+        result = runner.invoke(setup_cmd, ["--mode", "local"])
+
+    assert result.exit_code == 0, result.output
+    setup_click.assert_called_once_with("local", None)
+
+
+def test_setup_preflight_raises_click_exception(runner):
+    with patch("importlib.metadata.version", _fake_pkg_version("1.4.36")):
+        result = runner.invoke(
+            setup_cmd,
+            ["--mode", "local"],
+            standalone_mode=False,
+        )
+
+    assert isinstance(result.exception, click.ClickException)
+    assert "Traceback" not in result.output

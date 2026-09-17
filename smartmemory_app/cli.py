@@ -35,18 +35,10 @@ def _configure_cli_logging() -> None:
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
 
-# DIST-INSTALL-RESOLVE-1: floor for smartmemory-core. Every wrapper AND core
-# release below 1.4.39 is yanked on PyPI, so a fresh `pip install smartmemory`
-# can no longer backtrack across the dead-`/auth/me` API boundary (e.g. wrapper
-# 1.1.5 → core 0.7.1, which 401s at first API call). A core BELOW this floor is
-# therefore a stale or explicitly pinned install; `smartmemory doctor` flags it.
-# Keep this equal to the oldest UNYANKED smartmemory-core release.
-MIN_CORE_VERSION = "1.4.39"
-
-
-# Canonical implementation lives in update_check (which must not import this
-# module), so `doctor` and the update hint can never disagree on ordering.
-from smartmemory_app.update_check import version_lt as _version_lt  # noqa: E402
+from smartmemory_app.install_check import (  # noqa: E402
+    MIN_CORE_VERSION,
+    check_installation,
+)
 
 
 def _parse_extra_props(args: list[str]) -> dict[str, str]:
@@ -1610,18 +1602,13 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         _download_diagnostics_bundle(url, out)
         return
 
-    import sys
-    from importlib.metadata import version as _pkg_version, PackageNotFoundError
-
-    ok = True
+    status = check_installation()
 
     # ── Python version ──────────────────────────────────────────────────────
-    py = sys.version_info
-    py_str = f"{py.major}.{py.minor}.{py.micro}"
-    if py >= (3, 11):
+    py_str = ".".join(str(part) for part in status.python_version)
+    if status.python_ok:
         click.echo(f"✓ Python {py_str} (>=3.11 OK)")
     else:
-        ok = False
         click.echo(
             f"✗ Python {py_str} is too old — SmartMemory requires >=3.11. "
             "Old Python forces pip to backtrack onto a legacy wrapper.",
@@ -1629,10 +1616,8 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         )
 
     # ── smartmemory-core version ────────────────────────────────────────────
-    try:
-        core = _pkg_version("smartmemory-core")
-    except PackageNotFoundError:
-        ok = False
+    core = status.core_version
+    if core is None:
         click.echo(
             "✗ smartmemory-core is not installed. Reinstall in a clean venv:\n"
             "    python -m venv .venv && source .venv/bin/activate\n"
@@ -1640,8 +1625,7 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
             err=True,
         )
     else:
-        if _version_lt(core, MIN_CORE_VERSION):
-            ok = False
+        if not status.core_ok:
             click.echo(
                 f"✗ smartmemory-core {core} is too old (floor is {MIN_CORE_VERSION}).\n"
                 "  You likely have a pip-backtracked install: pip could not satisfy the\n"
@@ -1657,7 +1641,7 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         else:
             click.echo(f"✓ smartmemory-core {core} OK")
 
-    if not ok:
+    if not status.ok:
         raise SystemExit(1)
     click.echo("\nAll checks passed.")
 
