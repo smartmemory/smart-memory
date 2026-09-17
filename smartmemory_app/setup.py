@@ -290,8 +290,13 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
         except Exception:
             pass
     else:
-        _setup_local()
-        _start_daemon_local()
+        first_run = _setup_local()
+        daemon_status = _start_daemon_local()
+        if daemon_status and daemon_status.get("status") == "ok":
+            if first_run:
+                click.echo("All done. Run 'sm tour' if this is your first time.")
+            else:
+                click.echo("Done. SmartMemory is ready.")
         try:
             from smartmemory_app.launch_metrics import emit as _lm_emit
 
@@ -316,42 +321,51 @@ def _can_run_tui() -> bool:
         return False
 
 
-def _start_daemon_local() -> None:
+def _start_daemon_local(
+    on_log: Callable[[str], None] | None = None,
+) -> dict | None:
     """Start daemon automatically in local mode.
 
     On macOS: let launchd own the process (RunAtLoad starts it immediately).
     On other platforms: start manually via start_daemon().
     Never do both — that causes a duplicate-bind crash loop.
     """
-    import time
-
     launchd_ok = _install_launchd_plist()
-    if launchd_ok:
-        click.echo("\nWaiting for launchd to start daemon...")
-        try:
-            from smartmemory_app.daemon import is_running
+    if on_log is None:
+        action = (
+            "Waiting for SmartMemory to start..."
+            if launchd_ok
+            else "Starting SmartMemory..."
+        )
+        click.echo(f"\n{action}")
+    try:
+        from smartmemory_app.daemon import start_daemon
 
-            for _ in range(60):
-                if is_running():
-                    break
-                time.sleep(1)
-            if is_running():
-                click.echo("SmartMemory is running (managed by launchd).")
-            else:
-                click.echo("Warning: daemon not yet healthy. Check: smartmemory status")
-        except Exception as e:
-            click.echo(f"Warning: health check failed ({e}). Check: smartmemory status")
-    else:
-        click.echo("\nStarting SmartMemory daemon...")
-        try:
-            from smartmemory_app.daemon import start_daemon
+        if on_log is not None:
+            status = start_daemon(on_log=on_log)
+        else:
+            from smartmemory_app.progress import startup_progress
 
-            start_daemon()
+            with startup_progress("Starting SmartMemory", emit=click.echo) as emit:
+                status = start_daemon(on_log=emit)
+    except Exception:
+        if on_log is not None:
+            on_log("SmartMemory did not start. Run: sm doctor")
+        else:
+            click.echo("SmartMemory did not start. Run: sm doctor")
+        return None
+
+    if on_log is None:
+        if status is None:
+            click.echo("SmartMemory did not respond after startup. Run: sm doctor")
+        elif status.get("status") == "ok":
             click.echo("SmartMemory is running.")
-        except Exception as e:
-            click.echo(
-                f"Warning: daemon start failed ({e}). Start manually: smartmemory start"
-            )
+        else:
+            reason = status.get("degraded_reason") or "No reason was reported."
+            click.echo("SmartMemory started, but it needs attention.")
+            click.echo(f"Problem: {reason}")
+            click.echo("Next step: Run: sm doctor")
+    return status
 
 
 def _apply_setup_result(
@@ -469,7 +483,7 @@ def _persist_env_var(name: str, value: str) -> None:
     os.environ[name] = value
 
 
-def _setup_local() -> None:
+def _setup_local() -> bool:
     """Ask pipeline questions, write config, wire Claude Code hooks.
 
     All local deps (smartmemory-core, spaCy, usearch, filelock) are already
@@ -586,24 +600,19 @@ def _setup_local() -> None:
     _register_hooks()
     _seed_data_dir()
 
-    # Start (or restart) daemon so it picks up the new config + keys
-    from smartmemory_app.daemon import is_running, stop_daemon, start_daemon
+    # Stop a live daemon so the lifecycle owner can restart it with the new config.
+    from smartmemory_app.daemon import is_running, stop_daemon
 
     if is_running(require_healthy=False):
-        click.echo("\nRestarting daemon with new config...")
-        stop_daemon()
+        click.echo("\nRestarting SmartMemory with the new settings...")
         import time
 
-        time.sleep(2)
-    click.echo("Starting daemon...")
-    start_daemon()
-    if was_first_run:
-        # DIST-UPDATE-HINT-1: the tour nudge belongs to the first run only. On a
-        # re-run of setup the user has seen it, and the upgrade notice in
-        # update_check owns any later mention.
-        click.echo("All done. Run 'sm tour' if this is your first time.")
-    else:
-        click.echo("Done. SmartMemory is ready.")
+        from smartmemory_app.progress import startup_progress
+
+        with startup_progress("Restarting SmartMemory", emit=click.echo):
+            stop_daemon()
+            time.sleep(2)
+    return was_first_run
 
 
 def _setup_remote(api_key: str | None) -> None:

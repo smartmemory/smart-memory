@@ -293,6 +293,36 @@ def provenance_import_codex(codex_dir, since, dry_run) -> None:
 # ── Daemon lifecycle ────────────────────────────────────────────────────────
 
 
+def _report_start_status(info: dict | None, *, just_started: bool = True) -> None:
+    """Print a truthful startup outcome or fail when no daemon answered."""
+    if info is None:
+        raise click.ClickException(
+            "SmartMemory did not respond after startup. Run: sm doctor"
+        )
+    if info.get("status") == "ok":
+        click.echo("SmartMemory is ready.")
+        return
+    if info.get("status") == "degraded":
+        reason = info.get("degraded_reason") or "No reason was reported."
+        state = "started" if just_started else "is running"
+        click.echo(f"SmartMemory {state}, but it needs attention.")
+        click.echo(f"Problem: {reason}")
+        click.echo("Next step: Run: sm doctor")
+        return
+    raise click.ClickException(
+        "SmartMemory gave an unexpected health response. Run: sm doctor"
+    )
+
+
+def _start_with_progress(*, num_workers: int, message: str) -> dict | None:
+    """Start while displaying terminal-safe elapsed progress and daemon lines."""
+    from smartmemory_app.daemon import start_daemon
+    from smartmemory_app.progress import startup_progress
+
+    with startup_progress(message, emit=click.echo) as on_log:
+        return start_daemon(num_workers=num_workers, on_log=on_log)
+
+
 @cli.command("start")
 @click.option(
     "--num-workers",
@@ -302,20 +332,28 @@ def provenance_import_codex(codex_dir, since, dry_run) -> None:
 )
 def start_cmd(num_workers: int) -> None:
     """Start the SmartMemory daemon and enrichment workers."""
-    from smartmemory_app.daemon import start_daemon, is_running
+    from smartmemory_app.daemon import get_status
 
-    if is_running():
-        click.echo("SmartMemory daemon is already running.")
+    current = get_status()
+    if current is not None:
+        if current.get("status") == "ok":
+            click.echo("SmartMemory is already running.")
+        else:
+            _report_start_status(current, just_started=False)
         return
-    click.echo("Starting SmartMemory daemon (loading models)...")
+    click.echo("Starting SmartMemory (loading models)...")
     try:
-        # Stream the daemon's own startup progress (backend load, embedding warmup,
-        # etc.) so a ~22s cold start shows what it's doing instead of hanging silent.
-        start_daemon(num_workers=num_workers, on_log=lambda ln: click.echo(f"  {ln}"))
-        click.echo("Daemon ready.")
-    except Exception as e:
-        click.echo(f"Failed to start daemon: {e}", err=True)
-        raise SystemExit(1)
+        info = _start_with_progress(
+            num_workers=num_workers,
+            message="Starting SmartMemory",
+        )
+    except click.ClickException:
+        raise
+    except Exception:
+        raise click.ClickException(
+            "SmartMemory did not start. Run: sm doctor"
+        ) from None
+    _report_start_status(info)
 
 
 @cli.command("stop")
@@ -339,14 +377,27 @@ def stop_cmd() -> None:
 )
 def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and enrichment workers."""
-    from smartmemory_app.daemon import stop_daemon, start_daemon, is_running
+    from smartmemory_app.daemon import get_status, stop_daemon
 
-    if is_running(require_healthy=False):
-        click.echo("Stopping daemon...")
-        stop_daemon()
-    click.echo("Starting daemon...")
-    start_daemon(num_workers=num_workers, on_log=lambda ln: click.echo(f"  {ln}"))
-    click.echo("Daemon ready.")
+    if get_status() is not None:
+        click.echo("Stopping SmartMemory...")
+        from smartmemory_app.progress import startup_progress
+
+        with startup_progress("Stopping SmartMemory", emit=click.echo):
+            stop_daemon()
+    click.echo("Starting SmartMemory...")
+    try:
+        info = _start_with_progress(
+            num_workers=num_workers,
+            message="Starting SmartMemory",
+        )
+    except click.ClickException:
+        raise
+    except Exception:
+        raise click.ClickException(
+            "SmartMemory did not start. Run: sm doctor"
+        ) from None
+    _report_start_status(info)
 
 
 @cli.command("warm")
@@ -378,10 +429,14 @@ def warm_cmd(no_reranker: bool) -> None:
 @cli.command("status")
 def status_cmd() -> None:
     """Show SmartMemory daemon status."""
-    from smartmemory_app.daemon import get_status
+    from smartmemory_app.daemon import get_status, should_be_running
 
     info = get_status()
     if info is None:
+        if should_be_running():
+            click.echo("SmartMemory should be running, but it is not responding.")
+            click.echo("Run: sm restart")
+            return
         click.echo("SmartMemory daemon is not running.")
         click.echo("Start with: smartmemory start")
         return

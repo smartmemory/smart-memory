@@ -14,8 +14,9 @@ import atexit
 import logging
 import os
 import threading
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from filelock import FileLock
 
@@ -62,7 +63,24 @@ def _get_lock_file(data_path: Path):
 # --- Singleton lifecycle ---------------------------------------------------------
 
 
-def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
+def _timed_startup_step(
+    on_progress: Callable[[str], None],
+    starting: str,
+    finished: str,
+    action: Callable[[], object],
+) -> object:
+    """Run one startup action with truthful, flushable progress around it."""
+    on_progress(f"{starting}...")
+    started = time.perf_counter()
+    result = action()
+    on_progress(f"{finished} ({time.perf_counter() - started:.1f}s)")
+    return result
+
+
+def _get_local_memory(
+    data_dir: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> "SmartMemory":
     """Return the local SmartMemory singleton, initialising on first call.
 
     Thread-safe via double-checked locking. Registers atexit shutdown on first init.
@@ -117,17 +135,48 @@ def _get_local_memory(data_dir: str | None = None) -> "SmartMemory":
         data_path.mkdir(parents=True, exist_ok=True)
         _data_path = data_path  # cache so ingest() uses the same path as the singleton
         pattern_manager = PatternManager(store=JSONLPatternStore(data_path))
-        _memory = create_lite_memory(
-            data_dir=str(data_path),
-            entity_ruler_patterns=pattern_manager,
-            pipeline_profile=profile,
-            event_sink=get_event_sink(),  # DIST-LITE-3
-            # DIST-LITE-HARDEN-1 P1: core's factory is hermetic by default (a missing
-            # spaCy model raises MissingModelError instead of pip-installing at import).
-            # The `sm` CLI is the interactive first-run surface, so it keeps the
-            # download-on-first-use behaviour; library embedders get the hermetic default.
-            auto_download_models=True,
-        )
+        create_kwargs = {
+            "data_dir": str(data_path),
+            "entity_ruler_patterns": pattern_manager,
+            "pipeline_profile": profile,
+            "event_sink": get_event_sink(),  # DIST-LITE-3
+        }
+        if on_progress is None:
+            # Direct library callers keep the core factory's established one-shot path.
+            _memory = create_lite_memory(
+                **create_kwargs,
+                auto_download_models=True,
+            )
+        else:
+            # The daemon owns the interactive startup surface. Split core's combined
+            # prerequisite check into timed steps, then construct from the verified
+            # local files. The final factory call repeats only cheap presence checks.
+            from smartmemory.tools.factory import (
+                _ensure_spacy_model,
+                _require_embedding_model,
+            )
+
+            _timed_startup_step(
+                on_progress,
+                "Loading language tools (spaCy)",
+                "Language tools ready",
+                _ensure_spacy_model,
+            )
+            _timed_startup_step(
+                on_progress,
+                "Checking the local AI model",
+                "Local AI model ready",
+                lambda: _require_embedding_model(allow_download=True),
+            )
+            _memory = _timed_startup_step(
+                on_progress,
+                "Loading the spaCy language model and opening saved memories",
+                "Language model and saved memories ready",
+                lambda: create_lite_memory(
+                    **create_kwargs,
+                    auto_download_models=False,
+                ),
+            )
         atexit.register(_shutdown)
         # DIST-LITE-WARMSTART-1: warm the local embedder in the background so the
         # user's first add() overlaps the ~12s model load instead of paying it inline.
@@ -155,7 +204,10 @@ def _get_remote_memory(cfg: SmartMemoryConfig) -> "RemoteMemory":
         return _remote_memory
 
 
-def get_memory(data_dir: str | None = None):
+def get_memory(
+    data_dir: str | None = None,
+    on_progress: Callable[[str], None] | None = None,
+):
     """Return the active memory backend (local or remote).
 
     Raises UnconfiguredError if no config exists and auto-migration fails.
@@ -170,7 +222,7 @@ def get_memory(data_dir: str | None = None):
     cfg = load_config()
     if cfg.mode == "remote":
         return _get_remote_memory(cfg)
-    return _get_local_memory(data_dir)
+    return _get_local_memory(data_dir, on_progress=on_progress)
 
 
 def _shutdown() -> None:

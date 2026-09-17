@@ -1,9 +1,7 @@
 """Unit tests for DIST-SETUP-TUI-1: setup refactor + TUI integration."""
-import os
-from pathlib import Path
-from unittest.mock import MagicMock, PropertyMock, patch, call
 
-import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from smartmemory_app.setup import (
     SetupResult,
@@ -71,7 +69,6 @@ class TestCanRunTui:
         monkeypatch.delenv("TERM", raising=False)
         monkeypatch.delenv("CI", raising=False)
         with patch.dict("sys.modules", {"textual": None}):
-            import importlib
             # Force ImportError on textual
             with patch("builtins.__import__", side_effect=ImportError("no textual")):
                 assert _can_run_tui() is False
@@ -239,11 +236,16 @@ class TestSetupDispatch:
 
         with (
             patch("smartmemory_app.setup._can_run_tui", return_value=True),
-            patch("smartmemory_app.setup_tui.run_setup_tui", side_effect=ImportError("no textual")),
-            patch("smartmemory_app.setup._setup_click") as mock_click,
+            patch(
+                "smartmemory_app.setup_tui.run_setup_tui",
+                side_effect=ImportError("no textual"),
+            ),
+            patch("smartmemory_app.setup._setup_click"),
         ):
             runner = CliRunner()
-            result = runner.invoke(cli, ["setup"], input="1\ngroq\nlocal\n~/.smartmemory\n")
+            result = runner.invoke(
+                cli, ["setup"], input="1\ngroq\nlocal\n~/.smartmemory\n"
+            )
 
         # Should have fallen back — either mock_click was called or real click ran
         assert result.exit_code == 0 or "TUI unavailable" in result.output
@@ -260,7 +262,9 @@ class TestRemoteHandoff:
 
         with (
             patch("smartmemory_app.setup._can_run_tui", return_value=True),
-            patch("smartmemory_app.setup_tui.run_setup_tui", return_value=remote_result),
+            patch(
+                "smartmemory_app.setup_tui.run_setup_tui", return_value=remote_result
+            ),
             patch("smartmemory_app.setup._setup_remote") as mock_remote,
         ):
             runner = CliRunner()
@@ -311,12 +315,45 @@ class TestProgressScreen:
                 callback(*args)
 
         with (
-            patch.object(ProgressScreen, "app", new_callable=PropertyMock, return_value=AppStub()),
+            patch.object(
+                ProgressScreen, "app", new_callable=PropertyMock, return_value=AppStub()
+            ),
             patch.object(screen, "query_one", return_value=final),
-            patch("smartmemory_app.setup._apply_setup_result", side_effect=KeyboardInterrupt()),
+            patch(
+                "smartmemory_app.setup._apply_setup_result",
+                side_effect=KeyboardInterrupt(),
+            ),
         ):
             ProgressScreen._run_setup.__wrapped__(screen)
 
         final.update.assert_called_once()
         assert "KeyboardInterrupt" in final.update.call_args.args[0]
         assert screen._setup_finished is True
+
+    def test_daemon_log_updates_the_tui_progress_detail(self):
+        """The setup TUI shows the same daemon warmup lines as the plain CLI."""
+        from smartmemory_app.setup_tui import ProgressScreen
+
+        screen = ProgressScreen()
+        detail = MagicMock()
+
+        class AppStub:
+            def call_from_thread(self, callback, *args):
+                callback(*args)
+
+        with (
+            patch.object(
+                ProgressScreen,
+                "app",
+                new_callable=PropertyMock,
+                return_value=AppStub(),
+            ),
+            patch.object(screen, "query_one", return_value=detail),
+        ):
+            screen._show_daemon_log(
+                "Downloading the local AI model: 12 MB of 45 MB (27%)"
+            )
+
+        detail.update.assert_called_once_with(
+            "Downloading the local AI model: 12 MB of 45 MB (27%)"
+        )

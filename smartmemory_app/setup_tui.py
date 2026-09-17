@@ -6,20 +6,20 @@ screen with per-step checklist + daemon spinner.
 
 Entry point: run_setup_tui() -> SetupResult | None
 """
+
 import os
-from dataclasses import dataclass, field
+import time
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Vertical, VerticalScroll
+from textual.containers import Center, Vertical
 from textual.screen import Screen
 from textual.widgets import (
     Button,
     Footer,
     Header,
     Input,
-    Label,
     LoadingIndicator,
     OptionList,
     Static,
@@ -114,8 +114,7 @@ class LLMScreen(Screen):
                     "and relationships from your text.\n"
                 )
                 options = [
-                    Option(f"{pid:<14s} {desc}", id=pid)
-                    for pid, desc in LLM_PROVIDERS
+                    Option(f"{pid:<14s} {desc}", id=pid) for pid, desc in LLM_PROVIDERS
                 ]
                 yield OptionList(*options, id="llm-list")
                 yield Static(f"\nKeys: {_detect_keys()}\n", id="key-badges")
@@ -150,8 +149,10 @@ class ModelScreen(Screen):
         yield Header()
         with Center():
             with Vertical(id="model-box"):
-                yield Static(f"\n[bold]Model Selection[/bold]\n")
-                yield Static(f"Discovering models on {self._provider}...\n", id="status")
+                yield Static("\n[bold]Model Selection[/bold]\n")
+                yield Static(
+                    f"Discovering models on {self._provider}...\n", id="status"
+                )
                 yield LoadingIndicator(id="loader")
                 yield OptionList(id="model-list")
                 yield Button("Skip", id="skip-btn", variant="default")
@@ -212,7 +213,9 @@ class EmbeddingScreen(Screen):
                 yield Static("\n[bold]Embedding Provider[/bold]\n")
                 has_openai = bool(os.environ.get("OPENAI_API_KEY"))
                 if has_openai:
-                    yield Static("[green]OPENAI_API_KEY detected[/green] — defaulting to openai\n")
+                    yield Static(
+                        "[green]OPENAI_API_KEY detected[/green] — defaulting to openai\n"
+                    )
                 options = [
                     Option(f"{pid:<10s} {desc}", id=pid)
                     for pid, desc in EMBEDDING_PROVIDERS
@@ -251,14 +254,19 @@ class SummaryScreen(Screen):
             with Vertical(id="summary-box"):
                 yield Static("\n[bold]Configuration Summary[/bold]\n")
                 yield Static(f"  Mode:        {r.mode}")
-                yield Static(f"  LLM:         {r.llm_provider}" + (f" ({r.llm_model})" if r.llm_model else ""))
+                yield Static(
+                    f"  LLM:         {r.llm_provider}"
+                    + (f" ({r.llm_model})" if r.llm_model else "")
+                )
                 yield Static(f"  Embeddings:  {r.embedding_provider}")
                 yield Static("")
                 yield Static("  Data directory:")
                 yield Input(value=r.data_dir, id="data-dir-input")
                 yield Static("")
                 with Vertical(id="coref-row"):
-                    yield Static("  Coreference resolution (~500MB model):", id="coref-label")
+                    yield Static(
+                        "  Coreference resolution (~500MB model):", id="coref-label"
+                    )
                     yield Switch(value=r.coreference, id="coref-switch")
                 yield Static("")
                 with Center():
@@ -286,7 +294,6 @@ class SummaryScreen(Screen):
 
 
 class ProgressScreen(Screen):
-
     def compose(self) -> ComposeResult:
         yield Header()
         with Center():
@@ -298,17 +305,47 @@ class ProgressScreen(Screen):
                 yield Static("○ Skills installed", id="step-skills")
                 yield Static("○ Hooks registered", id="step-registered")
                 yield Static("○ Patterns seeded", id="step-patterns")
-                yield Static("○ Daemon started", id="step-daemon")
+                yield Static("○ SmartMemory started", id="step-daemon")
+                yield LoadingIndicator(id="daemon-spinner")
+                yield Static("", id="daemon-detail")
                 yield Static("", id="final-status")
         yield Footer()
 
     def on_mount(self) -> None:
         self._setup_finished = False
+        self._daemon_started_at: float | None = None
+        self.query_one("#daemon-spinner", LoadingIndicator).display = False
+        self.set_interval(1, self._update_daemon_elapsed)
         self._run_setup()
 
     def _set_final_status(self, status_text: str) -> None:
         self.query_one("#final-status", Static).update(status_text)
         self._setup_finished = True
+
+    def _begin_daemon_wait(self) -> None:
+        self._daemon_started_at = time.monotonic()
+        self.query_one("#daemon-spinner", LoadingIndicator).display = True
+        self._update_daemon_elapsed()
+
+    def _finish_daemon_wait(self) -> None:
+        self._daemon_started_at = None
+        self.query_one("#daemon-spinner", LoadingIndicator).display = False
+
+    def _update_daemon_elapsed(self) -> None:
+        started = getattr(self, "_daemon_started_at", None)
+        if started is None:
+            return
+        elapsed = int(time.monotonic() - started)
+        self.query_one("#step-daemon", Static).update(
+            f"● Starting SmartMemory... ({elapsed}s)"
+        )
+
+    def _show_daemon_log(self, line: str) -> None:
+        """Place the latest complete daemon progress line under the spinner."""
+        self.app.call_from_thread(
+            self.query_one("#daemon-detail", Static).update,
+            line,
+        )
 
     @work(thread=True)
     def _run_setup(self) -> None:
@@ -334,31 +371,34 @@ class ProgressScreen(Screen):
 
             _apply_setup_result(self.app._result, on_step=on_step)
 
-            self.app.call_from_thread(
-                self.query_one("#step-daemon", Static).update,
-                "● Starting daemon...",
-            )
-            _start_daemon_local()
+            self.app.call_from_thread(self._begin_daemon_wait)
+            daemon_status = _start_daemon_local(on_log=self._show_daemon_log)
+            self.app.call_from_thread(self._finish_daemon_wait)
 
-            # Check if daemon actually started (since _start_daemon_local never raises).
-            # Use require_healthy=False — daemon may still be warming up (loading
-            # spaCy/embeddings) but is serving on the port. _start_daemon_local()
-            # already waited for the port, so False here means it truly failed.
-            from smartmemory_app.daemon import is_running
-            daemon_ok = is_running(require_healthy=False)
-
-            if daemon_ok:
+            if daemon_status and daemon_status.get("status") == "ok":
                 self.app.call_from_thread(
                     self.query_one("#step-daemon", Static).update,
-                    "[green]✓[/green] Daemon started",
+                    "[green]✓[/green] SmartMemory started",
                 )
-                status_text = "\n[bold green]SmartMemory is ready![/bold green]\n\nTry: [cyan]smartmemory add \"hello world\"[/cyan]\n\nPress any key to exit."
+                status_text = '\n[bold green]SmartMemory is ready![/bold green]\n\nTry: [cyan]smartmemory add "hello world"[/cyan]\n\nPress any key to exit.'
+            elif daemon_status and daemon_status.get("status") == "degraded":
+                reason = (
+                    daemon_status.get("degraded_reason") or "No reason was reported."
+                )
+                self.app.call_from_thread(
+                    self.query_one("#step-daemon", Static).update,
+                    "[yellow]⚠[/yellow] SmartMemory needs attention",
+                )
+                status_text = (
+                    "\n[bold yellow]Setup finished, but SmartMemory needs attention.[/bold yellow]"
+                    f"\n{reason}\n\nRun: [cyan]sm doctor[/cyan]\n\nPress any key to exit."
+                )
             else:
                 self.app.call_from_thread(
                     self.query_one("#step-daemon", Static).update,
-                    "[yellow]⚠[/yellow] Daemon not running",
+                    "[red]✗[/red] SmartMemory did not start",
                 )
-                status_text = "\n[bold yellow]Setup complete but daemon not running.[/bold yellow]\nStart manually: [cyan]smartmemory start[/cyan]\n\nPress any key to exit."
+                status_text = "\n[bold red]Setup could not start SmartMemory.[/bold red]\nRun: [cyan]sm doctor[/cyan]\n\nPress any key to exit."
 
             self.app.call_from_thread(self._set_final_status, status_text)
         except BaseException as e:
@@ -403,10 +443,10 @@ def _format_size(size_bytes: int) -> str:
     """Format byte count as human-readable (e.g., 4.7 GB)."""
     if size_bytes <= 0:
         return ""
-    gb = size_bytes / (1024 ** 3)
+    gb = size_bytes / (1024**3)
     if gb >= 1:
         return f"{gb:.1f} GB"
-    mb = size_bytes / (1024 ** 2)
+    mb = size_bytes / (1024**2)
     return f"{mb:.0f} MB"
 
 

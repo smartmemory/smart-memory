@@ -219,14 +219,64 @@ def _build_app() -> FastAPI:
 app = _build_app()
 
 
+def _startup_line(message: str) -> None:
+    """Write one complete startup line for daemon-log streaming."""
+    print(message, flush=True)
+
+
+def _warm_backend() -> bool:
+    """Warm the local backend with timed, newline-only progress reporting."""
+    from smartmemory_app.hf_progress import discrete_huggingface_progress
+    from smartmemory_app.storage import get_memory
+
+    _startup_line("Loading SmartMemory...")
+    started = time.perf_counter()
+    backend_ok = True
+    with discrete_huggingface_progress(_startup_line):
+        try:
+            get_memory(on_progress=_startup_line)
+        except Exception:
+            backend_ok = False
+            _startup_line(
+                "Warning: SmartMemory could not open saved memories. "
+                "Run sm doctor after startup for help."
+            )
+
+        # First embed() constructs the selected runtime. Keep this foregrounded so
+        # the first real add/search request does not inherit the cold-start delay.
+        _startup_line("Warming the search model...")
+        model_started = time.perf_counter()
+        try:
+            from smartmemory.plugins.embedding import EmbeddingService
+
+            service = EmbeddingService()
+            service.embed("warmup")
+            _startup_line(
+                f"Search model ready ({time.perf_counter() - model_started:.1f}s)"
+            )
+        except Exception:
+            backend_ok = False
+            _startup_line(
+                "Warning: The search model could not start. "
+                "Run sm doctor after startup for help."
+            )
+
+    elapsed = time.perf_counter() - started
+    if backend_ok:
+        _startup_line(f"SmartMemory startup complete ({elapsed:.1f}s)")
+    else:
+        _startup_line(f"SmartMemory startup finished with a problem ({elapsed:.1f}s)")
+    return backend_ok
+
+
 def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """Start the SmartMemory daemon.
 
     Eagerly warms the memory backend (spaCy + embedding model load) before
     starting uvicorn so the first API request doesn't time out.
-    Writes PID file after successful warmup for daemon lifecycle management.
+    Writes a PID file before serving for daemon lifecycle management.
     """
-    from smartmemory_app.storage import get_memory, _shutdown, _resolve_data_dir
+    from smartmemory_app.storage import _shutdown, _resolve_data_dir
 
     data_path = _resolve_data_dir()
     data_path.mkdir(parents=True, exist_ok=True)
@@ -276,31 +326,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             flush=True,
         )
 
-    print("Loading SmartMemory backend...", flush=True)
-    t0 = time.time()
-    try:
-        get_memory()
-        print(f"Backend ready ({time.time() - t0:.1f}s)", flush=True)
-    except Exception as e:
-        print(
-            f"Warning: backend init failed ({e}) — daemon running in degraded mode",
-            flush=True,
-        )
-
-    # Warm embedding model — first embed() triggers lazy model load (~3-5s).
-    # Do it here so the first ingest/search request doesn't time out.
-    try:
-        from smartmemory.plugins.embedding import EmbeddingService
-
-        t1 = time.time()
-        svc = EmbeddingService()
-        svc.embed("warmup")
-        print(
-            f"Embedding model ready ({time.time() - t1:.1f}s, provider={svc.provider})",
-            flush=True,
-        )
-    except Exception as e:
-        print(f"Warning: embedding warmup failed ({e})", flush=True)
+    _warm_backend()
 
     # Sync hook scripts from package → ~/.claude/hooks/ on every daemon start.
     # Ensures pip upgrades that change hook content (e.g. persist→add rename)

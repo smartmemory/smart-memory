@@ -6,6 +6,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed (2026-09-17) — readable recovery from stale installs
 
+- Startup now reports each timed model/backend step, shows throttled newline-only
+  model-download progress, and uses an elapsed spinner only on interactive terminals.
+  The setup TUI shows the same live startup state. `sm start` and `sm restart` now
+  report the verified `/health` result: healthy, degraded with its reason and `sm
+  doctor`, or failed when nothing responds. `sm status` distinguishes a stopped
+  install from a configured background process that has stopped responding.
 - `sm doctor` now detects a configured SOCKS proxy without the optional httpx
   transport, exits unsuccessfully, and gives the exact install command. `smartmemory
   setup` reports the same problem but continues so cached-model and offline recovery

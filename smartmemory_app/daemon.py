@@ -116,6 +116,11 @@ def _launchd_manages_daemon() -> bool:
     )
 
 
+def should_be_running() -> bool:
+    """Whether local lifecycle markers say a daemon is expected to exist."""
+    return _pid_file().exists() or _launchd_manages_daemon()
+
+
 def is_running(require_healthy: bool = True) -> bool:
     """Check daemon is running AND is SmartMemory (not a random process on the port).
 
@@ -225,10 +230,11 @@ def _startup_failure_message(
 
 def start_daemon(
     num_workers: int = 1, on_log: Optional[Callable[[str], None]] = None
-) -> None:
+) -> dict | None:
     """Start the daemon and enrichment workers.
 
-    Blocks until daemon is ready (health check passes) or timeout.
+    Blocks until the daemon returns its health payload or the startup times out.
+    The caller decides whether that payload is healthy or degraded.
     Then starts num_workers background enrichment worker processes.
 
     Warmup takes ~22s cold (first run), ~2s warm (model cached). When `on_log` is
@@ -236,8 +242,9 @@ def start_daemon(
     streamed to it during the wait, so `sm start` shows progress instead of a
     silent hang. Idempotent — returns immediately if already running.
     """
-    if is_running():
-        return
+    existing = get_status()
+    if existing is not None:
+        return existing
 
     data = _data_dir()
     data.mkdir(parents=True, exist_ok=True)
@@ -271,15 +278,19 @@ def start_daemon(
                             include_job_state=True,
                         )
                     )
-        for _ in range(120):  # up to 60s for launchd to bring it healthy
+        # Keep polling for the full launch window. A KeepAlive job that crashed is
+        # genuinely absent during launchd's 10-second throttle interval; one missed
+        # probe is not a verdict. Return only a health payload obtained now.
+        for _ in range(120):  # up to 60s for launchd to answer /health
             _pump()
-            if is_running(require_healthy=False):
+            status = get_status()
+            if status is not None:
                 _pump()
-                return
+                return status
             time.sleep(0.5)
         raise TimeoutError(
             _startup_failure_message(
-                "launchd daemon did not become healthy within 60s.",
+                "SmartMemory did not respond within 60 seconds.",
                 log_path,
                 command_errors=bootstrap_errors,
                 include_job_state=True,
@@ -334,7 +345,8 @@ def start_daemon(
         )
 
     # Phase 2: Verify it's actually SmartMemory responding
-    if not is_running(require_healthy=False):
+    status = get_status()
+    if status is None:
         proc.terminate()
         raise RuntimeError(
             _startup_failure_message(
@@ -347,6 +359,7 @@ def start_daemon(
     # Phase 3: Start enrichment worker(s)
     _start_workers(num_workers)
     _pump()  # final drain of any trailing startup lines
+    return status
 
 
 def _start_workers(num_workers: int = 1) -> None:
@@ -482,6 +495,9 @@ def get_status() -> dict | None:
 
         with httpx.Client(trust_env=False) as client:
             r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=3)
-        return r.json()
+        data = r.json()
+        if data.get("service") != "smartmemory":
+            return None
+        return data
     except Exception:
-        return {"service": "smartmemory", "status": "unreachable"}
+        return None

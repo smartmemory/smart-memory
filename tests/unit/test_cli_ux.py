@@ -385,3 +385,212 @@ def test_start_daemon_timeout_survives_missing_log(tmp_path):
     assert "within 60s" in msg
     assert "No daemon log was written" in msg
     assert str(log_path) in msg
+
+
+def test_launchd_start_waits_through_keepalive_throttle_gap(tmp_path):
+    """Ten seconds without a process in a crash-loop is not an early verdict."""
+    from smartmemory_app import daemon
+
+    plist = tmp_path / "ai.smartmemory.daemon.plist"
+    plist.write_text("plist")
+    health = {"service": "smartmemory", "status": "ok"}
+    # Initial idempotence probe plus 20 half-second launch probes, then recovery.
+    health_checks = [None] * 21 + [health]
+
+    with (
+        patch.object(daemon, "get_status", side_effect=health_checks),
+        patch.object(daemon, "_data_dir", return_value=tmp_path),
+        patch.object(daemon, "_launchd_manages_daemon", return_value=True),
+        patch.object(daemon, "_launchd_plist_path", return_value=plist),
+        patch.object(daemon, "_launchd_loaded", return_value=True),
+        patch("time.sleep"),
+    ):
+        assert daemon.start_daemon() == health
+
+
+# ── Startup progress and truthful outcomes ───────────────────────────────────
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_start_commands_report_verified_healthy_result(runner, command):
+    """A success line is printed only for an explicit healthy payload."""
+    from smartmemory_app.cli import cli
+
+    health = {"service": "smartmemory", "status": "ok"}
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch("smartmemory_app.daemon.stop_daemon"),
+        patch("smartmemory_app.daemon.start_daemon", return_value=health),
+    ):
+        result = runner.invoke(cli, [command])
+
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory is ready." in result.output
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_start_commands_report_degraded_reason_without_success(runner, command):
+    """A degraded daemon is explained and never labelled ready."""
+    from smartmemory_app.cli import cli
+
+    health = {
+        "service": "smartmemory",
+        "status": "degraded",
+        "degraded_reason": "The local model could not be loaded.",
+    }
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch("smartmemory_app.daemon.stop_daemon"),
+        patch("smartmemory_app.daemon.start_daemon", return_value=health),
+    ):
+        result = runner.invoke(cli, [command])
+
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory started, but it needs attention." in result.output
+    assert "The local model could not be loaded." in result.output
+    assert "Run: sm doctor" in result.output
+    assert "SmartMemory is ready." not in result.output
+    assert "Daemon ready." not in result.output
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_start_commands_fail_when_nothing_answers(runner, command):
+    """No health response is a failed command, never a success."""
+    from smartmemory_app.cli import cli
+
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch("smartmemory_app.daemon.stop_daemon"),
+        patch("smartmemory_app.daemon.start_daemon", return_value=None),
+    ):
+        result = runner.invoke(cli, [command])
+
+    assert result.exit_code == 1
+    assert "SmartMemory did not respond after startup." in result.output
+    assert "SmartMemory is ready." not in result.output
+    assert "Daemon ready." not in result.output
+
+
+def test_status_says_should_be_running_when_pid_file_exists(runner, tmp_path):
+    """A stale pid/plist points to restart instead of claiming it is uninstalled."""
+    from smartmemory_app.cli import cli
+
+    pid_file = tmp_path / "daemon.pid"
+    pid_file.write_text("1234")
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch("smartmemory_app.daemon._pid_file", return_value=pid_file),
+        patch("smartmemory_app.daemon._launchd_manages_daemon", return_value=False),
+    ):
+        result = runner.invoke(cli, ["status"])
+
+    assert result.exit_code == 0
+    assert "should be running, but it is not responding" in result.output
+    assert "Run: sm restart" in result.output
+    assert "Start with: smartmemory start" not in result.output
+
+
+def test_status_keeps_not_running_message_without_runtime_markers(runner, tmp_path):
+    """A genuinely uninstalled/stopped daemon keeps the established guidance."""
+    from smartmemory_app.cli import cli
+
+    with (
+        patch("smartmemory_app.daemon.get_status", return_value=None),
+        patch(
+            "smartmemory_app.daemon._pid_file", return_value=tmp_path / "missing.pid"
+        ),
+        patch("smartmemory_app.daemon._launchd_manages_daemon", return_value=False),
+    ):
+        result = runner.invoke(cli, ["status"])
+
+    assert result.exit_code == 0
+    assert "SmartMemory daemon is not running." in result.output
+    assert "Start with: smartmemory start" in result.output
+
+
+def test_non_tty_startup_progress_has_no_spinner_control_output():
+    """Pipes and service logs receive plain lines, not animated terminal frames."""
+    from io import StringIO
+
+    from smartmemory_app.progress import startup_progress
+
+    class Pipe(StringIO):
+        def isatty(self):
+            return False
+
+    stream = Pipe()
+    emitted = []
+    with startup_progress(
+        "Starting SmartMemory", stream=stream, emit=emitted.append
+    ) as on_log:
+        on_log("Loading language tools...")
+
+    assert emitted == ["  Loading language tools..."]
+    assert stream.getvalue() == ""
+
+
+def test_download_progress_is_throttled_newline_text_without_carriage_returns():
+    """Model transfer updates are discrete log lines, never tqdm redraw fragments."""
+    from smartmemory_app.hf_progress import DownloadProgressReporter
+
+    emitted = []
+    now = iter([0.0, 0.1, 0.2, 2.2, 2.3])
+    reporter = DownloadProgressReporter(
+        emitted.append, clock=lambda: next(now), interval=2.0
+    )
+    bar = reporter.new_bar(total=50 * 1024 * 1024, initial=0)
+    bar.update(1 * 1024 * 1024)
+    bar.update(5 * 1024 * 1024)
+    bar.update(10 * 1024 * 1024)
+
+    assert len(emitted) == 2
+    assert emitted[0].startswith("Downloading the local AI model:")
+    assert "32%" in emitted[-1]
+    assert all("\r" not in line and "\n" not in line for line in emitted)
+
+
+def test_backend_startup_lines_are_emitted_in_order(monkeypatch, capsys):
+    """The daemon names each long startup step before doing the work."""
+    from smartmemory_app import viewer_server
+
+    class FakeService:
+        provider = "local"
+
+        def embed(self, text):
+            assert text == "warmup"
+
+    def fake_get_memory(on_progress=None):
+        assert on_progress is not None
+        for line in (
+            "Loading language tools (spaCy)...",
+            "Language tools ready (0.1s)",
+            "Checking the local AI model...",
+            "Local AI model ready (0.2s)",
+            "Loading the spaCy language model and opening saved memories...",
+            "Language model and saved memories ready (0.1s)",
+        ):
+            on_progress(line)
+        return object()
+
+    monkeypatch.setattr("smartmemory_app.storage.get_memory", fake_get_memory)
+    monkeypatch.setattr("smartmemory.plugins.embedding.EmbeddingService", FakeService)
+
+    assert viewer_server._warm_backend() is True
+    output = capsys.readouterr().out
+    expected = [
+        "Loading SmartMemory...",
+        "Loading language tools (spaCy)...",
+        "Language tools ready",
+        "Checking the local AI model...",
+        "Local AI model ready",
+        "Loading the spaCy language model and opening saved memories...",
+        "Language model and saved memories ready",
+        "Warming the search model...",
+        "Search model ready",
+        "SmartMemory startup complete",
+    ]
+    positions = [output.index(text) for text in expected]
+    assert positions == sorted(positions)
