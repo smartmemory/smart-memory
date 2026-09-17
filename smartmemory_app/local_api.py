@@ -1226,9 +1226,17 @@ def ask_endpoint(body: AskRequest) -> dict:
         )
     except Exception as exc:
         log.exception("sm ask LLM request failed")
-        raise HTTPException(
-            status_code=502, detail=f"Unable to answer with the configured LLM: {exc}"
-        )
+        detail = f"Unable to answer with the configured LLM: {exc}"
+        if isinstance(exc, ImportError) and (
+            exc.name == "openai" or str(exc) == "openai package is required"
+        ):
+            detail = (
+                "Python dependency 'openai' is missing; its SDK provides transport for "
+                "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
+                "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
+                "(core-library users: pip install 'smartmemory-core[llm]')."
+            )
+        raise HTTPException(status_code=502, detail=detail)
     if not isinstance(answer, str) or not answer.strip():
         raise HTTPException(
             status_code=502,

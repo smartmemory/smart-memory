@@ -14,6 +14,8 @@ All tests mock _get_backend() to avoid touching the filesystem.
 """
 
 import os
+import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -280,6 +282,38 @@ class TestAsk:
 
         assert response.status_code == 503
         assert "requires a configured LLM key" in response.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ImportError("openai package is required"),
+            ModuleNotFoundError("No module named 'openai'", name="openai"),
+        ],
+    )
+    def test_missing_openai_sdk_explains_transport_not_credentials(
+        self, client, monkeypatch, error
+    ):
+        import smartmemory_app.local_api as local_api
+
+        llm = ModuleType("smartmemory.utils.llm")
+        llm.call_llm = MagicMock(side_effect=error)
+        monkeypatch.setitem(sys.modules, "smartmemory.utils.llm", llm)
+        monkeypatch.setattr(local_api, "llm_key_present", lambda: True)
+        monkeypatch.setattr(local_api, "_search_items", lambda body: [])
+        monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
+
+        response = client.post("/ask", json={"question": "What did we decide?"})
+
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert "Python dependency 'openai' is missing" in detail
+        assert "Groq and other OpenAI-compatible providers" in detail
+        assert "No OpenAI API key is required" in detail
+        assert "pip install --upgrade --force-reinstall smartmemory" in detail
+        assert "smartmemory-core[llm]" in detail
+        remaining = detail.replace("No OpenAI API key is required", "").lower()
+        assert "api key" not in remaining
+        assert "openai package is required" not in detail
 
     def test_split_answer_uses_markers_and_falls_back_to_paragraphs(self):
         """The reply is split into a direct answer and separate reasoning."""

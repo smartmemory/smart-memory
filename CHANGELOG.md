@@ -4,6 +4,13 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed (2026-09-18) — install the compatible-provider SDK
+
+- Default installs now include the `openai` Python SDK used by `sm ask` for Groq
+  and other OpenAI-compatible providers, without adding `litellm` or requiring an
+  OpenAI API key. Missing-SDK errors distinguish the dependency from credentials
+  and explain how to reinstall/upgrade the wrapper or install the core LLM extra.
+
 ### Fixed (2026-09-17) — adaptive recall allocation
 
 - Local recall preserves its recency-first blend while allowing either channel to

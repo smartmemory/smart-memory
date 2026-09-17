@@ -6,9 +6,10 @@ wrapper and sits at or above the doctor floor. This is the regression guard for
 the backtracking trap: if a legacy wrapper is ever un-yanked, or a new wrapper's
 tree cannot resolve and pip walks back, this fails before a user does.
 
-Network + real PyPI, so it is OPT-IN: it skips unless
+The resolver check uses network + real PyPI, so it is OPT-IN: it skips unless
 SMARTMEMORY_FRESH_INSTALL_CHECK=1 is set (a plain `pytest` must stay offline-safe
-and fast). Runs `--dry-run`, so nothing is installed. Set
+and fast). An offline test always checks the default dependency declaration.
+The resolver runs `--dry-run`, so nothing is installed. Set
 SMARTMEMORY_FRESH_INSTALL_PYTHON to test a specific interpreter.
 
     SMARTMEMORY_FRESH_INSTALL_CHECK=1 pytest tests/integration/test_fresh_install_resolution.py
@@ -21,19 +22,17 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
+
+from packaging.requirements import Requirement
 
 import pytest
 
 from smartmemory_app.cli import MIN_CORE_VERSION
 from smartmemory_app.update_check import version_lt
 
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skipif(
-        os.environ.get("SMARTMEMORY_FRESH_INSTALL_CHECK") != "1",
-        reason="needs network + real PyPI; set SMARTMEMORY_FRESH_INSTALL_CHECK=1 to run",
-    ),
-]
+pytestmark = pytest.mark.integration
 
 
 def _resolve(tmp_path, python: str) -> dict[str, str]:
@@ -66,6 +65,21 @@ def _resolve(tmp_path, python: str) -> dict[str, str]:
     }
 
 
+def test_declared_dependencies_include_openai_transport():
+    """Offline guard for the default install contract, not a resolver/build check."""
+    project = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    metadata = tomllib.loads(project.read_text())
+    requirements = [Requirement(dep) for dep in metadata["project"]["dependencies"]]
+    openai = [req for req in requirements if req.name.lower() == "openai"]
+    assert len(openai) == 1, "default install must declare the openai Python SDK"
+    assert openai[0].marker is None, "the SDK must not depend on an extra or platform"
+    assert str(openai[0].specifier) == ">=1.0.0"
+
+
+@pytest.mark.skipif(
+    os.environ.get("SMARTMEMORY_FRESH_INSTALL_CHECK") != "1",
+    reason="needs network + real PyPI; set SMARTMEMORY_FRESH_INSTALL_CHECK=1 to run",
+)
 def test_fresh_install_resolves_to_lockstep_modern_core(tmp_path):
     python = os.environ.get("SMARTMEMORY_FRESH_INSTALL_PYTHON") or sys.executable
     if shutil.which(python) is None and not os.path.exists(python):
@@ -75,6 +89,7 @@ def test_fresh_install_resolves_to_lockstep_modern_core(tmp_path):
 
     assert "smartmemory" in resolved, resolved
     assert "smartmemory-core" in resolved, resolved
+    assert "openai" in resolved, "fresh install must include the openai Python SDK"
     wrapper = resolved["smartmemory"]
     core = resolved["smartmemory-core"]
 
