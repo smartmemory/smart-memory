@@ -4,6 +4,16 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed (2026-09-17) — adaptive recall allocation
+
+- Local recall preserves its recency-first blend while allowing either channel to
+  fill unused slots, widening candidate windows in the app when necessary. Dedup
+  precedes the final cap; exhausted eligible results produce a shortfall warning.
+- Recall filtering and formatting now warn with item identifiers and discard
+  reasons. Content dedup compares full lowercased content within a memory type,
+  replacing the unsafe 120-character prefix comparison shared by local and remote
+  formatting. Distinct memories sharing a prefix are retained.
+
 ### Fixed (2026-09-17) — readable recovery from stale installs
 
 - Daemon startup now checks the spaCy and embedding-model prerequisites in

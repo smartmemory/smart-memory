@@ -687,6 +687,7 @@ def recall(
         _trace,
         derive_workspace_id,
         format_recall_lines,
+        recall_item_label,
         time_ms,
     )
 
@@ -734,49 +735,82 @@ def recall(
                 if ws_match and _snapshot_is_fresh(snap, max_days=7):
                     frame = (getattr(snap, "content", "") or "").strip()
 
-    # 2. Recency + semantic candidates
-    if query:
-        results = mem.search(query, top_k=top_k * 2)
-    elif cwd:
-        recent_k, semantic_k = _split_recall_counts(top_k)
-        recent = mem.search("", top_k=recent_k, sort_by="recency")
-        semantic = mem.search(cwd, top_k=semantic_k) if semantic_k else []
-        results = list(recent) + list(semantic)
-    else:
-        results = list(mem.search("", top_k=top_k, sort_by="recency"))
-
-    # Drop snapshot rows from candidate set (the frame already covers them)
-    results = [r for r in results if getattr(r, "memory_type", "") != "snapshot"]
-
-    # 3. Origin tier filter (default {1, 2}; excludes tier-4 system noise)
-    results = filter_by_tiers(results, get_default_tiers("recall"))
-
-    # 4. Workspace metadata filter.
-    # Default: items without workspace_id pass through (legacy backward compat;
-    # SQLiteBackend single-tenant can't scope at storage layer).
-    # Strict mode (SMARTMEMORY_RECALL_STRICT or strict=True): drop items whose
-    # workspace_id is None when a workspace_id is set on the recall — eliminates
-    # legacy-leak items like Alice/Atlas that predate workspace tagging.
-    if workspace_id:
-        scoped = []
-        for r in results:
-            r_meta = getattr(r, "metadata", None) or {}
-            r_ws = r_meta.get("workspace_id") if isinstance(r_meta, dict) else None
-            if r_ws == workspace_id:
-                scoped.append(r)
-            elif r_ws is None and not strict:
-                scoped.append(r)
-        results = scoped
-
-    # 5. Confidence floor + reference exclusion (preserved from legacy)
+    # Filter each channel before allocating its preferred slots. Widen here, at
+    # the producing layer, when filtering/dedup leaves eligible slots unfilled.
+    tiers = get_default_tiers("recall")
     recall_floor = float(os.environ.get("SMARTMEMORY_RECALL_FLOOR", "0.3"))
-    results = [r for r in results if getattr(r, "confidence", 1.0) >= recall_floor]
-    results = [r for r in results if not getattr(r, "reference", False)]
 
-    # 6. Format (dedup + empty-suppress + top_k cap inside)
-    item_dicts = [_item_to_recall_dict(r) for r in results]
-    body = format_recall_lines(item_dicts, top_k=top_k)
-    emitted = body.count("\n- ") if body else 0
+    def eligible(rows):
+        tier_rows = filter_by_tiers(rows, tiers)
+        allowed = {id(r) for r in tier_rows}
+        kept = []
+        for r in rows:
+            meta = getattr(r, "metadata", None) or {}
+            r_ws = meta.get("workspace_id") if isinstance(meta, dict) else None
+            reason = None
+            if getattr(r, "memory_type", "") == "snapshot":
+                reason = "snapshot row covered by optional frame"
+            elif id(r) not in allowed:
+                reason = f"origin tier outside allowed tiers {tiers}"
+            elif workspace_id and r_ws != workspace_id and (r_ws is not None or strict):
+                reason = "workspace mismatch or missing strict workspace"
+            elif getattr(r, "confidence", 1.0) < recall_floor:
+                reason = f"confidence below floor {recall_floor}"
+            elif getattr(r, "reference", False):
+                reason = "reference exclusion"
+            if reason:
+                log.warning(
+                    "recall dropped %s: %s",
+                    recall_item_label(_item_to_recall_dict(r)),
+                    reason,
+                )
+            else:
+                kept.append(r)
+        return kept
+
+    requested = max(0, top_k)
+    fetch_k = max(1, requested * (2 if query else 1))
+    recent_k, semantic_k = _split_recall_counts(requested)
+    results = []
+    body = ""
+    emitted = 0
+    while requested:
+        if query:
+            raw = list(mem.search(query, top_k=fetch_k))
+            results = eligible(raw)
+            exhausted = len(raw) < fetch_k
+        elif cwd:
+            recent = list(mem.search("", top_k=fetch_k, sort_by="recency"))
+            semantic = list(mem.search(cwd, top_k=fetch_k))
+            recent_rows, semantic_rows = eligible(recent), eligible(semantic)
+            # Preserve ceil(k/2) recency first, then floor(k/2) semantic.
+            # Overflow from either channel can replace missing/duplicate slots.
+            results = (
+                recent_rows[:recent_k]
+                + semantic_rows[:semantic_k]
+                + recent_rows[recent_k:]
+                + semantic_rows[semantic_k:]
+            )
+            exhausted = len(recent) < fetch_k and len(semantic) < fetch_k
+        else:
+            raw = list(mem.search("", top_k=fetch_k, sort_by="recency"))
+            results = eligible(raw)
+            exhausted = len(raw) < fetch_k
+
+        body = format_recall_lines(
+            [_item_to_recall_dict(r) for r in results], top_k=requested
+        )
+        emitted = body.count("\n- ") if body else 0
+        if emitted >= requested or exhausted:
+            break
+        fetch_k *= 2
+
+    if emitted < requested:
+        log.warning(
+            "recall shortfall: requested=%d emitted=%d; eligible distinct candidates exhausted",
+            requested,
+            emitted,
+        )
 
     # 7. Compose: body + optional snapshot frame
     if body and frame:

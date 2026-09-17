@@ -5,6 +5,7 @@ All recall-path bug fixes (empty-bucket suppress, dedup, top_k cap) live in
 `format_recall_lines()` so both local (`storage.recall`) and remote
 (`remote_backend.RemoteMemory.recall`) paths converge on the same formatter.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -19,8 +20,12 @@ from typing import Any, Iterable
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TRACE_PATH = Path(os.environ.get("SMARTMEMORY_HOOK_TRACE",
-                                          str(Path.home() / ".smartmemory" / "hook-recall.jsonl")))
+DEFAULT_TRACE_PATH = Path(
+    os.environ.get(
+        "SMARTMEMORY_HOOK_TRACE",
+        str(Path.home() / ".smartmemory" / "hook-recall.jsonl"),
+    )
+)
 TRACE_MAX_BYTES = 10 * 1024 * 1024  # 10 MB rotate threshold
 
 
@@ -57,12 +62,21 @@ def _item_to_recall_dict(item: Any) -> dict:
 # --- Formatter --------------------------------------------------------------
 
 
+def recall_item_label(item: dict) -> str:
+    """Identify discarded rows without logging their potentially private content."""
+    return str(
+        item.get("item_id")
+        or "content-sha256:"
+        + hashlib.sha256((item.get("content") or "").encode("utf-8")).hexdigest()[:16]
+    )
+
+
 def format_recall_lines(items: Iterable[dict], top_k: int) -> str:
     """Format items as the `## SmartMemory Context` block.
 
     Bug fixes vs legacy storage.recall():
       - empty/whitespace content suppressed
-      - dedup by item_id (then case-folded content prefix as fallback)
+      - dedup by item_id (then lowercased full content within memory type)
       - top_k cap applied AFTER dedup, not before
 
     Returns "" if no items survive filtering.
@@ -74,21 +88,31 @@ def format_recall_lines(items: Iterable[dict], top_k: int) -> str:
     for it in items:
         body = (it.get("content") or "").strip()
         if not body:
+            log.warning("recall dropped %s: empty content", recall_item_label(it))
             continue
 
         iid = it.get("item_id")
         if iid and iid in seen_ids:
+            log.warning("recall dropped %s: duplicate item_id", recall_item_label(it))
             continue
         mtype = it.get("memory_type", "?") or "?"
-        body_key = (mtype, body[:120].lower())
+        body_key = (mtype, body.lower())
         if body_key in seen_bodies:
+            log.warning(
+                "recall dropped %s: duplicate content within memory type %s",
+                recall_item_label(it),
+                mtype,
+            )
             continue
         if iid:
             seen_ids.add(iid)
         seen_bodies.add(body_key)
 
         if len(lines) >= top_k:
-            break
+            log.warning(
+                "recall dropped %s: top_k cap (%d)", recall_item_label(it), top_k
+            )
+            continue
 
         conf = it.get("confidence", 1.0)
         try:
