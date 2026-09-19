@@ -4,6 +4,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Changed
+- **`smartmemory-mcp` pin bumped 1.4.96 → 1.4.100.** The wrapper installs the current MCP server again (release.sh had been warning about the drift).
+
 ### Fixed (2026-09-18) — install the compatible-provider SDK
 
 - Default installs now include the `openai` Python SDK used by `sm ask` for Groq
