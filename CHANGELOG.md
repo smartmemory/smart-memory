@@ -4,6 +4,20 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.103] - 2026-09-20
+
+### Fixed — search kwargs silently dropped since core added them
+
+- `metadata_filter`, `reranker`, `include_reference`, and `memory_types` now
+  actually reach the core search engine. They were valid parameters on
+  `SmartMemory.search()` but missing from this wrapper's kwarg allowlist, so
+  every caller setting one got a silent no-op instead of the intended search
+  behavior (same failure class as CORE-RETRACTED-RECALL-1). `include_reference`
+  had a second, narrower instance of the same bug: it only ever reached core on
+  the unfiltered-search path, so a call combining it with a property filter
+  dropped it too. `limit` is deliberately not exposed — this wrapper's `top_k`
+  is already the one result-count knob.
+
 ### Added (2026-09-20) — one-switch CLI diagnostics
 
 - `SMARTMEMORY_LOG_LEVEL=DEBUG` now records one startup environment summary,
