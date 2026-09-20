@@ -120,18 +120,17 @@ def _build_app() -> FastAPI:
     except Exception:
         pass
 
-    _version_check_counter = 0  # Only check every 10th request to avoid I/O overhead
+    # Both metadata lookups measure about 0.3 ms total, negligible beside the
+    # request-latency target. Check every request so upgrades cannot stay stale.
 
     @app.middleware("http")
     async def _version_guard(request, call_next):
         """Auto-restart daemon when pip upgrade is detected.
 
-        Checks installed package version every 10th request. If a version
-        mismatch is found, the daemon exits cleanly and launchd restarts it.
+        Checks installed package versions on every request. If a version mismatch
+        is found, the daemon exits cleanly and launchd restarts it.
         """
-        nonlocal _version_check_counter
-        _version_check_counter += 1
-        if _startup_versions and _version_check_counter % 10 == 0:
+        if _startup_versions:
             try:
                 from importlib.metadata import version as _pkg_version
 

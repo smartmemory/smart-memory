@@ -4,6 +4,22 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Added — automated CLI bug reporting
+
+- The CLI now keeps a silent, rotating DEBUG log in the configured local data
+  directory (`~/.smartmemory/cli-debug.log` by default) without changing console
+  verbosity or requiring `SMARTMEMORY_LOG_LEVEL=DEBUG`.
+- `sm report [TEST_ID] MESSAGE` files a public tracker BugReport in one step,
+  including runtime/version context and an automatically uploaded tail of the CLI
+  debug log when available. Upload and tracker failures produce concise manual
+  fallback guidance instead of a traceback.
+
+### Fixed — daemon reloads immediately after pip upgrades
+
+- The local daemon now checks installed wrapper and core versions on every
+  request, so launchd restarts stale pre-upgrade code on the first request after
+  a pip upgrade instead of waiting for a request-count milestone.
+
 ## [1.4.104] - 2026-09-20
 
 ### Fixed — search returned unrelated memories instead of empty results

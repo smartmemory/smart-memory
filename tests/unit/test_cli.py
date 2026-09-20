@@ -23,17 +23,23 @@ def test_persist_cmd_fallback(runner):
         patch("smartmemory_app.storage.ingest", return_value="item-abc") as mock_ingest,
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["add", "test memory text"])
 
     assert result.exit_code == 0
     assert "item-abc" in result.output
-    mock_ingest.assert_called_once_with("test memory text", "episodic", properties={}, origin="cli:add")
+    mock_ingest.assert_called_once_with(
+        "test memory text", "episodic", properties={}, origin="cli:add"
+    )
 
 
 def test_add_cmd_daemon_path(runner):
     """add command uses daemon response when available."""
-    with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "daemon-id"}):
+    with patch(
+        "smartmemory_app.cli._daemon_request", return_value={"item_id": "daemon-id"}
+    ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["add", "test memory text"])
 
     assert result.exit_code == 0
@@ -44,15 +50,24 @@ def test_recall_cmd_fallback(runner):
     """recall command falls back to storage.recall when daemon is down."""
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
-        patch("smartmemory_app.storage.recall", return_value="## SmartMemory Context\n- hello") as mock_recall,
+        patch(
+            "smartmemory_app.storage.recall",
+            return_value="## SmartMemory Context\n- hello",
+        ) as mock_recall,
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["recall", "--cwd", "/my/project"])
 
     assert result.exit_code == 0
     assert "SmartMemory" in result.output
     mock_recall.assert_called_once_with(
-        "/my/project", 10, query=None, workspace_id=None, include_snapshot=True, strict=False
+        "/my/project",
+        10,
+        query=None,
+        workspace_id=None,
+        include_snapshot=True,
+        strict=False,
     )
 
 
@@ -63,6 +78,7 @@ def test_recall_cmd_no_cwd_fallback(runner):
         patch("smartmemory_app.storage.recall", return_value="") as mock_recall,
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["recall"])
 
     assert result.exit_code == 0
@@ -73,8 +89,12 @@ def test_recall_cmd_no_cwd_fallback(runner):
 
 def test_recall_cmd_daemon_path(runner):
     """recall command uses daemon response when available."""
-    with patch("smartmemory_app.cli._daemon_request", return_value={"context": "daemon context"}):
+    with patch(
+        "smartmemory_app.cli._daemon_request",
+        return_value={"context": "daemon context"},
+    ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["recall"])
 
     assert result.exit_code == 0
@@ -83,23 +103,31 @@ def test_recall_cmd_daemon_path(runner):
 
 def test_search_cmd_fallback(runner):
     """search command falls back to storage.search when daemon is down."""
-    mock_results = [{"item_id": "abc12345", "content": "test result", "memory_type": "semantic"}]
+    mock_results = [
+        {"item_id": "abc12345", "content": "test result", "memory_type": "semantic"}
+    ]
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
-        patch("smartmemory_app.storage.search", return_value=mock_results) as mock_search,
+        patch(
+            "smartmemory_app.storage.search", return_value=mock_results
+        ) as mock_search,
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["search", "test query"])
 
     assert result.exit_code == 0
     assert "abc12345" in result.output
-    mock_search.assert_called_once_with("test query", 5, filters={}, include_reference=False)
+    mock_search.assert_called_once_with(
+        "test query", 5, filters={}, include_reference=False
+    )
 
 
 def test_search_cmd_no_results(runner):
     """search command prints 'No results.' when empty."""
     with patch("smartmemory_app.cli._daemon_request", return_value=[]):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["search", "nonexistent"])
 
     assert result.exit_code == 0
@@ -111,11 +139,18 @@ def test_search_cmd_daemon_items_contract(runner):
     The CLI must unwrap it, not iterate the dict directly (regression:
     `for r in results` over the dict yielded the key 'items' -> str ->
     AttributeError: 'str' object has no attribute 'get')."""
-    payload = {"items": [
-        {"item_id": "deadbeef-0000", "content": "Acme Corp in Berlin", "memory_type": "episodic"},
-    ]}
+    payload = {
+        "items": [
+            {
+                "item_id": "deadbeef-0000",
+                "content": "Acme Corp in Berlin",
+                "memory_type": "episodic",
+            },
+        ]
+    }
     with patch("smartmemory_app.cli._daemon_request", return_value=payload):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["search", "berlin"])
 
     assert result.exit_code == 0, result.output
@@ -127,9 +162,17 @@ def test_get_cmd_fallback(runner):
     """get command falls back to storage.get when daemon is unavailable."""
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
-        patch("smartmemory_app.storage.get", return_value={"item_id": "abc", "content": "hello", "memory_type": "episodic"}) as mock_get,
+        patch(
+            "smartmemory_app.storage.get",
+            return_value={
+                "item_id": "abc",
+                "content": "hello",
+                "memory_type": "episodic",
+            },
+        ) as mock_get,
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["get", "abc"])
 
     assert result.exit_code == 0
@@ -139,8 +182,12 @@ def test_get_cmd_fallback(runner):
 
 def test_get_cmd_daemon_path(runner):
     """get command prints daemon response when available."""
-    with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "daemon-id", "content": "from daemon"}):
+    with patch(
+        "smartmemory_app.cli._daemon_request",
+        return_value={"item_id": "daemon-id", "content": "from daemon"},
+    ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["get", "daemon-id"])
 
     assert result.exit_code == 0
@@ -154,6 +201,7 @@ def test_get_cmd_not_found_exits_nonzero(runner):
         patch("smartmemory_app.storage.get", return_value={}),
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["get", "missing-id"])
 
     assert result.exit_code == 1
@@ -164,9 +212,13 @@ def test_search_cmd_filters_unsupported_exits_nonzero(runner):
     """search with filters raises ClickException when storage raises NotImplementedError."""
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
-        patch("smartmemory_app.storage.search", side_effect=NotImplementedError("filters not supported")),
+        patch(
+            "smartmemory_app.storage.search",
+            side_effect=NotImplementedError("filters not supported"),
+        ),
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["search", "test", "--project", "atlas"])
 
     assert result.exit_code != 0
@@ -177,8 +229,12 @@ def test_get_cmd_daemon_http_error_surfaces(runner):
     """get command surfaces ClickException from daemon HTTP errors instead of swallowing it."""
     import click
 
-    with patch("smartmemory_app.cli._daemon_request", side_effect=click.ClickException("501: Not Implemented")):
+    with patch(
+        "smartmemory_app.cli._daemon_request",
+        side_effect=click.ClickException("501: Not Implemented"),
+    ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["get", "some-id"])
 
     assert result.exit_code != 0
@@ -192,28 +248,41 @@ def test_add_cmd_with_properties(runner):
         patch("smartmemory_app.storage.ingest", return_value="prop-id") as mock_ingest,
     ):
         from smartmemory_app.cli import cli
-        result = runner.invoke(cli, ["add", "test text", "--project", "atlas", "--domain", "legal"])
+
+        result = runner.invoke(
+            cli, ["add", "test text", "--project", "atlas", "--domain", "legal"]
+        )
 
     assert result.exit_code == 0
     assert "prop-id" in result.output
     mock_ingest.assert_called_once_with(
-        "test text", "episodic", properties={"project": "atlas", "domain": "legal"}, origin="cli:add"
+        "test text",
+        "episodic",
+        properties={"project": "atlas", "domain": "legal"},
+        origin="cli:add",
     )
 
 
 def test_search_cmd_with_filters(runner):
     """search command passes extra --key value flags as filters."""
-    mock_results = [{"item_id": "abc12345", "content": "filtered result", "memory_type": "semantic"}]
+    mock_results = [
+        {"item_id": "abc12345", "content": "filtered result", "memory_type": "semantic"}
+    ]
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
-        patch("smartmemory_app.storage.search", return_value=mock_results) as mock_search,
+        patch(
+            "smartmemory_app.storage.search", return_value=mock_results
+        ) as mock_search,
     ):
         from smartmemory_app.cli import cli
+
         result = runner.invoke(cli, ["search", "test", "--project", "atlas"])
 
     assert result.exit_code == 0
     assert "abc12345" in result.output
-    mock_search.assert_called_once_with("test", 5, filters={"project": "atlas"}, include_reference=False)
+    mock_search.assert_called_once_with(
+        "test", 5, filters={"project": "atlas"}, include_reference=False
+    )
 
 
 class TestCliLoggingPolicy:
@@ -221,7 +290,8 @@ class TestCliLoggingPolicy:
 
     Default WARNING keeps pipeline INFO chatter out of user-facing commands and
     neutralizes import-time logging.basicConfig() in deps (fastcoref). Warnings
-    stay visible (no-silent-degradation). SMARTMEMORY_LOG_LEVEL overrides.
+    stay visible (no-silent-degradation). SMARTMEMORY_LOG_LEVEL overrides. A
+    separate rotating file handler always captures DEBUG diagnostics.
     """
 
     @pytest.fixture(autouse=True)
@@ -232,6 +302,9 @@ class TestCliLoggingPolicy:
         root = logging.getLogger()
         handlers, level = list(root.handlers), root.level
         yield
+        for handler in list(root.handlers):
+            if handler not in handlers:
+                handler.close()
         root.handlers[:] = handlers
         root.setLevel(level)
 
@@ -243,35 +316,61 @@ class TestCliLoggingPolicy:
             root.removeHandler(h)
         root.setLevel(logging.WARNING)
 
-    def test_default_level_is_warning(self, runner, monkeypatch):
+    def test_default_console_level_is_warning_and_file_captures_debug(
+        self, runner, monkeypatch, tmp_path
+    ):
         import logging
+        from logging.handlers import RotatingFileHandler
 
         monkeypatch.delenv("SMARTMEMORY_LOG_LEVEL", raising=False)
+        monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
         self._reset_root()
-        with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}):
+        with patch(
+            "smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}
+        ):
             from smartmemory_app.cli import cli
+
             result = runner.invoke(cli, ["add", "t"])
 
         assert result.exit_code == 0
         root = logging.getLogger()
-        assert root.level == logging.WARNING
-        assert root.handlers, "CLI must install a root handler (neutralizes dep basicConfig)"
+        assert root.level == logging.DEBUG
+        console_handlers = [
+            handler
+            for handler in root.handlers
+            if not getattr(handler, "_smartmemory_debug_file", False)
+        ]
+        assert console_handlers, "CLI must install a console handler"
+        assert all(handler.level == logging.WARNING for handler in console_handlers)
+        file_handlers = [
+            handler
+            for handler in root.handlers
+            if getattr(handler, "_smartmemory_debug_file", False)
+        ]
+        assert len(file_handlers) == 1
+        assert isinstance(file_handlers[0], RotatingFileHandler)
+        assert file_handlers[0].level == logging.DEBUG
+        assert file_handlers[0].maxBytes == 5_000_000
+        assert file_handlers[0].backupCount == 2
+        assert "startup diagnostics:" in (tmp_path / "cli-debug.log").read_text()
+        assert "startup diagnostics:" not in result.output
 
     def test_env_override_raises_verbosity(self, runner, monkeypatch):
         import logging
 
         monkeypatch.setenv("SMARTMEMORY_LOG_LEVEL", "DEBUG")
         self._reset_root()
-        with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}):
+        with patch(
+            "smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}
+        ):
             from smartmemory_app.cli import cli
+
             result = runner.invoke(cli, ["add", "t"])
 
         assert result.exit_code == 0
         assert logging.getLogger().level == logging.DEBUG
 
-    def test_debug_command_emits_bounded_redacted_wire_trace(
-        self, runner, monkeypatch
-    ):
+    def test_debug_command_emits_bounded_redacted_wire_trace(self, runner, monkeypatch):
         import httpx
 
         import smartmemory_app.cli as cli_module
@@ -392,18 +491,25 @@ class TestCliLoggingPolicy:
             result = runner.invoke(cli_module.cli, ["add", "fallback payload"])
 
         assert result.exit_code == 0, result.output
-        assert (
-            "daemon unreachable; using in-process fallback: ingest" in result.output
-        )
+        assert "daemon unreachable; using in-process fallback: ingest" in result.output
 
     def test_invalid_env_falls_back_to_warning(self, runner, monkeypatch):
         import logging
 
         monkeypatch.setenv("SMARTMEMORY_LOG_LEVEL", "not-a-level")
         self._reset_root()
-        with patch("smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}):
+        with patch(
+            "smartmemory_app.cli._daemon_request", return_value={"item_id": "x"}
+        ):
             from smartmemory_app.cli import cli
+
             result = runner.invoke(cli, ["add", "t"])
 
         assert result.exit_code == 0
-        assert logging.getLogger().level == logging.WARNING
+        console_handlers = [
+            handler
+            for handler in logging.getLogger().handlers
+            if not getattr(handler, "_smartmemory_debug_file", False)
+        ]
+        assert console_handlers
+        assert all(handler.level == logging.WARNING for handler in console_handlers)

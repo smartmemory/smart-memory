@@ -5,11 +5,12 @@ daemon HTTP API first (<200ms). Falls back to direct storage calls if daemon
 is not running (~22s cold start).
 """
 
-import logging
 import json
+import logging
 import os
 import tarfile
 import tempfile
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import click
@@ -32,7 +33,17 @@ def _configure_cli_logging() -> None:
     level = getattr(logging, level_name, None)
     if not isinstance(level, int):
         level = logging.WARNING
-    logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+    # The root logger must admit DEBUG records for the background file handler.
+    # Console handlers retain the user-selected level, so this does not make the
+    # command itself noisier.
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    for handler in root_logger.handlers:
+        if not getattr(handler, "_smartmemory_debug_file", False):
+            handler.setLevel(level)
+
+    _install_cli_debug_handler(root_logger)
 
     if log.isEnabledFor(logging.DEBUG):
         import importlib.metadata
@@ -59,6 +70,43 @@ def _configure_cli_logging() -> None:
             platform.platform(),
             daemon_url,
         )
+
+
+def _install_cli_debug_handler(root_logger: logging.Logger) -> None:
+    """Install one rotating DEBUG handler at the configured local data path."""
+    from smartmemory_app.bug_report import debug_log_path
+
+    path = debug_log_path()
+    for handler in list(root_logger.handlers):
+        if not getattr(handler, "_smartmemory_debug_file", False):
+            continue
+        if Path(handler.baseFilename) == path:
+            handler.setLevel(logging.DEBUG)
+            return
+        root_logger.removeHandler(handler)
+        handler.close()
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = RotatingFileHandler(
+            path,
+            maxBytes=5_000_000,
+            backupCount=2,
+            encoding="utf-8",
+        )
+    except OSError:
+        # Diagnostics must never prevent the command being diagnosed from running.
+        return
+
+    file_handler._smartmemory_debug_file = True  # type: ignore[attr-defined]
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    root_logger.addHandler(file_handler)
 
 
 from smartmemory_app.install_check import (  # noqa: E402
@@ -809,9 +857,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 from smartmemory_app.storage import ingest
                 from smartmemory_app.remote_backend import RemoteBackendError
 
-                log.debug(
-                    "daemon unreachable; using in-process fallback: %s", "ingest"
-                )
+                log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
                 _warm_notice()
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
@@ -1870,6 +1916,70 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     if not status.doctor_ok:
         raise SystemExit(1)
     click.echo("\nAll checks passed.")
+
+
+@cli.command("report")
+@click.argument(
+    "report_args",
+    nargs=-1,
+    required=True,
+    metavar="[TEST_ID] MESSAGE",
+)
+@click.option(
+    "--severity",
+    type=click.Choice(["critical", "high", "medium", "low"]),
+    default="medium",
+    show_default=True,
+)
+@click.option("--test-title", help="Human-readable tracked test title.")
+def report_cmd(
+    report_args: tuple[str, ...], severity: str, test_title: str | None
+) -> None:
+    """File a tracker bug with the local CLI debug log attached.
+
+    MESSAGE is required. TEST_ID is optional, for example TC-LITE-305. Quote a
+    multi-word message so Click receives it as one argument.
+    """
+    if len(report_args) == 1:
+        test_id = None
+        message = report_args[0]
+    elif len(report_args) == 2:
+        test_id, message = report_args
+    else:
+        raise click.UsageError(
+            "Expected MESSAGE, optionally preceded by TEST_ID. "
+            "Quote multi-word messages."
+        )
+
+    from smartmemory_app.bug_report import BugReportError, submit_bug_report
+
+    try:
+        result = submit_bug_report(
+            test_id=test_id,
+            test_title=test_title,
+            message=message,
+            severity=severity,
+        )
+    except BugReportError as exc:
+        raise click.ClickException(
+            f"Could not submit bug report: {exc}. "
+            "Please paste your CLI output into the tracker manually."
+        ) from None
+
+    record_label = result.record_id or "not returned by tracker"
+    click.echo(f"Bug report submitted (id: {record_label}).")
+    if result.debug_log_attached:
+        click.echo("The recent CLI debug log was attached automatically.")
+    elif result.upload_error:
+        click.echo(
+            f"Debug log was not attached: {result.upload_error}. "
+            "Please paste relevant CLI output into the tracker manually.",
+            err=True,
+        )
+    elif not result.debug_log_available:
+        click.echo("No CLI debug log existed yet; the report has no attachment.")
+    else:
+        click.echo("The CLI debug log was empty; the report has no attachment.")
 
 
 @cli.command("config")
