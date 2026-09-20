@@ -492,6 +492,7 @@ def _list_all_memories(mem) -> list[dict]:
 
 
 # All explicit caller-settable SmartMemory.search parameters, plus documented kwargs.
+# `limit` is deliberately excluded: this wrapper binds/clamps `top_k`, its sole result-count knob.
 # The contract test enumerates the live facade signature; unknown keys still drop.
 _ALLOWED = frozenset(
     {
@@ -521,6 +522,10 @@ _ALLOWED = frozenset(
         "use_ssg",
         "domain",
         "sort_by",
+        "reranker",
+        "metadata_filter",
+        "include_reference",
+        "memory_types",
     }
 )
 
@@ -563,10 +568,14 @@ def search(
     # Note the failure mode this allowlist creates: an unknown key is dropped
     # rather than raising, so a param is either wired here or it silently means
     # nothing. Anything added to SmartMemory.search() that callers can set MUST
-    # be added here in the same change.
+    # be added here or explicitly documented as excluded beside `_ALLOWED`.
     core_kwargs = {
         k: v for k, v in search_kwargs.items() if k in _ALLOWED and v is not None
     }
+    # `include_reference` is bound by this wrapper rather than captured in
+    # search_kwargs, so it must be forwarded explicitly on the core search path.
+    if include_reference:
+        core_kwargs["include_reference"] = include_reference
     if memory_type:
         core_kwargs["memory_type"] = memory_type
     from smartmemory_app.remote_backend import RemoteMemory
@@ -580,6 +589,7 @@ def search(
     # Wildcard: return ALL memory nodes (not entity/relation/pattern nodes).
     # top_k is intentionally not applied — "*" means "list everything".
     if query.strip() == "*" and set(core_kwargs) <= {
+        "include_reference",
         "include_superseded",
         "include_retracted",
     }:
@@ -634,9 +644,7 @@ def search(
             all_items = [r for r in all_items if _keep(r)]
         return all_items
     if not filters:
-        results = mem.search(
-            query, top_k=top_k, include_reference=include_reference, **core_kwargs
-        )
+        results = mem.search(query, top_k=top_k, **core_kwargs)
         if isinstance(results, dict):
             return {key: [r.to_dict() for r in items] for key, items in results.items()}
         return [r.to_dict() for r in results]

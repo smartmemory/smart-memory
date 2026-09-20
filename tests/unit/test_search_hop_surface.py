@@ -15,16 +15,27 @@ def test_enumerating_core_search_allowlist():
         if name != "self"
         and param.kind not in (param.VAR_KEYWORD, param.VAR_POSITIONAL)
     }
-    bound_by_storage = {"query", "top_k", "memory_type"}
-    assert explicit - bound_by_storage <= storage._ALLOWED, (
-        explicit - bound_by_storage - storage._ALLOWED
+    bound_or_deliberately_excluded = {
+        "query",
+        "top_k",
+        "memory_type",
+        # storage.search binds/clamps top_k, so exposing core's compatibility
+        # alias would create a conflicting second result-count knob.
+        "limit",
+    }
+    assert explicit - bound_or_deliberately_excluded <= storage._ALLOWED, (
+        explicit - bound_or_deliberately_excluded - storage._ALLOWED
     )
     memory = Mock()
     memory.search.return_value = []
     with patch.object(storage, "get_memory", return_value=memory):
-        for key in explicit - bound_by_storage:
+        for key in explicit - bound_or_deliberately_excluded:
             marker = object()
-            storage.search("bridge question", **{key: marker, "future_unknown": "drop"})
+            storage.search(
+                "bridge question",
+                filters={"project": "atlas"} if key == "include_reference" else None,
+                **{key: marker, "future_unknown": "drop"},
+            )
             assert memory.search.call_args.kwargs[key] is marker, key
             assert "future_unknown" not in memory.search.call_args.kwargs
 
