@@ -1,11 +1,9 @@
-"""Regression coverage for automated CLI bug reporting."""
+"""Regression coverage for local CLI bug report formatting."""
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
-import httpx
 from click.testing import CliRunner
 
 from smartmemory_app import bug_report
@@ -36,162 +34,99 @@ def test_read_log_tail_applies_line_and_byte_limits(tmp_path):
     assert byte_tail.endswith("last-line\n")
 
 
-def test_payload_has_required_fields_and_synthesizes_test_id():
+def test_format_bug_report_includes_tracker_fields_and_log_preview(tmp_path):
     environment = bug_report.EnvironmentInfo(
         core_version="1.2.3",
         wrapper_version="4.5.6",
         python_version="3.13.7",
         os_version="TestOS-1",
     )
+    log_path = tmp_path / "cli-debug.log"
+    log_path.write_text("first detail\nlast detail\n", encoding="utf-8")
 
-    payload = bug_report.build_bug_report_payload(
+    report = bug_report.format_bug_report(
         test_id=None,
         test_title=None,
         message="Search returned the wrong memory",
         severity="high",
         environment=environment,
-        timestamp="20260920T123456Z",
+        log_path=log_path,
+        timestamp=datetime(2026, 9, 20, 12, 34, 56, tzinfo=timezone.utc),
     )
 
-    assert payload == {
-        "test_id": "CLI-20260920T123456Z",
-        "test_title": "Ad-hoc CLI report",
-        "actual_outcome": "Search returned the wrong memory",
-        "severity": "high",
-        "browser_info": (
-            "CLI smartmemory-core=1.2.3 wrapper=4.5.6 TestOS-1 python=3.13.7"
-        ),
-    }
+    assert "Test ID: CLI-20260920T123456Z" in report
+    assert "Test title: Ad-hoc CLI report" in report
+    assert "Severity: high" in report
+    assert "Search returned the wrong memory" in report
+    assert (
+        "Environment: CLI smartmemory-core=1.2.3 wrapper=4.5.6 TestOS-1 python=3.13.7"
+    ) in report
+    assert f"Debug log path: {log_path}" in report
+    assert "first detail\nlast detail" in report
 
 
-def test_submit_without_debug_log_skips_upload_and_creates_record(tmp_path):
-    requests: list[httpx.Request] = []
+def test_format_bug_report_handles_missing_and_empty_logs(tmp_path):
+    environment = bug_report.EnvironmentInfo("1", "2", "3", "TestOS")
+    missing_path = tmp_path / "missing.log"
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(
-            201,
-            json={"data": {"id": "bug-nested-123"}},
-            request=request,
-        )
+    missing_report = bug_report.format_bug_report(
+        test_id="TC-LITE-305",
+        test_title="Search regression",
+        message="Nothing happened",
+        severity="medium",
+        environment=environment,
+        log_path=missing_path,
+    )
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = bug_report.submit_bug_report(
-            test_id=None,
-            test_title=None,
-            message="Nothing happened",
-            severity="medium",
-            log_path=tmp_path / "missing.log",
-            client=client,
-            now=datetime(2026, 9, 20, 12, 34, 56, tzinfo=timezone.utc),
-        )
+    assert "Debug log preview: unavailable (file not found)" in missing_report
 
-    assert len(requests) == 1
-    assert requests[0].url == httpx.URL(bug_report._BUG_REPORT_URL)
-    assert requests[0].headers["x-app-id"] == bug_report._APP_ID
-    assert requests[0].headers["content-type"] == "application/json"
-    assert json.loads(requests[0].content)["test_id"] == "CLI-20260920T123456Z"
-    assert result.record_id == "bug-nested-123"
-    assert result.debug_log_available is False
-    assert result.debug_log_attached is False
-    assert result.upload_error is None
+    empty_path = tmp_path / "empty.log"
+    empty_path.touch()
+    empty_report = bug_report.format_bug_report(
+        test_id="TC-LITE-305",
+        test_title="Search regression",
+        message="Nothing happened",
+        severity="medium",
+        environment=environment,
+        log_path=empty_path,
+    )
+
+    assert "Debug log preview: unavailable (file is empty)" in empty_report
 
 
-def test_submit_uploads_multipart_tail_and_uses_nested_file_url(tmp_path):
-    log_path = tmp_path / "cli-debug.log"
-    log_path.write_text("debug detail\n", encoding="utf-8")
-    requests: list[httpx.Request] = []
+def test_format_bug_report_bounds_log_preview(tmp_path):
+    log_path = tmp_path / "long.log"
+    log_path.write_text(
+        "".join(f"preview-{index:03d}\n" for index in range(100)),
+        encoding="utf-8",
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.url == httpx.URL(bug_report._UPLOAD_URL):
-            return httpx.Response(
-                200,
-                json={"data": {"file_url": "https://files.example/debug.log"}},
-                request=request,
-            )
-        return httpx.Response(
-            201,
-            json={"id": "bug-top-level-456"},
-            request=request,
-        )
+    report = bug_report.format_bug_report(
+        test_id="TC-LITE-305",
+        test_title=None,
+        message="Search failed",
+        severity="medium",
+        environment=bug_report.EnvironmentInfo("1", "2", "3", "TestOS"),
+        log_path=log_path,
+    )
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = bug_report.submit_bug_report(
-            test_id="TC-LITE-305",
-            test_title="Search regression",
-            message="Search returned the wrong memory",
-            severity="critical",
-            log_path=log_path,
-            client=client,
-            now=datetime(2026, 9, 20, 12, 34, 56, tzinfo=timezone.utc),
-        )
-
-    assert len(requests) == 2
-    upload_request, create_request = requests
-    assert upload_request.url == httpx.URL(bug_report._UPLOAD_URL)
-    assert upload_request.headers["x-app-id"] == bug_report._APP_ID
-    assert upload_request.headers["content-type"].startswith("multipart/form-data;")
-    assert b'name="file"' in upload_request.content
-    assert b'filename="cli-debug-20260920T123456Z.log"' in upload_request.content
-    assert b"debug detail" in upload_request.content
-
-    assert json.loads(create_request.content) == {
-        "test_id": "TC-LITE-305",
-        "test_title": "Search regression",
-        "actual_outcome": "Search returned the wrong memory",
-        "severity": "critical",
-        "browser_info": json.loads(create_request.content)["browser_info"],
-        "debug_log_url": "https://files.example/debug.log",
-    }
-    assert result.record_id == "bug-top-level-456"
-    assert result.debug_log_available is True
-    assert result.debug_log_attached is True
-    assert result.upload_error is None
+    preview = report.split("Debug log preview:\n", maxsplit=1)[1]
+    assert len(preview.splitlines()) == 40
+    assert preview.startswith("preview-060\n")
+    assert preview.endswith("preview-099")
 
 
-def test_upload_failure_still_creates_report_without_debug_url(tmp_path):
-    log_path = tmp_path / "cli-debug.log"
-    log_path.write_text("debug detail\n", encoding="utf-8")
-    requests: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if request.url == httpx.URL(bug_report._UPLOAD_URL):
-            return httpx.Response(503, request=request)
-        return httpx.Response(201, json={"id": "bug-without-log"}, request=request)
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = bug_report.submit_bug_report(
-            test_id="TC-LITE-305",
-            test_title=None,
-            message="Search failed",
-            severity="medium",
-            log_path=log_path,
-            client=client,
-        )
-
-    assert len(requests) == 2
-    assert "debug_log_url" not in json.loads(requests[1].content)
-    assert result.record_id == "bug-without-log"
-    assert result.debug_log_attached is False
-    assert "503" in result.upload_error
-
-
-def test_report_command_parses_optional_test_id_and_prints_confirmation(
+def test_report_command_prints_local_report_and_manual_paste_guidance(
     monkeypatch, tmp_path
 ):
-    submitted = {}
-
-    def fake_submit_bug_report(**kwargs):
-        submitted.update(kwargs)
-        return bug_report.BugReportResult(
-            record_id="bug-cli-789",
-            debug_log_attached=True,
-            debug_log_available=True,
-        )
-
-    monkeypatch.setattr(bug_report, "submit_bug_report", fake_submit_bug_report)
+    log_path = tmp_path / "cli-debug.log"
+    log_path.write_text("debug detail\n", encoding="utf-8")
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: log_path)
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: bug_report.EnvironmentInfo("1.2.3", "4.5.6", "3.13.7", "TestOS"),
+    )
     result = CliRunner().invoke(
         cli,
         [
@@ -210,40 +145,37 @@ def test_report_command_parses_optional_test_id_and_prints_confirmation(
     )
 
     assert result.exit_code == 0, result.output
-    assert submitted == {
-        "test_id": "TC-LITE-305",
-        "test_title": "Search regression",
-        "message": "Search returned the wrong memory",
-        "severity": "high",
-    }
-    assert "Bug report submitted (id: bug-cli-789)" in result.output
-    assert "debug log was attached automatically" in result.output
+    assert "Test ID: TC-LITE-305" in result.output
+    assert "Test title: Search regression" in result.output
+    assert "Severity: high" in result.output
+    assert "Search returned the wrong memory" in result.output
+    assert "Environment: CLI smartmemory-core=1.2.3 wrapper=4.5.6" in result.output
+    assert f"Debug log path: {log_path}" in result.output
+    assert "debug detail" in result.output
+    assert "Paste this report into the tracker's Bug Report dialog." in result.output
+    assert "one-click copy button" in result.output
+    assert "attach the log file manually there" in result.output
+    assert "submitted" not in result.output.lower()
 
 
-def test_report_http_failure_is_clean_and_has_manual_fallback(monkeypatch, tmp_path):
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("network unavailable", request=request)
+def test_report_command_accepts_message_without_test_id(monkeypatch, tmp_path):
+    missing_log_path = tmp_path / "missing.log"
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: missing_log_path)
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: bug_report.EnvironmentInfo("1", "2", "3", "TestOS"),
+    )
 
-    transport = httpx.MockTransport(handler)
-    original_client = httpx.Client
-
-    def client_with_mock_transport(*args, **kwargs):
-        kwargs["transport"] = transport
-        return original_client(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "Client", client_with_mock_transport)
-    monkeypatch.setattr(bug_report, "read_log_tail", lambda path: None)
     result = CliRunner().invoke(
         cli,
         ["report", "The search command failed"],
-        env={
-            "SMARTMEMORY_DATA_DIR": str(tmp_path),
-            "SMARTMEMORY_UPDATE_CHECK": "0",
-        },
+        env={"SMARTMEMORY_UPDATE_CHECK": "0"},
     )
 
-    assert result.exit_code != 0
-    assert "Could not submit bug report" in result.output
-    assert "network unavailable" in result.output
-    assert "paste your CLI output into the tracker manually" in result.output
-    assert "Traceback" not in result.output
+    assert result.exit_code == 0, result.output
+    assert "Test ID: CLI-" in result.output
+    assert "Test title: Ad-hoc CLI report" in result.output
+    assert "The search command failed" in result.output
+    assert f"Debug log path: {missing_log_path}" in result.output
+    assert "Debug log preview:" in result.output

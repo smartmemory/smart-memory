@@ -1935,7 +1935,7 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
 def report_cmd(
     report_args: tuple[str, ...], severity: str, test_title: str | None
 ) -> None:
-    """File a tracker bug with the local CLI debug log attached.
+    """Format a tracker bug report with local CLI diagnostics.
 
     MESSAGE is required. TEST_ID is optional, for example TC-LITE-305. Quote a
     multi-word message so Click receives it as one argument.
@@ -1951,35 +1951,26 @@ def report_cmd(
             "Quote multi-word messages."
         )
 
-    from smartmemory_app.bug_report import BugReportError, submit_bug_report
+    from smartmemory_app.bug_report import (
+        debug_log_path,
+        format_bug_report,
+        gather_environment,
+    )
 
-    try:
-        result = submit_bug_report(
-            test_id=test_id,
-            test_title=test_title,
-            message=message,
-            severity=severity,
-        )
-    except BugReportError as exc:
-        raise click.ClickException(
-            f"Could not submit bug report: {exc}. "
-            "Please paste your CLI output into the tracker manually."
-        ) from None
-
-    record_label = result.record_id or "not returned by tracker"
-    click.echo(f"Bug report submitted (id: {record_label}).")
-    if result.debug_log_attached:
-        click.echo("The recent CLI debug log was attached automatically.")
-    elif result.upload_error:
-        click.echo(
-            f"Debug log was not attached: {result.upload_error}. "
-            "Please paste relevant CLI output into the tracker manually.",
-            err=True,
-        )
-    elif not result.debug_log_available:
-        click.echo("No CLI debug log existed yet; the report has no attachment.")
-    else:
-        click.echo("The CLI debug log was empty; the report has no attachment.")
+    report = format_bug_report(
+        test_id=test_id,
+        test_title=test_title,
+        message=message,
+        severity=severity,
+        environment=gather_environment(),
+        log_path=debug_log_path(),
+    )
+    click.echo(report)
+    click.echo(
+        "\nPaste this report into the tracker's Bug Report dialog. The dialog "
+        "already shows the debug-log path with a one-click copy button; attach "
+        "the log file manually there."
+    )
 
 
 @cli.command("config")
