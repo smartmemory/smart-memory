@@ -4,6 +4,13 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Fixed (2026-09-20) — Wikipedia grounding works out of the box
+
+- Default installs now include `wikipedia-api`, which the pipeline's default
+  Wikipedia grounder requires. Existing incomplete installs no longer log an
+  ERROR-level traceback on every ingest; the missing dependency is reported as
+  one actionable WARNING and grounding skips the affected item cleanly.
+
 ### Changed
 - **`smartmemory-mcp` pin bumped 1.4.96 → 1.4.100.** The wrapper installs the current MCP server again (release.sh had been warning about the drift).
 
