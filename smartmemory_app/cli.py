@@ -34,6 +34,32 @@ def _configure_cli_logging() -> None:
         level = logging.WARNING
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
+    if log.isEnabledFor(logging.DEBUG):
+        import importlib.metadata
+        import platform
+
+        try:
+            wrapper_version = importlib.metadata.version("smartmemory")
+        except importlib.metadata.PackageNotFoundError:
+            wrapper_version = "not-installed"
+        try:
+            core_version = check_installation().core_version or "not-installed"
+        except Exception:
+            core_version = "unavailable"
+        try:
+            daemon_url = _daemon_url()
+        except Exception:
+            daemon_url = "unavailable"
+        log.debug(
+            "startup diagnostics: smartmemory=%s smartmemory-core=%s "
+            "python=%s platform=%s daemon_url=%s",
+            wrapper_version,
+            core_version,
+            platform.python_version(),
+            platform.platform(),
+            daemon_url,
+        )
+
 
 from smartmemory_app.install_check import (  # noqa: E402
     MIN_CORE_VERSION,
@@ -69,6 +95,70 @@ _DAEMON_NOT_RUNNING_MSG = (
     "SmartMemory daemon is not running. Run `sm start` (first time: `sm setup`)."
 )
 _DAEMON_LOG_HINT = "~/.smartmemory/daemon.log"
+_DEBUG_PREVIEW_LIMIT = 4000
+_SENSITIVE_DEBUG_KEYS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "cookie",
+        "password",
+        "proxy-authorization",
+        "secret",
+        "set-cookie",
+    }
+)
+
+
+def _is_sensitive_debug_key(key: object) -> bool:
+    """Return whether a request field name is credential-shaped."""
+    normalized = str(key).strip().lower().replace("_", "-")
+    return (
+        normalized in _SENSITIVE_DEBUG_KEYS
+        or normalized.endswith("-api-key")
+        or normalized.endswith("-secret")
+        or normalized.endswith("-token")
+    )
+
+
+def _redact_debug_value(value):
+    """Copy a request/response value with credential-shaped fields redacted."""
+    from collections.abc import Mapping
+
+    if isinstance(value, Mapping):
+        return {
+            key: (
+                "<redacted>"
+                if _is_sensitive_debug_key(key)
+                else _redact_debug_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(_redact_debug_value(item) for item in value)
+    if isinstance(value, list):
+        return [_redact_debug_value(item) for item in value]
+    return value
+
+
+def _debug_preview(value, *, limit: int = _DEBUG_PREVIEW_LIMIT) -> str:
+    """Render a redacted, bounded diagnostic preview."""
+    safe_value = _redact_debug_value(value)
+    try:
+        rendered = json.dumps(safe_value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        rendered = repr(safe_value)
+    if len(rendered) <= limit:
+        return rendered
+    return f"{rendered[:limit]}... <truncated {len(rendered) - limit} chars>"
+
+
+def _response_debug_preview(response) -> str:
+    """Return a bounded response-body preview, redacting JSON credentials."""
+    try:
+        body = response.json()
+    except Exception:
+        body = response.text
+    return _debug_preview(body)
 
 
 def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
@@ -87,21 +177,53 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
     import httpx
     import time
 
+    url = f"{_daemon_url()}{path}"
+    debug_enabled = log.isEnabledFor(logging.DEBUG)
+    if debug_enabled:
+        log.debug(
+            "daemon request: method=%s url=%s kwargs=%s",
+            method.upper(),
+            url,
+            _debug_preview(kwargs),
+        )
     for attempt in range(2):
+        started_at = time.perf_counter()
         try:
             with httpx.Client(trust_env=False) as client:
-                r = client.request(
-                    method, f"{_daemon_url()}{path}", timeout=timeout, **kwargs
+                r = client.request(method, url, timeout=timeout, **kwargs)
+            latency_ms = (time.perf_counter() - started_at) * 1000
+            if debug_enabled:
+                log.debug(
+                    "daemon response: status=%s latency_ms=%.1f body=%s",
+                    r.status_code,
+                    latency_ms,
+                    _response_debug_preview(r),
                 )
             r.raise_for_status()
             return r.json() if r.status_code != 204 else {}
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.RemoteProtocolError,
+        ) as exc:
+            latency_ms = (time.perf_counter() - started_at) * 1000
             if attempt == 0:
+                log.debug(
+                    "daemon connection dropped after %.1fms (%s); retrying request",
+                    latency_ms,
+                    type(exc).__name__,
+                )
                 time.sleep(2)  # wait for launchd to restart daemon (~1.2s startup)
                 continue
             # Daemon unreachable: return None so callers fall back to direct local
             # storage (add/search/get all branch on None). Commands with no local
             # fallback surface _DAEMON_NOT_RUNNING_MSG themselves.
+            log.debug(
+                "daemon unreachable after retry; returning fallback signal: "
+                "method=%s url=%s",
+                method.upper(),
+                url,
+            )
             click.echo(
                 f"({_DAEMON_NOT_RUNNING_MSG} Using direct local access.)", err=True
             )
@@ -116,6 +238,12 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
                 raise click.ClickException(f"{detail}  (check {_DAEMON_LOG_HINT})")
             raise click.ClickException(detail)
         except httpx.ReadTimeout:
+            log.debug(
+                "daemon request timed out: method=%s url=%s timeout=%ss",
+                method.upper(),
+                url,
+                timeout,
+            )
             raise click.ClickException(
                 f"SmartMemory daemon is not responding (timeout).  (check {_DAEMON_LOG_HINT})"
             )
@@ -681,6 +809,9 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 from smartmemory_app.storage import ingest
                 from smartmemory_app.remote_backend import RemoteBackendError
 
+                log.debug(
+                    "daemon unreachable; using in-process fallback: %s", "ingest"
+                )
                 _warm_notice()
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
@@ -718,6 +849,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         from smartmemory_app.storage import ingest
         from smartmemory_app.remote_backend import RemoteBackendError
 
+        log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
         _warm_notice()
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
@@ -767,6 +899,7 @@ def recall_cmd(
     else:
         from smartmemory_app.storage import recall
 
+        log.debug("daemon unreachable; using in-process fallback: %s", "recall")
         _warm_notice()
         context = recall(
             cwd,
@@ -930,6 +1063,7 @@ def search_cmd(
         from smartmemory_app.storage import search
         from smartmemory_app.remote_backend import RemoteBackendError
 
+        log.debug("daemon unreachable; using in-process fallback: %s", "search")
         # One-shot in-process search: this interpreter exits right after the
         # query, so the reranker's background load can never finish in time —
         # "async" here means every result comes back in fusion order with a
@@ -1260,6 +1394,7 @@ def get_cmd(item_id: str) -> None:
     if result is None:
         from smartmemory_app.storage import get
 
+        log.debug("daemon unreachable; using in-process fallback: %s", "get")
         result = get(item_id)
 
     if not result:
@@ -2207,6 +2342,7 @@ def clear_cmd() -> None:
     # Daemon not running — clear files directly
     from smartmemory_app.storage import _resolve_data_dir, _shutdown
 
+    log.debug("daemon unreachable; using in-process fallback: %s", "clear")
     _shutdown()
 
     data_path = _resolve_data_dir()

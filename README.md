@@ -679,6 +679,7 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_EMBEDDING_PROVIDER` | Embedding provider (`local`, `openai`, `ollama`) |
 | `SMARTMEMORY_DAEMON_PORT` | Daemon port (default: `9014`) |
 | `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
+| `SMARTMEMORY_LOG_LEVEL` | Logging threshold (default: `WARNING`). Set to `DEBUG` for startup context, daemon/fallback routing, and bounded request/response wire detail on stderr; `Authorization` and other credential-shaped fields are always redacted |
 | `SMARTMEMORY_NO_UPDATE_CHECK` | Set to `1` to turn off the daily update-available hint |
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
 | `GROQ_API_KEY` | Groq API key, an alternative to OpenAI for LLM extraction |

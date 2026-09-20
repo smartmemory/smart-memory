@@ -4,6 +4,14 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+### Added (2026-09-20) — one-switch CLI diagnostics
+
+- `SMARTMEMORY_LOG_LEVEL=DEBUG` now records one startup environment summary,
+  daemon request/response wire previews with status and latency, retry decisions,
+  and every daemon-to-in-process fallback. Diagnostics stay on stderr, payloads
+  are bounded, and `Authorization`, API keys, tokens, and other
+  credential-shaped fields are redacted.
+
 ### Fixed (2026-09-20) — Wikipedia grounding works out of the box
 
 - Default installs now include `wikipedia-api`, which the pipeline's default
