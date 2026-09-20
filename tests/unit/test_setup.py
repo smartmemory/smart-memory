@@ -140,12 +140,12 @@ def test_copy_hooks_namespaced_no_clobber(tmp_path):
     hooks_src.mkdir()
 
     # Existing generic hook owned by another app
-    other_app_hook = hooks_dest / "session-start.sh"
+    other_app_hook = hooks_dest / "orient.sh"
     other_app_hook.write_text("#!/bin/bash\n# coder-config hook — DO NOT CLOBBER")
 
     # SmartMemory source hooks
-    (hooks_src / "session-start.sh").write_text("#!/bin/bash\n# smartmemory session-start")
-    (hooks_src / "session-end.sh").write_text("#!/bin/bash\n# smartmemory session-end")
+    (hooks_src / "orient.sh").write_text("#!/bin/bash\n# smartmemory orient")
+    (hooks_src / "recall.sh").write_text("#!/bin/bash\n# smartmemory recall")
 
     with (
         patch("smartmemory_app.setup.HOOKS_SRC", hooks_src),
@@ -158,8 +158,8 @@ def test_copy_hooks_namespaced_no_clobber(tmp_path):
     # Generic file must be untouched
     assert other_app_hook.read_text() == "#!/bin/bash\n# coder-config hook — DO NOT CLOBBER"
     # Namespaced files must exist
-    assert (hooks_dest / "smartmemory-session-start.sh").exists()
-    assert (hooks_dest / "smartmemory-session-end.sh").exists()
+    assert (hooks_dest / "smartmemory-orient.sh").exists()
+    assert (hooks_dest / "smartmemory-recall.sh").exists()
 
 
 def test_copy_hooks_updates_on_upgrade(tmp_path):
@@ -170,11 +170,11 @@ def test_copy_hooks_updates_on_upgrade(tmp_path):
     hooks_src.mkdir()
 
     # Existing SmartMemory hook from v1
-    old = hooks_dest / "smartmemory-session-start.sh"
+    old = hooks_dest / "smartmemory-orient.sh"
     old.write_text("#!/bin/bash\n# v1 — old logic")
 
     # New version in source
-    (hooks_src / "session-start.sh").write_text("#!/bin/bash\n# v2 — new logic")
+    (hooks_src / "orient.sh").write_text("#!/bin/bash\n# v2 — new logic")
 
     with (
         patch("smartmemory_app.setup.HOOKS_SRC", hooks_src),

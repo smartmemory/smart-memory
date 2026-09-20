@@ -191,6 +191,10 @@ def test_get_api_key_returns_env_var(monkeypatch):
 def test_get_api_key_warns_when_neither_env_nor_keychain(monkeypatch):
     with (
         patch("keyring.get_password", return_value=None),
+        patch(
+            "smartmemory_app.config.load_config",
+            return_value=SmartMemoryConfig(mode="remote"),
+        ),
         warnings.catch_warnings(record=True) as w,
     ):
         warnings.simplefilter("always")
@@ -202,6 +206,10 @@ def test_get_api_key_warns_when_neither_env_nor_keychain(monkeypatch):
 def test_get_api_key_warns_when_keyring_raises(monkeypatch):
     with (
         patch("keyring.get_password", side_effect=Exception("no keychain")),
+        patch(
+            "smartmemory_app.config.load_config",
+            return_value=SmartMemoryConfig(mode="remote"),
+        ),
         warnings.catch_warnings(record=True) as w,
     ):
         warnings.simplefilter("always")

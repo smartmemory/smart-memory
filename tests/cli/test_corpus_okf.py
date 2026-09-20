@@ -20,6 +20,11 @@ def _use_lite_storage(monkeypatch, data_dir: Path):
     monkeypatch.setattr(storage, "_memory", None)
     monkeypatch.setattr(storage, "_data_path", None)
     memory = storage.get_memory(data_dir=str(data_dir))
+    # OKF 0.2 imports validate ontology declarations against the destination
+    # workspace, so exercise the real importer with an explicitly scoped store.
+    from smartmemory.scope_provider import DefaultScopeProvider
+
+    memory.scope_provider = DefaultScopeProvider(workspace_id="test-cli-okf")
     # The real lite store has an optional Redis-backed PPR invalidation hook.
     # Corpus I/O does not exercise it, and disabling its cache instance avoids
     # Redis connection retries in this no-Docker test.
@@ -35,7 +40,7 @@ def _seed_items(storage) -> set[str]:
     memory = storage.get_memory()
     for content in sorted(contents):
         memory.add(
-            MemoryItem(content=content, memory_type="metadata", origin="test:cli-okf")
+            MemoryItem(content=content, memory_type="document", origin="test:cli-okf")
         )
     return contents
 
@@ -65,7 +70,7 @@ def test_admin_okf_round_trip_and_top_level_aliases(tmp_path, monkeypatch):
     from smartmemory.okf import parse_okf
 
     index = parse_okf((bundle_dir / "index.md").read_text(encoding="utf-8"))
-    assert index.okf_version == "0.1"
+    assert index.okf_version == "0.2"
     assert len(list(bundle_dir.glob("*.md"))) == len(contents) + 1
 
     # Top-level `export`/`import` aliases must round-trip REAL data, not just

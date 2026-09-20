@@ -313,40 +313,37 @@ class TestDrainThread:
 class TestTwoTierIngest:
     """Integration: POST /ingest uses two-tier when LLM key present."""
 
-    def test_ingest_enqueues_when_llm_available(self, monkeypatch):
+    def test_ingest_enqueues_when_llm_available(self, tmp_path, monkeypatch):
         """With LLM key, ingest should use sync=False and enqueue for enrichment."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
 
-        from smartmemory_app.async_enrichment import _drain_running
-        import smartmemory_app.async_enrichment as ae_mod
-        # Simulate drain thread running
-        ae_mod._drain_running = True
+        from smartmemory_app.viewer_server import app
+        from fastapi.testclient import TestClient
 
-        try:
-            from smartmemory_app.viewer_server import app
-            from fastapi.testclient import TestClient
+        mock_result = {"item_id": "tier1-id", "queued": False, "entity_ids": {"alice": "node-1"}}
 
-            mock_result = {"item_id": "tier1-id", "queued": False, "entity_ids": {"alice": "node-1"}}
+        with patch("smartmemory_app.storage.ingest", return_value=mock_result) as mock_ingest:
+            client = TestClient(app)
+            r = client.post("/memory/ingest", json={"content": "Alice leads Atlas"})
 
-            with patch("smartmemory_app.storage.ingest", return_value=mock_result) as mock_ingest:
-                client = TestClient(app)
-                r = client.post("/memory/ingest", json={"content": "Alice leads Atlas"})
+        assert r.status_code == 200
+        assert r.json()["item_id"] == "tier1-id"
+        mock_ingest.assert_called_once()
+        assert mock_ingest.call_args.args == ("Alice leads Atlas", "episodic")
+        assert mock_ingest.call_args.kwargs["sync"] is False
 
-            assert r.status_code == 200
-            assert r.json()["item_id"] == "tier1-id"
-            mock_ingest.assert_called_once_with("Alice leads Atlas", "episodic", sync=False)
+        # Check the endpoint's current SQLite-backed queue, not the retired
+        # in-process AsyncEnrichmentQueue used by the old drain thread.
+        from smartmemory_app.enrichment_queue import dequeue
 
-            # Check job was enqueued
-            q = get_queue()
-            jobs = q.dequeue_all()
-            assert len(jobs) == 1
-            assert jobs[0]["item_id"] == "tier1-id"
-            assert jobs[0]["entity_ids"] == {"alice": "node-1"}
-        finally:
-            ae_mod._drain_running = False
+        jobs = dequeue(batch_size=10)
+        assert len(jobs) == 1
+        assert jobs[0]["item_id"] == "tier1-id"
+        assert jobs[0]["entity_ids"] == {"alice": "node-1"}
 
     def test_ingest_sync_when_no_llm(self, monkeypatch):
-        """Without LLM key, ingest should use sync=True (no enqueue)."""
+        """Without an LLM key, ingest should stay Tier-1-only and not enqueue."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
 
@@ -359,7 +356,9 @@ class TestTwoTierIngest:
 
         assert r.status_code == 200
         assert r.json()["item_id"] == "sync-id"
-        mock_ingest.assert_called_once_with("Bob tests", "semantic")
+        mock_ingest.assert_called_once()
+        assert mock_ingest.call_args.args == ("Bob tests", "semantic")
+        assert mock_ingest.call_args.kwargs["sync"] is False
 
 
 class TestClearFlushesQueue:
