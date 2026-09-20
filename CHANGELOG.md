@@ -4,6 +4,16 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.104] - 2026-09-20
+
+### Fixed — search returned unrelated memories instead of empty results
+
+- `sm search "<query>"` (and `SmartMemory.search()`) could return unrelated
+  memories for a query with no real matches, because MiniLM's local embedder
+  scores some unrelated short queries as high as 0.301 cosine similarity,
+  clearing the existing recall floor. Core now additionally requires shared
+  query/content words for weak hits. See `smartmemory-core` CHANGELOG for detail.
+
 ## [1.4.103] - 2026-09-20
 
 ### Fixed — search kwargs silently dropped since core added them
