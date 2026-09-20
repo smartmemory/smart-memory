@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.105] - 2026-09-20
+
 ### Added — local CLI bug report formatting
 
 - The CLI now keeps a silent, rotating DEBUG log in the configured local data
