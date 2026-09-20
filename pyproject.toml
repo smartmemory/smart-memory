@@ -25,6 +25,13 @@ dependencies = [
     "tiktoken>=0.7",           # DIST-TOUR-1: real token receipt in `sm tour`
 ]
 
+[tool.uv.sources]
+# Resolved from sibling checkouts in the parent uv workspace
+# (~/reg/my/SmartMemory/pyproject.toml) instead of PyPI, so local core/mcp
+# edits are visible without a reinstall.
+smartmemory-core = { workspace = true }
+smartmemory-mcp = { workspace = true }
+
 [project.optional-dependencies]
 tui = ["textual>=8.0"]         # kept for backward compat (now included by default)
 
