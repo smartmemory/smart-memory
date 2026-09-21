@@ -25,8 +25,12 @@ PROXY_ENV_VARS = (
 SOCKS_PROXY_SCHEMES = frozenset({"socks4", "socks5", "socks5h"})
 SOCKS_PROXY_PREFIXES = tuple(f"{scheme}://" for scheme in SOCKS_PROXY_SCHEMES)
 SOCKS_PROXY_ERROR = (
-    "SmartMemory cannot use your network's SOCKS proxy because a small package "
-    "is missing.\n  Run: pip install httpx[socks]"
+    "SOCKS proxy support is missing for the daemon's local API calls (socksio)."
+    "\n  Run: pip install httpx[socks]"
+)
+PYSOCKS_ERROR = (
+    "SOCKS proxy support is missing for the wrapper's own outbound calls, "
+    "including WikipediaGrounder (PySocks).\n  Run: pip install pysocks"
 )
 
 
@@ -48,6 +52,15 @@ def _socksio_is_importable() -> bool:
     return True
 
 
+def _pysocks_is_importable() -> bool:
+    """Return whether requests' optional SOCKS transport can be imported."""
+    try:
+        importlib.import_module("socks")
+    except ImportError:
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class InstallationCheck:
     """Installed Python and smartmemory-core compatibility verdict."""
@@ -58,6 +71,7 @@ class InstallationCheck:
     core_ok: bool
     socks_proxy_configured: bool
     socks_support_ok: bool
+    pysocks_support_ok: bool
 
     @property
     def ok(self) -> bool:
@@ -67,7 +81,7 @@ class InstallationCheck:
     @property
     def doctor_ok(self) -> bool:
         """Whether all installation diagnostics pass."""
-        return self.ok and self.socks_support_ok
+        return self.ok and self.socks_support_ok and self.pysocks_support_ok
 
 
 def check_installation() -> InstallationCheck:
@@ -89,4 +103,5 @@ def check_installation() -> InstallationCheck:
         ),
         socks_proxy_configured=socks_proxy_configured,
         socks_support_ok=(not socks_proxy_configured or _socksio_is_importable()),
+        pysocks_support_ok=(not socks_proxy_configured or _pysocks_is_importable()),
     )

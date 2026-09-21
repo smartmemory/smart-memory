@@ -23,10 +23,15 @@ from pathlib import Path
 import sys
 from dataclasses import dataclass
 from typing import Callable
+from xml.sax.saxutils import escape
 
 import click
 
-from smartmemory_app.install_check import SOCKS_PROXY_ERROR, check_installation
+from smartmemory_app.install_check import (
+    PROXY_ENV_VARS,
+    SOCKS_PROXY_ERROR,
+    check_installation,
+)
 from smartmemory_app.daemon import (
     _LAUNCHD_DAEMON_LABEL,
     _LAUNCHD_WORKER_LABEL,
@@ -672,10 +677,10 @@ def _setup_tool_config(tool: str) -> None:
     "--keep-data",
     is_flag=True,
     default=False,
-    help="Keep ~/.smartmemory/ data directory (memories, patterns). Only removes hooks and skills.",
+    help="Keep ~/.smartmemory/ data directory (memories, patterns). Config is still removed.",
 )
 def uninstall(keep_data: bool) -> None:
-    """Remove SmartMemory hooks, skills, launchd plist, and optionally data from ~/.smartmemory/."""
+    """Remove SmartMemory hooks, skills, launchd plist, config, and optionally data."""
     # Stop daemon before removing anything
     try:
         from smartmemory_app.daemon import stop_daemon
@@ -687,6 +692,7 @@ def uninstall(keep_data: bool) -> None:
     _deregister_hooks()
     _remove_hooks()
     _remove_skills()
+    _remove_config_file()
     if not keep_data:
         _remove_data_dir()
     click.echo("SmartMemory removed. Restart Claude Code to deactivate hooks.")
@@ -825,9 +831,9 @@ def _seed_data_dir(data_dir: str | None = None) -> None:
 def _install_launchd_plist() -> bool:
     """Install launchd plist for auto-start + crash recovery (macOS only).
 
-    Substitutes {PYTHON_PATH}, {DAEMON_PORT}, {DATA_DIR}, {BIN_DIR} into the
-    template plist and writes to ~/Library/LaunchAgents/. Then loads the plist
-    with launchctl so launchd starts managing the daemon immediately.
+    Substitutes runtime paths, configuration, and configured proxy variables
+    into the template plist and writes to ~/Library/LaunchAgents/. Then loads
+    the plist with launchctl so launchd starts managing the daemon immediately.
 
     Returns True if the plist was loaded successfully (caller should NOT also
     call start_daemon — launchd owns the process via RunAtLoad).
@@ -865,12 +871,19 @@ def _install_launchd_plist() -> bool:
         except Exception:
             pass
 
+    proxy_env_xml = "".join(
+        f"\n        <key>{name}</key>\n        <string>{escape(value)}</string>"
+        for name in (*PROXY_ENV_VARS, "NO_PROXY", "no_proxy")
+        if (value := os.environ.get(name))
+    )
+
     replacements = {
         "{PYTHON_PATH}": python_path,
         "{DAEMON_PORT}": str(cfg.daemon_port),
         "{DATA_DIR}": data_dir,
         "{BIN_DIR}": bin_dir,
         "{GROQ_API_KEY}": groq_key,
+        "{PROXY_ENV_XML}": proxy_env_xml,
     }
 
     LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1066,6 +1079,15 @@ def _remove_skills() -> None:
         path = skills_dest / name
         if path.exists():
             path.unlink()
+
+
+def _remove_config_file() -> None:
+    from smartmemory_app.config import config_path
+
+    path = config_path()
+    if path.exists():
+        path.unlink()
+        click.echo(f"Removed config file: {path}")
 
 
 def _remove_data_dir() -> None:

@@ -1,7 +1,13 @@
 """Tests for DIST-DAEMON-1 Task 10: launchd plist template + install/uninstall."""
 
+import plistlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
+from click.testing import CliRunner
+
+from smartmemory_app.install_check import PROXY_ENV_VARS
 
 
 PLIST_TEMPLATE = (
@@ -10,6 +16,14 @@ PLIST_TEMPLATE = (
     / "data"
     / "ai.smartmemory.daemon.plist"
 )
+PROXY_PASSTHROUGH_VARS = frozenset((*PROXY_ENV_VARS, "NO_PROXY", "no_proxy"))
+
+
+@pytest.fixture(autouse=True)
+def isolated_proxy_environment(monkeypatch):
+    """Never let launchd tests inherit the developer machine's proxy settings."""
+    for name in PROXY_PASSTHROUGH_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 class TestPlistTemplate:
@@ -33,6 +47,7 @@ class TestPlistTemplate:
             "{BIN_DIR}",
             "{LAUNCHD_LABEL}",
             "{LAUNCHD_COMMAND}",
+            "{PROXY_ENV_XML}",
         ]:
             assert placeholder in content, f"Template must contain {placeholder}"
 
@@ -50,6 +65,16 @@ class TestPlistTemplate:
 
 
 class TestInstallLaunchdPlist:
+    @staticmethod
+    def _installed_environments(launch_agents):
+        return [
+            plistlib.loads((launch_agents / name).read_bytes())["EnvironmentVariables"]
+            for name in (
+                "ai.smartmemory.daemon.plist",
+                "ai.smartmemory.worker.plist",
+            )
+        ]
+
     def test_install_substitutes_placeholders(self, tmp_path, monkeypatch):
         """_install_launchd_plist() substitutes all placeholders and writes valid plist."""
         launch_agents = tmp_path / "LaunchAgents"
@@ -83,6 +108,56 @@ class TestInstallLaunchdPlist:
         # Substituted values present
         assert "9014" in content
         assert "ai.smartmemory.daemon" in content
+
+    def test_install_captures_proxy_environment_for_both_jobs(
+        self, tmp_path, monkeypatch
+    ):
+        launch_agents = tmp_path / "LaunchAgents"
+        launch_agents.mkdir()
+        monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", launch_agents)
+        monkeypatch.setenv(
+            "HTTPS_PROXY", "http://user:pass@127.0.0.1:7890/path?a=1&b=2"
+        )
+        monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+
+        mock_cfg = MagicMock(daemon_port=9014, data_dir=str(tmp_path / ".smartmemory"))
+        with (
+            patch("smartmemory_app.setup.subprocess.run") as mock_run,
+            patch("smartmemory_app.config.load_config", return_value=mock_cfg),
+            patch("platform.system", return_value="Darwin"),
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            from smartmemory_app.setup import _install_launchd_plist
+
+            assert _install_launchd_plist() is True
+
+        for environment in self._installed_environments(launch_agents):
+            assert environment["HTTPS_PROXY"] == (
+                "http://user:pass@127.0.0.1:7890/path?a=1&b=2"
+            )
+            assert environment["NO_PROXY"] == "localhost,127.0.0.1"
+
+    def test_install_omits_unset_and_empty_proxy_environment(
+        self, tmp_path, monkeypatch
+    ):
+        launch_agents = tmp_path / "LaunchAgents"
+        launch_agents.mkdir()
+        monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", launch_agents)
+        monkeypatch.setenv("HTTP_PROXY", "")
+
+        mock_cfg = MagicMock(daemon_port=9014, data_dir=str(tmp_path / ".smartmemory"))
+        with (
+            patch("smartmemory_app.setup.subprocess.run") as mock_run,
+            patch("smartmemory_app.config.load_config", return_value=mock_cfg),
+            patch("platform.system", return_value="Darwin"),
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            from smartmemory_app.setup import _install_launchd_plist
+
+            assert _install_launchd_plist() is True
+
+        for environment in self._installed_environments(launch_agents):
+            assert PROXY_PASSTHROUGH_VARS.isdisjoint(environment)
 
     def test_install_uses_config_data_dir(self, tmp_path, monkeypatch):
         """_install_launchd_plist() uses load_config().data_dir, not env var or default."""
@@ -251,3 +326,62 @@ class TestUninstallLaunchdPlist:
             from smartmemory_app.setup import _uninstall_launchd_plist
 
             _uninstall_launchd_plist()  # should not raise
+
+
+class TestUninstallCommand:
+    @staticmethod
+    def _invoke(tmp_path, monkeypatch, *args):
+        config_file = tmp_path / "config" / "smartmemory" / "config.toml"
+        data_dir = tmp_path / ".smartmemory"
+
+        monkeypatch.setattr("smartmemory_app.config.config_path", lambda: config_file)
+        monkeypatch.setattr("smartmemory_app.setup.DATA_DIR", data_dir)
+
+        with (
+            patch("smartmemory_app.daemon.stop_daemon"),
+            patch("smartmemory_app.setup._uninstall_launchd_plist"),
+            patch("smartmemory_app.setup._deregister_hooks"),
+            patch("smartmemory_app.setup._remove_hooks"),
+            patch("smartmemory_app.setup._remove_skills"),
+        ):
+            from smartmemory_app.setup import uninstall
+
+            result = CliRunner().invoke(uninstall, list(args))
+
+        return result
+
+    def test_uninstall_removes_existing_config_file(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config" / "smartmemory" / "config.toml"
+        data_dir = tmp_path / ".smartmemory"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text('[smartmemory]\nmode = "remote"\n')
+        data_dir.mkdir()
+
+        result = self._invoke(tmp_path, monkeypatch)
+
+        assert result.exit_code == 0, result.output
+        assert not config_file.exists()
+        assert not data_dir.exists()
+        assert f"Removed config file: {config_file}" in result.output
+
+    def test_uninstall_keep_data_still_removes_config_file(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config" / "smartmemory" / "config.toml"
+        data_dir = tmp_path / ".smartmemory"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text('[smartmemory]\nmode = "local"\n')
+        data_dir.mkdir()
+
+        result = self._invoke(tmp_path, monkeypatch, "--keep-data")
+
+        assert result.exit_code == 0, result.output
+        assert not config_file.exists()
+        assert data_dir.exists()
+        assert f"Removed config file: {config_file}" in result.output
+
+    def test_uninstall_without_config_file_is_a_noop(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config" / "smartmemory" / "config.toml"
+        result = self._invoke(tmp_path, monkeypatch, "--keep-data")
+
+        assert result.exit_code == 0, result.output
+        assert not config_file.exists()
+        assert "Removed config file:" not in result.output

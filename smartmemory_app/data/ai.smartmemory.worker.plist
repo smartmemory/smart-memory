@@ -35,7 +35,7 @@
         <key>SMARTMEMORY_DATA_DIR</key>
         <string>{DATA_DIR}</string>
         <key>GROQ_API_KEY</key>
-        <string>{GROQ_API_KEY}</string>
+        <string>{GROQ_API_KEY}</string>{PROXY_ENV_XML}
     </dict>
 </dict>
 </plist>

@@ -111,6 +111,7 @@ def _install_cli_debug_handler(root_logger: logging.Logger) -> None:
 
 from smartmemory_app.install_check import (  # noqa: E402
     MIN_CORE_VERSION,
+    PYSOCKS_ERROR,
     SOCKS_PROXY_ERROR,
     check_installation,
 )
@@ -1859,7 +1860,8 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     in a polluted environment can backtrack to an ancient wrapper that pins a
     `smartmemory-core` from the dead-`/auth/me` era, which 401s at first use.
     Checks the installed core against a conservative floor, reports the Python
-    version, and catches a configured SOCKS proxy without httpx SOCKS support.
+    version, and catches a configured SOCKS proxy without either httpx's
+    socksio transport or requests' PySocks transport.
     """
     if bundle:
         if not url or out is None:
@@ -1909,9 +1911,19 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     # ── outbound SOCKS proxy support ────────────────────────────────────────
     if status.socks_proxy_configured:
         if status.socks_support_ok:
-            click.echo("✓ SOCKS proxy support is installed")
+            click.echo(
+                "✓ SOCKS proxy support is installed for the daemon's "
+                "local API calls (socksio)"
+            )
         else:
             click.echo(f"✗ {SOCKS_PROXY_ERROR}", err=True)
+        if status.pysocks_support_ok:
+            click.echo(
+                "✓ SOCKS proxy support is installed for the wrapper's own "
+                "outbound calls, including WikipediaGrounder (PySocks)"
+            )
+        else:
+            click.echo(f"✗ {PYSOCKS_ERROR}", err=True)
 
     if not status.doctor_ok:
         raise SystemExit(1)

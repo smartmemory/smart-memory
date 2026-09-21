@@ -75,16 +75,53 @@ def test_doctor_fails_when_lowercase_socks_proxy_lacks_support(runner, monkeypat
             return_value=False,
             create=True,
         ),
+        patch(
+            "smartmemory_app.install_check._pysocks_is_importable",
+            return_value=True,
+            create=True,
+        ),
     ):
         result = runner.invoke(cli, ["doctor"])
 
     assert result.exit_code == 1
-    assert "SmartMemory cannot use your network's SOCKS proxy" in result.output
+    assert "daemon's local API calls (socksio)" in result.output
     assert "pip install httpx[socks]" in result.output
+    assert (
+        "✓ SOCKS proxy support is installed for the wrapper's own outbound calls"
+        in result.output
+    )
     assert "All checks passed." not in result.output
 
 
-def test_doctor_passes_when_socks_proxy_support_is_installed(runner, monkeypatch):
+def test_doctor_fails_when_pysocks_support_is_missing(runner, monkeypatch):
+    monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example:1080")
+    with (
+        patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
+        patch(
+            "smartmemory_app.install_check._socksio_is_importable",
+            return_value=True,
+            create=True,
+        ),
+        patch(
+            "smartmemory_app.install_check._pysocks_is_importable",
+            return_value=False,
+            create=True,
+        ),
+    ):
+        result = runner.invoke(cli, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "✓ SOCKS proxy support is installed for the daemon's local API calls" in (
+        result.output
+    )
+    assert "wrapper's own outbound calls, including WikipediaGrounder (PySocks)" in (
+        result.output
+    )
+    assert "pip install pysocks" in result.output
+    assert "All checks passed." not in result.output
+
+
+def test_doctor_passes_when_both_socks_packages_are_installed(runner, monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "socks4://proxy.example:1080")
     with (
         patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
@@ -93,26 +130,41 @@ def test_doctor_passes_when_socks_proxy_support_is_installed(runner, monkeypatch
             return_value=True,
             create=True,
         ),
+        patch(
+            "smartmemory_app.install_check._pysocks_is_importable",
+            return_value=True,
+            create=True,
+        ),
     ):
         result = runner.invoke(cli, ["doctor"])
 
     assert result.exit_code == 0, result.output
-    assert "\u2713 SOCKS proxy support is installed" in result.output
+    assert "✓ SOCKS proxy support is installed for the daemon's local API calls" in (
+        result.output
+    )
+    assert (
+        "✓ SOCKS proxy support is installed for the wrapper's own outbound calls"
+        in result.output
+    )
     assert "All checks passed." in result.output
 
 
-def test_doctor_passes_without_a_proxy_and_does_not_import_socksio(runner):
+def test_doctor_passes_without_a_proxy_and_does_not_import_socks_packages(runner):
     with (
         patch("importlib.metadata.version", _fake_pkg_version(MIN_CORE_VERSION)),
         patch(
             "smartmemory_app.install_check._socksio_is_importable", create=True
         ) as socksio_is_importable,
+        patch(
+            "smartmemory_app.install_check._pysocks_is_importable", create=True
+        ) as pysocks_is_importable,
     ):
         result = runner.invoke(cli, ["doctor"])
 
     assert result.exit_code == 0, result.output
     assert "SOCKS proxy" not in result.output
     socksio_is_importable.assert_not_called()
+    pysocks_is_importable.assert_not_called()
 
 
 def test_doctor_ignores_http_proxy(runner, monkeypatch):
@@ -122,12 +174,16 @@ def test_doctor_ignores_http_proxy(runner, monkeypatch):
         patch(
             "smartmemory_app.install_check._socksio_is_importable", create=True
         ) as socksio_is_importable,
+        patch(
+            "smartmemory_app.install_check._pysocks_is_importable", create=True
+        ) as pysocks_is_importable,
     ):
         result = runner.invoke(cli, ["doctor"])
 
     assert result.exit_code == 0, result.output
     assert "SOCKS proxy" not in result.output
     socksio_is_importable.assert_not_called()
+    pysocks_is_importable.assert_not_called()
 
 
 def test_doctor_fails_on_backtracked_core(runner):
@@ -236,13 +292,21 @@ def test_setup_warns_but_proceeds_when_socks_proxy_support_is_missing(
             return_value=False,
             create=True,
         ),
+        patch(
+            "smartmemory_app.install_check._pysocks_is_importable",
+            return_value=True,
+            create=True,
+        ),
         patch("smartmemory_app.config.config_path", return_value=tmp_path / "config"),
         patch("smartmemory_app.setup._setup_click") as setup_click,
     ):
         result = runner.invoke(setup_cmd, ["--mode", "local"])
 
     assert result.exit_code == 0, result.output
-    assert "Warning: SmartMemory cannot use your network's SOCKS proxy" in result.output
+    assert (
+        "Warning: SOCKS proxy support is missing for the daemon's local API calls"
+        in result.output
+    )
     assert "pip install httpx[socks]" in result.output
     setup_click.assert_called_once_with("local", None)
 
