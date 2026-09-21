@@ -65,6 +65,41 @@ def test_get_memory_registers_atexit(tmp_path):
         mock_register.assert_called_once_with(storage._shutdown)
 
 
+def test_local_memory_disables_entity_grounding_by_default(tmp_path):
+    """The local CLI profile preserves default ingest quality without network grounding."""
+    from smartmemory_app import storage
+    from smartmemory_app.config import SmartMemoryConfig
+
+    config = SmartMemoryConfig(mode="local", coreference=True)
+    mock_mem = MagicMock()
+    mock_pm = MagicMock()
+    mock_store = MagicMock()
+
+    with (
+        patch("smartmemory_app.storage.load_config", return_value=config),
+        patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
+        patch("smartmemory_app.patterns.JSONLPatternStore", return_value=mock_store),
+        patch(
+            "smartmemory.ontology.pattern_manager.PatternManager", return_value=mock_pm
+        ),
+        patch(
+            "smartmemory.tools.factory.create_lite_memory", return_value=mock_mem
+        ) as mock_create,
+        patch("atexit.register"),
+    ):
+        storage._get_local_memory()
+
+    profile = mock_create.call_args.kwargs["pipeline_profile"]
+    assert profile.profile_name == "default"
+    assert profile.coreference.enabled is True
+    assert profile.extraction.llm_extract.enabled is True
+    assert profile.enrich.enricher_names is None
+    assert profile.enrich.wikidata.enabled is False
+    assert profile.enrich.wikidata.sparql_enabled is False
+    assert profile.evolve.run_evolution is False
+    assert profile.evolve.run_clustering is False
+
+
 def test_shutdown_calls_save_and_close():
     """_shutdown() calls save_all() and SmartMemory.close() on the memory instance.
 

@@ -185,6 +185,9 @@ def _get_local_memory(
         profile = PipelineConfig.default()
         if not cfg.coreference:
             profile.coreference.enabled = False
+        # Local/lite ingest must not depend on live Wikidata REST or SPARQL calls.
+        profile.enrich.wikidata.enabled = False
+        profile.enrich.wikidata.sparql_enabled = False
         # Disable evolution — evolvers crash with missing typed configs
         # (EpisodicDecayEvolver, EpisodicToSemanticEvolver, etc.)
         # and ExponentialDecayEvolver hits datetime serialization errors.
