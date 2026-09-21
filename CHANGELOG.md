@@ -4,6 +4,16 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- **Fixed:** `POST /memory/reextract` always 500'd — `local_api.py` imported a
+  `_get_memory` helper that no longer exists in `storage.py`. Now uses the public
+  `storage.get_memory()` accessor.
+- **Fixed:** `sm add` could still fire live Wikipedia grounding HTTP calls even with
+  grounding disabled, because a core-side policy override reset the wrapper's disable
+  flags back to their defaults on every Tier-1 foreground ingest. Requires
+  `smartmemory-core`'s matching fix (see its CHANGELOG). The daemon's Tier-2 dispatch
+  no longer wastes a Redis connection attempt on every `add` either — lite mode now
+  tells core to skip straight to the wrapper's own SQLite `enrichment_queue.py`.
+
 ## [1.4.108] - 2026-09-21
 
 ### Fixed — grounding could still hang on proxied networks after 1.4.106/1.4.107

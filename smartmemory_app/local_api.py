@@ -695,10 +695,10 @@ def reextract_entities() -> dict:
     import time
 
     with _rw_lock:
-        from smartmemory_app.storage import _resolve_data_dir, _get_memory
+        from smartmemory_app.storage import _resolve_data_dir, get_memory
 
         data_dir = str(_resolve_data_dir())
-        mem = _get_memory()
+        mem = get_memory()
 
         # Read all user memory nodes (skip entity/relation/Version)
         db_path = os.path.join(data_dir, "memory.db")
