@@ -4,6 +4,11 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.107] - 2026-09-21
+
+- Pins `smartmemory-core==1.4.107`, which lowers the grounding lookup time budget
+  introduced in 1.4.106 from 15s to 3s.
+
 ## [1.4.106] - 2026-09-21
 
 ### Fixed — `sm add` daemon timeout under Wikipedia grounding
