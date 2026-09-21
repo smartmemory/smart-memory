@@ -20,7 +20,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   Wikipedia grounder's HTTP client (`requests`/`wikipediaapi`) actually needs for
   a SOCKS proxy — so `doctor` could report a clean bill of health while grounding
   still couldn't reach a SOCKS-only proxy. Now reports both packages separately.
-- No `smartmemory-core` change; pin stays at 1.4.107.
+- No `smartmemory-core` functional change; pins `smartmemory-core==1.4.108`, a
+  version-only bump required to keep the wrapper/core release lockstep.
 
 ### Changed — `sm uninstall` also removes the config file
 
