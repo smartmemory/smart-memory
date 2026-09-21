@@ -4,6 +4,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.112] - 2026-09-21
+
+- **Fixed:** pins `smartmemory-core==1.4.112` — `sm admin import` still failed after
+  1.4.111's crash fix because exported bundles included internal entity graph nodes as
+  unimportable `type: entity` pages (see core's CHANGELOG, TC-LITE-384).
+
 ## [1.4.111] - 2026-09-21
 
 - **Added:** `sm update` — checks PyPI for a newer `smartmemory` release, installs it via
