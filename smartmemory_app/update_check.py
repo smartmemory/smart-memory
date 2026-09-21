@@ -119,9 +119,10 @@ def _fetch_latest() -> str | None:
         return None
 
 
-def latest_version(*, now: float | None = None) -> str | None:
+def latest_version(*, now: float | None = None, force: bool = False) -> str | None:
     """Newest `smartmemory` version on PyPI, at most one network call per 24 h.
 
+    Set ``force`` for an explicit user-requested check that bypasses the cache.
     Returns None when opted out, when the network call fails, or when a previous
     failure is still inside its 24 h back-off window.
     """
@@ -130,7 +131,7 @@ def latest_version(*, now: float | None = None) -> str | None:
     stamp = time.time() if now is None else now
     cache_path = data_dir() / UPDATE_CACHE_FILENAME
 
-    cached = _read_json(cache_path)
+    cached = None if force else _read_json(cache_path)
     if cached is not None:
         checked_at = cached.get("checked_at")
         if (

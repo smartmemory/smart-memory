@@ -8,6 +8,8 @@ is not running (~22s cold start).
 import json
 import logging
 import os
+import subprocess
+import sys
 import tarfile
 import tempfile
 from logging.handlers import RotatingFileHandler
@@ -593,6 +595,68 @@ def restart_cmd(num_workers: int) -> None:
             "SmartMemory did not start. Run: sm doctor"
         ) from None
     _report_start_status(info)
+
+
+def _installed_version_from_subprocess() -> str | None:
+    """Read the installed wrapper version from a fresh Python interpreter."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from importlib.metadata import version; print(version('smartmemory'))",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+@cli.command("update")
+@click.pass_context
+def update_cmd(ctx: click.Context) -> None:
+    """Update SmartMemory from PyPI and restart its running daemon."""
+    from smartmemory_app import __version__ as current_version
+    from smartmemory_app.daemon import get_status
+    from smartmemory_app.update_check import latest_version, version_lt
+
+    latest = latest_version(force=True)
+    if latest is None:
+        click.echo(
+            "Could not check for SmartMemory updates (network unavailable or "
+            "SMARTMEMORY_NO_UPDATE_CHECK is set). No changes made."
+        )
+        return
+    if not version_lt(current_version, latest):
+        click.echo(f"SmartMemory {current_version} is already the latest version.")
+        return
+
+    daemon_was_running = get_status() is not None
+    click.echo(f"Updating SmartMemory {current_version} to {latest}...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-U", "smartmemory"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise click.ClickException(
+            f"SmartMemory update failed (pip exited with status {result.returncode}). "
+            "The daemon was not restarted."
+        )
+
+    installed_version = _installed_version_from_subprocess()
+    if installed_version is None:
+        raise click.ClickException(
+            "SmartMemory was updated, but the installed version could not be verified. "
+            "The daemon was not restarted."
+        )
+    click.echo(f"SmartMemory updated: {current_version} → {installed_version}.")
+
+    if daemon_was_running:
+        ctx.invoke(restart_cmd, num_workers=1)
+    else:
+        click.echo("Daemon was not running; it was not started.")
 
 
 @cli.command("warm")
