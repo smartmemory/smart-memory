@@ -4,6 +4,30 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.108] - 2026-09-21
+
+### Fixed — grounding could still hang on proxied networks after 1.4.106/1.4.107
+
+- On macOS, `smartmemory setup` installs the daemon/worker as launchd jobs, which
+  do not inherit the shell's environment — only the small env-var set baked into
+  the plist. That set never included `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/
+  `NO_PROXY`, so a daemon on a network that requires a proxy for internet egress
+  (e.g. via sing-box) would attempt direct connections to Wikipedia and hang
+  until the per-request timeout. Proxy variables present at `setup` time are now
+  captured into the launchd plist, matching the existing non-launchd daemon path.
+- `sm doctor`'s SOCKS proxy check only verified `socksio` (used by the daemon's
+  own local API calls over httpx). It never checked PySocks, which is what the
+  Wikipedia grounder's HTTP client (`requests`/`wikipediaapi`) actually needs for
+  a SOCKS proxy — so `doctor` could report a clean bill of health while grounding
+  still couldn't reach a SOCKS-only proxy. Now reports both packages separately.
+- No `smartmemory-core` change; pin stays at 1.4.107.
+
+### Changed — `sm uninstall` also removes the config file
+
+- Previously only removed hooks, skills, and (unless `--keep-data`) the data
+  directory. Now also removes the config file; `--keep-data` still preserves the
+  data directory but no longer preserves the config file.
+
 ## [1.4.107] - 2026-09-21
 
 - Pins `smartmemory-core==1.4.107`, which lowers the grounding lookup time budget

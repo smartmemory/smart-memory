@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smartmemory"
-version = "1.4.107"
+version = "1.4.108"
 requires-python = ">=3.11"
 dependencies = [
     "smartmemory-core[lite,wikipedia]==1.4.107",  # EXACT pin — wrapper and core versions move in lockstep
