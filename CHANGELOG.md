@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.109] - 2026-09-21
+
 - **Fixed:** `POST /memory/reextract` always 500'd — `local_api.py` imported a
   `_get_memory` helper that no longer exists in `storage.py`. Now uses the public
   `storage.get_memory()` accessor.
