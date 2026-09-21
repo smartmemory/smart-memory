@@ -4,6 +4,17 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.106] - 2026-09-21
+
+### Fixed — `sm add` daemon timeout under Wikipedia grounding
+
+- Local ingest no longer makes live Wikidata/Wikipedia network calls for entity
+  grounding by default. Previously every `add`/`ingest` could make one live HTTP
+  call per extracted entity with no time budget, which under rate-limiting could
+  accumulate past the daemon's own 120s request timeout and cause a live daemon
+  to be falsely reported as unresponsive. Pins `smartmemory-core==1.4.106`, which
+  also bounds this network call to a 15s wall-clock budget regardless of caller.
+
 ## [1.4.105] - 2026-09-20
 
 ### Added — local CLI bug report formatting
