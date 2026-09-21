@@ -4,6 +4,15 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.111] - 2026-09-21
+
+- **Added:** `sm update` — checks PyPI for a newer `smartmemory` release, installs it via
+  `pip`, verifies the install, and restarts the daemon immediately if it was already running
+  (a stopped daemon stays stopped).
+- **Fixed:** pins `smartmemory-core==1.4.111` — `sm admin import` could crash with
+  `TypeError: object of type 'NoneType' has no len()` while reporting item preflight errors
+  in lite/local mode (see core's CHANGELOG, TC-LITE-384).
+
 ## [1.4.109] - 2026-09-21
 
 - **Fixed:** `POST /memory/reextract` always 500'd — `local_api.py` imported a
