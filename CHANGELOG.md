@@ -4,6 +4,11 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.114] - 2026-09-23
+
+- **Changed:** pins `smartmemory-core==1.4.114`. Core adds the CORE-BG-2b evolve-ownership flag (default OFF) and
+  structured per-evolver outcomes; lite behaviour is unchanged (see core's CHANGELOG).
+
 ## [1.4.113] - 2026-09-23
 
 - **Changed:** pins `smartmemory-core==1.4.113`. Core ships the CORE-BG-2a collaborator seam and
