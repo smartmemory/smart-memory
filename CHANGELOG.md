@@ -4,6 +4,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.113] - 2026-09-23
+
+- **Changed:** pins `smartmemory-core==1.4.113`. Core ships the CORE-BG-2a collaborator seam and
+  the CORE-BG-2c enrich/ground worker offload, both behind a default-OFF flag; lite mode
+  behaviour is unchanged (see core's CHANGELOG).
+
 ## [1.4.112] - 2026-09-21
 
 - **Fixed:** pins `smartmemory-core==1.4.112` — `sm admin import` still failed after
