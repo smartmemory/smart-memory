@@ -2,6 +2,10 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## [1.4.116] - 2026-09-24
+
+- Pins `smartmemory-core==1.4.116` (decision listings keep `context_snapshot`: supersede/retract reason).
+
 ## [Unreleased]
 
 ## [1.4.115] - 2026-09-24
