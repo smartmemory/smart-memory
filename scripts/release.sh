@@ -61,7 +61,7 @@ fi
 if [ "${CHECK_ONLY}" -eq 0 ]; then
   rm -rf dist build
   echo ">> building py3-none-any wheel (--wheel only, never sdist)"
-  uv build --wheel
+  uv build --wheel --out-dir dist
 fi
 
 # ---- FAIL-CLOSED guards ---------------------------------------------------------------

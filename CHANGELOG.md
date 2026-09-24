@@ -4,6 +4,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.4.115] - 2026-09-24
+
+- **Fixed:** pins `smartmemory-core==1.4.115`. A slow Wikidata no longer fails or stalls a save: grounding makes one
+  attempt under a 10 s budget (`SMARTMEMORY_SYNC_GROUND_BUDGET_SECONDS`), unfinished entities are flagged on the item
+  for later re-grounding, and money/number entities are no longer looked up. Also carries CORE-BG-2e (flags default OFF).
+
 ## [1.4.114] - 2026-09-23
 
 - **Changed:** pins `smartmemory-core==1.4.114`. Core adds the CORE-BG-2b evolve-ownership flag (default OFF) and
