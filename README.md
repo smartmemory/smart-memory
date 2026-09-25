@@ -728,4 +728,4 @@ Search uses `lexical` with default weight 0.8. Replace removed `contains` and `k
 
 Lite is single-tenant. Graph-first retrieval conditionally fills from FTS5 lexical and vector search. Bounded refill can underfill, and regex-text still scans. CORE-FACT-INDEX-1 separately owns deferred fact ranking and path expansion.
 
-Quiesce old writers before first-open indexing. Verify the engine capability pin and use `sm rebuild --lexical` for recovery. [Migration, targets and measured limitations](https://github.com/smart-memory/smart-memory-docs/blob/main/docs/features/CORE-LEXICAL-INDEX-1/migration.md).
+Quiesce old writers before first-open indexing. Verify the engine capability pin and use `sm rebuild --lexical` for recovery. [Migration, targets and measured limitations](https://github.com/smartmemory/smart-memory-docs/blob/main/docs/features/CORE-LEXICAL-INDEX-1/migration.md).
