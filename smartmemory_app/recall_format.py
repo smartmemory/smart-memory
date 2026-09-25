@@ -229,6 +229,15 @@ def record_hook_error(message: str, error: Exception | str) -> None:
         active["errors"].append(detail)
 
 
+def record_hook_degradation(message: str, error: Exception | str) -> None:
+    """Log a non-fatal loss separately from a failed injection."""
+    detail = f"{message}: {error}"
+    log.warning("%s", detail)
+    active = _ACTIVE_TRACE.get()
+    if active is not None:
+        active.setdefault("degradations", []).append(detail)
+
+
 def skip_injection(reason: str) -> None:
     active = _ACTIVE_TRACE.get()
     if active is not None:
@@ -295,12 +304,14 @@ def _trace(
     payload: str = "",
     error: str | None = None,
     skipped_reason: str | None = None,
+    degradations: list[str] | None = None,
 ) -> None:
     """Append one JSONL line per hook invocation. Never raises."""
     active = _ACTIVE_TRACE.get()
     if active is not None:
         active["ranked_ids"].extend(ranked_ids or payload_ids(payload))
         active["snapshot_used"] |= snapshot_used
+        active.setdefault("degradations", []).extend(degradations or [])
         if error:
             active["errors"].append(error)
         return
@@ -318,6 +329,7 @@ def _trace(
         "payload": payload,
         "payload_tokens": (len(payload) + 3) // 4,
         "error": error,
+        "degradations": degradations or [],
         "workspace_id": workspace_id,
         "cwd": cwd,
         "query": query,

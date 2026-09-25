@@ -58,6 +58,12 @@ def test_capture_origin_and_workspace_readback(
     }
     getattr(lc, phase)(*args[phase], cwd=cwd)
     rows = local_memory._graph.search_nodes({"memory_type": mtype})
+    if phase == "persist":
+        from smartmemory_app.capture_queue import jobs
+
+        assert not rows  # Transcript missing, and the old summary would duplicate Stop.
+        assert jobs()[-1]["status"] == "error"
+        return
     assert len(rows) == 1
     stored = local_memory.get(rows[0].item_id)
     assert stored.origin == origin

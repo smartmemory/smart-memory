@@ -16,6 +16,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Capture SessionEnd transcripts through the existing Claude Code importer with a
+  durable capture ledger and detached worker; `smartmemory lifecycle drain`
+  acknowledges completion, errors, or timeout.
+- Fix topic-change recall embeddings and distinguish non-fatal trace degradations
+  from failed injections.
+
 - Hooks retain complete recalled memories within phase budgets, label injected items with stable IDs, and record final payloads and failures in the recall trace. Hook stderr is retained in `hooks.log`.
 - Learn, Distill, Persist, and Observe captures retain workspace metadata; Learn, Distill, and Persist now preserve their explicit origins.
 

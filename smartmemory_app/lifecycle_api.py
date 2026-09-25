@@ -107,7 +107,7 @@ async def learn(request: Request):
 async def persist(request: Request):
     body = await request.json()
     lc = _get_lifecycle(body)
-    lc.persist(cwd=body.get("cwd"))
+    lc.persist(cwd=body.get("cwd"), transcript_path=body.get("transcript_path"))
     return {"status": "ok"}
 
 

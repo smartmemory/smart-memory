@@ -25,6 +25,7 @@ from smartmemory_app.recall_format import (
     budget_blocks,
     derive_workspace_id,
     record_hook_error,
+    record_hook_degradation,
     skip_injection,
 )
 
@@ -38,7 +39,12 @@ def _traced_injection(method: Callable) -> Callable:
         cwd = bound.arguments.get("cwd")
         query = bound.arguments.get("prompt")
         started = recall_format.time_ms()
-        diagnostic = {"ranked_ids": [], "errors": [], "snapshot_used": False}
+        diagnostic = {
+            "ranked_ids": [],
+            "errors": [],
+            "degradations": [],
+            "snapshot_used": False,
+        }
         token = recall_format._ACTIVE_TRACE.set(diagnostic)
         output = ""
         workspace_id = None
@@ -63,6 +69,7 @@ def _traced_injection(method: Callable) -> Callable:
                 ranked_ids=ranked_ids,
                 payload=output,
                 error="; ".join(diagnostic["errors"]) or None,
+                degradations=diagnostic["degradations"],
                 skipped_reason=diagnostic.get("skipped_reason")
                 or ("empty" if not output else None),
             )
@@ -182,7 +189,7 @@ class MemoryLifecycle:
                     include_snapshot=False,
                 )
             except Exception as exc:
-                record_hook_error("Orient lost patterns context", exc)
+                record_hook_degradation("Orient lost patterns context", exc)
 
         output = self._format_orient_block(context, patterns)
         self._save_state()
@@ -372,31 +379,28 @@ class MemoryLifecycle:
         except Exception as e:
             log.warning("Learn ingest failed; error memory lost: %s", e)
 
-    def persist(self, cwd: str | None = None) -> None:
-        """Phase 6: Session end — save session summary, clean up state file."""
+    def persist(
+        self, cwd: str | None = None, transcript_path: str | None = None
+    ) -> None:
+        """Phase 6: durably enqueue the session transcript, then clean up state."""
         if not self._config.enabled:
             self._delete_state()
             return
 
-        summary = self._last_assistant_message
-        if not summary:
-            self._delete_state()
-            return
-
-        text = f"Session summary (turns={self._turn_count}, observations={self._observation_count}): {summary[:1000]}"
-
-        from smartmemory_app.storage import ingest
+        from smartmemory_app import capture_queue
 
         try:
-            ingest(
-                text,
-                memory_type="episodic",
-                origin="hook:persist",
-                properties={"workspace_id": derive_workspace_id(cwd)},
+            job = capture_queue.enqueue(
+                self.session_id, transcript_path, derive_workspace_id(cwd), cwd
             )
-        except Exception as e:
-            log.warning("Persist ingest failed; session summary lost: %s", e)
+            if job["status"] == "queued":
+                capture_queue.spawn_worker()
+        except Exception as exc:
+            log.warning("Persist transcript capture could not start: %s", exc)
 
+        # The full transcript contains the final response. Even without a path,
+        # Stop/Distill already captured _last_assistant_message; writing its
+        # truncated summary again duplicates it and would block exit on ingest.
         self._delete_state()
 
     # ── Recall gate ────────────────────────────────────────────────────
@@ -440,36 +444,40 @@ class MemoryLifecycle:
         if self._last_injection_embedding is None:
             return True
         try:
-            from smartmemory_app.storage import get_memory
+            from smartmemory.plugins.embedding import create_embeddings
 
-            mem = get_memory()
-            embedding = mem.embed(prompt)
+            embedding = create_embeddings(prompt)
             if embedding is None:
-                record_hook_error("Recall lost topic gating", "embedding unavailable")
+                record_hook_degradation(
+                    "Recall lost topic gating", "embedding unavailable"
+                )
                 return True
             similarity = self._cosine_similarity(
                 embedding, self._last_injection_embedding
             )
             return similarity < self._config.topic_threshold
         except Exception as exc:
-            record_hook_error(
+            record_hook_degradation(
                 "Recall lost topic gating; recalling without similarity", exc
             )
             return True  # fail open — recall when unsure
 
     def _cache_embedding(self, prompt: str) -> None:
         """Cache the prompt embedding for topic comparison."""
+        self._last_injection_embedding = None
         try:
-            from smartmemory_app.storage import get_memory
+            from smartmemory.plugins.embedding import create_embeddings
 
-            mem = get_memory()
-            self._last_injection_embedding = mem.embed(prompt)
+            embedding = create_embeddings(prompt)
+            self._last_injection_embedding = (
+                [float(value) for value in embedding] if embedding is not None else None
+            )
             if self._last_injection_embedding is None:
-                record_hook_error(
+                record_hook_degradation(
                     "Recall lost cached topic embedding", "embedding unavailable"
                 )
         except Exception as exc:
-            record_hook_error("Recall lost cached topic embedding", exc)
+            record_hook_degradation("Recall lost cached topic embedding", exc)
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -535,7 +543,7 @@ class MemoryLifecycle:
             self._observation_count = data.get("observation_count", 0)
             self._config_overrides = data.get("config_overrides", {})
         except (json.JSONDecodeError, OSError) as e:
-            record_hook_error(
+            record_hook_degradation(
                 "Failed to load session state; prior session context lost", e
             )
 
@@ -557,7 +565,7 @@ class MemoryLifecycle:
             tmp.write_text(json.dumps(data))
             tmp.rename(path)
         except OSError as e:
-            record_hook_error(
+            record_hook_degradation(
                 "Failed to save session state; current session updates lost", e
             )
 

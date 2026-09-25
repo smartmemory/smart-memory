@@ -27,6 +27,9 @@ def isolated_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SMARTMEMORY_WORKSPACE_ID", raising=False)
     monkeypatch.delenv("SMARTMEMORY_RECALL_STRICT", raising=False)
     monkeypatch.delenv("SMARTMEMORY_RECALL_FLOOR", raising=False)
+    monkeypatch.setattr(
+        "smartmemory.plugins.embedding.create_embeddings", lambda _: [1.0]
+    )
 
 
 def traces(tmp_path: Path) -> list[dict]:
@@ -140,7 +143,9 @@ def test_orient_pattern_failure_preserves_context(
     payload = MemoryLifecycle("patterns").orient(str(tmp_path))
     assert payload == block
     (record,) = traces(tmp_path)
-    assert "patterns unavailable" in record["error"] and record["injected_ids"] == ["a"]
+    assert "patterns unavailable" in "; ".join(record["degradations"]) and record[
+        "injected_ids"
+    ] == ["a"]
     assert "lost patterns context" in caplog.text
 
 
@@ -157,7 +162,15 @@ def test_capture_failure_warns(
         "learn": ("Bash", "error"),
         "persist": (),
     }
+    if phase == "persist":
+        monkeypatch.setattr(
+            "smartmemory_app.capture_queue.enqueue",
+            Mock(side_effect=OSError("disk full")),
+        )
     getattr(lc, phase)(*args[phase])
+    if phase == "persist":
+        assert "could not start" in caplog.text and "disk full" in caplog.text
+        return
     assert (
         f"{phase.title()} ingest failed" in caplog.text and "disk full" in caplog.text
     )
@@ -272,9 +285,7 @@ def test_hook_script_logs_stderr_and_exits_zero(
     )
     assert again.returncode == 0
     assert (log_dir / "hooks.log").read_text().count(f"failure-{phase}") == 2
-    assert ("} &" in script.read_text()) == (
-        phase in {"observe", "learn", "distill", "persist"}
-    )
+    assert ("} &" in script.read_text()) == (phase in {"observe", "learn", "distill"})
 
 
 @pytest.mark.parametrize("phase", ["learn", "distill", "persist", "observe"])
@@ -336,7 +347,8 @@ def test_embedding_fallback_warns_and_traces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(
-        storage, "get_memory", Mock(side_effect=RuntimeError("embedding unavailable"))
+        "smartmemory.plugins.embedding.create_embeddings",
+        Mock(side_effect=RuntimeError("embedding unavailable")),
     )
     block = recall_format.format_recall_lines([{"item_id": "a", "content": "Fact."}], 1)
     monkeypatch.setattr(storage, "recall", lambda *a, **kw: block)
@@ -344,10 +356,10 @@ def test_embedding_fallback_warns_and_traces(
     lc._last_injection_embedding = [1.0]
     assert lc.recall("Explain the facts") == block
     (record,) = traces(tmp_path)
-    assert (
-        "lost topic gating" in record["error"]
-        and "lost cached topic embedding" in record["error"]
-    )
+    assert "lost topic gating" in "; ".join(
+        record["degradations"]
+    ) and "lost cached topic embedding" in "; ".join(record["degradations"])
+    assert record["error"] is None
     assert "embedding unavailable" in caplog.text
 
 
@@ -412,7 +424,7 @@ def test_snapshot_tag_or_failure_in_orient_trace(
     if failure:
         assert (
             not payload
-            and "snapshot offline" in record["error"]
+            and "snapshot offline" in "; ".join(record["degradations"])
             and "lost snapshot" in caplog.text
         )
     else:
@@ -450,7 +462,7 @@ def test_missing_embedding_warns_and_is_traced(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(
-        storage, "get_memory", lambda: SimpleNamespace(embed=lambda _: None)
+        "smartmemory.plugins.embedding.create_embeddings", lambda _: None
     )
     block = recall_format.format_recall_lines([{"item_id": "a", "content": "Fact."}], 1)
     monkeypatch.setattr(storage, "recall", lambda *a, **kw: block)
@@ -459,7 +471,7 @@ def test_missing_embedding_warns_and_is_traced(
     assert lc.recall("Explain the fact") == block
     (record,) = traces(tmp_path)
     assert (
-        "embedding unavailable" in record["error"]
+        "embedding unavailable" in "; ".join(record["degradations"])
         and "lost topic gating" in caplog.text
     )
 
@@ -481,7 +493,7 @@ def test_remote_snapshot_error_response_is_loud(
     (record,) = traces(tmp_path)
     assert "Still useful." in out
     assert (
-        "snapshot request failed" in record["error"]
+        "snapshot request failed" in "; ".join(record["degradations"])
         and "lost remote snapshot" in caplog.text
     )
 
@@ -527,3 +539,25 @@ def test_workspace_fallback_warns_and_keeps_stable_scope(
     caplog.clear()
     assert recall_format.derive_workspace_id(str(tmp_path)) == "pinned"
     assert not caplog.records
+
+
+def test_topic_gate_uses_embedding_api_and_saves_json(tmp_path, monkeypatch):
+    import numpy as np
+
+    vectors = {
+        "first topic": [1.0, 0.0],
+        "same topic": [0.99, 0.01],
+        "new topic": [0.0, 1.0],
+    }
+    monkeypatch.setattr(
+        "smartmemory.plugins.embedding.create_embeddings",
+        lambda text: np.array(vectors[text]),
+    )
+    block = recall_format.format_recall_lines([{"item_id": "a", "content": "Fact."}], 1)
+    lookup = Mock(return_value=block)
+    monkeypatch.setattr(storage, "recall", lookup)
+    assert MemoryLifecycle("topics").recall("first topic") == block
+    assert MemoryLifecycle("topics").recall("same topic") == ""
+    assert MemoryLifecycle("topics").recall("new topic") == block
+    assert lookup.call_count == 2
+    assert all(record["error"] is None for record in traces(tmp_path))

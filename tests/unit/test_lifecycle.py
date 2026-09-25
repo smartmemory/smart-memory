@@ -1,10 +1,7 @@
 """Tests for DIST-AGENT-HOOKS-1 lifecycle engine."""
 
-import json
 import os
-import tempfile
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -100,7 +97,9 @@ class TestOrient:
         mock_search.assert_not_called()
 
     @patch("smartmemory_app.storage.recall")
-    def test_orient_patterns_rehung_under_header(self, mock_recall, tmp_data_dir, config):
+    def test_orient_patterns_rehung_under_header(
+        self, mock_recall, tmp_data_dir, config
+    ):
         mock_recall.side_effect = [
             "## SmartMemory Context\n- [semantic] recent thing",
             "## SmartMemory Context\n- [decision] we use pnpm",
@@ -151,7 +150,9 @@ class TestRecall:
 
     @patch("smartmemory_app.storage.recall")
     def test_recall_trims_to_budget(self, mock_recall, tmp_data_dir):
-        cfg = LifecycleConfig(recall_strategy=RecallStrategy.EVERY_PROMPT, recall_budget=40)
+        cfg = LifecycleConfig(
+            recall_strategy=RecallStrategy.EVERY_PROMPT, recall_budget=40
+        )
         mock_recall.return_value = "## SmartMemory Context\n" + "\n".join(
             f"- [semantic] {'x' * 100} {i}" for i in range(10)
         )
@@ -260,14 +261,18 @@ class TestLearn:
 
 class TestPersist:
     @patch("smartmemory_app.storage.ingest", return_value="item-999")
-    def test_persist_saves_summary(self, mock_ingest, tmp_data_dir, config):
+    def test_persist_does_not_duplicate_distilled_summary(
+        self, mock_ingest, tmp_data_dir, config
+    ):
         lc = MemoryLifecycle("test-session", config)
         lc._last_assistant_message = "Fixed the auth bug by updating JWT validation."
         lc._turn_count = 5
         lc._observation_count = 12
         lc.persist()
-        mock_ingest.assert_called_once()
-        assert "hook:persist" in str(mock_ingest.call_args)
+        mock_ingest.assert_not_called()
+        from smartmemory_app.capture_queue import jobs
+
+        assert jobs()[-1]["status"] == "error"
         # State file should be deleted
         assert not lc._state_path().exists()
 

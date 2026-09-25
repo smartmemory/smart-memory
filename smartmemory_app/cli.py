@@ -1655,13 +1655,10 @@ def lifecycle_learn() -> None:
 
 @lifecycle_group.command("persist")
 def lifecycle_persist() -> None:
-    """Persist phase: save session summary."""
+    """Persist phase: durably enqueue this session transcript."""
     import sys
 
     body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
-
-    if _lifecycle_via_daemon("/lifecycle/persist", body) is not None:
-        return
 
     session_id = body.get("session_id", "unknown")
 
@@ -1671,7 +1668,20 @@ def lifecycle_persist() -> None:
     lc = MemoryLifecycle(
         session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
     )
-    lc.persist(cwd=body.get("cwd"))
+    lc.persist(cwd=body.get("cwd"), transcript_path=body.get("transcript_path"))
+
+
+@lifecycle_group.command("drain")
+@click.option(
+    "--timeout", type=click.FloatRange(min=0), default=60.0, show_default=True
+)
+def lifecycle_drain(timeout: float) -> None:
+    """Await all SessionEnd captures; exit 0 done, 1 error, 2 timeout."""
+    from smartmemory_app.capture_queue import drain
+
+    result, code = drain(timeout)
+    click.echo(json.dumps(result))
+    raise SystemExit(code)
 
 
 @lifecycle_group.command("status")

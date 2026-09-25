@@ -27,7 +27,10 @@ from smartmemory_app.config import LLM_KEY_ENV_VARS
 
 @pytest.fixture()
 def client():
-    return TestClient(api)
+    # Endpoint unit tests must not depend on another test warming storage's
+    # process-global singleton (or open the user's real database).
+    with patch("smartmemory_app.local_api.get_memory", return_value=MagicMock()):
+        yield TestClient(api)
 
 
 # ---------------------------------------------------------------------------

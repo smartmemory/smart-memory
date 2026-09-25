@@ -222,6 +222,7 @@ class RemoteMemory:
             format_recall_lines,
             payload_ids,
             recall_item_label,
+            record_hook_degradation,
             record_hook_error,
             time_ms,
         )
@@ -269,7 +270,7 @@ class RemoteMemory:
                             "## SmartMemory Context\n"
                         )
             except Exception as exc:
-                record_hook_error("Orient lost remote snapshot context", exc)
+                record_hook_degradation("Orient lost remote snapshot context", exc)
 
         # 2. Candidates — recall runs on every prompt hook, so a remote search
         # failure degrades to empty (logged) rather than crashing the hook. The

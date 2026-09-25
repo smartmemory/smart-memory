@@ -699,7 +699,7 @@ def recall(
         derive_workspace_id,
         format_recall_lines,
         payload_ids,
-        record_hook_error,
+        record_hook_degradation,
         recall_item_label,
         time_ms,
     )
@@ -732,7 +732,7 @@ def recall(
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
         except Exception as exc:  # noqa: BLE001
-            record_hook_error("Orient lost snapshot context", exc)
+            record_hook_degradation("Orient lost snapshot context", exc)
             snaps = []
         if snaps:
             snap = snaps[0]

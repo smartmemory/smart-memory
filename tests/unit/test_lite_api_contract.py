@@ -7,7 +7,7 @@ SDK produces and asserts the response is what the plugin parses.
 
 All tests mock the SmartMemory layer to avoid filesystem/backend setup.
 """
-import os
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,7 +18,10 @@ from smartmemory_app.local_api import api
 
 @pytest.fixture()
 def client():
-    return TestClient(api)
+    # Endpoint unit tests must not depend on another test warming storage's
+    # process-global singleton (or open the user's real database).
+    with patch("smartmemory_app.local_api.get_memory", return_value=MagicMock()):
+        yield TestClient(api)
 
 
 # Helper — make a plain mock SmartMemory instance that's NOT a RemoteMemory.
@@ -46,24 +49,32 @@ class TestIngestSDKContract:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         with patch("smartmemory_app.storage.ingest", return_value="item-123"):
-            r = client.post("/ingest", json={
-                "content": "Hello world",
-                "profile_name": None,
-                "extractor_name": "llm",
-                "context": {},
-            })
+            r = client.post(
+                "/ingest",
+                json={
+                    "content": "Hello world",
+                    "profile_name": None,
+                    "extractor_name": "llm",
+                    "context": {},
+                },
+            )
         assert r.status_code == 200, r.text
         assert r.json() == {"item_id": "item-123"}
 
     def test_ingest_two_tier_with_llm(self, client, monkeypatch):
         """has_llm branch: enqueues to async queue, still returns {item_id}."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
-        with patch("smartmemory_app.storage.ingest",
-                   return_value={"item_id": "item-456", "entity_ids": {}, "queued": True}):
-            r = client.post("/ingest", json={
-                "content": "Hello",
-                "extractor_name": "llm",
-            })
+        with patch(
+            "smartmemory_app.storage.ingest",
+            return_value={"item_id": "item-456", "entity_ids": {}, "queued": True},
+        ):
+            r = client.post(
+                "/ingest",
+                json={
+                    "content": "Hello",
+                    "extractor_name": "llm",
+                },
+            )
         assert r.status_code == 200, r.text
         assert r.json() == {"item_id": "item-456"}
 
@@ -72,10 +83,13 @@ class TestIngestSDKContract:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         with patch("smartmemory_app.storage.ingest", return_value="item-789"):
-            r = client.post("/ingest", json={
-                "content": "Hello",
-                "extractor_name": "llm",  # ignored without LLM key
-            })
+            r = client.post(
+                "/ingest",
+                json={
+                    "content": "Hello",
+                    "extractor_name": "llm",  # ignored without LLM key
+                },
+            )
         assert r.status_code == 200, r.text
         assert r.json() == {"item_id": "item-789"}
 
@@ -90,12 +104,15 @@ class TestSearchSDKContract:
 
     def test_search_accepts_enable_hybrid_and_memory_type(self, client):
         with patch("smartmemory_app.storage.search", return_value=[{"item_id": "x"}]):
-            r = client.post("/search", json={
-                "query": "atlas",
-                "top_k": 5,
-                "enable_hybrid": True,
-                "memory_type": "semantic",
-            })
+            r = client.post(
+                "/search",
+                json={
+                    "query": "atlas",
+                    "top_k": 5,
+                    "enable_hybrid": True,
+                    "memory_type": "semantic",
+                },
+            )
         assert r.status_code == 200, r.text
         body = r.json()
         assert body == {"items": [{"item_id": "x"}]}
@@ -111,29 +128,39 @@ class TestSearchSDKContract:
 
     def test_search_memory_type_folds_into_filters(self, client):
         captured = {}
+
         def _spy(query, top_k, filters=None):
             captured["filters"] = filters
             return []
+
         with patch("smartmemory_app.storage.search", side_effect=_spy):
-            client.post("/search", json={
-                "query": "q",
-                "top_k": 5,
-                "memory_type": "decision",
-            })
+            client.post(
+                "/search",
+                json={
+                    "query": "q",
+                    "top_k": 5,
+                    "memory_type": "decision",
+                },
+            )
         assert captured["filters"] is not None
         assert captured["filters"].get("memory_type") == "decision"
 
     def test_search_filters_param_still_works(self, client):
         captured = {}
+
         def _spy(query, top_k, filters=None):
             captured["filters"] = filters
             return []
+
         with patch("smartmemory_app.storage.search", side_effect=_spy):
-            client.post("/search", json={
-                "query": "q",
-                "top_k": 5,
-                "filters": {"project": "atlas"},
-            })
+            client.post(
+                "/search",
+                json={
+                    "query": "q",
+                    "top_k": 5,
+                    "filters": {"project": "atlas"},
+                },
+            )
         assert captured["filters"] == {"project": "atlas"}
 
 
@@ -147,8 +174,12 @@ class TestPatchEndpoint:
 
     def test_patch_content_only(self, client):
         mem = _make_local_mem()
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
             r = client.patch("/some-id", json={"content": "new content"})
         assert r.status_code == 200, r.text
         assert r.json() == {"item_id": "some-id", "updated": True}
@@ -159,21 +190,34 @@ class TestPatchEndpoint:
 
     def test_patch_metadata_flat_merge(self, client):
         mem = _make_local_mem()
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
-            r = client.patch("/some-id", json={"metadata": {"source_path": "vault/note.md"}})
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
+            r = client.patch(
+                "/some-id", json={"metadata": {"source_path": "vault/note.md"}}
+            )
         assert r.status_code == 200
         args, _kwargs = mem.update_properties.call_args
         assert args[1].get("source_path") == "vault/note.md"
 
     def test_patch_properties_direct(self, client):
         mem = _make_local_mem()
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
-            r = client.patch("/some-id", json={
-                "properties": {"key": "val"},
-                "content": "ignored when properties is set",
-            })
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
+            r = client.patch(
+                "/some-id",
+                json={
+                    "properties": {"key": "val"},
+                    "content": "ignored when properties is set",
+                },
+            )
         assert r.status_code == 200
         args, _kwargs = mem.update_properties.call_args
         # properties wins per CORE-CRUD-UPDATE-1; content shouldn't override
@@ -183,26 +227,40 @@ class TestPatchEndpoint:
 
     def test_patch_write_mode_replace(self, client):
         mem = _make_local_mem()
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
-            r = client.patch("/some-id", json={
-                "properties": {"k": "v"},
-                "write_mode": "replace",
-            })
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
+            r = client.patch(
+                "/some-id",
+                json={
+                    "properties": {"k": "v"},
+                    "write_mode": "replace",
+                },
+            )
         assert r.status_code == 200
         _args, kwargs = mem.update_properties.call_args
         assert kwargs.get("write_mode") == "replace"
 
     def test_patch_404_on_unknown_id(self, client):
         mem = _make_local_mem()
-        mem.update_properties.side_effect = ValueError("Node bad-id not found in graph.")
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
+        mem.update_properties.side_effect = ValueError(
+            "Node bad-id not found in graph."
+        )
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
             r = client.patch("/bad-id", json={"content": "x"})
         assert r.status_code == 404
 
     def test_patch_remote_mode_returns_501(self, client):
         from smartmemory_app.remote_backend import RemoteMemory
+
         remote = MagicMock(spec=RemoteMemory)
         with patch("smartmemory_app.local_api._get_mem", return_value=remote):
             r = client.patch("/some-id", json={"content": "x"})
@@ -220,6 +278,7 @@ class TestDeleteEndpoint:
 
     def test_delete_remote_mode_returns_501(self, client):
         from smartmemory_app.remote_backend import RemoteMemory
+
         remote = MagicMock(spec=RemoteMemory)
         with patch("smartmemory_app.local_api._get_mem", return_value=remote):
             r = client.delete("/some-id")
@@ -229,8 +288,12 @@ class TestDeleteEndpoint:
         """Cascade requirement — must go through mem.delete() so vector store
         and Vec_* nodes are cleaned up. crud.py:288 docs the cascade."""
         mem = _make_local_mem()
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
             r = client.delete("/some-id")
         assert r.status_code == 204
         mem.delete.assert_called_once_with("some-id")
@@ -243,9 +306,14 @@ class TestDeleteEndpoint:
 
 def _edge(src, tgt, et="RELATED"):
     return {
-        "source_id": src, "target_id": tgt, "edge_type": et,
-        "memory_type": "semantic", "valid_from": None, "valid_to": None,
-        "created_at": "2026-04-30T00:00:00", "properties": {},
+        "source_id": src,
+        "target_id": tgt,
+        "edge_type": et,
+        "memory_type": "semantic",
+        "valid_from": None,
+        "valid_to": None,
+        "created_at": "2026-04-30T00:00:00",
+        "properties": {},
     }
 
 
@@ -259,7 +327,9 @@ class TestNeighborsDirection:
         neighbors = body["neighbors"]
         assert len(neighbors) == 1
         assert neighbors[0] == {
-            "item_id": "B", "link_type": "SUPERSEDES", "direction": "outgoing"
+            "item_id": "B",
+            "link_type": "SUPERSEDES",
+            "direction": "outgoing",
         }
 
     def test_incoming_supersedes(self, client):
@@ -306,9 +376,13 @@ class TestNeighborsDirection:
         entries that downstream clients can't classify."""
         backend = MagicMock()
         bad_edge = {
-            "source_id": "A", "target_id": "B",
-            "memory_type": "semantic", "valid_from": None, "valid_to": None,
-            "created_at": "2026-04-30T00:00:00", "properties": {},
+            "source_id": "A",
+            "target_id": "B",
+            "memory_type": "semantic",
+            "valid_from": None,
+            "valid_to": None,
+            "created_at": "2026-04-30T00:00:00",
+            "properties": {},
         }
         good_edge = _edge("A", "C", "RELATED")
         backend.get_edges_for_node.return_value = [bad_edge, good_edge]
@@ -331,9 +405,15 @@ class TestPatchValueErrorNarrowing:
         # exceptions surface as 500 rather than re-raising in the test.
         local_client = TestClient(api, raise_server_exceptions=False)
         mem = _make_local_mem()
-        mem.update_properties.side_effect = ValueError("write_mode must be merge or replace")
-        with patch("smartmemory_app.local_api._get_mem", return_value=mem), \
-             patch("smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})):
+        mem.update_properties.side_effect = ValueError(
+            "write_mode must be merge or replace"
+        )
+        with (
+            patch("smartmemory_app.local_api._get_mem", return_value=mem),
+            patch(
+                "smartmemory_app.remote_backend.RemoteMemory", new=type("Stub", (), {})
+            ),
+        ):
             r = local_client.patch("/some-id", json={"content": "x"})
         # Whatever the surface code is, it must NOT be 404 (which is reserved
         # for the explicit "not found" path).
@@ -358,9 +438,14 @@ class TestHealthCapabilityShape:
     def test_capability_keys_present(self):
         # This is the contract the plugin reads; pin it.
         expected_capability_keys = {
-            "delete", "patch", "neighbors_direction", "quota", "auth",
+            "delete",
+            "patch",
+            "neighbors_direction",
+            "quota",
+            "auth",
         }
         from smartmemory_app import viewer_server
+
         # Sanity: the source code references all expected keys
         src = open(viewer_server.__file__).read()
         for k in expected_capability_keys:
