@@ -16,6 +16,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Session lessons now retire outdated ones. When a new session explicitly
+  replaces or withdraws an earlier lesson (verbatim evidence required), the old
+  lesson is marked superseded or retracted and drops out of Orient/Recall.
+  Several new lessons may replace one old rule; one is kept as its successor of
+  record. Declined transitions carry a downgrade reason in the capture receipt.
+
 - Session capture receipts now record the lesson-extraction LLM usage (provider,
   model, prompt/completion tokens) and its cost from the core price table, with
   provenance. Retries and cached tokens are reported as unmeasured, never estimated.

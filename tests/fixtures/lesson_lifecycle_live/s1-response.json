@@ -1,0 +1,26 @@
+[
+  {
+    "lesson": 0,
+    "old_id": "dec_b37e696750b3",
+    "relation": "supersedes",
+    "evidence": "\"platform-team approval is no longer used for payments deploys\"",
+    "reason": "The assistant explicitly states that platform‑team approval is no longer used for payments deploys, directly contradicting the old rule that payments deploys need platform‑team approval and providing a new rule.",
+    "explicit": true
+  },
+  {
+    "lesson": 1,
+    "old_id": "dec_b37e696750b3",
+    "relation": "supersedes",
+    "evidence": "\"payments deploys now require sign-off from the security team instead\"",
+    "reason": "The assistant explicitly replaces the old requirement (platform‑team approval) with a new requirement (security‑team sign‑off), thereby superseding the previous rule.",
+    "explicit": true
+  },
+  {
+    "lesson": 2,
+    "old_id": "dec_b37e696750b3",
+    "relation": "supersedes",
+    "evidence": "\"platform approval no longer unblocks the job\"",
+    "reason": "The assistant explicitly indicates that platform approval no longer unblocks the job, contradicting the old rule that platform‑team approval was required, and thus supersedes it.",
+    "explicit": true
+  }
+]

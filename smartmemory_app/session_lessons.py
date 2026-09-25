@@ -1,7 +1,10 @@
 """Session conclusions through core's reasoning and decision extractors."""
 
+import json
 import logging
 import os
+
+from filelock import FileLock
 
 from smartmemory.plugins.extractors.reasoning import (
     ReasoningExtractor,
@@ -92,9 +95,30 @@ class SessionLessonExtractor(ReasoningExtractor):
 
 
 def capture_lessons(mem, job, turns, item_ids, session_date=None):
+    from smartmemory_app.lesson_lifecycle import journal_path
+
+    try:
+        path = journal_path(job)
+        with FileLock(str(path) + ".lock"):
+            return _capture_lessons(mem, job, turns, item_ids, session_date, path)
+    except Exception as exc:
+        message = f"Session {job['session_id']} lost session lessons: {exc}"
+        log.warning(message)
+        return {"degradation": message}
+
+
+def _capture_lessons(mem, job, turns, item_ids, session_date, path):
     """A loss here degrades lessons only; a successful transcript stays done."""
+    from smartmemory_app.lesson_lifecycle import apply_plan, classify, save_plan
+
     receipt = {}
     try:
+        if path.exists():
+            plan = json.loads(path.read_text())
+            receipt = dict(plan["receipt"])
+            receipt.pop("lesson_usage", None)  # retry performs no new LLM calls
+            plan["receipt"] = receipt
+            return apply_plan(mem, plan, path)
         existing = mem._graph.search_nodes(
             {"memory_type": "decision", "origin": ORIGIN}
         )
@@ -143,16 +167,22 @@ def capture_lessons(mem, job, turns, item_ids, session_date=None):
         decisions = DecisionExtractor().extract_from_trace(trace)
         if not decisions:
             raise ValueError("reasoning trace contained no lessons/decisions")
-        seen = set()
-        for decision in decisions:
-            if decision.content in seen:
-                continue
-            seen.add(decision.content)
+        decisions = list({d.content: d for d in decisions}.values())[:8]
+        try:
+            relations = classify(mem, decisions, job, turns, receipt)
+        except Exception as exc:
+            message = f"Session {job['session_id']} lost lesson lifecycle classification: {exc}"
+            log.warning(message)
+            receipt["degradation"] = message
+            relations = []
+        entries = []
+        for index, decision in enumerate(decisions):
             context = {
                 "workspace_id": job["workspace_id"],
                 "session_id": job["session_id"],
                 "transcript_path": job["transcript_path"],
                 "session_date": session_date,
+                "lesson_operation": f"{path.stem}:{index}",
             }
             spans = [
                 [i, i + 1]
@@ -161,21 +191,29 @@ def capture_lessons(mem, job, turns, item_ids, session_date=None):
             ]
             if spans:
                 context["turn_range"] = spans[-1]
-            stored = mem.add_decision(
-                decision.content,
-                decision_type=decision.decision_type,
-                confidence=decision.confidence,
-                source_type="reasoning",
-                source_session_id=job["session_id"],
-                evidence_ids=item_ids,
-                context_snapshot=context,
-                origin=ORIGIN,
+            entries.append(
+                {
+                    "context_snapshot": context,
+                    "decision": dict(
+                        decision_id=decision.generate_id(),
+                        content=decision.content,
+                        decision_type=decision.decision_type,
+                        confidence=decision.confidence,
+                        source_type="reasoning",
+                        source_session_id=job["session_id"],
+                        evidence_ids=item_ids,
+                        origin=ORIGIN,
+                    ),
+                }
             )
-            ids.append(stored.decision_id)
-            mem.update_properties(stored.decision_id, context)
-            if len(ids) == 8:
-                break
-        return {**receipt, "lesson_ids": ids}
+        plan = {
+            "receipt": receipt,
+            "entries": entries,
+            "relations": relations,
+            "origin": ORIGIN,
+        }
+        save_plan(path, plan)
+        return apply_plan(mem, plan, path)
     except Exception as exc:
         message = f"Session {job['session_id']} lost session lessons: {exc}"
         log.warning(message)

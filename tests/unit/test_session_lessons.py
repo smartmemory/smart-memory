@@ -26,6 +26,8 @@ def lesson_env(monkeypatch, tmp_path):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     mem = Mock()
+    mem.find_decision_conflicts.return_value = []
+    mem.search.return_value = []
     records = []
     mem._graph.search_nodes.side_effect = lambda filters: records
     mem._graph.find_by_source_path.return_value = None
@@ -288,3 +290,34 @@ def test_offline_has_no_usage_or_provider_call(lesson_env, sdk_response, monkeyp
     assert receipt["degradation"]
     assert "lesson_usage" not in receipt
     sdk_response[1].assert_not_called()
+
+
+def test_classifier_failure_keeps_transcript_done(lesson_env, monkeypatch):
+    from smartmemory.models.decision import Decision
+
+    mem, _, _ = lesson_env
+    mem.find_decision_conflicts.return_value = [
+        Decision(
+            decision_id="old",
+            content=LESSON,
+            context_snapshot={"workspace_id": "ws-test"},
+        )
+    ]
+
+    def fail(**kwargs):
+        raise RuntimeError("classifier unavailable")
+
+    monkeypatch.setattr("smartmemory_app.lesson_lifecycle.call_llm", fail)
+    enqueue()
+    capture_worker.run()
+    receipt = queue.jobs()[-1]
+    assert receipt["status"] == "done"
+    assert receipt["item_ids"] == ["chunk-1"]
+    assert receipt["lesson_ids"] == ["lesson-0"]
+    assert "lifecycle classification" in receipt["degradation"]
+    enqueue()
+    capture_worker.run()
+    retry = queue.jobs()[-1]
+    assert retry["degradation"] == receipt["degradation"]
+    assert retry["lesson_transitions"] == []
+    assert mem.add_decision.call_count == 1

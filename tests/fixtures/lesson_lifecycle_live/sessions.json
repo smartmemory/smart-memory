@@ -1,0 +1,37 @@
+[
+  {
+    "turns": [
+      {
+        "role": "assistant",
+        "content": "payments deploys need platform-team approval"
+      }
+    ],
+    "lessons": [
+      "payments deploys need platform‑team approval"
+    ]
+  },
+  {
+    "turns": [
+      {
+        "role": "assistant",
+        "content": "platform-team approval is no longer used for payments deploys; payments deploys now require sign-off from the security team instead; platform approval no longer unblocks the job"
+      }
+    ],
+    "lessons": [
+      "platform‑team approval is no longer used for payments deploys",
+      "payments deploys now require sign-off from the security team instead",
+      "platform approval no longer unblocks the job"
+    ]
+  },
+  {
+    "turns": [
+      {
+        "role": "assistant",
+        "content": "The repo pins Python 3.12 in pyproject; CI tests 3.12 only."
+      }
+    ],
+    "lessons": [
+      "The repo pins Python 3.12 in pyproject; CI tests 3.12 only."
+    ]
+  }
+]

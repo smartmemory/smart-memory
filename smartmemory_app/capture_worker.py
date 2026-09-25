@@ -62,8 +62,22 @@ def import_capture(job: dict) -> dict:
                 "item_ids": previous.get("item_ids", []),
                 "unchanged": True,
             }
-            if previous.get("lesson_ids"):
-                return {**cached, "lesson_ids": previous["lesson_ids"]}
+            if previous.get("lessons_complete") or (
+                previous.get("lesson_ids") and not previous.get("degradation")
+            ):
+                return {
+                    **cached,
+                    **{
+                        key: previous[key]
+                        for key in (
+                            "lesson_ids",
+                            "lesson_transitions",
+                            "lessons_complete",
+                            "degradation",
+                        )
+                        if key in previous
+                    },
+                }
             break
     mem = _memory()
     try:
