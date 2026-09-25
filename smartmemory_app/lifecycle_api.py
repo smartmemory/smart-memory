@@ -7,7 +7,6 @@ loads session state, executes, saves state.
 
 from __future__ import annotations
 
-import json
 import logging
 
 from fastapi import APIRouter, Request
@@ -31,11 +30,13 @@ def _load_lifecycle_config() -> dict:
     """Load [lifecycle] section from config.toml."""
     try:
         from smartmemory_app.config import load_config
-        cfg = load_config()
+
+        load_config()
         # load_config returns SmartMemoryConfig dataclass, not raw TOML.
         # For lifecycle config, read raw TOML directly.
         import tomllib
         from smartmemory_app.config import config_path
+
         path = config_path()
         if path.exists():
             with open(path, "rb") as f:
@@ -86,7 +87,7 @@ async def observe(request: Request):
 async def distill(request: Request):
     body = await request.json()
     lc = _get_lifecycle(body)
-    lc.distill(response=body.get("last_assistant_message", ""))
+    lc.distill(response=body.get("last_assistant_message", ""), cwd=body.get("cwd"))
     return {"status": "ok"}
 
 
@@ -97,6 +98,7 @@ async def learn(request: Request):
     lc.learn(
         tool_name=body.get("tool_name", "unknown"),
         error=as_text(body.get("error") or body.get("tool_response")),
+        cwd=body.get("cwd"),
     )
     return {"status": "ok"}
 
@@ -105,7 +107,7 @@ async def learn(request: Request):
 async def persist(request: Request):
     body = await request.json()
     lc = _get_lifecycle(body)
-    lc.persist()
+    lc.persist(cwd=body.get("cwd"))
     return {"status": "ok"}
 
 

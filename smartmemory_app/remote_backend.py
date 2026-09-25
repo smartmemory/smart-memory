@@ -220,6 +220,9 @@ class RemoteMemory:
             _trace,
             derive_workspace_id,
             format_recall_lines,
+            payload_ids,
+            recall_item_label,
+            record_hook_error,
             time_ms,
         )
 
@@ -248,6 +251,8 @@ class RemoteMemory:
                         "top_k": 1,
                     },
                 )
+                if isinstance(snaps, dict) and snaps.get("error"):
+                    raise RemoteBackendError(str(snaps["error"]))
                 rows = (
                     snaps
                     if isinstance(snaps, list)
@@ -260,9 +265,11 @@ class RemoteMemory:
                         "workspace_id"
                     ) in (None, workspace_id)
                     if ws_match:
-                        frame = (snap.get("content") or "").strip()
-            except Exception:
-                pass  # snapshot is best-effort
+                        frame = format_recall_lines([snap], top_k=1).removeprefix(
+                            "## SmartMemory Context\n"
+                        )
+            except Exception as exc:
+                record_hook_error("Orient lost remote snapshot context", exc)
 
         # 2. Candidates — recall runs on every prompt hook, so a remote search
         # failure degrades to empty (logged) rather than crashing the hook. The
@@ -282,7 +289,7 @@ class RemoteMemory:
                 )
                 results = list(recent) + list(semantic)
         except RemoteBackendError as e:
-            log.warning("Remote recall search failed — returning empty recall: %s", e)
+            record_hook_error("Remote recall lost search context", e)
             results = []
         results = [r for r in results if r.get("memory_type") != "snapshot"]
 
@@ -333,7 +340,9 @@ class RemoteMemory:
 
         # 8. Trace
         _trace(
-            phase="user_prompt" if query else "session_start",
+            phase="recall" if query else "orient",
+            payload=out,
+            ranked_ids=[recall_item_label(r) for r in results] + payload_ids(frame),
             workspace_id=workspace_id,
             cwd=cwd,
             query=query,

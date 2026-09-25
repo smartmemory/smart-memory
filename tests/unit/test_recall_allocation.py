@@ -51,7 +51,7 @@ def run_recall(monkeypatch):
 @pytest.mark.parametrize("cwd", [None, "/project"])
 def test_semantic_empty_fills_from_recency(run_recall, cwd):
     out = run_recall([item(f"r{i}") for i in range(5)], [], cwd=cwd)
-    assert out.splitlines()[1:] == [f"- [semantic] r{i}" for i in range(3)]
+    assert out.splitlines()[1:] == [f"- [semantic] [mem:r{i}] r{i}" for i in range(3)]
 
 
 def test_populated_preserves_blend_order(run_recall):
@@ -59,9 +59,9 @@ def test_populated_preserves_blend_order(run_recall):
         [item(f"r{i}") for i in range(5)], [item(f"s{i}") for i in range(5)]
     )
     assert out.splitlines()[1:] == [
-        "- [semantic] r0",
-        "- [semantic] r1",
-        "- [semantic] s0",
+        "- [semantic] [mem:r0] r0",
+        "- [semantic] [mem:r1] r1",
+        "- [semantic] [mem:s0] s0",
     ]
 
 
@@ -75,9 +75,9 @@ def test_short_union_warns_without_padding(run_recall, caplog, query):
 def test_cross_channel_duplicates_fill_remaining_slots(run_recall, caplog):
     out = run_recall([item("a"), item("b"), item("c")], [item("a"), item("d")])
     assert out.splitlines()[1:] == [
-        "- [semantic] a",
-        "- [semantic] b",
-        "- [semantic] c",
+        "- [semantic] [mem:a] a",
+        "- [semantic] [mem:b] b",
+        "- [semantic] [mem:c] c",
     ]
     assert "duplicate item_id" in caplog.text and "a" in caplog.text
 

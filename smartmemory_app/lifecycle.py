@@ -13,13 +13,65 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
+from smartmemory_app import recall_format
 from smartmemory_app.lifecycle_config import LifecycleConfig, RecallStrategy
+from smartmemory_app.recall_format import (
+    budget_blocks,
+    derive_workspace_id,
+    record_hook_error,
+    skip_injection,
+)
 
 
-def as_text(value) -> str:
+def _traced_injection(method: Callable) -> Callable:
+    """Trace the final hook payload once, including gated and failing calls."""
+
+    @wraps(method)
+    def wrapped(self: MemoryLifecycle, *args: Any, **kwargs: Any) -> str:
+        bound = signature(method).bind(self, *args, **kwargs)
+        cwd = bound.arguments.get("cwd")
+        query = bound.arguments.get("prompt")
+        started = recall_format.time_ms()
+        diagnostic = {"ranked_ids": [], "errors": [], "snapshot_used": False}
+        token = recall_format._ACTIVE_TRACE.set(diagnostic)
+        output = ""
+        workspace_id = None
+        try:
+            workspace_id = derive_workspace_id(cwd)
+            output = method(self, *args, **kwargs)
+        except Exception as exc:
+            record_hook_error(f"{method.__name__} lost injected context", exc)
+        finally:
+            recall_format._ACTIVE_TRACE.reset(token)
+            ranked_ids = diagnostic["ranked_ids"] or recall_format.payload_ids(output)
+            recall_format._trace(
+                phase=method.__name__,
+                session_id=self.session_id,
+                workspace_id=workspace_id,
+                cwd=cwd,
+                query=query,
+                candidate_count=len(ranked_ids),
+                emitted=len(recall_format.payload_ids(output)),
+                snapshot_used=diagnostic["snapshot_used"],
+                latency_ms=recall_format.time_ms() - started,
+                ranked_ids=ranked_ids,
+                payload=output,
+                error="; ".join(diagnostic["errors"]) or None,
+                skipped_reason=diagnostic.get("skipped_reason")
+                or ("empty" if not output else None),
+            )
+        return output
+
+    return wrapped
+
+
+def as_text(value: Any) -> str:
     """Coerce a hook payload field to text.
 
     Claude Code sends `tool_response` (and some `error` payloads) as a JSON
@@ -44,8 +96,10 @@ def as_text(value) -> str:
         return value
     try:
         return json.dumps(value, default=str)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        log.warning("Hook payload lost JSON representation; using string: %s", exc)
         return str(value)
+
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +143,7 @@ class MemoryLifecycle:
 
     # ── Phase methods ──────────────────────────────────────────────────
 
+    @_traced_injection
     def orient(self, cwd: str | None = None) -> str:
         """Phase 1: Session start — recall previous context with progressive disclosure.
 
@@ -96,6 +151,7 @@ class MemoryLifecycle:
         Clears stale session state for fresh start.
         """
         if not self._config.enabled:
+            skip_injection("disabled")
             return ""
 
         # Clear state for new session
@@ -125,13 +181,14 @@ class MemoryLifecycle:
                     query=f"patterns conventions decisions for {os.path.basename(cwd)}",
                     include_snapshot=False,
                 )
-            except Exception:
-                pass  # non-critical
+            except Exception as exc:
+                record_hook_error("Orient lost patterns context", exc)
 
         output = self._format_orient_block(context, patterns)
         self._save_state()
         return output
 
+    @_traced_injection
     def recall(self, prompt: str, cwd: str | None = None) -> str:
         """Phase 2: Per-prompt recall — always captures prompt, optionally injects context.
 
@@ -144,6 +201,7 @@ class MemoryLifecycle:
         Returns formatted context if recall gate passes, empty string otherwise.
         """
         if not self._config.enabled:
+            skip_injection("disabled")
             return ""
 
         # Always capture prompt for distill pairing (unconditional)
@@ -152,6 +210,9 @@ class MemoryLifecycle:
 
         # Check if recall should fire
         if not self._should_recall(prompt):
+            skip_injection(
+                "deduped" if prompt.strip() == self._last_recalled_prompt else "gated"
+            )
             self._save_state()
             return ""
 
@@ -160,7 +221,7 @@ class MemoryLifecycle:
         try:
             block = scoped_recall(cwd, top_k=5, query=prompt, include_snapshot=False)
         except Exception as e:
-            log.warning("Recall search failed: %s", e)
+            record_hook_error("Recall lost search context", e)
             self._save_state()
             return ""
 
@@ -205,11 +266,16 @@ class MemoryLifecycle:
             # origin MUST be the explicit kwarg — it is a reserved key stripped from
             # `properties` (DIST-LITE-QUIET-1), so the old properties= form silently
             # stored origin="unknown". (CORE-CODE-PROVENANCE-1 Phase 2a fix.)
-            ingest(text, memory_type="episodic", origin="hook:observe")
+            ingest(
+                text,
+                memory_type="episodic",
+                origin="hook:observe",
+                properties={"workspace_id": derive_workspace_id(cwd)},
+            )
             self._observation_count += 1
             self._save_state()
         except Exception as e:
-            log.warning("Observe ingest failed: %s", e)
+            log.warning("Observe ingest failed; tool observation lost: %s", e)
 
         # CORE-CODE-PROVENANCE-1 Phase 2a — durable code-authorship evidence, in its
         # OWN try/except so a failure here cannot regress the episodic write above.
@@ -249,9 +315,11 @@ class MemoryLifecycle:
                             )
                         )
         except Exception as e:
-            log.warning("Provenance persist failed (non-fatal): %s", e)
+            log.warning(
+                "Provenance persist failed; code-authorship evidence lost: %s", e
+            )
 
-    def distill(self, response: str) -> None:
+    def distill(self, response: str, cwd: str | None = None) -> None:
         """Phase 4: Pair assistant response with stored prompt, save turn pair.
 
         Called by Stop hook with last_assistant_message.
@@ -272,15 +340,20 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(pair, memory_type="pending", properties={"origin": "lifecycle:distill"})
+            ingest(
+                pair,
+                memory_type="pending",
+                origin="lifecycle:distill",
+                properties={"workspace_id": derive_workspace_id(cwd)},
+            )
         except Exception as e:
-            log.warning("Distill ingest failed: %s", e)
+            log.warning("Distill ingest failed; turn pair lost: %s", e)
 
         # Clear current turn (consumed)
         self._current_user_turn = None
         self._save_state()
 
-    def learn(self, tool_name: str, error: str) -> None:
+    def learn(self, tool_name: str, error: str, cwd: str | None = None) -> None:
         """Phase 5: Capture tool failure as episodic memory."""
         if not self._config.enabled or not self._config.learn_from_errors:
             return
@@ -290,11 +363,16 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(text, memory_type="episodic", properties={"origin": "hook:learn"})
+            ingest(
+                text,
+                memory_type="episodic",
+                origin="hook:learn",
+                properties={"workspace_id": derive_workspace_id(cwd)},
+            )
         except Exception as e:
-            log.warning("Learn ingest failed: %s", e)
+            log.warning("Learn ingest failed; error memory lost: %s", e)
 
-    def persist(self) -> None:
+    def persist(self, cwd: str | None = None) -> None:
         """Phase 6: Session end — save session summary, clean up state file."""
         if not self._config.enabled:
             self._delete_state()
@@ -310,9 +388,14 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(text, memory_type="episodic", properties={"origin": "hook:persist"})
+            ingest(
+                text,
+                memory_type="episodic",
+                origin="hook:persist",
+                properties={"workspace_id": derive_workspace_id(cwd)},
+            )
         except Exception as e:
-            log.warning("Persist ingest failed: %s", e)
+            log.warning("Persist ingest failed; session summary lost: %s", e)
 
         self._delete_state()
 
@@ -330,7 +413,10 @@ class MemoryLifecycle:
         stripped = prompt.strip()
         if not stripped:
             return False
-        if len(stripped.split()) <= _MAX_SKIP_TOKENS and stripped.lower() in _SKIP_TOKENS:
+        if (
+            len(stripped.split()) <= _MAX_SKIP_TOKENS
+            and stripped.lower() in _SKIP_TOKENS
+        ):
             return False
         if stripped.startswith("/"):
             return False  # slash commands
@@ -355,23 +441,35 @@ class MemoryLifecycle:
             return True
         try:
             from smartmemory_app.storage import get_memory
+
             mem = get_memory()
             embedding = mem.embed(prompt)
             if embedding is None:
+                record_hook_error("Recall lost topic gating", "embedding unavailable")
                 return True
-            similarity = self._cosine_similarity(embedding, self._last_injection_embedding)
+            similarity = self._cosine_similarity(
+                embedding, self._last_injection_embedding
+            )
             return similarity < self._config.topic_threshold
-        except Exception:
+        except Exception as exc:
+            record_hook_error(
+                "Recall lost topic gating; recalling without similarity", exc
+            )
             return True  # fail open — recall when unsure
 
     def _cache_embedding(self, prompt: str) -> None:
         """Cache the prompt embedding for topic comparison."""
         try:
             from smartmemory_app.storage import get_memory
+
             mem = get_memory()
             self._last_injection_embedding = mem.embed(prompt)
-        except Exception:
-            pass
+            if self._last_injection_embedding is None:
+                record_hook_error(
+                    "Recall lost cached topic embedding", "embedding unavailable"
+                )
+        except Exception as exc:
+            record_hook_error("Recall lost cached topic embedding", exc)
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -392,71 +490,26 @@ class MemoryLifecycle:
         from the workspace-scoped storage.recall path; its header is dropped and
         the entries re-hung under `## Patterns`.
         """
-        budget = self._config.orient_budget
-        lines: list[str] = []
-
-        # Layer 1: Recall context (highest priority)
-        if context:
-            context_tokens = _estimate_tokens(context)
-            if context_tokens <= budget:
-                lines.append(context)
-                budget -= context_tokens
-
-        # Layer 2: Patterns/decisions (if budget remains)
-        if patterns and budget > 100:
-            pattern_lines = []
-            for line in patterns.splitlines():
-                if not line.startswith("- "):
-                    continue  # drop the block header
-                line_tokens = _estimate_tokens(line)
-                if budget - line_tokens < 0:
-                    break
-                pattern_lines.append(line)
-                budget -= line_tokens
-            if pattern_lines:
-                lines.append("\n## Patterns")
-                lines.extend(pattern_lines)
-
-        return "\n".join(lines) if lines else ""
+        return budget_blocks(
+            [(context, None), (patterns, "## Patterns")], self._config.orient_budget
+        )
 
     def _trim_to_budget(self, block: str) -> str:
-        """Cap a pre-formatted recall block (header + `- ` lines) at recall_budget."""
-        budget = self._config.recall_budget
-        lines = block.splitlines()
-        if not lines:
-            return ""
-        kept = [lines[0]]
-        used = _estimate_tokens(lines[0])
-        for line in lines[1:]:
-            t = _estimate_tokens(line)
-            if used + t > budget:
-                break
-            kept.append(line)
-            used += t
-        return "\n".join(kept) if len(kept) > 1 else ""
+        """Apply the recall budget to complete items, retaining later items that fit."""
+        return budget_blocks([(block, None)], self._config.recall_budget)
 
     def _format_recall_block(self, results: list[dict]) -> str:
-        """Build Recall context block within budget."""
-        budget = self._config.recall_budget
-        lines = ["[SmartMemory Recall]"]
-        used = _estimate_tokens(lines[0])
-
-        for r in results:
-            content = r.get("content", "") if isinstance(r, dict) else str(r)
-            mtype = r.get("memory_type", "?") if isinstance(r, dict) else "?"
-            line = f"- [{mtype}] {content[:200]}"
-            line_tokens = _estimate_tokens(line)
-            if used + line_tokens > budget:
-                break
-            lines.append(line)
-            used += line_tokens
-
-        return "\n".join(lines) if len(lines) > 1 else ""
+        """Build Recall context block within budget using the shared formatter."""
+        return recall_format.format_recall_lines(
+            results, top_k=len(results), budget=self._config.recall_budget
+        )
 
     # ── Session state persistence ──────────────────────────────────────
 
     def _state_dir(self) -> Path:
-        data_dir = os.environ.get("SMARTMEMORY_DATA_DIR", str(Path.home() / ".smartmemory"))
+        data_dir = os.environ.get(
+            "SMARTMEMORY_DATA_DIR", str(Path.home() / ".smartmemory")
+        )
         d = Path(data_dir) / "sessions"
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -469,10 +522,10 @@ class MemoryLifecycle:
         return self._state_dir() / f"{safe_id}.json"
 
     def _load_state(self) -> None:
-        path = self._state_path()
-        if not path.exists():
-            return
         try:
+            path = self._state_path()
+            if not path.exists():
+                return
             data = json.loads(path.read_text())
             self._current_user_turn = data.get("current_user_turn")
             self._last_assistant_message = data.get("last_assistant_message")
@@ -482,7 +535,9 @@ class MemoryLifecycle:
             self._observation_count = data.get("observation_count", 0)
             self._config_overrides = data.get("config_overrides", {})
         except (json.JSONDecodeError, OSError) as e:
-            log.warning("Failed to load session state: %s", e)
+            record_hook_error(
+                "Failed to load session state; prior session context lost", e
+            )
 
     def _save_state(self) -> None:
         data = {
@@ -496,24 +551,28 @@ class MemoryLifecycle:
             "config_overrides": self._config_overrides,
             "updated_at": time.time(),
         }
-        path = self._state_path()
-        tmp = path.with_suffix(".tmp")
         try:
+            path = self._state_path()
+            tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data))
             tmp.rename(path)
         except OSError as e:
-            log.warning("Failed to save session state: %s", e)
+            record_hook_error(
+                "Failed to save session state; current session updates lost", e
+            )
 
     def _delete_state(self) -> None:
         try:
             self._state_path().unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            log.warning("Failed to delete session state; stale state retained: %s", exc)
 
     @classmethod
     def cleanup_stale_sessions(cls, max_age_hours: int = 24) -> int:
         """Delete session state files older than max_age_hours. Returns count deleted."""
-        data_dir = os.environ.get("SMARTMEMORY_DATA_DIR", str(Path.home() / ".smartmemory"))
+        data_dir = os.environ.get(
+            "SMARTMEMORY_DATA_DIR", str(Path.home() / ".smartmemory")
+        )
         sessions_dir = Path(data_dir) / "sessions"
         if not sessions_dir.exists():
             return 0
@@ -524,6 +583,6 @@ class MemoryLifecycle:
                 if f.stat().st_mtime < cutoff:
                     f.unlink()
                     deleted += 1
-            except OSError:
-                pass
+            except OSError as exc:
+                log.warning("Failed to clean stale session state %s: %s", f, exc)
         return deleted

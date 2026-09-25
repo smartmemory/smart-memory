@@ -16,6 +16,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Hooks retain complete recalled memories within phase budgets, label injected items with stable IDs, and record final payloads and failures in the recall trace. Hook stderr is retained in `hooks.log`.
+- Learn, Distill, Persist, and Observe captures retain workspace metadata; Learn, Distill, and Persist now preserve their explicit origins.
+
 ## [1.4.115] - 2026-09-24
 
 - **Fixed:** pins `smartmemory-core==1.4.115`. A slow Wikidata no longer fails or stalls a save: grounding makes one

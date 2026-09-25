@@ -12,6 +12,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+from contextvars import ContextVar
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -71,7 +73,9 @@ def recall_item_label(item: dict) -> str:
     )
 
 
-def format_recall_lines(items: Iterable[dict], top_k: int) -> str:
+def format_recall_lines(
+    items: Iterable[dict], top_k: int, budget: int | None = None
+) -> str:
     """Format items as the `## SmartMemory Context` block.
 
     Bug fixes vs legacy storage.recall():
@@ -92,6 +96,11 @@ def format_recall_lines(items: Iterable[dict], top_k: int) -> str:
             continue
 
         iid = it.get("item_id")
+        if not iid:
+            log.warning(
+                "recall lost stored item ID; using stable content label %s",
+                recall_item_label(it),
+            )
         if iid and iid in seen_ids:
             log.warning("recall dropped %s: duplicate item_id", recall_item_label(it))
             continue
@@ -118,15 +127,112 @@ def format_recall_lines(items: Iterable[dict], top_k: int) -> str:
         try:
             conf_marker = "~" if float(conf) < 0.5 else ""
         except (TypeError, ValueError):
+            log.warning(
+                "recall lost confidence marker for %s: invalid confidence",
+                recall_item_label(it),
+            )
             conf_marker = ""
         stale_marker = "⚠" if it.get("stale") else ""
         mtype = it.get("memory_type", "?") or "?"
 
-        lines.append(f"- {stale_marker}{conf_marker}[{mtype}] {body[:200]}")
+        body = body.replace("\n", "\n  ")
+        lines.append(
+            f"- {stale_marker}{conf_marker}[{mtype}] [mem:{recall_item_label(it)}] {body}"
+        )
 
     if not lines:
         return ""
-    return "## SmartMemory Context\n" + "\n".join(lines)
+    block = "## SmartMemory Context\n" + "\n".join(lines)
+    return budget_blocks([(block, None)], budget) if budget is not None else block
+
+
+def payload_ids(payload: str) -> list[str]:
+    """IDs on rendered item headers, in injection order."""
+    return re.findall(r"(?m)^- [^\n]*?\[mem:([^\]]+)\]", payload)
+
+
+def budget_blocks(blocks: list[tuple[str, str | None]], budget: int) -> str:
+    """Keep complete ranked items, accounting for headers and separators too.
+
+    Formatter continuation lines are indented, so a multiline memory remains
+    atomic. Only an item larger than the entire phase allowance can be shortened.
+    """
+    limit = max(0, budget) * 4
+    output = ""
+    seen: set[str] = set()
+    for block, heading in blocks:
+        if not block:
+            continue
+        chunks = re.split(r"(?m)^(?=- )", block)
+        header = heading or chunks[0].strip()
+        entries = chunks[1:]
+        if not entries:  # Legacy unstructured backend response: still atomic.
+            log.warning(
+                "recall lost item IDs and item boundaries in legacy unstructured block"
+            )
+            if len(output + block) <= limit:
+                output += block
+            else:
+                log.info("recall dropped legacy block for budget")
+            continue
+        section_started = False
+        for entry in entries:
+            entry = entry.rstrip()
+            ids = payload_ids(entry)
+            iid = ids[0] if ids else recall_item_label({"content": entry})
+            if iid in seen:
+                log.warning("recall dropped %s: duplicate injected item", iid)
+                continue
+            seen.add(iid)
+            prefix = ("\n" if output else "") + (
+                "" if section_started else header + "\n"
+            )
+            if len(output + prefix + entry) > limit:
+                if len(header + "\n" + entry) > limit:
+                    marker = f"…[truncated, mem:{iid}]"
+                    available = limit - len(output + prefix) - len(marker)
+                    # Preserve the tags, and cut only after a complete sentence.
+                    tag_end = entry.find("] ", entry.find("[mem:")) + 2 if ids else 0
+                    ends = [m.end() for m in re.finditer(r"[.!?。！？](?=\s|$)", entry)]
+                    ends = [end for end in ends if tag_end < end <= available]
+                    if ends:
+                        entry = entry[: ends[-1]] + marker
+                    elif tag_end and tag_end <= available:
+                        entry = entry[:tag_end] + marker
+                    else:
+                        log.info("recall dropped %s for budget", iid)
+                        continue
+                    log.warning(
+                        "recall lost full content for %s: oversized item truncated at sentence boundary",
+                        iid,
+                    )
+                else:
+                    log.info("recall dropped %s for budget", iid)
+                    continue
+            output += prefix + entry
+            section_started = True
+    return output
+
+
+# Context-local aggregation keeps storage diagnostics in the one lifecycle trace.
+_ACTIVE_TRACE: ContextVar[dict | None] = ContextVar(
+    "hook_injection_trace", default=None
+)
+
+
+def record_hook_error(message: str, error: Exception | str) -> None:
+    """Surface a fallback and retain its loss in the current injection trace."""
+    detail = f"{message}: {error}"
+    log.warning("%s", detail)
+    active = _ACTIVE_TRACE.get()
+    if active is not None:
+        active["errors"].append(detail)
+
+
+def skip_injection(reason: str) -> None:
+    active = _ACTIVE_TRACE.get()
+    if active is not None:
+        active["skipped_reason"] = reason
 
 
 # --- Workspace derivation ---------------------------------------------------
@@ -161,8 +267,10 @@ def derive_workspace_id(cwd: str | None) -> str | None:
         toplevel = result.stdout.strip()
         if toplevel:
             canonical = os.path.realpath(toplevel)
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        pass
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
+        log.warning(
+            "workspace lost git-root resolution; using cwd %s: %s", canonical, exc
+        )
 
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
     return f"ws_{digest}"
@@ -182,12 +290,34 @@ def _trace(
     snapshot_used: bool,
     latency_ms: int,
     trace_path: Path | None = None,
+    session_id: str | None = None,
+    ranked_ids: list[str] | None = None,
+    payload: str = "",
+    error: str | None = None,
+    skipped_reason: str | None = None,
 ) -> None:
     """Append one JSONL line per hook invocation. Never raises."""
-    path = Path(trace_path) if trace_path is not None else DEFAULT_TRACE_PATH
+    active = _ACTIVE_TRACE.get()
+    if active is not None:
+        active["ranked_ids"].extend(ranked_ids or payload_ids(payload))
+        active["snapshot_used"] |= snapshot_used
+        if error:
+            active["errors"].append(error)
+        return
+    path = (
+        Path(trace_path)
+        if trace_path is not None
+        else Path(os.environ.get("SMARTMEMORY_HOOK_TRACE", str(DEFAULT_TRACE_PATH)))
+    )
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "phase": phase,
+        "session_id": session_id,
+        "ranked_ids": ranked_ids or [],
+        "injected_ids": payload_ids(payload),
+        "payload": payload,
+        "payload_tokens": (len(payload) + 3) // 4,
+        "error": error,
         "workspace_id": workspace_id,
         "cwd": cwd,
         "query": query,
@@ -196,6 +326,8 @@ def _trace(
         "snapshot_used": snapshot_used,
         "latency_ms": latency_ms,
     }
+    if skipped_reason is not None:
+        record["skipped_reason"] = skipped_reason
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists() and path.stat().st_size > TRACE_MAX_BYTES:
@@ -204,12 +336,12 @@ def _trace(
                 if rotated.exists():
                     rotated.unlink()
                 path.rename(rotated)
-            except OSError:
-                pass
+            except OSError as exc:
+                log.warning("hook trace lost rotation: %s", exc)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
     except Exception as exc:  # noqa: BLE001 — trace must never break the hook
-        log.debug("hook-recall trace failed: %s", exc)
+        log.warning("hook-recall trace lost injection record: %s", exc)
 
 
 def time_ms() -> int:

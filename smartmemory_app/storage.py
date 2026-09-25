@@ -698,6 +698,8 @@ def recall(
         _trace,
         derive_workspace_id,
         format_recall_lines,
+        payload_ids,
+        record_hook_error,
         recall_item_label,
         time_ms,
     )
@@ -730,7 +732,7 @@ def recall(
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
         except Exception as exc:  # noqa: BLE001
-            log.debug("snapshot lookup failed: %s", exc)
+            record_hook_error("Orient lost snapshot context", exc)
             snaps = []
         if snaps:
             snap = snaps[0]
@@ -744,7 +746,9 @@ def recall(
                     workspace_id,
                 )
                 if ws_match and _snapshot_is_fresh(snap, max_days=7):
-                    frame = (getattr(snap, "content", "") or "").strip()
+                    frame = format_recall_lines(
+                        [_item_to_recall_dict(snap)], top_k=1
+                    ).removeprefix("## SmartMemory Context\n")
 
     # Filter each channel before allocating its preferred slots. Widen here, at
     # the producing layer, when filtering/dedup leaves eligible slots unfilled.
@@ -835,7 +839,10 @@ def recall(
 
     # 8. Trace (never raises)
     _trace(
-        phase="user_prompt" if query else "session_start",
+        phase="recall" if query else "orient",
+        payload=out,
+        ranked_ids=[recall_item_label(_item_to_recall_dict(r)) for r in results]
+        + payload_ids(frame),
         workspace_id=workspace_id,
         cwd=cwd,
         query=query,

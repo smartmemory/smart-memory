@@ -179,8 +179,8 @@ def test_hook_recall_trace_jsonl_emitted(temp_data, tmp_path, monkeypatch):
     import json
     rec1 = json.loads(lines[0])
     rec2 = json.loads(lines[1])
-    assert rec1["phase"] == "session_start"
-    assert rec2["phase"] == "user_prompt"
+    assert rec1["phase"] == "orient"
+    assert rec2["phase"] == "recall"
     assert rec2["query"] == "trace test"
 
 

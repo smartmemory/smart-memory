@@ -64,8 +64,7 @@ def _configure_cli_logging() -> None:
         except Exception:
             daemon_url = "unavailable"
         log.debug(
-            "startup diagnostics: smartmemory=%s smartmemory-core=%s "
-            "python=%s platform=%s daemon_url=%s",
+            "startup diagnostics: smartmemory=%s smartmemory-core=%s python=%s platform=%s daemon_url=%s",
             wrapper_version,
             core_version,
             platform.python_version(),
@@ -270,8 +269,7 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             # storage (add/search/get all branch on None). Commands with no local
             # fallback surface _DAEMON_NOT_RUNNING_MSG themselves.
             log.debug(
-                "daemon unreachable after retry; returning fallback signal: "
-                "method=%s url=%s",
+                "daemon unreachable after retry; returning fallback signal: method=%s url=%s",
                 method.upper(),
                 url,
             )
@@ -641,15 +639,13 @@ def update_cmd(ctx: click.Context) -> None:
     )
     if result.returncode != 0:
         raise click.ClickException(
-            f"SmartMemory update failed (pip exited with status {result.returncode}). "
-            "The daemon was not restarted."
+            f"SmartMemory update failed (pip exited with status {result.returncode}). The daemon was not restarted."
         )
 
     installed_version = _installed_version_from_subprocess()
     if installed_version is None:
         raise click.ClickException(
-            "SmartMemory was updated, but the installed version could not be verified. "
-            "The daemon was not restarted."
+            "SmartMemory was updated, but the installed version could not be verified. The daemon was not restarted."
         )
     click.echo(f"SmartMemory updated: {current_version} → {installed_version}.")
 
@@ -1629,7 +1625,7 @@ def lifecycle_distill() -> None:
     lc = MemoryLifecycle(
         session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
     )
-    lc.distill(response=body.get("last_assistant_message", ""))
+    lc.distill(response=body.get("last_assistant_message", ""), cwd=body.get("cwd"))
 
 
 @lifecycle_group.command("learn")
@@ -1653,6 +1649,7 @@ def lifecycle_learn() -> None:
     lc.learn(
         tool_name=body.get("tool_name", "unknown"),
         error=_as_text(body.get("error") or body.get("tool_response")),
+        cwd=body.get("cwd"),
     )
 
 
@@ -1674,7 +1671,7 @@ def lifecycle_persist() -> None:
     lc = MemoryLifecycle(
         session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
     )
-    lc.persist()
+    lc.persist(cwd=body.get("cwd"))
 
 
 @lifecycle_group.command("status")
@@ -1976,8 +1973,7 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     if status.socks_proxy_configured:
         if status.socks_support_ok:
             click.echo(
-                "✓ SOCKS proxy support is installed for the daemon's "
-                "local API calls (socksio)"
+                "✓ SOCKS proxy support is installed for the daemon's local API calls (socksio)"
             )
         else:
             click.echo(f"✗ {SOCKS_PROXY_ERROR}", err=True)
@@ -2023,8 +2019,7 @@ def report_cmd(
         test_id, message = report_args
     else:
         raise click.UsageError(
-            "Expected MESSAGE, optionally preceded by TEST_ID. "
-            "Quote multi-word messages."
+            "Expected MESSAGE, optionally preceded by TEST_ID. Quote multi-word messages."
         )
 
     from smartmemory_app.bug_report import (
