@@ -16,6 +16,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Fix async Observe, Learn, and Distill hooks, which never received their stdin
+  payloads. Capture payloads before backgrounding and remove temporary files
+  after processing, including large tool responses.
+
 - Capture SessionEnd transcripts through the existing Claude Code importer with a
   durable capture ledger and detached worker; `smartmemory lifecycle drain`
   acknowledges completion, errors, or timeout.

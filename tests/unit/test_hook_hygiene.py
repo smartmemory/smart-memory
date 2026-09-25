@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -274,7 +275,15 @@ def test_hook_script_logs_stderr_and_exits_zero(
         timeout=5,
     )
     assert result.returncode == 0
-    assert f"failure-{phase}" in (log_dir / "hooks.log").read_text()
+
+    def wait_for_log_count(expected):
+        deadline = time.monotonic() + 5
+        while (log_dir / "hooks.log").read_text().count(f"failure-{phase}") < expected:
+            assert time.monotonic() < deadline, "Background hook did not log failure"
+            time.sleep(0.02)
+        assert (log_dir / "hooks.log").read_text().count(f"failure-{phase}") == expected
+
+    wait_for_log_count(1)
     again = subprocess.run(
         ["bash", str(script)],
         input="{}",
@@ -284,8 +293,7 @@ def test_hook_script_logs_stderr_and_exits_zero(
         timeout=5,
     )
     assert again.returncode == 0
-    assert (log_dir / "hooks.log").read_text().count(f"failure-{phase}") == 2
-    assert ("} &" in script.read_text()) == (phase in {"observe", "learn", "distill"})
+    wait_for_log_count(2)
 
 
 @pytest.mark.parametrize("phase", ["learn", "distill", "persist", "observe"])

@@ -1519,12 +1519,35 @@ def lifecycle_group() -> None:
     """Automatic memory lifecycle commands (called by hooks)."""
 
 
+def _read_lifecycle_payload(phase: str) -> dict | None:
+    """Reject unusable hook input without turning a lost event into a traceback."""
+    import sys
+
+    if sys.stdin.isatty():
+        return {}
+    raw = sys.stdin.read()
+    if not raw.strip():
+        log.warning("Lifecycle %s skipped: empty stdin; hook event lost", phase)
+        return None
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError:
+        log.warning("Lifecycle %s skipped: invalid JSON; hook event lost", phase)
+        return None
+    if not isinstance(body, dict):
+        log.warning(
+            "Lifecycle %s skipped: expected JSON object; hook event lost", phase
+        )
+        return None
+    return body
+
+
 @lifecycle_group.command("orient")
 def lifecycle_orient() -> None:
     """Orient phase: recall context at session start."""
-    import sys
-
-    body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    body = _read_lifecycle_payload("orient")
+    if body is None:
+        return
 
     out = _lifecycle_via_daemon("/lifecycle/orient", body)
     if out is not None:
@@ -1558,9 +1581,9 @@ def _as_text(value) -> str:
 @lifecycle_group.command("recall")
 def lifecycle_recall() -> None:
     """Recall phase: inject prompt-relevant context."""
-    import sys
-
-    body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    body = _read_lifecycle_payload("recall")
+    if body is None:
+        return
 
     out = _lifecycle_via_daemon("/lifecycle/recall", body)
     if out is not None:
@@ -1583,9 +1606,9 @@ def lifecycle_recall() -> None:
 @lifecycle_group.command("observe")
 def lifecycle_observe() -> None:
     """Observe phase: capture tool call."""
-    import sys
-
-    body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    body = _read_lifecycle_payload("observe")
+    if body is None:
+        return
 
     if _lifecycle_via_daemon("/lifecycle/observe", body) is not None:
         return
@@ -1610,9 +1633,9 @@ def lifecycle_observe() -> None:
 @lifecycle_group.command("distill")
 def lifecycle_distill() -> None:
     """Distill phase: pair response with stored prompt."""
-    import sys
-
-    body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    body = _read_lifecycle_payload("distill")
+    if body is None:
+        return
 
     if _lifecycle_via_daemon("/lifecycle/distill", body) is not None:
         return
@@ -1631,9 +1654,9 @@ def lifecycle_distill() -> None:
 @lifecycle_group.command("learn")
 def lifecycle_learn() -> None:
     """Learn phase: capture error pattern."""
-    import sys
-
-    body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    body = _read_lifecycle_payload("learn")
+    if body is None:
+        return
 
     if _lifecycle_via_daemon("/lifecycle/learn", body) is not None:
         return
@@ -1656,9 +1679,9 @@ def lifecycle_learn() -> None:
 @lifecycle_group.command("persist")
 def lifecycle_persist() -> None:
     """Persist phase: durably enqueue this session transcript."""
-    import sys
-
-    body = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+    body = _read_lifecycle_payload("persist")
+    if body is None:
+        return
 
     session_id = body.get("session_id", "unknown")
 
