@@ -695,6 +695,8 @@ def recall(
     from smartmemory.origin_policy import filter_by_tiers, get_default_tiers
     from smartmemory_app.recall_format import (
         _item_to_recall_dict,
+        filter_hook_items,
+        matching_lessons,
         _trace,
         derive_workspace_id,
         format_recall_lines,
@@ -727,6 +729,7 @@ def recall(
         )
 
     # 1. Optional snapshot frame (graph-mirrored markdown from CORE-SUMMARY-1)
+    excluded = set()
     frame = ""
     if include_snapshot:
         try:
@@ -734,6 +737,7 @@ def recall(
         except Exception as exc:  # noqa: BLE001
             record_hook_degradation("Orient lost snapshot context", exc)
             snaps = []
+        snaps = filter_hook_items(snaps, excluded)
         if snaps:
             snap = snaps[0]
             # Defensive: only honor results that are actually snapshots.
@@ -756,11 +760,12 @@ def recall(
     recall_floor = float(os.environ.get("SMARTMEMORY_RECALL_FLOOR", "0.3"))
 
     def eligible(rows):
+        rows = filter_hook_items(rows, excluded)
         tier_rows = filter_by_tiers(rows, tiers)
         allowed = {id(r) for r in tier_rows}
         kept = []
         for r in rows:
-            meta = getattr(r, "metadata", None) or {}
+            meta = _item_to_recall_dict(r)["metadata"]
             r_ws = meta.get("workspace_id") if isinstance(meta, dict) else None
             reason = None
             if getattr(r, "memory_type", "") == "snapshot":
@@ -782,6 +787,16 @@ def recall(
             else:
                 kept.append(r)
         return kept
+
+    try:
+        lessons = eligible(
+            matching_lessons(
+                mem._graph.search_nodes({"memory_type": "decision"}), query
+            )
+        )
+    except Exception as exc:
+        record_hook_degradation("Recall lost decision lookup", exc)
+        lessons = []
 
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
@@ -813,7 +828,7 @@ def recall(
             exhausted = len(raw) < fetch_k
 
         body = format_recall_lines(
-            [_item_to_recall_dict(r) for r in results], top_k=requested
+            [_item_to_recall_dict(r) for r in lessons + results], top_k=requested
         )
         emitted = body.count("\n- ") if body else 0
         if emitted >= requested or exhausted:
@@ -841,7 +856,10 @@ def recall(
     _trace(
         phase="recall" if query else "orient",
         payload=out,
-        ranked_ids=[recall_item_label(_item_to_recall_dict(r)) for r in results]
+        excluded_non_memory=len(excluded),
+        ranked_ids=[
+            recall_item_label(_item_to_recall_dict(r)) for r in lessons + results
+        ]
         + payload_ids(frame),
         workspace_id=workspace_id,
         cwd=cwd,

@@ -70,6 +70,7 @@ def _traced_injection(method: Callable) -> Callable:
                 payload=output,
                 error="; ".join(diagnostic["errors"]) or None,
                 degradations=diagnostic["degradations"],
+                excluded_non_memory=diagnostic.get("excluded_non_memory", 0),
                 skipped_reason=diagnostic.get("skipped_reason")
                 or ("empty" if not output else None),
             )
@@ -504,7 +505,11 @@ class MemoryLifecycle:
 
     def _trim_to_budget(self, block: str) -> str:
         """Apply the recall budget to complete items, retaining later items that fit."""
-        return budget_blocks([(block, None)], self._config.recall_budget)
+        return budget_blocks(
+            [(block, None)],
+            self._config.recall_budget,
+            query=self._current_user_turn or "",
+        )
 
     def _format_recall_block(self, results: list[dict]) -> str:
         """Build Recall context block within budget using the shared formatter."""

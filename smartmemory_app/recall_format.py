@@ -39,26 +39,115 @@ def _item_to_recall_dict(item: Any) -> dict:
 
     Local path returns MemoryItem objects; remote path returns dicts. Normalize.
     """
-    if isinstance(item, dict):
-        return {
-            "item_id": item.get("item_id") or item.get("id"),
-            "memory_type": item.get("memory_type", "?"),
-            "content": item.get("content", ""),
-            "origin": item.get("origin", ""),
-            "confidence": item.get("confidence", 1.0),
-            "stale": item.get("stale", False),
-            "metadata": item.get("metadata") or {},
+    raw = (
+        item
+        if isinstance(item, dict)
+        else {
+            key: getattr(item, key, None)
+            for key in (
+                "item_id",
+                "memory_type",
+                "content",
+                "origin",
+                "confidence",
+                "stale",
+                "metadata",
+                "node_category",
+                "created_at",
+                "reference",
+            )
         }
-    metadata = getattr(item, "metadata", None) or {}
-    return {
-        "item_id": getattr(item, "item_id", None),
-        "memory_type": getattr(item, "memory_type", "?"),
-        "content": getattr(item, "content", "") or "",
-        "origin": getattr(item, "origin", "") or "",
-        "confidence": getattr(item, "confidence", 1.0),
-        "stale": getattr(item, "stale", False),
-        "metadata": metadata if isinstance(metadata, dict) else {},
+    )
+    metadata = {
+        **(raw.get("properties") or {}),
+        **(raw.get("context_snapshot") or {}),
+        **(raw.get("metadata") or {}),
     }
+    metadata = {**(metadata.get("context_snapshot") or {}), **metadata}
+    for key in (
+        "status",
+        "node_category",
+        "workspace_id",
+        "session_date",
+        "created_at",
+    ):
+        if raw.get(key) is not None:
+            metadata[key] = raw[key]
+    return {
+        "item_id": raw.get("item_id") or raw.get("id") or raw.get("decision_id"),
+        "memory_type": raw.get("memory_type")
+        or ("decision" if raw.get("decision_id") else "?"),
+        "content": raw.get("content") or "",
+        "origin": raw.get("origin") or "",
+        "confidence": raw.get("confidence")
+        if raw.get("confidence") is not None
+        else 1.0,
+        "stale": raw.get("stale", False),
+        "reference": raw.get("reference", False),
+        "metadata": metadata,
+    }
+
+
+def filter_hook_items(items, excluded=None):
+    """Exclude graph infrastructure in every recall channel, without per-row logs."""
+    kept = []
+    for item in items:
+        row = _item_to_recall_dict(item)
+        meta = row["metadata"]
+        if row["memory_type"] in {
+            "entity",
+            "relation",
+            "Version",
+            "pattern",
+        } or meta.get("node_category") in {"entity", "relation"}:
+            if excluded is not None:
+                excluded.add(recall_item_label(row))
+            continue
+        if (
+            row["memory_type"] == "decision"
+            and meta.get("status", "active") != "active"
+        ):
+            continue
+        kept.append(item)
+    return kept
+
+
+def query_words(text):
+    return set(re.findall(r"[a-z0-9_]+", text.lower())) - {
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "for",
+        "to",
+        "of",
+        "in",
+        "is",
+        "it",
+        "them",
+        "with",
+        "by",
+        "from",
+        "as",
+        "on",
+        "be",
+        "per",
+        "support",
+        "add",
+    }
+
+
+def matching_lessons(items, query):
+    return [
+        item
+        for item in filter_hook_items(items)
+        if _item_to_recall_dict(item)["memory_type"] == "decision"
+        and (
+            not query
+            or query_words(query) & query_words(_item_to_recall_dict(item)["content"])
+        )
+    ]
 
 
 # --- Formatter --------------------------------------------------------------
@@ -74,7 +163,7 @@ def recall_item_label(item: dict) -> str:
 
 
 def format_recall_lines(
-    items: Iterable[dict], top_k: int, budget: int | None = None
+    items: Iterable[dict], top_k: int, budget: int | None = None, query: str = ""
 ) -> str:
     """Format items as the `## SmartMemory Context` block.
 
@@ -89,6 +178,8 @@ def format_recall_lines(
     seen_bodies: set[tuple[str, str]] = set()
     lines: list[str] = []
 
+    items = [_item_to_recall_dict(it) for it in filter_hook_items(items)]
+    items.sort(key=lambda it: it["memory_type"] != "decision")
     for it in items:
         body = (it.get("content") or "").strip()
         if not body:
@@ -135,6 +226,12 @@ def format_recall_lines(
         stale_marker = "⚠" if it.get("stale") else ""
         mtype = it.get("memory_type", "?") or "?"
 
+        if mtype == "decision":
+            meta = it["metadata"]
+            date = str(meta.get("session_date") or meta.get("created_at") or "unknown")[
+                :10
+            ]
+            body = f"[session:{date}] {body}"
         body = body.replace("\n", "\n  ")
         lines.append(
             f"- {stale_marker}{conf_marker}[{mtype}] [mem:{recall_item_label(it)}] {body}"
@@ -142,8 +239,21 @@ def format_recall_lines(
 
     if not lines:
         return ""
-    block = "## SmartMemory Context\n" + "\n".join(lines)
-    return budget_blocks([(block, None)], budget) if budget is not None else block
+    lessons = [line for line in lines if re.match(r"- [^\[]*\[decision\]", line)]
+    memories = [line for line in lines if line not in lessons]
+    block = "\n".join(
+        heading + "\n" + "\n".join(rows)
+        for heading, rows in (
+            ("## Lessons & decisions", lessons),
+            ("## SmartMemory Context", memories),
+        )
+        if rows
+    )
+    return (
+        budget_blocks([(block, None)], budget, query=query)
+        if budget is not None
+        else block
+    )
 
 
 def payload_ids(payload: str) -> list[str]:
@@ -151,16 +261,28 @@ def payload_ids(payload: str) -> list[str]:
     return re.findall(r"(?m)^- [^\n]*?\[mem:([^\]]+)\]", payload)
 
 
-def budget_blocks(blocks: list[tuple[str, str | None]], budget: int) -> str:
+def budget_blocks(
+    blocks: list[tuple[str, str | None]], budget: int, query: str = ""
+) -> str:
     """Keep complete ranked items, accounting for headers and separators too.
 
     Formatter continuation lines are indented, so a multiline memory remains
-    atomic. Only an item larger than the entire phase allowance can be shortened.
+    atomic. Oversize memories use query-focused sentences; lessons stay complete.
     """
     limit = max(0, budget) * 4
     output = ""
     seen: set[str] = set()
+    sections = []
     for block, heading in blocks:
+        if not block:
+            continue
+        for section in re.split(r"(?m)(?=^## )", block):
+            if section.strip():
+                sections.append(
+                    (section, None if section.startswith("## Lessons") else heading)
+                )
+    sections.sort(key=lambda part: not part[0].startswith("## Lessons & decisions"))
+    for block, heading in sections:
         if not block:
             continue
         chunks = re.split(r"(?m)^(?=- )", block)
@@ -188,27 +310,37 @@ def budget_blocks(blocks: list[tuple[str, str | None]], budget: int) -> str:
                 "" if section_started else header + "\n"
             )
             if len(output + prefix + entry) > limit:
-                if len(header + "\n" + entry) > limit:
-                    marker = f"…[truncated, mem:{iid}]"
-                    available = limit - len(output + prefix) - len(marker)
-                    # Preserve the tags, and cut only after a complete sentence.
-                    tag_end = entry.find("] ", entry.find("[mem:")) + 2 if ids else 0
-                    ends = [m.end() for m in re.finditer(r"[.!?。！？](?=\s|$)", entry)]
-                    ends = [end for end in ends if tag_end < end <= available]
-                    if ends:
-                        entry = entry[: ends[-1]] + marker
-                    elif tag_end and tag_end <= available:
-                        entry = entry[:tag_end] + marker
-                    else:
-                        log.info("recall dropped %s for budget", iid)
-                        continue
-                    log.warning(
-                        "recall lost full content for %s: oversized item truncated at sentence boundary",
-                        iid,
-                    )
-                else:
-                    log.info("recall dropped %s for budget", iid)
+                # Lessons are atomic: never present a partial constraint as complete.
+                if "[decision]" in entry:
+                    log.info("recall dropped lesson %s for budget", iid)
                     continue
+                marker = f"…[excerpt, mem:{iid}]"
+                available = limit - len(output + prefix) - len(marker)
+                tag_end = entry.find("] ", entry.find("[mem:")) + 2 if ids else 0
+                tags, content = entry[:tag_end], entry[tag_end:]
+                sentences = re.split(r"(?<=[.!?。！？])\s+|\n\s*", content)
+                words = query_words(query)
+                ranked = sorted(
+                    range(len(sentences)),
+                    key=lambda i: (-len(words & query_words(sentences[i])), i),
+                )
+                matching = [i for i in ranked if words & query_words(sentences[i])]
+                if matching:
+                    ranked = matching
+                selected = []
+                remaining = available - len(tags)
+                for i in ranked:
+                    cost = len(sentences[i]) + (1 if selected else 0)
+                    if sentences[i] and cost <= remaining:
+                        selected.append(i)
+                        remaining -= cost
+                if not selected:
+                    log.info("recall dropped %s: no complete excerpt fits budget", iid)
+                    continue
+                entry = tags + " ".join(sentences[i] for i in sorted(selected)) + marker
+                log.warning(
+                    "recall lost full content for %s: query-focused excerpt", iid
+                )
             output += prefix + entry
             section_started = True
     return output
@@ -305,12 +437,16 @@ def _trace(
     error: str | None = None,
     skipped_reason: str | None = None,
     degradations: list[str] | None = None,
+    excluded_non_memory: int = 0,
 ) -> None:
     """Append one JSONL line per hook invocation. Never raises."""
     active = _ACTIVE_TRACE.get()
     if active is not None:
         active["ranked_ids"].extend(ranked_ids or payload_ids(payload))
         active["snapshot_used"] |= snapshot_used
+        active["excluded_non_memory"] = (
+            active.get("excluded_non_memory", 0) + excluded_non_memory
+        )
         active.setdefault("degradations", []).extend(degradations or [])
         if error:
             active["errors"].append(error)
@@ -326,6 +462,10 @@ def _trace(
         "session_id": session_id,
         "ranked_ids": ranked_ids or [],
         "injected_ids": payload_ids(payload),
+        "excluded_non_memory": excluded_non_memory,
+        "lesson_ids": re.findall(
+            r"(?m)^- [^\n]*?\[decision\] \[mem:([^\]]+)\]", payload
+        ),
         "payload": payload,
         "payload_tokens": (len(payload) + 3) // 4,
         "error": error,

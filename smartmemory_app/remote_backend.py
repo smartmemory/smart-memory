@@ -218,6 +218,9 @@ class RemoteMemory:
         from smartmemory.origin_policy import get_default_tiers, get_tier
         from smartmemory_app.recall_format import (
             _trace,
+            _item_to_recall_dict,
+            filter_hook_items,
+            matching_lessons,
             derive_workspace_id,
             format_recall_lines,
             payload_ids,
@@ -238,6 +241,7 @@ class RemoteMemory:
         recall_tiers = get_default_tiers("recall")
 
         # 1. Optional snapshot frame (graph-mirrored)
+        excluded = set()
         frame = ""
         if include_snapshot:
             try:
@@ -259,13 +263,14 @@ class RemoteMemory:
                     if isinstance(snaps, list)
                     else (snaps or {}).get("results", [])
                 )
+                rows = filter_hook_items(rows, excluded)
                 if rows:
                     snap = rows[0]
                     snap_meta = snap.get("metadata") or {}
                     ws_match = workspace_id is None or snap_meta.get(
                         "workspace_id"
                     ) in (None, workspace_id)
-                    if ws_match:
+                    if ws_match and snap.get("memory_type") == "snapshot":
                         frame = format_recall_lines([snap], top_k=1).removeprefix(
                             "## SmartMemory Context\n"
                         )
@@ -292,7 +297,33 @@ class RemoteMemory:
         except RemoteBackendError as e:
             record_hook_error("Remote recall lost search context", e)
             results = []
-        results = [r for r in results if r.get("memory_type") != "snapshot"]
+        try:
+            response = self._request(
+                "GET",
+                "/memory/decisions",
+                workspace_id=workspace_id,
+                params={"status": "active", "limit": 200},
+            )
+            if isinstance(response, dict) and response.get("error"):
+                raise RemoteBackendError(str(response["error"]))
+            lessons = (
+                response
+                if isinstance(response, list)
+                else response.get("decisions", [])
+            )
+            if len(lessons) == 200:
+                record_hook_degradation(
+                    "Remote lesson lookup limited to 200 active decisions",
+                    "older matching lessons may be absent",
+                )
+            results = matching_lessons(lessons, query) + list(results)
+        except Exception as exc:
+            record_hook_degradation("Recall lost remote decision lookup", exc)
+        results = [
+            _item_to_recall_dict(r)
+            for r in filter_hook_items(results, excluded)
+            if r.get("memory_type") != "snapshot"
+        ]
 
         # 3. Origin tier filter (dict-aware; legacy "unknown" / missing pass through)
         def _tier_ok(r: dict) -> bool:
@@ -343,6 +374,7 @@ class RemoteMemory:
         _trace(
             phase="recall" if query else "orient",
             payload=out,
+            excluded_non_memory=len(excluded),
             ranked_ids=[recall_item_label(r) for r in results] + payload_ids(frame),
             workspace_id=workspace_id,
             cwd=cwd,

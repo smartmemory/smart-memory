@@ -54,15 +54,34 @@ def import_capture(job: dict) -> dict:
     fingerprint = hashlib.sha256(
         json.dumps(kwargs, sort_keys=True).encode()
     ).hexdigest()
+    cached = None
     for previous in reversed(queue.jobs()):
         if previous["status"] == "done" and previous.get("fingerprint") == fingerprint:
-            return {
+            cached = {
                 "fingerprint": fingerprint,
                 "item_ids": previous.get("item_ids", []),
                 "unchanged": True,
             }
+            if previous.get("lesson_ids"):
+                return {**cached, "lesson_ids": previous["lesson_ids"]}
+            break
     mem = _memory()
     try:
+        from smartmemory_app.session_lessons import capture_lessons
+
+        def lessons_for(item_ids):
+            return capture_lessons(
+                mem,
+                job,
+                kwargs["turns"],
+                item_ids,
+                (kwargs.get("session_dates") or [None])[0],
+            )
+
+        if cached is not None:
+            # T2 receipts and previous degradations still need lessons, but the
+            # already-imported transcript must not be written again.
+            return {**cached, **lessons_for(cached["item_ids"])}
         # SQLite natural keys are store-wide. Refuse to replace another
         # workspace's transcript instead of silently changing its ownership.
         from smartmemory.conversation.bulk_ingest import ConversationChunker
@@ -84,7 +103,11 @@ def import_capture(job: dict) -> dict:
             raise RuntimeError(
                 "; ".join(chunk.error for chunk in result.chunk_results if chunk.error)
             )
+        lessons = lessons_for(
+            [chunk.item_id for chunk in result.chunk_results if chunk.item_id]
+        )
         return {
+            **lessons,
             "fingerprint": fingerprint,
             "chunks_ingested": result.chunks_ingested,
             "item_ids": [chunk.item_id for chunk in result.chunk_results],

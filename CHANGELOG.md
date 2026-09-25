@@ -16,6 +16,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Session capture now stores up to eight durable lessons per Claude Code session
+  (core reasoning → decision path, origin `import:claude_code:lesson`, linked to
+  the transcript chunks). Hooks inject active lessons first, drop graph-only
+  entity/relation/pattern nodes, and excerpt oversized memories by query
+  relevance instead of head-truncating them.
+
 - Fix async Observe, Learn, and Distill hooks, which never received their stdin
   payloads. Capture payloads before backgrounding and remove temporary files
   after processing, including large tool responses.

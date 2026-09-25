@@ -83,7 +83,7 @@ def test_final_trace_once_with_full_payload(
     assert record["ranked_ids"][:3] == ["first", "second", "third"]
     assert (
         record["injected_ids"]
-        == ["first", "third"]
+        == ["first", "second"]
         == recall_format.payload_ids(payload)
     )
     assert record["payload"] == payload
@@ -200,7 +200,7 @@ def test_budget_keeps_whole_items_and_continues(
     )
     assert "x" * 250 in out and "y" * 250 not in out
     assert recall_format.payload_ids(out) == ["first", "last"]
-    assert "overflow for budget" in caplog.text
+    assert "overflow: no complete excerpt fits budget" in caplog.text
     assert len(out) <= 520
 
 
@@ -211,7 +211,7 @@ def test_oversized_item_sentence_boundary_and_marker(
     out = recall_format.format_recall_lines(
         [{"item_id": "huge", "content": body}], 1, budget=40
     )
-    assert "Keep this sentence.…[truncated, mem:huge]" in out
+    assert "Keep this sentence.…[excerpt, mem:huge]" in out
     assert "Unfinished" not in out and len(out) <= 160
     assert "lost full content for huge" in caplog.text
 
@@ -220,9 +220,7 @@ def test_oversized_no_sentence_and_tiny_budget(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     row = {"item_id": "huge", "content": "x" * 500}
-    assert "[mem:huge] …[truncated, mem:huge]" in recall_format.format_recall_lines(
-        [row], 1, budget=30
-    )
+    assert recall_format.format_recall_lines([row], 1, budget=30) == ""
     assert recall_format.format_recall_lines([row], 1, budget=1) == ""
 
 
