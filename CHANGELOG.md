@@ -16,6 +16,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Session capture receipts now record the lesson-extraction LLM usage (provider,
+  model, prompt/completion tokens) and its cost from the core price table, with
+  provenance. Retries and cached tokens are reported as unmeasured, never estimated.
+
 - Session capture now stores up to eight durable lessons per Claude Code session
   (core reasoning → decision path, origin `import:claude_code:lesson`, linked to
   the transcript chunks). Hooks inject active lessons first, drop graph-only

@@ -7,13 +7,74 @@ from smartmemory.plugins.extractors.reasoning import (
     ReasoningExtractor,
     ReasoningExtractorConfig,
 )
+from smartmemory.utils.llm import get_last_usage
+from smartmemory.utils.token_tracking import COST_PER_1K_TOKENS
 
 log = logging.getLogger(__name__)
 ORIGIN = "import:claude_code:lesson"
 
 
+def _lesson_usage(usage, model):
+    """Price only reported tokens; core does not expose SDK attempt totals."""
+    record = {
+        "provider": "groq",
+        "model": (usage or {}).get("model") or model,
+        "prompt_tokens": (usage or {}).get("prompt_tokens"),
+        "completion_tokens": (usage or {}).get("completion_tokens"),
+        "cached_tokens": (usage or {}).get("cached_tokens"),
+        "call_count": None,
+        "call_count_status": "unmeasured",
+        "usage_source": "smartmemory.utils.llm.get_last_usage"
+        if usage is not None
+        else "unmeasured",
+        "usage_scope": "final_response_only",
+        "cost_usd": None,
+        "cost_status": "unpriced",
+    }
+    measured = all(
+        isinstance(record[key], int)
+        and not isinstance(record[key], bool)
+        and record[key] >= 0
+        for key in ("prompt_tokens", "completion_tokens")
+    )
+    if not measured:
+        record["usage_source"] = "unmeasured"
+        log.warning(
+            "Session lesson token usage unmeasured: core returned no usable usage"
+        )
+    pricing = COST_PER_1K_TOKENS.get(record["model"])
+    if measured and pricing and record["model"] != "default":
+        record["cost_usd"] = (
+            record["prompt_tokens"] * pricing["prompt"]
+            + record["completion_tokens"] * pricing["completion"]
+        ) / 1000
+        record["cost_status"] = "repository_price"
+        record["cost_source"] = {
+            "table": "smartmemory.utils.token_tracking.COST_PER_1K_TOKENS",
+            "model": record["model"],
+            "unit": "USD/1000 tokens",
+            "prompt": pricing["prompt"],
+            "completion": pricing["completion"],
+        }
+    log.warning(
+        "Session lesson usage is final-response only: core does not expose SDK "
+        "attempt counts or cached-token details; retries are unmeasured"
+    )
+    return record
+
+
 class SessionLessonExtractor(ReasoningExtractor):
     """Keep the final turn; core's generic prompt only reads the first 4k chars."""
+
+    lesson_usage = None
+
+    def _extract_implicit(self, text):
+        # Ingestion shares this context; never attribute its last usage to lessons.
+        get_last_usage()
+        try:
+            return super()._extract_implicit(text)
+        finally:
+            self.lesson_usage = _lesson_usage(get_last_usage(), self.cfg.model_name)
 
     def _likely_contains_reasoning(self, text):
         return bool(text.strip())
@@ -32,6 +93,7 @@ class SessionLessonExtractor(ReasoningExtractor):
 
 def capture_lessons(mem, job, turns, item_ids, session_date=None):
     """A loss here degrades lessons only; a successful transcript stays done."""
+    receipt = {}
     try:
         existing = mem._graph.search_nodes(
             {"memory_type": "decision", "origin": ORIGIN}
@@ -68,7 +130,11 @@ def capture_lessons(mem, job, turns, item_ids, session_date=None):
                 min_steps=1,
             )
         )
-        trace = extractor.extract(text).get("reasoning_trace")
+        try:
+            trace = extractor.extract(text).get("reasoning_trace")
+        finally:
+            if extractor.lesson_usage is not None:
+                receipt["lesson_usage"] = extractor.lesson_usage
         if trace is None:
             raise ValueError("reasoning extraction returned no usable trace")
         trace.session_id = job["session_id"]
@@ -109,8 +175,8 @@ def capture_lessons(mem, job, turns, item_ids, session_date=None):
             mem.update_properties(stored.decision_id, context)
             if len(ids) == 8:
                 break
-        return {"lesson_ids": ids}
+        return {**receipt, "lesson_ids": ids}
     except Exception as exc:
         message = f"Session {job['session_id']} lost session lessons: {exc}"
         log.warning(message)
-        return {"degradation": message}
+        return {**receipt, "degradation": message}

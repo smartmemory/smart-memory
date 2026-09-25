@@ -135,3 +135,156 @@ def test_retry_degraded_receipt_adds_lessons_without_reimport(lesson_env, monkey
     assert receipt["unchanged"]
     assert receipt["lesson_ids"] == ["lesson-0"]
     assert lesson_env[0].ingest_conversation_sync.call_count == 1
+
+
+@pytest.fixture
+def sdk_response(lesson_env, monkeypatch):
+    """Exercise core's real usage producer without any HTTP requests."""
+    from smartmemory.utils.llm import call_llm, get_last_usage
+
+    monkeypatch.setattr("smartmemory.plugins.extractors.reasoning.call_llm", call_llm)
+    response = SimpleNamespace(
+        model="openai/gpt-oss-120b",
+        usage=SimpleNamespace(
+            prompt_tokens=123,
+            completion_tokens=45,
+            total_tokens=168,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=20),
+        ),
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=json.dumps([{"type": "conclusion", "content": LESSON}])
+                )
+            )
+        ],
+    )
+    create = Mock(return_value=response)
+    client = Mock()
+    client.chat.completions.create = create
+    factory = Mock(return_value=client)
+    monkeypatch.setattr("smartmemory.utils.llm_client.openai_chat.OpenAI", factory)
+    get_last_usage()
+    yield response, create, factory
+    get_last_usage()
+
+
+def test_usage_receipt_from_provider_response(lesson_env, sdk_response):
+    from smartmemory.utils.llm import get_last_usage
+
+    enqueue()
+    capture_worker.run()
+    receipt = queue.jobs()[-1]
+    assert receipt["status"] == "done"
+    assert receipt["lesson_ids"] == ["lesson-0"]
+    assert lesson_env[1][0].content == LESSON
+    assert receipt["lesson_usage"] == {
+        "provider": "groq",
+        "model": "openai/gpt-oss-120b",
+        "prompt_tokens": 123,
+        "completion_tokens": 45,
+        # Core discards cached-token details and SDK attempts. Never invent them.
+        "cached_tokens": None,
+        "call_count": None,
+        "call_count_status": "unmeasured",
+        "usage_source": "smartmemory.utils.llm.get_last_usage",
+        "usage_scope": "final_response_only",
+        "cost_usd": pytest.approx(0.00004545),
+        "cost_status": "repository_price",
+        "cost_source": {
+            "table": "smartmemory.utils.token_tracking.COST_PER_1K_TOKENS",
+            "model": "openai/gpt-oss-120b",
+            "unit": "USD/1000 tokens",
+            "prompt": 0.00015,
+            "completion": 0.0006,
+        },
+    }
+    sdk_response[1].assert_called_once()
+    assert sdk_response[2].call_args.kwargs["max_retries"] == 5
+    assert get_last_usage() is None
+
+
+@pytest.mark.parametrize("provider_error", [False, True])
+def test_unmeasured_usage_warns_without_stale_tokens(
+    lesson_env, sdk_response, caplog, provider_error
+):
+    from smartmemory.utils.llm_client.openai_chat import set_last_usage
+
+    set_last_usage(
+        {"prompt_tokens": 999, "completion_tokens": 888, "model": "stale-ingestion"}
+    )
+    sdk_response[0].usage = None
+    if provider_error:
+        sdk_response[1].side_effect = RuntimeError("provider down")
+    enqueue()
+    capture_worker.run()
+    receipt = queue.jobs()[-1]
+    assert receipt["status"] == "done"
+    assert receipt["item_ids"] == ["chunk-1"]
+    assert ("degradation" in receipt) == provider_error
+    usage = receipt["lesson_usage"]
+    assert usage["usage_source"] == "unmeasured"
+    assert usage["model"] == "openai/gpt-oss-120b"
+    for key in ("prompt_tokens", "completion_tokens", "cached_tokens", "cost_usd"):
+        assert usage[key] is None
+    assert usage["cost_status"] == "unpriced"
+    assert usage["call_count"] is None
+    assert any(
+        record.levelname == "WARNING" and "token usage unmeasured" in record.message
+        for record in caplog.records
+    )
+    sdk_response[1].assert_called_once()
+
+
+def test_retry_usage_is_new_response_only(lesson_env, sdk_response):
+    response, create, _ = sdk_response
+    response.choices[0].message.content = "[]"
+    enqueue()
+    capture_worker.run()
+    first = queue.jobs()[-1]
+    assert first["degradation"]
+    assert first["lesson_usage"]["prompt_tokens"] == 123
+    response.choices[0].message.content = json.dumps(
+        [{"type": "conclusion", "content": LESSON}]
+    )
+    response.usage.prompt_tokens = 17
+    response.usage.completion_tokens = 9
+    response.usage.total_tokens = 26
+    enqueue()
+    capture_worker.run()
+    receipt = queue.jobs()[-1]
+    assert receipt["status"] == "done"
+    assert receipt["unchanged"]
+    assert receipt["lesson_ids"] == ["lesson-0"]
+    assert "degradation" not in receipt
+    assert receipt["lesson_usage"]["prompt_tokens"] == 17
+    assert receipt["lesson_usage"]["completion_tokens"] == 9
+    assert receipt["lesson_usage"]["cost_usd"] == pytest.approx(0.00000795)
+    assert create.call_count == 2
+    assert lesson_env[0].ingest_conversation_sync.call_count == 1
+    enqueue()
+    capture_worker.run()
+    assert "lesson_usage" not in queue.jobs()[-1]
+    assert create.call_count == 2
+
+
+def test_unknown_model_is_unpriced(lesson_env, sdk_response):
+    sdk_response[0].model = "unknown-provider-model"
+    enqueue()
+    capture_worker.run()
+    usage = queue.jobs()[-1]["lesson_usage"]
+    assert usage["model"] == "unknown-provider-model"
+    assert usage["prompt_tokens"] == 123
+    assert usage["cost_usd"] is None
+    assert usage["cost_status"] == "unpriced"
+    assert "cost_source" not in usage
+
+
+def test_offline_has_no_usage_or_provider_call(lesson_env, sdk_response, monkeypatch):
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_OFFLINE", "1")
+    enqueue()
+    capture_worker.run()
+    receipt = queue.jobs()[-1]
+    assert receipt["degradation"]
+    assert "lesson_usage" not in receipt
+    sdk_response[1].assert_not_called()
