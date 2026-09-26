@@ -16,6 +16,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Lite saves work without an LLM key, with deferred work owned by one core worker.
+  `sm status` shows pending/running/dead work counts and a re-extraction offer.
+  `sm admin reextract` queues work with `--yes`, `--all`, `--ruler`, or `--decline`;
+  `sm worker requeue-dead` retries dead and skipped work. Daemon and launchd workers
+  now use the durable core work graph; the legacy queue modules remain for migration.
+
 - SessionStart injects a separately budgeted rules card of active workspace constraints,
   newest first. A dedicated classifier identifies external constraints, with separately
   reported usage and prefix-only fallback on failure. `smartmemory lifecycle reclassify`

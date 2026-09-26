@@ -1,3 +1,5 @@
+# Deprecated: retained for one release so core can migrate enrichment_queue.
+# All active wrapper saves and worker launchers use the core work graph.
 """SQLite-backed enrichment queue for two-tier ingest.
 
 Tier 1 (ingest endpoint) writes jobs here. A separate worker process

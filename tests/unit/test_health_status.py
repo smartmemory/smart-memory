@@ -28,7 +28,9 @@ def test_health_returns_safe_degraded_reason_and_logs_warning(
     tmp_path, monkeypatch, caplog
 ):
     client = _health_client(tmp_path, monkeypatch)
-    config = SimpleNamespace(llm_provider="none", embedding_provider="local")
+    config = SimpleNamespace(
+        mode="local", llm_provider="none", embedding_provider="local"
+    )
     error = RuntimeError(
         "database is locked at /Users/beta/.smartmemory/store.db; api_key=secret"
     )
@@ -37,7 +39,7 @@ def test_health_returns_safe_degraded_reason_and_logs_warning(
         patch("smartmemory_app.config.load_config", return_value=config),
         patch("smartmemory_app.config.llm_key_present", return_value=False),
         patch("smartmemory_app.storage.get_memory", side_effect=error),
-        patch("smartmemory_app.enrichment_queue.stats", return_value={}),
+        patch("smartmemory_app.work_graph.get_work_status", return_value={}),
         caplog.at_level(logging.WARNING, logger="smartmemory_app.viewer_server"),
     ):
         response = client.get("/health")
@@ -56,7 +58,9 @@ def test_health_is_ok_without_degraded_reason_when_backend_succeeds(
     tmp_path, monkeypatch, caplog
 ):
     client = _health_client(tmp_path, monkeypatch)
-    config = SimpleNamespace(llm_provider="none", embedding_provider="local")
+    config = SimpleNamespace(
+        mode="local", llm_provider="none", embedding_provider="local"
+    )
     memory = MagicMock()
     memory._graph.backend.serialize.return_value = {
         "nodes": [{"memory_type": "Episodic"}, {"memory_type": "Version"}]
@@ -66,7 +70,7 @@ def test_health_is_ok_without_degraded_reason_when_backend_succeeds(
         patch("smartmemory_app.config.load_config", return_value=config),
         patch("smartmemory_app.config.llm_key_present", return_value=False),
         patch("smartmemory_app.storage.get_memory", return_value=memory),
-        patch("smartmemory_app.enrichment_queue.stats", return_value={}),
+        patch("smartmemory_app.work_graph.get_work_status", return_value={}),
         caplog.at_level(logging.WARNING, logger="smartmemory_app.viewer_server"),
     ):
         response = client.get("/health")
@@ -106,9 +110,13 @@ def test_health_reports_observed_warming_without_opening_storage(tmp_path, monke
     get_memory.assert_not_called()
 
 
-def test_background_warmup_exposes_warming_then_flips_to_ok(monkeypatch):
+def test_background_warmup_exposes_warming_then_flips_to_ok(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     from smartmemory_app import viewer_server
 
+    monkeypatch.setattr(
+        "smartmemory_app.work_graph.show_reextract_offer", lambda emit: None
+    )
     entered = threading.Event()
     release = threading.Event()
 
@@ -187,7 +195,9 @@ def test_socks_incident_chain_health_to_status_to_doctor(runner, tmp_path, monke
     monkeypatch.setenv("ALL_PROXY", "socks5://proxy.example:1080")
 
     client = _health_client(tmp_path, monkeypatch)
-    config = SimpleNamespace(llm_provider="none", embedding_provider="local")
+    config = SimpleNamespace(
+        mode="local", llm_provider="none", embedding_provider="local"
+    )
     error = RuntimeError(
         "Embedding model 'sentence-transformers/all-MiniLM-L6-v2' for backend "
         "'onnxruntime/cpu' is unavailable. Details: Using SOCKS proxy, but the "
@@ -197,7 +207,7 @@ def test_socks_incident_chain_health_to_status_to_doctor(runner, tmp_path, monke
         patch("smartmemory_app.config.load_config", return_value=config),
         patch("smartmemory_app.config.llm_key_present", return_value=False),
         patch("smartmemory_app.storage.get_memory", side_effect=error),
-        patch("smartmemory_app.enrichment_queue.stats", return_value={}),
+        patch("smartmemory_app.work_graph.get_work_status", return_value={}),
     ):
         health = client.get("/health").json()
 

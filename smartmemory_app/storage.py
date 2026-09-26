@@ -182,18 +182,10 @@ def _get_local_memory(
         # DIST-FULL-LOCAL-1 Phase 2b: apply coreference config to pipeline profile
         from smartmemory.pipeline.config import PipelineConfig
 
-        profile = PipelineConfig.default()
-        if not cfg.coreference:
-            profile.coreference.enabled = False
-        # Local/lite ingest must not depend on live Wikidata REST or SPARQL calls.
-        profile.enrich.wikidata.enabled = False
-        profile.enrich.wikidata.sparql_enabled = False
-        # Disable evolution — evolvers crash with missing typed configs
-        # (EpisodicDecayEvolver, EpisodicToSemanticEvolver, etc.)
-        # and ExponentialDecayEvolver hits datetime serialization errors.
-        # These crash the daemon process silently.
-        profile.evolve.run_evolution = False
-        profile.evolve.run_clustering = False
+        # Core owns lite defaults and deferred placement. The wrapper only applies
+        # its explicit coreference preference; ground/evolve remain opt-in.
+        profile = PipelineConfig.lite()
+        profile.coreference.enabled = cfg.coreference
 
         data_path = _resolve_data_dir(data_dir)
         data_path.mkdir(parents=True, exist_ok=True)
@@ -362,9 +354,9 @@ def ingest(
     Args:
         content: Text to ingest.
         memory_type: Memory type (episodic, semantic, etc.).
-        sync: If True (default), run full pipeline synchronously and return item_id string.
-              If False, run Tier 1 only (spaCy + EntityRuler) and return dict with
-              item_id + entity_ids for background Tier 2 enrichment.
+        sync: Both values save through discoverability and queue deferred core work.
+              True returns an item_id string; False returns the core result dict
+              including item_id, entity_ids, queued and run_id.
         properties: Optional user-supplied key-value properties stored in metadata.
         origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by local write
             surfaces (CLI sm add → "cli:add"). Threaded into core ingest via context

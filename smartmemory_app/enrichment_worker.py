@@ -1,3 +1,5 @@
+# Deprecated: retained for one release so core can migrate enrichment_queue.
+# All active wrapper saves and worker launchers use the core work graph.
 """Enrichment worker — separate process that drains the SQLite queue.
 
 Polls enrichment_queue table, runs Tier 2 LLM extraction for each job,

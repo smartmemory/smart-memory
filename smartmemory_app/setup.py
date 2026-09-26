@@ -370,6 +370,8 @@ def _start_daemon_local(
             click.echo("SmartMemory started, but it needs attention.")
             click.echo(f"Problem: {reason}")
             click.echo("Next step: Run: sm doctor")
+    if status and status.get("reextract_offer"):
+        (on_log or click.echo)(status["reextract_offer"])
     return status
 
 
@@ -907,7 +909,7 @@ def _install_launchd_plist() -> bool:
                 WORKER_PLIST_NAME,
                 _LAUNCHD_WORKER_LABEL,
                 "worker",
-                "smartmemory_app.enrichment_worker",
+                "smartmemory.cli",
                 "main()",
             )
         )

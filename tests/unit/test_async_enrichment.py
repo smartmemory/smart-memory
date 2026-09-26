@@ -3,11 +3,11 @@
 Tests the AsyncEnrichmentQueue, drain loop, and two-tier ingest integration
 without requiring infrastructure or real LLM calls.
 """
+
 import threading
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from smartmemory_app.async_enrichment import (
     AsyncEnrichmentQueue,
@@ -108,20 +108,36 @@ class TestDrainThread:
         mem = MagicMock()
         mem.get.return_value = {"content": "test content"}
 
-        job = {"item_id": "test-1", "workspace_id": "", "entity_ids": {}, "enable_ontology": False}
+        job = {
+            "item_id": "test-1",
+            "workspace_id": "",
+            "entity_ids": {},
+            "enable_ontology": False,
+        }
         q.enqueue(job)
 
-        mock_result = {"status": "ok", "new_entities": 2, "new_relations": 1, "new_patterns": 0}
+        mock_result = {
+            "status": "ok",
+            "new_entities": 2,
+            "new_relations": 1,
+            "new_patterns": 0,
+        }
 
         _stop_event.clear()
 
-        with patch(
-            "smartmemory.background.extraction_worker._run_llm_extraction",
-            return_value={"status": "ok", "extraction": {"entities": [], "relations": []}},
-        ), patch(
-            "smartmemory.background.extraction_worker.process_extract_job",
-            return_value=mock_result,
-        ) as mock_pej:
+        with (
+            patch(
+                "smartmemory.background.extraction_worker._run_llm_extraction",
+                return_value={
+                    "status": "ok",
+                    "extraction": {"entities": [], "relations": []},
+                },
+            ),
+            patch(
+                "smartmemory.background.extraction_worker.process_extract_job",
+                return_value=mock_result,
+            ) as mock_pej,
+        ):
             # Start drain in thread, stop after first batch
             def run_drain():
                 enrichment_drain_loop(lambda: mem, q, lock)
@@ -162,16 +178,27 @@ class TestDrainThread:
             call_count += 1
             if payload["item_id"] == "fail-1":
                 raise RuntimeError("LLM exploded")
-            return {"status": "ok", "new_entities": 0, "new_relations": 0, "new_patterns": 0}
+            return {
+                "status": "ok",
+                "new_entities": 0,
+                "new_relations": 0,
+                "new_patterns": 0,
+            }
 
         _stop_event.clear()
 
-        with patch(
-            "smartmemory.background.extraction_worker._run_llm_extraction",
-            return_value={"status": "ok", "extraction": {"entities": [], "relations": []}},
-        ), patch(
-            "smartmemory.background.extraction_worker.process_extract_job",
-            side_effect=side_effect,
+        with (
+            patch(
+                "smartmemory.background.extraction_worker._run_llm_extraction",
+                return_value={
+                    "status": "ok",
+                    "extraction": {"entities": [], "relations": []},
+                },
+            ),
+            patch(
+                "smartmemory.background.extraction_worker.process_extract_job",
+                side_effect=side_effect,
+            ),
         ):
             t = threading.Thread(
                 target=enrichment_drain_loop,
@@ -235,13 +262,24 @@ class TestDrainThread:
 
         _stop_event.clear()
 
-        with patch(
-            "smartmemory.background.extraction_worker._run_llm_extraction",
-            return_value={"status": "ok", "extraction": {"entities": [], "relations": []}},
-        ), patch(
-            "smartmemory.background.extraction_worker.process_extract_job",
-            return_value={"status": "ok", "new_entities": 0, "new_relations": 0, "new_patterns": 0},
-        ) as mock_pej:
+        with (
+            patch(
+                "smartmemory.background.extraction_worker._run_llm_extraction",
+                return_value={
+                    "status": "ok",
+                    "extraction": {"entities": [], "relations": []},
+                },
+            ),
+            patch(
+                "smartmemory.background.extraction_worker.process_extract_job",
+                return_value={
+                    "status": "ok",
+                    "new_entities": 0,
+                    "new_relations": 0,
+                    "new_patterns": 0,
+                },
+            ) as mock_pej,
+        ):
             t = threading.Thread(
                 target=enrichment_drain_loop,
                 args=(get_mem, q, lock),
@@ -268,7 +306,14 @@ class TestDrainThread:
         mem = MagicMock()
         mem.get.return_value = {"content": "slow item"}
 
-        q.enqueue({"item_id": "slow-1", "workspace_id": "", "entity_ids": {}, "enable_ontology": False})
+        q.enqueue(
+            {
+                "item_id": "slow-1",
+                "workspace_id": "",
+                "entity_ids": {},
+                "enable_ontology": False,
+            }
+        )
 
         started = threading.Event()
         release = threading.Event()
@@ -280,12 +325,20 @@ class TestDrainThread:
 
         _stop_event.clear()
 
-        with patch(
-            "smartmemory.background.extraction_worker._run_llm_extraction",
-            side_effect=slow_extract,
-        ), patch(
-            "smartmemory.background.extraction_worker.process_extract_job",
-            return_value={"status": "ok", "new_entities": 0, "new_relations": 0, "new_patterns": 0},
+        with (
+            patch(
+                "smartmemory.background.extraction_worker._run_llm_extraction",
+                side_effect=slow_extract,
+            ),
+            patch(
+                "smartmemory.background.extraction_worker.process_extract_job",
+                return_value={
+                    "status": "ok",
+                    "new_entities": 0,
+                    "new_relations": 0,
+                    "new_patterns": 0,
+                },
+            ),
         ):
             t = threading.Thread(
                 target=enrichment_drain_loop,
@@ -295,7 +348,9 @@ class TestDrainThread:
             t.start()
 
             assert started.wait(timeout=5), "Drain thread never reached LLM extraction"
-            assert lock.acquire(timeout=0.2), "rw_lock stayed held during LLM extraction"
+            assert lock.acquire(timeout=0.2), (
+                "rw_lock stayed held during LLM extraction"
+            )
             lock.release()
 
             release.set()
@@ -313,17 +368,23 @@ class TestDrainThread:
 class TestTwoTierIngest:
     """Integration: POST /ingest uses two-tier when LLM key present."""
 
-    def test_ingest_enqueues_when_llm_available(self, tmp_path, monkeypatch):
-        """With LLM key, ingest should use sync=False and enqueue for enrichment."""
+    def test_ingest_leaves_queueing_to_core(self, tmp_path, monkeypatch):
+        """Even failed core publication must not fall back to the legacy queue."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
 
         from smartmemory_app.viewer_server import app
         from fastapi.testclient import TestClient
 
-        mock_result = {"item_id": "tier1-id", "queued": False, "entity_ids": {"alice": "node-1"}}
+        mock_result = {
+            "item_id": "tier1-id",
+            "queued": False,
+            "entity_ids": {"alice": "node-1"},
+        }
 
-        with patch("smartmemory_app.storage.ingest", return_value=mock_result) as mock_ingest:
+        with patch(
+            "smartmemory_app.storage.ingest", return_value=mock_result
+        ) as mock_ingest:
             client = TestClient(app)
             r = client.post("/memory/ingest", json={"content": "Alice leads Atlas"})
 
@@ -333,14 +394,9 @@ class TestTwoTierIngest:
         assert mock_ingest.call_args.args == ("Alice leads Atlas", "episodic")
         assert mock_ingest.call_args.kwargs["sync"] is False
 
-        # Check the endpoint's current SQLite-backed queue, not the retired
-        # in-process AsyncEnrichmentQueue used by the old drain thread.
         from smartmemory_app.enrichment_queue import dequeue
 
-        jobs = dequeue(batch_size=10)
-        assert len(jobs) == 1
-        assert jobs[0]["item_id"] == "tier1-id"
-        assert jobs[0]["entity_ids"] == {"alice": "node-1"}
+        assert dequeue(batch_size=10) == []
 
     def test_ingest_sync_when_no_llm(self, monkeypatch):
         """Without an LLM key, ingest should stay Tier-1-only and not enqueue."""
@@ -350,9 +406,14 @@ class TestTwoTierIngest:
         from smartmemory_app.viewer_server import app
         from fastapi.testclient import TestClient
 
-        with patch("smartmemory_app.storage.ingest", return_value="sync-id") as mock_ingest:
+        with patch(
+            "smartmemory_app.storage.ingest", return_value="sync-id"
+        ) as mock_ingest:
             client = TestClient(app)
-            r = client.post("/memory/ingest", json={"content": "Bob tests", "memory_type": "semantic"})
+            r = client.post(
+                "/memory/ingest",
+                json={"content": "Bob tests", "memory_type": "semantic"},
+            )
 
         assert r.status_code == 200
         assert r.json()["item_id"] == "sync-id"
@@ -373,7 +434,10 @@ class TestClearFlushesQueue:
         assert q.size == 1
 
         with patch("smartmemory_app.storage._shutdown"):
-            with patch("smartmemory_app.storage._resolve_data_dir", return_value=MagicMock(exists=lambda: False)):
+            with patch(
+                "smartmemory_app.storage._resolve_data_dir",
+                return_value=MagicMock(exists=lambda: False),
+            ):
                 with patch("smartmemory_app.setup._seed_data_dir"):
                     client = TestClient(app)
                     client.post("/memory/clear")

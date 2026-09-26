@@ -416,56 +416,47 @@ def start_daemon(
 
 
 def _start_workers(num_workers: int = 1) -> None:
-    """Start enrichment worker(s) as detached background processes.
+    """Start one core worker, including for keyless enrichment.
 
-    Each worker polls the SQLite enrichment_queue and runs Tier 2 LLM extraction.
-    Multiple workers process jobs in parallel (SQLite row-level locking prevents
-    double-processing via the 'processing' status).
-
-    Args:
-        num_workers: Number of worker processes to start (default 1).
+    ``num_workers`` remains accepted for CLI compatibility; core serializes all
+    work for a data directory under its authoritative worker lock.
     """
-    from smartmemory_app.config import LLM_KEY_ENV_VARS, llm_key_present
-
-    if not llm_key_present():
-        # no-silent-degradation: this fallback disables Tier-2 entirely, so say so.
-        log.warning(
-            "No LLM API key found (checked %s) — Tier-2 entity extraction and "
-            "enrichment workers will NOT start. Memories are still stored with "
-            "Tier-1 (spaCy) extraction only. Add a key with `smartmemory setup`.",
-            ", ".join(LLM_KEY_ENV_VARS),
-        )
-        return
+    from smartmemory.pipeline.work_graph.spawn import worker_is_running
 
     data = _data_dir()
     data.mkdir(parents=True, exist_ok=True)
-    worker_log = data / "worker.log"
-    env = os.environ.copy()
-
-    for i in range(num_workers):
-        pid_file = data / f"worker.{i}.pid"
-
-        # Check if this slot is already running
-        if pid_file.exists():
-            try:
-                pid = int(pid_file.read_text().strip())
-                os.kill(pid, 0)
-                continue  # already running
-            except (ProcessLookupError, ValueError):
-                pid_file.unlink(missing_ok=True)
-
+    pid_file = data / "worker.0.pid"
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), 0)
+            return
+        except (ProcessLookupError, ValueError):
+            pid_file.unlink(missing_ok=True)
+    if worker_is_running(data):
+        return
+    with (data / "worker.log").open("a") as output:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "smartmemory_app.enrichment_worker", "--loop"],
-            stdout=open(worker_log, "a"),
+            [
+                sys.executable,
+                "-m",
+                "smartmemory.cli",
+                "--data-dir",
+                str(data),
+                "worker",
+                "run",
+                "--idle-exit",
+                "0",
+            ],
+            stdout=output,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            env=env,
+            env=os.environ.copy(),
         )
-        pid_file.write_text(str(proc.pid))
+    pid_file.write_text(str(proc.pid))
 
 
 def _stop_workers() -> None:
-    """Stop all enrichment workers. Idempotent."""
+    """Stop all daemon-owned core workers. Idempotent."""
     data = _data_dir()
     for pid_file in data.glob("worker.*.pid"):
         try:

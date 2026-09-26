@@ -507,13 +507,20 @@ class TestUnconfiguredReturns503:
 _LLM_ENV = {k: "" for k in LLM_KEY_ENV_VARS}
 
 
-class TestIngestLLMWarning:
-    def test_warns_when_no_llm_key(self, client):
-        """No LLM key → 200 with item_id AND a 'warning' field naming the downgrade."""
+class TestIngestCorePlacement:
+    def test_keyless_uses_core_work_result(self, client):
+        """Keyless saves still defer local enrichment via the core work graph."""
         with patch.dict("os.environ", _LLM_ENV, clear=False):
             for k in list(_LLM_ENV):
                 os.environ.pop(k, None)
-            with patch("smartmemory_app.storage.ingest", return_value="itm_123"):
+            with patch(
+                "smartmemory_app.storage.ingest",
+                return_value={
+                    "item_id": "itm_123",
+                    "queued": True,
+                    "run_id": "run-123",
+                },
+            ):
                 r = client.post(
                     "/ingest",
                     json={"content": "Alice leads Atlas", "memory_type": "episodic"},
@@ -521,7 +528,7 @@ class TestIngestLLMWarning:
         assert r.status_code == 200
         body = r.json()
         assert body["item_id"] == "itm_123"
-        assert "warning" in body and "LLM" in body["warning"]
+        assert body == {"item_id": "itm_123"}
 
     def test_no_warning_when_llm_key_present(self, client):
         """With a key, the two-tier path runs and the response carries NO warning."""
@@ -537,8 +544,8 @@ class TestIngestLLMWarning:
         assert r.status_code == 200
         assert "warning" not in r.json()
 
-    def test_anthropic_only_key_is_recognised(self, client):
-        """Regression: Anthropic-only used to be silently treated as no-key (Tier-2 skipped)."""
+    def test_endpoint_does_not_override_core_route_decision(self, client):
+        """Route detection belongs to core, not a wrapper key-presence list."""
         with patch.dict(
             "os.environ", {**_LLM_ENV, "ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False
         ):
@@ -556,11 +563,7 @@ class TestIngestLLMWarning:
         assert "warning" not in r.json()  # key present → no downgrade
 
     def test_keyless_path_runs_tier1_only_not_full_pipeline(self, client):
-        """Regression (keyless-ingest 500): with no LLM key the endpoint MUST call
-        storage.ingest(sync=False) — Tier-1 spaCy only. The default sync=True runs
-        the full core pipeline including llm_extract, which hard-requires a cloud
-        key and 500s on a fresh lite/ollama install. Earlier tests mocked ingest
-        without checking sync=, so the bug slipped through — assert the arg here."""
+        """The API asks core for the result dict, including durable work status."""
         from unittest.mock import MagicMock
 
         fake = MagicMock(return_value={"item_id": "itm_lite", "entity_ids": {}})
@@ -576,6 +579,5 @@ class TestIngestLLMWarning:
         assert r.json()["item_id"] == "itm_lite"
         assert fake.call_count == 1
         assert fake.call_args.kwargs.get("sync") is False, (
-            "keyless ingest must run Tier-1 only (sync=False); sync=True would run "
-            "llm_extract and 500 without a cloud key"
+            "sync=False preserves the core work-graph result dict"
         )

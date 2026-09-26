@@ -26,7 +26,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from smartmemory_app.config import UnconfiguredError, llm_key_present
 from smartmemory_app.storage import get_memory
@@ -37,11 +37,6 @@ log = logging.getLogger(__name__)
 # endpoints in a thread pool — without locking, concurrent ingest+clear or
 # ingest+read could race on the SmartMemory singleton's non-thread-safe state.
 _rw_lock = threading.RLock()
-
-# One-shot guard so the "no LLM key → Tier-2 disabled" warning is logged once per
-# daemon lifetime instead of on every line of a batch ingest (the per-request
-# signal still rides back to the user in the response `warning` field every time).
-_llm_warned = False
 
 api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
 
@@ -681,157 +676,44 @@ def reindex() -> dict:
     }
 
 
+class ReextractRequest(BaseModel):
+    all_items: bool = Field(default=False, alias="all")
+    ruler: bool = False
+    decline: bool = False
+
+
 @api.post("/reextract")
-def reextract_entities() -> dict:
-    """Re-run entity extraction on all stored memories and create entity nodes.
+def reextract_entities(body: ReextractRequest | None = None) -> dict:
+    """Publish durable re-extraction runs; execution belongs to the core worker."""
+    from smartmemory.pipeline.work_graph.reextract import (
+        enqueue_reextract,
+        plan_reextract,
+    )
+    from smartmemory_app.config import load_config
+    from smartmemory_app.storage import get_memory
+    from smartmemory_app.work_graph import get_work_graph
 
-    Use after upgrading from a version that didn't create entity nodes on SQLite.
-    Reads each memory, runs EntityRuler (spaCy + seed patterns), creates entity
-    nodes and CONTAINS_ENTITY/MENTIONED_IN edges via add_dual_node.
-    """
-    import json
-    import os
-    import sqlite3
-    import time
-
-    with _rw_lock:
-        from smartmemory_app.storage import _resolve_data_dir, get_memory
-
-        data_dir = str(_resolve_data_dir())
-        mem = get_memory()
-
-        # Read all user memory nodes (skip entity/relation/Version)
-        db_path = os.path.join(data_dir, "memory.db")
-        db = sqlite3.connect(db_path)
-        user_types = (
-            "semantic",
-            "episodic",
-            "procedural",
-            "pending",
-            "zettel",
-            "reasoning",
-            "opinion",
-            "observation",
-            "decision",
+    if load_config().mode == "remote":
+        raise HTTPException(
+            status_code=400, detail="Reextract is only available in local mode."
         )
-        placeholders = ",".join("?" * len(user_types))
-        rows = db.execute(
-            f"SELECT item_id, properties, memory_type FROM nodes WHERE memory_type IN ({placeholders})",
-            user_types,
-        ).fetchall()
-        db.close()
-
-        if not rows:
-            return {"extracted": 0, "entities_created": 0, "total": 0, "elapsed_s": 0}
-
-        # Get EntityRuler stage from the pipeline
-        from smartmemory.pipeline.stages.entity_ruler import EntityRulerStage, _get_nlp
-        from smartmemory.pipeline.state import PipelineState
-
-        nlp = _get_nlp()
-        pattern_manager = getattr(mem, "_entity_ruler_patterns", None)
-        ruler = EntityRulerStage(nlp=nlp, pattern_manager=pattern_manager)
-
-        # Build a minimal pipeline config for entity_ruler
-        pipeline_config = mem._build_pipeline_config()
-
-        t0 = time.time()
-        extracted = 0
-        entities_created = 0
-        skipped = 0
-        backend = mem._graph.backend
-
-        for item_id, props_json, memory_type in rows:
-            props = json.loads(props_json) if props_json else {}
-            content = props.get("content", "")
-            if not content or len(content.strip()) < 3:
-                skipped += 1
-                continue
-
-            # Check if this memory already has entity edges
-            existing_edges = backend.get_edges_for_node(item_id)
-            has_entities = any(
-                e.get("edge_type") in ("CONTAINS_ENTITY", "MENTIONED_IN")
-                for e in existing_edges
-            )
-            if has_entities:
-                skipped += 1
-                continue
-
-            # Run EntityRuler on the content
-            try:
-                state = PipelineState(text=content, memory_type=memory_type)
-                state = ruler.execute(state, pipeline_config)
-                entities = state.ruler_entities or []
-
-                if not entities:
-                    skipped += 1
-                    continue
-
-                # Build entity_nodes for add_dual_node
-                entity_nodes = []
-                for ent in entities:
-                    name = ent.get("name", "")
-                    etype = ent.get("entity_type", "concept")
-                    if not name:
-                        continue
-                    entity_nodes.append(
-                        {
-                            "entity_type": etype,
-                            "properties": {
-                                "name": name,
-                                "confidence": ent.get("confidence", 0.85),
-                                "source": "reextract",
-                            },
-                        }
-                    )
-
-                if entity_nodes:
-                    # Create entity nodes + edges (memory node already exists)
-                    for en in entity_nodes:
-                        ename = en["properties"]["name"]
-                        etype = en["entity_type"]
-                        canonical_key = f"{ename.lower()}::{etype.lower()}"
-
-                        # Find or create entity node
-                        existing_eid = backend._find_entity_by_canonical_key(
-                            canonical_key
-                        )
-                        if existing_eid:
-                            eid = existing_eid
-                        else:
-                            import uuid
-
-                            eid = str(uuid.uuid4())
-                            backend.add_node(
-                                eid,
-                                {
-                                    "content": ename,
-                                    "name": ename,
-                                    "entity_type": etype,
-                                    "canonical_key": canonical_key,
-                                    "memory_type": "entity",
-                                },
-                                memory_type="entity",
-                            )
-                            entities_created += 1
-
-                        backend.add_edge(item_id, eid, "CONTAINS_ENTITY", {})
-                        backend.add_edge(eid, item_id, "MENTIONED_IN", {})
-
-                    extracted += 1
-            except Exception as e:
-                log.warning("Re-extraction failed for %s: %s", item_id, e)
-                skipped += 1
-
-        elapsed = time.time() - t0
-
+    body = body or ReextractRequest()
+    with _rw_lock:
+        graph = get_work_graph()
+        if body.decline:
+            graph.set_meta("reextract_decision", "declined")
+            return {"declined": True}
+        memory = get_memory()
+        plan = plan_reextract(
+            memory, "all" if body.all_items else "default", body.ruler
+        )
+        queued = enqueue_reextract(memory, plan)
+        graph.set_meta("reextract_decision", "accepted")
     return {
-        "extracted": extracted,
-        "entities_created": entities_created,
-        "skipped": skipped,
-        "total": len(rows),
-        "elapsed_s": round(elapsed, 1),
+        "queued": queued,
+        "total": plan.item_count,
+        "estimated_tokens": plan.estimated_tokens,
+        "mode": plan.mode,
     }
 
 
@@ -857,10 +739,7 @@ class IngestRequest(BaseModel):
 
 @api.post("/ingest")
 def ingest_endpoint(body: IngestRequest) -> dict:
-    """Ingest content through the pipeline. Two-tier when LLM key available.
-
-    Tier 1 (sync, ~4ms): spaCy + EntityRuler → returns item_id immediately.
-    Tier 2 (async, ~740ms): background LLM extraction if API key is set.
+    """Save immediately; core queues deferred extraction and enrichment.
 
     HOOK-RECALL-RELEVANCE-1 G3.B: stamps `metadata.workspace_id` on the item
     so future workspace-scoped recall can filter. Derivation priority:
@@ -887,81 +766,25 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     # AND precedence). [Codex review, 2026-06-07]
     origin = (body.context or {}).get("origin")
 
-    from smartmemory_app.config import llm_key_present
     from smartmemory_app.remote_backend import RemoteBackendError
-    from fastapi import HTTPException
+    from smartmemory_app.storage import ingest
 
-    has_llm = llm_key_present()
-
-    if has_llm:
-        # Two-tier: Tier 1 sync (spaCy), enqueue Tier 2 (LLM) via SQLite queue.
-        # A separate worker process drains the queue — no threading issues.
-        with _rw_lock:
-            from smartmemory_app.storage import ingest
-
-            try:
-                result = ingest(
-                    body.content,
-                    memory_type,
-                    sync=False,
-                    properties=properties,
-                    origin=origin,
-                )
-            except RemoteBackendError as e:
-                raise HTTPException(
-                    status_code=502, detail=f"Hosted SmartMemory API error: {e}"
-                )
-            item_id = result["item_id"] if isinstance(result, dict) else result
-            raw_ids = result.get("entity_ids", {}) if isinstance(result, dict) else {}
-            entity_ids = {k.lower(): v for k, v in raw_ids.items()} if raw_ids else {}
-            already_queued = (
-                result.get("queued", False) if isinstance(result, dict) else False
+    # Core decides placement using all supported LLM routes. Even a failed work
+    # graph publication must never fall back to the retired wrapper queue.
+    with _rw_lock:
+        try:
+            result = ingest(
+                body.content,
+                memory_type,
+                sync=False,
+                properties=properties,
+                origin=origin,
             )
-            if not already_queued:
-                from smartmemory_app.enrichment_queue import enqueue
-
-                enqueue(item_id, entity_ids)
-        return {"item_id": item_id}
-    else:
-        # No LLM key — Tier-1 only (spaCy). This is a real capability downgrade:
-        # no entity extraction, no enrichment, weaker semantic index. Per
-        # no-silent-degradation, say so — both in the daemon log (once) and to
-        # the caller (every time, so the CLI can surface it).
-        global _llm_warned
-        if not _llm_warned:
-            log.warning(
-                "Ingesting without an LLM API key — Tier-2 entity extraction and "
-                "enrichment are DISABLED (Tier-1 spaCy only). Add a key with "
-                "`smartmemory setup` to enable full extraction."
-            )
-            _llm_warned = True
-        with _rw_lock:
-            from smartmemory_app.storage import ingest
-
-            try:
-                # Tier-1 ONLY (spaCy + EntityRuler). MUST pass sync=False: the default
-                # sync=True runs the full core pipeline including llm_extract, which
-                # hard-requires a cloud LLM key and 500s on a keyless lite install
-                # (ValueError: No API key found → Stage 'llm_extract' failed). There is
-                # no Tier-2 enqueue here — no key means no enrichment worker to drain it.
-                result = ingest(
-                    body.content,
-                    memory_type,
-                    sync=False,
-                    properties=properties,
-                    origin=origin,
-                )
-            except RemoteBackendError as e:
-                raise HTTPException(
-                    status_code=502, detail=f"Hosted SmartMemory API error: {e}"
-                )
-            item_id = result["item_id"] if isinstance(result, dict) else result
-        return {
-            "item_id": item_id,
-            "warning": "No LLM key configured — stored with Tier-1 (spaCy) extraction "
-            "only; entity extraction and enrichment are disabled. "
-            "Run `smartmemory setup` to add a key.",
-        }
+        except RemoteBackendError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Hosted SmartMemory API error: {exc}"
+            ) from exc
+    return {"item_id": result["item_id"] if isinstance(result, dict) else result}
 
 
 class SearchRequest(BaseModel):

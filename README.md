@@ -729,3 +729,27 @@ Search uses `lexical` with default weight 0.8. Replace removed `contains` and `k
 Lite is single-tenant. Graph-first retrieval conditionally fills from FTS5 lexical and vector search. Bounded refill can underfill, and regex-text still scans. CORE-FACT-INDEX-1 separately owns deferred fact ranking and path expansion.
 
 Quiesce old writers before first-open indexing. Verify the engine capability pin and use `sm rebuild --lexical` for recovery. [Migration, targets and measured limitations](https://github.com/smartmemory/smart-memory-docs/blob/main/docs/features/CORE-LEXICAL-INDEX-1/migration.md).
+
+### Local background work
+
+Local saves (`sm add` and lifecycle hooks) work without an LLM key, whether the
+daemon is running or not. Pattern extraction makes memories available immediately;
+local enrichment runs in the background. With an available LLM route, the core
+worker also performs deferred LLM extraction. One worker per data directory drains
+the durable work graph; the daemon, launchd, or an on-demand save starts it.
+
+`sm status` shows **pending**, **running**, and **dead** work counts. After adding
+an LLM key, status and setup offer to re-extract memories saved without one.
+
+```sh
+sm admin reextract           # show count/token estimate, then ask for confirmation
+sm admin reextract --yes     # skip confirmation; queue and return immediately
+sm admin reextract --all     # include all user memories
+sm admin reextract --ruler   # force pattern-only extraction (no LLM)
+sm admin reextract --decline # dismiss the re-extraction notice
+sm worker requeue-dead       # retry dead and skipped boxes
+```
+
+Flags can be combined. Re-extraction does not require the daemon and does not wait
+for background processing. The default scope is memories marked `ruler_only` or
+`llm_failed`. Grounding and evolution are off by default in local mode.

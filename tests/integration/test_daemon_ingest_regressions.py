@@ -27,6 +27,10 @@ def lite_daemon(tmp_path, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_OBSERVABILITY", "false")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "smartmemory.utils.llm.llm_route_available",
+        lambda: (bool(__import__("os").environ.get("GROQ_API_KEY")), "test"),
+    )
     cfg = config.SmartMemoryConfig(mode="local", data_dir=str(tmp_path))
     monkeypatch.setattr(config, "load_config", lambda: cfg)
     monkeypatch.setattr(storage, "load_config", lambda: cfg)
@@ -40,6 +44,7 @@ def lite_daemon(tmp_path, monkeypatch):
     def make_memory(**kwargs):
         kwargs["pipeline_profile"].store.embed = False
         kwargs["pipeline_profile"].supersede.enabled = False
+        kwargs["spawn_worker"] = False
         return real_factory(**kwargs)
 
     monkeypatch.setattr(factory, "create_lite_memory", make_memory)
@@ -68,7 +73,7 @@ def test_sm_add_never_grounds_over_http_and_uses_sqlite_dispatch(
     lite_daemon, monkeypatch, has_llm
 ):
     from smartmemory.observability.events import RedisStreamQueue
-    from smartmemory_app import enrichment_queue, storage
+    from smartmemory_app import storage
     from smartmemory_app.cli import cli
 
     _client, outbound = lite_daemon
@@ -85,38 +90,13 @@ def test_sm_add_never_grounds_over_http_and_uses_sqlite_dispatch(
     assert any(n.get("memory_type") == "entity" for n in nodes), nodes
     outbound.assert_not_called()
     redis.assert_not_called()
-    jobs = enrichment_queue.dequeue()
-    assert len(jobs) == int(has_llm)
-    if has_llm:
-        assert jobs[0]["entity_ids"]
-        assert mem.get(jobs[0]["item_id"]) is not None
-        from smartmemory.models.memory_item import MemoryItem
-        from smartmemory_app.enrichment_worker import process_one_job
+    import sqlite3
 
-        extracted = MemoryItem(
-            content="Falcon propulsion",
-            memory_type="entity",
-            metadata={"name": "Falcon propulsion", "entity_type": "concept"},
-        )
-        llm = Mock(
-            return_value={
-                "status": "ok",
-                "extraction": {"entities": [extracted], "relations": []},
-            }
-        )
-        monkeypatch.setattr(
-            "smartmemory.background.extraction_worker._run_llm_extraction", llm
-        )
-        outcome = process_one_job(jobs[0])
-        llm.assert_called_once()
-        assert outcome["status"] == "ok"
-        assert outcome["new_entities"] == 1
-        stored_id = outcome["new_entity_nodes"][0]["memory_id"]
-        stored = mem._graph.backend.get_node(stored_id)
-        assert stored is not None
-        assert stored["name"] == "Falcon propulsion"
-        outbound.assert_not_called()
-        redis.assert_not_called()
+    with sqlite3.connect(storage._data_path / "memory.db") as db:
+        kinds = [row[0] for row in db.execute("SELECT kind FROM work_nodes")]
+    assert sorted(kinds) == (
+        ["extract", "stage:enrich"] if has_llm else ["stage:enrich"]
+    )
 
 
 def test_reextract_empty_store_returns_200(lite_daemon):

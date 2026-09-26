@@ -65,7 +65,8 @@ def test_get_memory_registers_atexit(tmp_path):
         mock_register.assert_called_once_with(storage._shutdown)
 
 
-def test_local_memory_disables_entity_grounding_by_default(tmp_path):
+@pytest.mark.parametrize("keyed", [False, True])
+def test_local_memory_disables_entity_grounding_by_default(tmp_path, keyed):
     """The local CLI profile preserves default ingest quality without network grounding."""
     from smartmemory_app import storage
     from smartmemory_app.config import SmartMemoryConfig
@@ -76,6 +77,9 @@ def test_local_memory_disables_entity_grounding_by_default(tmp_path):
     mock_store = MagicMock()
 
     with (
+        patch(
+            "smartmemory.utils.llm.llm_route_available", return_value=(keyed, "test")
+        ),
         patch("smartmemory_app.storage.load_config", return_value=config),
         patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
         patch("smartmemory_app.patterns.JSONLPatternStore", return_value=mock_store),
@@ -90,10 +94,19 @@ def test_local_memory_disables_entity_grounding_by_default(tmp_path):
         storage._get_local_memory()
 
     profile = mock_create.call_args.kwargs["pipeline_profile"]
-    assert profile.profile_name == "default"
+    assert profile.profile_name == "lite"
     assert profile.coreference.enabled is True
-    assert profile.extraction.llm_extract.enabled is True
-    assert profile.enrich.enricher_names is None
+    assert profile.extraction.llm_extract.enabled is keyed
+    assert profile.enrich.enricher_names == (
+        None
+        if keyed
+        else [
+            "basic_enricher",
+            "sentiment_enricher",
+            "topic_enricher",
+            "extract_skills_tools",
+        ]
+    )
     assert profile.enrich.wikidata.enabled is False
     assert profile.enrich.wikidata.sparql_enabled is False
     assert profile.evolve.run_evolution is False

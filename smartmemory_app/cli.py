@@ -515,7 +515,7 @@ def _start_with_progress(
     "--num-workers",
     default=1,
     show_default=True,
-    help="Number of enrichment worker processes.",
+    help="Compatibility option; local mode always uses one core worker.",
 )
 @click.option(
     "--wait",
@@ -523,7 +523,7 @@ def _start_with_progress(
     help="Wait for models and saved memories to be fully ready.",
 )
 def start_cmd(num_workers: int, wait: bool) -> None:
-    """Start the SmartMemory daemon and enrichment workers."""
+    """Start the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status
 
     current = get_status()
@@ -567,10 +567,10 @@ def stop_cmd() -> None:
     "--num-workers",
     default=1,
     show_default=True,
-    help="Number of enrichment worker processes.",
+    help="Compatibility option; local mode always uses one core worker.",
 )
 def restart_cmd(num_workers: int) -> None:
-    """Restart the SmartMemory daemon and enrichment workers."""
+    """Restart the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status, stop_daemon
 
     if get_status() is not None:
@@ -686,6 +686,17 @@ def status_cmd() -> None:
     """Show SmartMemory daemon status."""
     from smartmemory_app.daemon import get_status, should_be_running
 
+    from smartmemory_app.config import load_config
+    from smartmemory_app.work_graph import get_work_status
+
+    if load_config().mode != "remote":
+        try:
+            work = get_work_status()
+            click.echo(
+                f"  Work:       pending={work['pending']}, running={work['running']}, dead={work['dead']}"
+            )
+        except Exception as exc:
+            click.echo(f"Work counts unavailable: {exc}", err=True)
     info = get_status()
     if info is None:
         if should_be_running():
@@ -695,6 +706,8 @@ def status_cmd() -> None:
         click.echo("SmartMemory daemon is not running.")
         click.echo("Start with: smartmemory start")
         return
+    if info.get("reextract_offer"):
+        click.echo(info["reextract_offer"])
     status = info.get("status", "?")
     click.echo(f"SmartMemory daemon: {status}")
     if status == "warming":
@@ -724,15 +737,6 @@ def status_cmd() -> None:
         click.echo(f"  LLM:        {_llm}")
     click.echo(f"  Embeddings: {info.get('embedding_provider', '?')}")
     click.echo(f"  PID:        {info.get('pid', '?')}")
-    async_info = info.get("async_enrichment", {})
-    if async_info.get("enabled"):
-        pending = async_info.get("pending", 0)
-        done = async_info.get("done", 0)
-        failed = async_info.get("failed", 0)
-        click.echo(f"  Queue:      pending={pending}, done={done}, failed={failed}")
-    else:
-        click.echo("  Queue:      (no table)")
-
     # DIST-LOCAL-REMOTE-AWARENESS-1: in lite mode, explain the local↔cloud
     # boundary so an empty cloud dashboard isn't read as data loss. The cloud
     # web dashboard reads the remote account; these memories live on this
@@ -776,27 +780,35 @@ def tour_cmd(keep: bool, code: bool, port: int | None, no_viewer: bool) -> None:
     tour.run_tour(keep=keep, code=code, port=port, no_viewer=no_viewer)
 
 
-@cli.command("worker")
-@click.option(
-    "--loop", is_flag=True, help="Poll continuously instead of drain-and-exit."
-)
-def worker_cmd(loop: bool) -> None:
-    """Run the enrichment worker (Tier 2 LLM extraction).
+@cli.group("worker", invoke_without_command=True)
+@click.option("--loop", is_flag=True, help="Run continuously (compatibility alias).")
+@click.pass_context
+def worker_cmd(ctx: click.Context, loop: bool) -> None:
+    """Manage the core durable work graph."""
+    from smartmemory_app.config import load_config
 
-    Drains the SQLite enrichment queue. Use --loop for continuous polling.
-    """
-    # The worker's module-level basicConfig is a no-op under the CLI's root
-    # handler; its INFO progress lines are the command's purpose, so raise the
-    # level here unless the user pinned one explicitly.
-    if "SMARTMEMORY_LOG_LEVEL" not in os.environ:
-        logging.getLogger().setLevel(logging.INFO)
-    from smartmemory_app.enrichment_worker import drain_queue, run_loop
+    if load_config().mode == "remote":
+        raise click.ClickException("Worker commands are only available in local mode.")
+    if ctx.invoked_subcommand is None:
+        from smartmemory.pipeline.work_graph.worker import run_worker
+        from smartmemory_app.storage import _resolve_data_dir
 
-    if loop:
-        run_loop()
-    else:
-        n = drain_queue()
-        click.echo(f"Processed {n} jobs")
+        ctx.exit(
+            run_worker(_resolve_data_dir(), idle_exit=0 if loop else 0.2, lease=60)
+        )
+
+
+@worker_cmd.command("requeue-dead")
+def requeue_dead_cmd() -> None:
+    """Reset dead and skipped boxes for another worker attempt."""
+    from smartmemory.pipeline.work_graph.spawn import spawn_worker_if_idle
+    from smartmemory_app.storage import _resolve_data_dir
+    from smartmemory_app.work_graph import get_work_graph
+
+    count = get_work_graph().requeue_dead()
+    if count:
+        spawn_worker_if_idle(_resolve_data_dir())
+    click.echo(f"Requeued {count} boxes.")
 
 
 # ── Memory operations ───────────────────────────────────────────────────────
@@ -2688,30 +2700,37 @@ def reindex_cmd() -> None:
 
 
 @admin_group.command("reextract")
-def reextract_cmd() -> None:
-    """Re-run entity extraction on all memories to populate the knowledge graph.
-
-    Use after upgrading to rebuild entity nodes and edges for memories that
-    were stored before entity extraction was available on lite mode.
-    """
+@click.option("--yes", is_flag=True, help="Skip confirmation.")
+@click.option("--all", "all_items", is_flag=True, help="Re-extract every user memory.")
+@click.option("--ruler", is_flag=True, help="Force the pattern-only pass.")
+@click.option("--decline", is_flag=True, help="Stop the re-extraction notice.")
+def reextract_cmd(yes: bool, all_items: bool, ruler: bool, decline: bool) -> None:
+    """Queue re-extraction without waiting for the daemon or the worker."""
+    from smartmemory.pipeline.work_graph.reextract import (
+        enqueue_reextract,
+        plan_reextract,
+    )
     from smartmemory_app.config import load_config
+    from smartmemory_app.storage import get_memory
+    from smartmemory_app.work_graph import get_work_graph
 
-    cfg = load_config()
-    if cfg.mode == "remote":
+    if load_config().mode == "remote":
         raise click.ClickException("Reextract is only available in local mode.")
-    click.echo("Re-extracting entities from all memories...")
-    result = _daemon_request("POST", "/memory/reextract", timeout=300)
-    if result is not None:
-        click.echo(
-            f"Done: {result.get('extracted', 0)} memories processed, "
-            f"{result.get('entities_created', 0)} new entity nodes, "
-            f"{result.get('skipped', 0)} skipped, "
-            f"{result.get('elapsed_s', '?')}s"
-        )
-    else:
-        raise click.ClickException(
-            "Daemon is not running. Start it first: smartmemory start"
-        )
+    graph = get_work_graph()
+    if decline:
+        graph.set_meta("reextract_decision", "declined")
+        click.echo("Re-extraction notice declined.")
+        return
+    memory = get_memory()
+    plan = plan_reextract(memory, "all" if all_items else "default", ruler)
+    click.echo(
+        f"{plan.item_count} memories; about {plan.estimated_tokens} tokens; mode: {plan.mode}."
+    )
+    if not yes:
+        click.confirm("Queue re-extraction?", abort=True)
+    count = enqueue_reextract(memory, plan)
+    graph.set_meta("reextract_decision", "accepted")
+    click.echo(f"Queued {count} re-extraction runs.")
 
 
 # ── Hidden/internal ─────────────────────────────────────────────────────────

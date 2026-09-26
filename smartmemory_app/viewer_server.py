@@ -162,6 +162,7 @@ def _build_app() -> FastAPI:
                 "service": "smartmemory",
                 "status": startup_status,
                 "memories": -1,
+                "reextract_offer": None,
                 "llm_provider": cfg.llm_provider,
                 "llm_key_present": llm_key_present(),
                 "embedding_provider": cfg.embedding_provider,
@@ -211,15 +212,23 @@ def _build_app() -> FastAPI:
                 "and the memory count is unavailable: %s",
                 degraded_reason,
             )
-        # Enrichment queue status (SQLite-backed, separate worker process)
-        async_info: dict = {"enabled": False}
-        try:
-            from smartmemory_app.enrichment_queue import stats as queue_stats
+        offer = None
+        if backend_ok and cfg.mode != "remote":
+            try:
+                from smartmemory.pipeline.work_graph.reextract import reextract_offer
+                from smartmemory_app.work_graph import get_work_graph
 
-            qs = queue_stats()
-            async_info = {"enabled": True, **qs}
-        except Exception:
-            pass
+                offer = reextract_offer(mem, get_work_graph())
+            except Exception:
+                log.warning("Re-extraction notice unavailable", exc_info=True)
+        work_info = None
+        if cfg.mode != "remote":
+            try:
+                from smartmemory_app.work_graph import get_work_status
+
+                work_info = get_work_status()
+            except Exception:
+                log.warning("Work graph counts unavailable", exc_info=True)
 
         # DIST-OBSIDIAN-LITE-1: capability block lets the Obsidian plugin (and
         # any other client) detect lite vs remote-proxy mode + which write
@@ -240,7 +249,11 @@ def _build_app() -> FastAPI:
             "llm_key_present": llm_key_present(),
             "embedding_provider": cfg.embedding_provider,
             "pid": os.getpid(),
-            "async_enrichment": async_info,
+            "work_graph": work_info,
+            "reextract_offer": offer,
+            "async_enrichment": {
+                "enabled": False
+            },  # retired queue; compatibility field
             "mode": mode,
             "capabilities": capabilities,
         }
@@ -347,6 +360,10 @@ def _start_background_warmup() -> threading.Thread:
     def run() -> None:
         try:
             backend_ok = _warm_backend()
+            if backend_ok:
+                from smartmemory_app.work_graph import show_reextract_offer
+
+                show_reextract_offer(log.info)
             _sync_hooks()
         except BaseException as exc:
             reason = _safe_warmup_reason(exc)
