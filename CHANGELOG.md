@@ -14,7 +14,14 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 - Pins `smartmemory-core==1.4.116` (decision listings keep `context_snapshot`: supersede/retract reason).
 
-## [Unreleased]
+## Unreleased
+
+- SessionStart injects a separately budgeted rules card of active workspace constraints,
+  newest first. Capture tags external rules without an extra model call, with an audited regex
+  fallback when the model tags no constraints; superseded
+  lessons disappear and card IDs are excluded from subsequent prompt recall.
+  Configure `rules_card_enabled` and `rules_card_budget` (default 2000 tokens).
+  Legacy classification, budget loss, and unavailable remote cards emit warnings.
 
 - Session lessons keep every stated rule. Extraction now files each rule,
   constraint, limit or required format as its own lesson, and a rule the model

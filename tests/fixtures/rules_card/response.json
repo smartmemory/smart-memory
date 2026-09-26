@@ -1,0 +1,6 @@
+[
+  {"type": "observation", "content": "CONSTRAINT: Acme Pay accepts batch files in UTF-8."},
+  {"type": "conclusion", "content": "CONSTRAINT: Acme Pay rejects batches above 50 entries with AP-409."},
+  {"type": "conclusion", "content": "The adapter uses a queue to schedule batch submission."},
+  {"type": "observation", "content": "The adapter source was inspected."}
+]

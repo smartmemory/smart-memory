@@ -207,6 +207,7 @@ class RemoteMemory:
         include_snapshot: bool = True,
         workspace_id: str | None = None,
         strict: bool | None = None,
+        exclude_ids: list[str] | None = None,
     ) -> str:
         """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall (remote).
 
@@ -323,6 +324,7 @@ class RemoteMemory:
             _item_to_recall_dict(r)
             for r in filter_hook_items(results, excluded)
             if r.get("memory_type") != "snapshot"
+            and _item_to_recall_dict(r)["item_id"] not in (exclude_ids or ())
         ]
 
         # 3. Origin tier filter (dict-aware; legacy "unknown" / missing pass through)

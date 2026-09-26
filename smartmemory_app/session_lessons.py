@@ -96,14 +96,17 @@ class SessionLessonExtractor(ReasoningExtractor):
             "system, counterparty or component it applies to and the task it matters "
             "for (for example 'Stripe webhook retries: ...'), because it will be read "
             "and searched without this conversation. "
+            "Prefix a conclusion with CONSTRAINT: when it is a hard rule imposed "
+            "from outside the code’s own design and learned from evidence: a "
+            "counterparty/API/system rejection or error code, a required format or "
+            "limit, or a policy the owner or a partner stated. Do not tag design "
+            "choices, code structure facts, status, or what was tried as constraints. "
             "Preserve exact identifiers and limitations. "
             "Quote the conclusion text where possible. Return [] if none.\n\n" + text
         )
 
 
-# A stated rule survives even when the model files it as an observation: live Groq
-# output typed "a reversal's E2E ID must be exactly RV + the original ID" as
-# `observation`, which DecisionExtractor discards (DEMO-CC-UPLIFT-1 Stage 2a).
+# Preserve rule-shaped observations that the decision extractor would discard.
 _RULE = re.compile(
     r"\b(?:must|never|exactly|only|required?|requires|not allowed|cannot|can't"
     r"|at (?:most|least)|rejects?|rejected)\b|(?-i:\b[A-Z]{2,}-\d{2,}\b)",
@@ -114,7 +117,10 @@ _RULE = re.compile(
 def _promote_rules(trace):
     promoted = 0
     for step in trace.steps:
-        if step.type == "observation" and _RULE.search(step.content or ""):
+        if step.type == "observation" and (
+            (step.content or "").strip().startswith("CONSTRAINT:")
+            or _RULE.search(step.content or "")
+        ):
             step.type = "conclusion"
             promoted += 1
     return promoted
@@ -196,7 +202,30 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
         decisions = DecisionExtractor().extract_from_trace(trace)
         if not decisions:
             raise ValueError("reasoning trace contained no lessons/decisions")
-        decisions = list({d.content: d for d in decisions}.values())[:8]
+        regex_fallback = not any(
+            decision.content.strip().startswith("CONSTRAINT:") for decision in decisions
+        )
+        lesson_kind_source = "regex_fallback" if regex_fallback else "model"
+        fallback_count = 0
+        lesson_kinds = {}
+        for decision in decisions:
+            content = decision.content.strip()
+            tagged = content.startswith("CONSTRAINT:")
+            decision.content = (
+                content.removeprefix("CONSTRAINT:").strip() if tagged else content
+            )
+            regex_constraint = regex_fallback and bool(_RULE.search(content))
+            fallback_count += int(regex_constraint)
+            kind = "constraint" if tagged or regex_constraint else "finding"
+            if lesson_kinds.get(decision.content) != "constraint":
+                lesson_kinds[decision.content] = kind
+        if regex_fallback:
+            log.warning(
+                "model tagged no constraints; regex fallback classified %d of %d",
+                fallback_count,
+                len(decisions),
+            )
+        decisions = list({d.content: d for d in decisions if d.content}.values())[:8]
         try:
             relations = classify(mem, decisions, job, turns, receipt)
         except Exception as exc:
@@ -212,6 +241,8 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
                 "transcript_path": job["transcript_path"],
                 "session_date": session_date,
                 "lesson_operation": f"{path.stem}:{index}",
+                "lesson_kind": lesson_kinds[decision.content],
+                "lesson_kind_source": lesson_kind_source,
             }
             spans = [
                 [i, i + 1]

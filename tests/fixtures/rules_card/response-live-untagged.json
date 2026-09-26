@@ -1,0 +1,14 @@
+[
+  {
+    "type": "conclusion",
+    "content": "Acme Pay batch files must be encoded in UTF-8."
+  },
+  {
+    "type": "conclusion",
+    "content": "Acme Pay rejects batch submissions containing more than 50 entries, returning error code AP-409."
+  },
+  {
+    "type": "decision",
+    "content": "The integration adapter will use a queue to schedule batch submissions to Acme Pay."
+  }
+]

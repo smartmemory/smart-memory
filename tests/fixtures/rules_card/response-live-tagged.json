@@ -1,0 +1,14 @@
+[
+  {
+    "type": "conclusion",
+    "content": "CONSTRAINT: Acme Pay (partner) requires batch files to be UTF-8 encoded."
+  },
+  {
+    "type": "conclusion",
+    "content": "CONSTRAINT: Acme Pay (partner) rejects batch submissions containing more than 50 entries, returning error AP-409."
+  },
+  {
+    "type": "decision",
+    "content": "The integration adapter will use a queue to schedule batch submissions to Acme Pay."
+  }
+]

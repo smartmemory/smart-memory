@@ -7,7 +7,7 @@ Two layers:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -26,6 +26,8 @@ class LifecycleConfig:
     enabled: bool = True
     recall_strategy: RecallStrategy = RecallStrategy.TOPIC_CHANGE
     orient_budget: int = 1500  # max tokens for Orient injection
+    rules_card_enabled: bool = True
+    rules_card_budget: int = 2000
     recall_budget: int = 500  # max tokens for Recall injection
     topic_threshold: float = 0.7  # cosine similarity for topic-change detection
     observe_tool_calls: bool = True
@@ -51,6 +53,8 @@ class LifecycleConfig:
             enabled=raw.get("enabled", True),
             recall_strategy=strategy,
             orient_budget=raw.get("orient_budget", 1500),
+            rules_card_enabled=raw.get("rules_card_enabled", True),
+            rules_card_budget=raw.get("rules_card_budget", 2000),
             recall_budget=raw.get("recall_budget", 500),
             topic_threshold=raw.get("topic_threshold", 0.7),
             observe_tool_calls=raw.get("observe_tool_calls", True),
@@ -65,12 +69,24 @@ class LifecycleConfig:
         """
         merged = {
             "enabled": overrides.get("enabled", self.enabled),
-            "recall_strategy": overrides.get("recall_strategy", self.recall_strategy.value),
+            "recall_strategy": overrides.get(
+                "recall_strategy", self.recall_strategy.value
+            ),
             "orient_budget": overrides.get("orient_budget", self.orient_budget),
+            "rules_card_enabled": overrides.get(
+                "rules_card_enabled", self.rules_card_enabled
+            ),
+            "rules_card_budget": overrides.get(
+                "rules_card_budget", self.rules_card_budget
+            ),
             "recall_budget": overrides.get("recall_budget", self.recall_budget),
             "topic_threshold": overrides.get("topic_threshold", self.topic_threshold),
-            "observe_tool_calls": overrides.get("observe_tool_calls", self.observe_tool_calls),
+            "observe_tool_calls": overrides.get(
+                "observe_tool_calls", self.observe_tool_calls
+            ),
             "distill_turns": overrides.get("distill_turns", self.distill_turns),
-            "learn_from_errors": overrides.get("learn_from_errors", self.learn_from_errors),
+            "learn_from_errors": overrides.get(
+                "learn_from_errors", self.learn_from_errors
+            ),
         }
         return LifecycleConfig.from_config(merged)

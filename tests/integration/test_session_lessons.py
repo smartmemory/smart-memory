@@ -17,6 +17,7 @@ LESSON = "Nordbank refunds require reversal E2E id RV plus the original E2E id. 
 def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
+    from smartmemory_app.lifecycle_config import LifecycleConfig
 
     for key, value in {
         "SMARTMEMORY_DATA_DIR": str(tmp_path / "data"),
@@ -86,10 +87,33 @@ def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
         lifecycle = MemoryLifecycle("fresh-session")
         orient = lifecycle.orient("/tmp/nordbank")
         recall = lifecycle.recall(PROMPT, "/tmp/nordbank")
-        for payload in (orient, recall):
+        assert orient.startswith("## Rules learned in this project\n")
+        card = orient.split("\n## ", 1)[0]
+        assert LESSON in card
+        assert f"[mem:{lesson_id}]" in card
+        # Source transcripts can quote the rule; the card excludes the lesson ID.
+        recall_lessons = recall.partition("## Lessons & decisions")[2].split(
+            "\n## ", 1
+        )[0]
+        assert LESSON not in recall_lessons
+        assert f"[mem:{lesson_id}]" not in recall
+        assert any(f"[mem:{iid}]" in recall for iid in receipt["item_ids"])
+        assert "[entity]" not in recall
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "trace.jsonl").read_text().splitlines()
+        ]
+        assert records[-2]["lesson_ids"] == [lesson_id]
+        assert records[-1]["lesson_ids"] == []
+        # The card excludes this rule only after Orient; retain Recall-path coverage.
+        recall_only = MemoryLifecycle(
+            "fresh-recall-only", config=LifecycleConfig(rules_card_enabled=False)
+        ).recall(PROMPT, "/tmp/nordbank")
+        assert recall_only.startswith("## Lessons & decisions")
+        for payload in (orient, recall_only):
             assert LESSON in payload
+            assert f"[mem:{lesson_id}]" in payload
             assert "[entity]" not in payload
-            assert payload.startswith("## Lessons & decisions")
             assert "[session:2026-09-24]" in payload
         records = [
             json.loads(line)
@@ -110,6 +134,7 @@ def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
 def test_three_session_lifecycle_and_fresh_injection(tmp_path, monkeypatch):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
+    from smartmemory_app.lifecycle_config import LifecycleConfig
     from smartmemory_app.session_lessons import capture_lessons
     from smartmemory_app.recall_format import format_recall_lines
 
@@ -205,12 +230,25 @@ def test_three_session_lifecycle_and_fresh_injection(tmp_path, monkeypatch):
         try:
             monkeypatch.setattr(storage, "get_memory", lambda: mem)
             lifecycle = MemoryLifecycle(f"fresh-{index}")
-            for payload in (
-                lifecycle.orient("/tmp/rules"),
-                lifecycle.recall("Deployment rule X approval", "/tmp/rules"),
-            ):
+            orient = lifecycle.orient("/tmp/rules")
+            recall = lifecycle.recall("Deployment rule X approval", "/tmp/rules")
+            recall_only = MemoryLifecycle(
+                f"fresh-recall-only-{index}",
+                config=LifecycleConfig(rules_card_enabled=False),
+            ).recall("Deployment rule X approval", "/tmp/rules")
+            if index < 2:
+                lesson_id = receipt["lesson_ids"][0]
+                assert orient.startswith("## Rules learned in this project\n")
+                card = orient.split("\n## ", 1)[0]
+                assert content in card
+                assert f"[mem:{lesson_id}]" in card
+                assert content not in recall
+                assert f"[mem:{lesson_id}]" not in recall
+                assert f"[mem:{lesson_id}]" in recall_only
+            for payload in (orient, recall_only):
                 if index < 2:
                     assert content in payload
+            for payload in (orient, recall, recall_only):
                 if index > 0:
                     assert contents[0] not in payload
                 if index == 2:

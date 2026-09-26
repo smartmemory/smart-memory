@@ -678,6 +678,7 @@ def recall(
     include_snapshot: bool = True,
     workspace_id: str | None = None,
     strict: bool | None = None,
+    exclude_ids: list[str] | None = None,
 ) -> str:
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
 
@@ -718,6 +719,7 @@ def recall(
             include_snapshot=include_snapshot,
             workspace_id=workspace_id,
             strict=strict,
+            **({"exclude_ids": exclude_ids} if exclude_ids else {}),
         )
 
     workspace_id = workspace_id or derive_workspace_id(cwd)
@@ -760,7 +762,11 @@ def recall(
     recall_floor = float(os.environ.get("SMARTMEMORY_RECALL_FLOOR", "0.3"))
 
     def eligible(rows):
-        rows = filter_hook_items(rows, excluded)
+        rows = [
+            r
+            for r in filter_hook_items(rows, excluded)
+            if _item_to_recall_dict(r)["item_id"] not in (exclude_ids or ())
+        ]
         tier_rows = filter_by_tiers(rows, tiers)
         allowed = {id(r) for r in tier_rows}
         kept = []

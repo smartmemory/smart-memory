@@ -142,6 +142,8 @@ class MemoryLifecycle:
         self._turn_count: int = 0
         self._observation_count: int = 0
         self._config_overrides: dict = {}
+        self._rules_card_ids: list[str] = []
+        self._rules_card_workspace: str | None = None
 
         self._load_state()
 
@@ -155,7 +157,7 @@ class MemoryLifecycle:
     def orient(self, cwd: str | None = None) -> str:
         """Phase 1: Session start — recall previous context with progressive disclosure.
 
-        Returns formatted context block within orient_budget tokens.
+        Returns the separately budgeted rules card followed by orient_budget context.
         Clears stale session state for fresh start.
         """
         if not self._config.enabled:
@@ -172,8 +174,23 @@ class MemoryLifecycle:
 
         from smartmemory_app.storage import recall
 
+        self._rules_card_ids = []
+        self._rules_card_workspace = derive_workspace_id(cwd)
+        card = ""
+        if self._config.rules_card_enabled:
+            try:
+                from smartmemory_app.rules_card import build_rules_card
+
+                card = build_rules_card(cwd, budget=self._config.rules_card_budget)
+                self._rules_card_ids = recall_format.payload_ids(card)
+            except Exception as exc:
+                record_hook_degradation("Orient lost rules card", exc)
+
         # Get recent + relevant memories
-        context = recall(cwd, top_k=10)
+        exclusions = (
+            {"exclude_ids": self._rules_card_ids} if self._rules_card_ids else {}
+        )
+        context = recall(cwd, top_k=10, **exclusions)
 
         # Also look for patterns and decisions if cwd provided. This MUST go
         # through the workspace-scoped recall path, not storage.search: search
@@ -188,11 +205,16 @@ class MemoryLifecycle:
                     top_k=5,
                     query=f"patterns conventions decisions for {os.path.basename(cwd)}",
                     include_snapshot=False,
+                    **exclusions,
                 )
             except Exception as exc:
                 record_hook_degradation("Orient lost patterns context", exc)
 
-        output = self._format_orient_block(context, patterns)
+        output = "\n\n".join(
+            part
+            for part in (card, self._format_orient_block(context, patterns))
+            if part
+        )
         self._save_state()
         return output
 
@@ -227,7 +249,15 @@ class MemoryLifecycle:
         from smartmemory_app.storage import recall as scoped_recall
 
         try:
-            block = scoped_recall(cwd, top_k=5, query=prompt, include_snapshot=False)
+            exclusions = {}
+            if (
+                self._rules_card_ids
+                and self._rules_card_workspace == derive_workspace_id(cwd)
+            ):
+                exclusions["exclude_ids"] = self._rules_card_ids
+            block = scoped_recall(
+                cwd, top_k=5, query=prompt, include_snapshot=False, **exclusions
+            )
         except Exception as e:
             record_hook_error("Recall lost search context", e)
             self._save_state()
@@ -547,6 +577,8 @@ class MemoryLifecycle:
             self._turn_count = data.get("turn_count", 0)
             self._observation_count = data.get("observation_count", 0)
             self._config_overrides = data.get("config_overrides", {})
+            self._rules_card_ids = data.get("rules_card_ids", [])
+            self._rules_card_workspace = data.get("rules_card_workspace")
         except (json.JSONDecodeError, OSError) as e:
             record_hook_degradation(
                 "Failed to load session state; prior session context lost", e
@@ -562,6 +594,8 @@ class MemoryLifecycle:
             "turn_count": self._turn_count,
             "observation_count": self._observation_count,
             "config_overrides": self._config_overrides,
+            "rules_card_ids": self._rules_card_ids,
+            "rules_card_workspace": self._rules_card_workspace,
             "updated_at": time.time(),
         }
         try:

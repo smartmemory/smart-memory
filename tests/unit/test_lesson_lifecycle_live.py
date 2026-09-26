@@ -14,6 +14,8 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
 
+    from smartmemory_app.lifecycle_config import LifecycleConfig
+
     for key, value in {
         "SMARTMEMORY_DATA_DIR": str(tmp_path / "data"),
         "XDG_CONFIG_HOME": str(tmp_path / "config"),
@@ -127,15 +129,27 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         try:
             monkeypatch.setattr(storage, "get_memory", lambda: mem)
             lifecycle = MemoryLifecycle(f"fresh-live-{index}")
-            for payload in (
-                lifecycle.orient("/tmp/payments"),
-                lifecycle.recall(
-                    "payments deploys approval security team", "/tmp/payments"
-                ),
-            ):
+            orient = lifecycle.orient("/tmp/payments")
+            recall = lifecycle.recall(
+                "payments deploys approval security team", "/tmp/payments"
+            )
+            successor = sessions[1]["lessons"][1]
+            successor_id = receipts[1]["lesson_ids"][1]
+            assert orient.startswith("## Rules learned in this project\n")
+            card = orient.split("\n## ", 1)[0]
+            assert successor in card
+            assert f"[mem:{successor_id}]" in card
+            assert successor not in recall
+            assert f"[mem:{successor_id}]" not in recall
+            recall_only = MemoryLifecycle(
+                f"fresh-live-recall-only-{index}",
+                config=LifecycleConfig(rules_card_enabled=False),
+            ).recall("payments deploys approval security team", "/tmp/payments")
+            assert successor in recall_only
+            assert f"[mem:{successor_id}]" in recall_only
+            for payload in (orient, recall, recall_only):
                 assert f"[mem:{id_map[recorded_ids[0]]}]" not in payload
                 assert sessions[0]["lessons"][0] not in payload
-                assert sessions[1]["lessons"][1] in payload
         finally:
             mem.close()
     assert calls == [1, 2]

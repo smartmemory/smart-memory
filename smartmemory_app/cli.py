@@ -1716,6 +1716,8 @@ def lifecycle_status() -> None:
     click.echo(f"Lifecycle enabled: {cfg.enabled}")
     click.echo(f"Recall strategy: {cfg.recall_strategy.value}")
     click.echo(f"Orient budget: {cfg.orient_budget} tokens")
+    click.echo(f"Rules card enabled: {cfg.rules_card_enabled}")
+    click.echo(f"Rules card budget: {cfg.rules_card_budget} tokens")
     click.echo(f"Recall budget: {cfg.recall_budget} tokens")
     click.echo(
         f"Observe: {cfg.observe_tool_calls}, Distill: {cfg.distill_turns}, Learn: {cfg.learn_from_errors}"

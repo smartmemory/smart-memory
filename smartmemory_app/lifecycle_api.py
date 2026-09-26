@@ -118,5 +118,7 @@ async def status():
         "enabled": config.enabled,
         "recall_strategy": config.recall_strategy.value,
         "orient_budget": config.orient_budget,
+        "rules_card_enabled": config.rules_card_enabled,
+        "rules_card_budget": config.rules_card_budget,
         "recall_budget": config.recall_budget,
     }
