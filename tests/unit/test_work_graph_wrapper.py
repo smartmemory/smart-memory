@@ -348,6 +348,22 @@ def test_daemon_worker_process_stops_cleanly(tmp_path, monkeypatch):
         assert worker_is_running(tmp_path)
         daemon._start_workers(3)
         assert len(processes) == 1
+        try:
+            subprocess.run(
+                ["ps", "-o", "command=", "-p", str(processes[0].pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except PermissionError:
+            # Sandbox denies ps: retain real child, lock, signals and exit.
+            monkeypatch.setattr(
+                subprocess,
+                "run",
+                lambda command, **kw: subprocess.CompletedProcess(
+                    command, 0, " ".join(processes[0].args), ""
+                ),
+            )
         daemon._stop_workers()
         assert processes[0].wait(timeout=45) == 0
     finally:

@@ -6,7 +6,9 @@ The daemon IS viewer_server.main() running in a detached subprocess.
 
 import logging
 import os
+import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -74,10 +76,20 @@ def _launchd_bootout(label: str) -> bool:
         ["launchctl", "unload", str(_launchd_plist_path(label))],
     ):
         try:
-            if subprocess.run(cmd, capture_output=True, text=True).returncode == 0:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if result.returncode == 0:
                 return True
-        except Exception:
-            continue
+            log.warning(
+                "launchd worker retirement via %s failed; restart prevention unverified: %s",
+                cmd[1],
+                result.stderr.strip(),
+            )
+        except OSError as exc:
+            log.warning(
+                "launchd worker retirement via %s unavailable; restart prevention unverified: %s",
+                cmd[1],
+                exc,
+            )
     return False
 
 
@@ -419,40 +431,147 @@ def start_daemon(
     return status
 
 
+def _pid_alive(pid: int) -> bool:
+    """Only ESRCH proves exit; permission/inspection failures remain errors."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_legacy_exit(pid: int) -> None:
+    deadline = time.monotonic() + 10
+    while _pid_alive(pid):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"Legacy enrichment worker {pid} did not stop")
+        time.sleep(0.05)
+
+
+def _legacy_agent_state() -> str | None:
+    result = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/{_LAUNCHD_WORKER_LABEL}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout
+    if result.returncode == 113 and "Could not find service" in result.stderr:
+        return None
+    raise RuntimeError(f"Cannot inspect legacy launchd worker: {result.stderr.strip()}")
+
+
+def _retire_legacy_agent() -> bool:
+    # Historical launchd -c enrichment_worker.main() never wrote a PID file.
+    plist = _launchd_plist_path(_LAUNCHD_WORKER_LABEL)
+    if (
+        sys.platform != "darwin"
+        or not plist.exists()
+        or "enrichment_worker" not in plist.read_text()
+    ):
+        return False
+    state = _legacy_agent_state()
+    if state is None:
+        return False
+    match = re.search(r"^\s*pid = (\d+)\s*$", state, re.MULTILINE)
+    pid = int(match[1]) if match else None
+    if "state = running" in state and pid is None:
+        raise RuntimeError(
+            "Legacy launchd worker is running without an inspectable PID"
+        )
+    # Preserve the identity across failed bootout/wait attempts.
+    if pid is not None:
+        (_data_dir() / "worker.launchd.pid").write_text(str(pid))
+    if not _launchd_bootout(_LAUNCHD_WORKER_LABEL) or _legacy_agent_state() is not None:
+        raise RuntimeError("Legacy launchd worker could not be positively booted out")
+    if pid is not None:
+        _wait_legacy_exit(pid)
+    return True
+
+
+def _processing_count() -> int:
+    database = _data_dir() / "memory.db"
+    if not database.exists():
+        return 0
+    with sqlite3.connect(database) as conn:
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='enrichment_queue'"
+        ).fetchone():
+            return 0
+        return conn.execute(
+            "SELECT count(*) FROM enrichment_queue WHERE status='processing'"
+        ).fetchone()[0]
+
+
 def _retire_legacy_workers() -> bool:
-    """Retire identified legacy consumers; return whether any were stopped."""
-    retired = False
-    for pid_file in _data_dir().glob("worker.*.pid"):
-        try:
-            pid = int(pid_file.read_text().strip())
+    """Prove legacy quiescence before recovering in-flight rows or starting core."""
+    try:
+        retired = _retire_legacy_agent()
+        for pid_file in _data_dir().glob("worker.*.pid"):
+            try:
+                pid = int(pid_file.read_text().strip())
+            except ValueError:
+                log.warning(
+                    "Legacy PID identity lost in %s; retirement cannot be verified",
+                    pid_file,
+                )
+                raise RuntimeError(f"Invalid legacy PID file: {pid_file}") from None
             if pid <= 0:
-                pid_file.unlink(missing_ok=True)
-                continue
-            result = subprocess.run(
-                ["ps", "-o", "command=", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if "smartmemory_app.enrichment_worker" in result.stdout:
-                os.kill(pid, signal.SIGTERM)
-                retired = True
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline:
+                raise RuntimeError(f"Invalid legacy PID in {pid_file}: {pid}")
+            if _pid_alive(pid):
+                try:
                     result = subprocess.run(
                         ["ps", "-o", "command=", "-p", str(pid)],
                         capture_output=True,
                         text=True,
                         check=False,
                     )
-                    if "smartmemory_app.enrichment_worker" not in result.stdout:
-                        break
-                    time.sleep(0.05)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"Cannot inspect live legacy PID {pid}: {exc}"
+                    ) from exc
+                if result.returncode != 0 or not result.stdout.strip():
+                    raise RuntimeError(
+                        f"Cannot inspect live legacy PID {pid}: "
+                        f"ps exit {result.returncode}, {result.stderr.strip() or 'empty output'}"
+                    )
+                if "smartmemory_app.enrichment_worker" in result.stdout:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        log.warning(
+                            "Legacy worker %s exited before retirement signal", pid
+                        )
+                    _wait_legacy_exit(pid)
+                    retired = True
                 else:
-                    raise RuntimeError(f"Legacy enrichment worker {pid} did not stop")
-        except (ProcessLookupError, ValueError):
-            pass
-        pid_file.unlink(missing_ok=True)
+                    log.warning(
+                        "Legacy PID %s was reused; stale worker identity discarded without signalling",
+                        pid,
+                    )
+            else:
+                log.warning("Legacy worker %s is gone; removing stale PID file", pid)
+            pid_file.unlink(missing_ok=True)
+    except (OSError, RuntimeError) as exc:
+        try:
+            count = str(_processing_count())
+        except sqlite3.Error as count_error:
+            count = f"unknown (queue inspection failed: {count_error})"
+        log.warning(
+            "Legacy retirement unverified; %s processing rows remain unrecovered; replacement blocked: %s",
+            count,
+            exc,
+        )
+        raise
+    database = _data_dir() / "memory.db"
+    if database.exists():
+        from smartmemory.pipeline.work_graph.sqlite_store import SQLiteWorkGraph
+
+        recovered = SQLiteWorkGraph(str(database)).migrate_enrichment_queue(
+            recover_processing=True
+        )
+        retired = retired or recovered > 0
     return retired
 
 
@@ -465,7 +584,6 @@ def _upgrade_worker_agent() -> None:
             "enrichment_worker" in content
             or "from smartmemory.cli import main" in content
         ):
-            _launchd_bootout(_LAUNCHD_WORKER_LABEL)
             _retire_legacy_workers()
             from smartmemory_app.setup import _install_launchd_plist
 
@@ -507,10 +625,15 @@ def _stop_workers() -> None:
     """Stop every core launch path and any identified legacy consumer."""
     from smartmemory.pipeline.work_graph.spawn import stop_worker
 
+    try:
+        _retire_legacy_workers()
+    except (OSError, RuntimeError) as exc:
+        log.warning(
+            "Legacy retirement failed during stop; continuing shutdown: %s", exc
+        )
     if sys.platform == "darwin" and _launchd_loaded(_LAUNCHD_WORKER_LABEL):
         _launchd_bootout(_LAUNCHD_WORKER_LABEL)
     stop_worker(_data_dir())
-    _retire_legacy_workers()
 
 
 def stop_daemon() -> None:

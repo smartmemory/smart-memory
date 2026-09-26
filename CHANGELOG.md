@@ -21,7 +21,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   `sm admin reextract` queues work with `--yes`, `--all`, `--ruler`, or `--decline`;
   `sm worker requeue-dead` retries dead and skipped work. Daemon and launchd workers
   now use the durable core work graph; the legacy queue modules remain for migration.
-  Upgrades retire legacy workers and reload old launchd agents. All persistent
+  Upgrades retire legacy workers and reload old launchd agents, recover in-flight
+  jobs only after confirmed consumer exit, and block replacement when process
+  inspection or launchd retirement is uncertain. All persistent
   workers load the same provider configuration as saves; stop/restart also stops
   on-demand workers through the core worker lock.
 

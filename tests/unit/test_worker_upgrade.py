@@ -1,9 +1,12 @@
 """Worker upgrade, shared configuration, and cross-launch-path shutdown."""
 
 import json
+import logging
 import os
+import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from unittest.mock import Mock
 
@@ -31,7 +34,7 @@ def cleanup(process):
     process.wait(timeout=10)
 
 
-def test_stop_on_demand_worker_without_wrapper_pid(tmp_path):
+def test_stop_on_demand_worker_without_wrapper_pid(tmp_path, monkeypatch):
     from smartmemory.pipeline.work_graph.spawn import worker_pid, worker_is_running
 
     process = subprocess.Popen(
@@ -47,6 +50,21 @@ def test_stop_on_demand_worker_without_wrapper_pid(tmp_path):
         text=True,
     )
     try:
+        try:
+            subprocess.run(
+                ["ps", "-o", "command=", "-p", str(process.pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except PermissionError:
+            monkeypatch.setattr(
+                subprocess,
+                "run",
+                lambda command, **kw: subprocess.CompletedProcess(
+                    command, 0, " ".join(process.args), ""
+                ),
+            )
         deadline = time.monotonic() + 40
         while worker_pid(tmp_path) != process.pid and time.monotonic() < deadline:
             assert process.poll() is None, process.stderr.read()
@@ -58,6 +76,112 @@ def test_stop_on_demand_worker_without_wrapper_pid(tmp_path):
         assert not worker_is_running(tmp_path)
     finally:
         cleanup(process)
+
+
+def test_stop_continues_when_live_legacy_ps_fails(tmp_path, monkeypatch, caplog):
+    from smartmemory.pipeline.work_graph.spawn import worker_is_running, worker_pid
+
+    children = []
+    try:
+        legacy = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(120)"]
+        )
+        children.append(legacy)
+        core = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "from smartmemory.pipeline.work_graph.worker import run_worker; "
+                "import sys; run_worker(sys.argv[1], idle_exit=0, lease=60)",
+                str(tmp_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        children.append(core)
+        pidfile = tmp_path / "worker.0.pid"
+        pidfile.write_text(str(legacy.pid))
+        real_run = subprocess.run
+        events = []
+
+        def inspect(command, **kwargs):
+            if command[0] == "ps":
+                if command[command.index("-p") + 1] == str(legacy.pid):
+                    events.append("retire")
+                    return subprocess.CompletedProcess(
+                        command, 2, "", "legacy inspection denied"
+                    )
+                try:
+                    return real_run(command, **kwargs)
+                except PermissionError:
+                    # Sandbox denies ps; keep the real core lock, signals and exit.
+                    assert command[command.index("-p") + 1] == str(core.pid)
+                    return subprocess.CompletedProcess(
+                        command, 0, " ".join(core.args), ""
+                    )
+            return real_run(command, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", inspect)
+        deadline = time.monotonic() + 40
+        while worker_pid(tmp_path) != core.pid and time.monotonic() < deadline:
+            assert core.poll() is None, core.stderr.read()
+            time.sleep(0.05)
+        assert worker_pid(tmp_path) == core.pid
+        assert worker_is_running(tmp_path)
+
+        # Record actual signals, allowing liveness probes but no legacy signal.
+        real_kill = os.kill
+        signals = []
+
+        def kill(pid, sig):
+            signals.append((pid, sig))
+            return real_kill(pid, sig)
+
+        monkeypatch.setattr(os, "kill", kill)
+        monkeypatch.setattr(daemon.sys, "platform", "darwin")
+        loaded = {daemon._LAUNCHD_WORKER_LABEL, daemon._LAUNCHD_DAEMON_LABEL}
+        monkeypatch.setattr(daemon, "_launchd_loaded", lambda label: label in loaded)
+
+        def bootout(label):
+            events.append(label)
+            loaded.remove(label)
+            return True
+
+        monkeypatch.setattr(daemon, "_launchd_bootout", bootout)
+        monkeypatch.setattr(daemon, "is_running", lambda **kwargs: False)
+        daemon._pid_file().write_text("123")
+        with caplog.at_level(logging.WARNING, logger=daemon.log.name):
+            daemon.stop_daemon()
+        assert core.wait(timeout=45) == 0
+        assert not worker_is_running(tmp_path)
+        assert not daemon._pid_file().exists()
+        assert events == [
+            "retire",
+            daemon._LAUNCHD_WORKER_LABEL,
+            daemon._LAUNCHD_DAEMON_LABEL,
+        ]
+        assert pidfile.read_text() == str(legacy.pid)
+        assert legacy.poll() is None
+        assert not any(pid == legacy.pid and sig != 0 for pid, sig in signals)
+        assert any(
+            record.levelno == logging.WARNING
+            and "continuing shutdown" in record.getMessage()
+            and "legacy inspection denied" in record.getMessage()
+            for record in caplog.records
+        )
+        assert caplog.text.count("processing rows remain unrecovered") == 1
+
+        # The preserved identity must still block the next start.
+        with pytest.raises(RuntimeError, match="Cannot inspect live legacy PID"):
+            daemon.start_daemon()
+        assert pidfile.read_text() == str(legacy.pid)
+        assert legacy.poll() is None
+        assert not worker_is_running(tmp_path)
+        assert not any(pid == legacy.pid and sig != 0 for pid, sig in signals)
+    finally:
+        for child in children:
+            cleanup(child)
 
 
 @pytest.mark.parametrize("legacy", [True, False])
@@ -80,6 +204,8 @@ def test_start_retires_only_identified_legacy_process(
         args.append("smartmemory_app.enrichment_worker")
     real_popen = subprocess.Popen
     process = real_popen(args)
+    reaper = threading.Thread(target=process.wait, daemon=True)
+    reaper.start()
     if not real_inspection:
 
         def inspect(command, **kwargs):
@@ -95,9 +221,11 @@ def test_start_retires_only_identified_legacy_process(
         monkeypatch.setattr(
             daemon.subprocess,
             "Popen",
-            lambda command, **kwargs: real_popen(command, **kwargs)
-            if command[0] == "ps"
-            else spawn(command, **kwargs),
+            lambda command, **kwargs: (
+                real_popen(command, **kwargs)
+                if command[0] == "ps"
+                else spawn(command, **kwargs)
+            ),
         )
         daemon._start_workers()
         spawn.assert_called_once()
@@ -238,7 +366,7 @@ def test_upgrade_reuses_installer_before_start(tmp_path, monkeypatch):
         daemon.subprocess, "Popen", lambda *a, **k: events.append("spawn")
     )
     daemon._start_workers()
-    assert events == ["unload", "retire", "install", "retire", "spawn"]
+    assert events == ["retire", "install", "retire", "spawn"]
 
 
 def test_live_daemon_replaces_retired_legacy_worker(monkeypatch):
@@ -253,3 +381,137 @@ def test_live_daemon_replaces_retired_legacy_worker(monkeypatch):
     monkeypatch.setattr(daemon, "_start_workers", lambda n: events.append("start"))
     assert daemon.start_daemon() == {"status": "ok"}
     assert events == ["upgrade", "retire", "start"]
+
+
+def legacy_queue(tmp_path):
+    from smartmemory.pipeline.work_graph.sqlite_store import SQLiteWorkGraph
+
+    store = SQLiteWorkGraph(str(tmp_path / "memory.db"))
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        conn.execute("CREATE TABLE enrichment_queue (item_id TEXT, status TEXT)")
+        conn.execute("INSERT INTO enrichment_queue VALUES ('flight', 'processing')")
+    return store
+
+
+@pytest.mark.parametrize("failure", ["nonzero", "empty", "oserror"])
+def test_failed_ps_blocks_recovery_and_replacement(
+    tmp_path, monkeypatch, caplog, failure
+):
+    store = legacy_queue(tmp_path)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        pidfile = tmp_path / "worker.0.pid"
+        pidfile.write_text(str(process.pid))
+
+        def inspect(command, **kwargs):
+            if failure == "oserror":
+                raise OSError("inspection denied")
+            return subprocess.CompletedProcess(
+                command, 2 if failure == "nonzero" else 0, "", "inspection failed"
+            )
+
+        monkeypatch.setattr(subprocess, "run", inspect)
+        spawn = Mock()
+        monkeypatch.setattr(subprocess, "Popen", spawn)
+        with pytest.raises(RuntimeError, match="Cannot inspect live legacy PID"):
+            daemon._start_workers()
+        assert pidfile.exists()
+        assert process.poll() is None
+        assert store.stats()["runs"] == 0
+        spawn.assert_not_called()
+        assert "1 processing rows remain unrecovered" in caplog.text
+    finally:
+        cleanup(process)
+
+
+def test_dead_legacy_pid_needs_no_ps(tmp_path, monkeypatch):
+    store = legacy_queue(tmp_path)
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    try:
+        process.wait(10)
+        (tmp_path / "worker.0.pid").write_text(str(process.pid))
+        monkeypatch.setattr(
+            subprocess, "run", Mock(side_effect=AssertionError("ps must not run"))
+        )
+        assert daemon._retire_legacy_workers()
+        assert store.stats()["runs"] == 1
+        assert not (tmp_path / "worker.0.pid").exists()
+    finally:
+        cleanup(process)
+
+
+def test_retired_inflight_job_recovered_before_spawn(tmp_path, monkeypatch):
+    store = legacy_queue(tmp_path)
+    # Real child claims the pending row, simulating interruption at extraction.
+    with sqlite3.connect(tmp_path / "memory.db") as conn:
+        conn.execute("UPDATE enrichment_queue SET status='pending'")
+    script = (
+        "import sqlite3,sys,time; "
+        "c=sqlite3.connect(sys.argv[1]); "
+        "c.execute(\"UPDATE enrichment_queue SET status='processing' WHERE status='pending'\"); "
+        "c.commit(); print('claimed',flush=True); time.sleep(60)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path / "memory.db")],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout.readline().strip() == "claimed"
+        threading.Thread(target=process.wait, daemon=True).start()
+        (tmp_path / "worker.0.pid").write_text(str(process.pid))
+        monkeypatch.setattr(
+            subprocess,
+            "run",
+            lambda command, **kw: subprocess.CompletedProcess(
+                command, 0, "python -m smartmemory_app.enrichment_worker --loop", ""
+            ),
+        )
+
+        def spawn(*args, **kwargs):
+            assert process.poll() == -15
+            assert store.stats()["runs"] == 1
+            with sqlite3.connect(tmp_path / "memory.db") as conn:
+                assert (
+                    conn.execute("SELECT status FROM enrichment_queue").fetchone()[0]
+                    == "migrated"
+                )
+
+        monkeypatch.setattr(subprocess, "Popen", spawn)
+        daemon._start_workers()
+        assert store.migrate_enrichment_queue(recover_processing=True) == 0
+    finally:
+        cleanup(process)
+
+
+@pytest.mark.parametrize("bootout_ok", [True, False])
+def test_legacy_launchd_without_pidfile(tmp_path, monkeypatch, caplog, bootout_ok):
+    store = legacy_queue(tmp_path)
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        threading.Thread(target=process.wait, daemon=True).start()
+        plist = tmp_path / f"{daemon._LAUNCHD_WORKER_LABEL}.plist"
+        plist.write_text("from smartmemory_app.enrichment_worker import main; main()")
+        monkeypatch.setattr(daemon.sys, "platform", "darwin")
+        states = iter([f"state = running\npid = {process.pid}\n", None])
+        monkeypatch.setattr(daemon, "_legacy_agent_state", lambda: next(states))
+
+        def bootout(label):
+            if bootout_ok:
+                process.terminate()
+            return bootout_ok
+
+        monkeypatch.setattr(daemon, "_launchd_bootout", bootout)
+        if bootout_ok:
+            assert daemon._retire_legacy_workers()
+            assert process.poll() == -15
+            assert store.stats()["runs"] == 1
+        else:
+            with pytest.raises(RuntimeError, match="positively booted out"):
+                daemon._retire_legacy_workers()
+            assert process.poll() is None
+            assert store.stats()["runs"] == 0
+            assert (tmp_path / "worker.launchd.pid").exists()
+            assert "1 processing rows remain unrecovered" in caplog.text
+    finally:
+        cleanup(process)
