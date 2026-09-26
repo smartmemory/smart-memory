@@ -247,7 +247,11 @@ def start_daemon(
     streamed to it during the wait, so `sm start` shows progress instead of a
     silent hang. Idempotent — returns immediately if already running.
     """
+    _upgrade_worker_agent()
+    legacy_retired = _retire_legacy_workers()
     existing = get_status()
+    if existing is not None and legacy_retired:
+        _start_workers(num_workers)
     if existing is not None and (
         not wait_until_ready or existing.get("status") != "warming"
     ):
@@ -415,6 +419,60 @@ def start_daemon(
     return status
 
 
+def _retire_legacy_workers() -> bool:
+    """Retire identified legacy consumers; return whether any were stopped."""
+    retired = False
+    for pid_file in _data_dir().glob("worker.*.pid"):
+        try:
+            pid = int(pid_file.read_text().strip())
+            if pid <= 0:
+                pid_file.unlink(missing_ok=True)
+                continue
+            result = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if "smartmemory_app.enrichment_worker" in result.stdout:
+                os.kill(pid, signal.SIGTERM)
+                retired = True
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    result = subprocess.run(
+                        ["ps", "-o", "command=", "-p", str(pid)],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if "smartmemory_app.enrichment_worker" not in result.stdout:
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(f"Legacy enrichment worker {pid} did not stop")
+        except (ProcessLookupError, ValueError):
+            pass
+        pid_file.unlink(missing_ok=True)
+    return retired
+
+
+def _upgrade_worker_agent() -> None:
+    """Reuse setup's renderer/reload path for installed pre-core worker agents."""
+    plist = _launchd_plist_path(_LAUNCHD_WORKER_LABEL)
+    if sys.platform == "darwin" and plist.exists():
+        content = plist.read_text()
+        if (
+            "enrichment_worker" in content
+            or "from smartmemory.cli import main" in content
+        ):
+            _launchd_bootout(_LAUNCHD_WORKER_LABEL)
+            _retire_legacy_workers()
+            from smartmemory_app.setup import _install_launchd_plist
+
+            if not _install_launchd_plist():
+                raise RuntimeError("Could not upgrade the SmartMemory launchd worker")
+
+
 def _start_workers(num_workers: int = 1) -> None:
     """Start one core worker, including for keyless enrichment.
 
@@ -425,46 +483,34 @@ def _start_workers(num_workers: int = 1) -> None:
 
     data = _data_dir()
     data.mkdir(parents=True, exist_ok=True)
-    pid_file = data / "worker.0.pid"
-    if pid_file.exists():
-        try:
-            os.kill(int(pid_file.read_text().strip()), 0)
-            return
-        except (ProcessLookupError, ValueError):
-            pid_file.unlink(missing_ok=True)
+    _upgrade_worker_agent()
+    _retire_legacy_workers()
     if worker_is_running(data):
         return
     with (data / "worker.log").open("a") as output:
-        proc = subprocess.Popen(
+        subprocess.Popen(
             [
                 sys.executable,
                 "-m",
-                "smartmemory.cli",
+                "smartmemory_app.worker_entry",
                 "--data-dir",
                 str(data),
-                "worker",
-                "run",
-                "--idle-exit",
-                "0",
             ],
             stdout=output,
             stderr=subprocess.STDOUT,
             start_new_session=True,
             env=os.environ.copy(),
         )
-    pid_file.write_text(str(proc.pid))
 
 
 def _stop_workers() -> None:
-    """Stop all daemon-owned core workers. Idempotent."""
-    data = _data_dir()
-    for pid_file in data.glob("worker.*.pid"):
-        try:
-            pid = int(pid_file.read_text().strip())
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, ValueError):
-            pass
-        pid_file.unlink(missing_ok=True)
+    """Stop every core launch path and any identified legacy consumer."""
+    from smartmemory.pipeline.work_graph.spawn import stop_worker
+
+    if sys.platform == "darwin" and _launchd_loaded(_LAUNCHD_WORKER_LABEL):
+        _launchd_bootout(_LAUNCHD_WORKER_LABEL)
+    stop_worker(_data_dir())
+    _retire_legacy_workers()
 
 
 def stop_daemon() -> None:

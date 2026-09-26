@@ -335,6 +335,10 @@ def _start_daemon_local(
     On other platforms: start manually via start_daemon().
     Never do both — that causes a duplicate-bind crash loop.
     """
+    from smartmemory_app.daemon import _retire_legacy_workers, _upgrade_worker_agent
+
+    _upgrade_worker_agent()
+    _retire_legacy_workers()
     launchd_ok = _install_launchd_plist()
     if on_log is None:
         action = (
@@ -909,7 +913,7 @@ def _install_launchd_plist() -> bool:
                 WORKER_PLIST_NAME,
                 _LAUNCHD_WORKER_LABEL,
                 "worker",
-                "smartmemory.cli",
+                "smartmemory_app.worker_entry",
                 "main()",
             )
         )

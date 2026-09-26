@@ -19,6 +19,7 @@ def lite(tmp_path, monkeypatch):
     from smartmemory_app.local_api import api
 
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("SMARTMEMORY_NO_WARM", "1")
     monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
     monkeypatch.setenv("SMARTMEMORY_OBSERVABILITY", "false")
@@ -274,6 +275,7 @@ def test_daemon_starts_one_core_worker(tmp_path, monkeypatch):
     from smartmemory_app import daemon
 
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr("smartmemory_app.config.llm_key_present", lambda: False)
     popen = Mock(return_value=Mock(pid=123456))
     monkeypatch.setattr(daemon.subprocess, "Popen", popen)
@@ -283,19 +285,10 @@ def test_daemon_starts_one_core_worker(tmp_path, monkeypatch):
     assert command == [
         sys.executable,
         "-m",
-        "smartmemory.cli",
+        "smartmemory_app.worker_entry",
         "--data-dir",
         str(tmp_path),
-        "worker",
-        "run",
-        "--idle-exit",
-        "0",
     ]
-    assert (tmp_path / "worker.0.pid").read_text() == "123456"
-    kill = Mock()
-    monkeypatch.setattr(daemon.os, "kill", kill)
-    daemon._stop_workers()
-    assert kill.call_args.args[0] == 123456
     assert not list(tmp_path.glob("worker.*.pid"))
 
 
@@ -334,6 +327,7 @@ def test_daemon_worker_process_stops_cleanly(tmp_path, monkeypatch):
     from smartmemory_app import daemon
 
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("SMARTMEMORY_NO_WARM", "1")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     real_popen = subprocess.Popen
@@ -373,6 +367,7 @@ def test_status_down_never_constructs_memory(tmp_path, monkeypatch):
     from smartmemory_app.cli import cli
 
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
     monkeypatch.setattr(
         config, "load_config", lambda: config.SmartMemoryConfig(mode="local")

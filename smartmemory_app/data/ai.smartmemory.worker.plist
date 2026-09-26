@@ -12,10 +12,6 @@
         <string>{LAUNCHD_COMMAND}</string>
         <string>--data-dir</string>
         <string>{DATA_DIR}</string>
-        <string>worker</string>
-        <string>run</string>
-        <string>--idle-exit</string>
-        <string>0</string>
     </array>
 
     <key>RunAtLoad</key>

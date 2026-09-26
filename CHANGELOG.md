@@ -21,6 +21,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   `sm admin reextract` queues work with `--yes`, `--all`, `--ruler`, or `--decline`;
   `sm worker requeue-dead` retries dead and skipped work. Daemon and launchd workers
   now use the durable core work graph; the legacy queue modules remain for migration.
+  Upgrades retire legacy workers and reload old launchd agents. All persistent
+  workers load the same provider configuration as saves; stop/restart also stops
+  on-demand workers through the core worker lock.
 
 - SessionStart injects a separately budgeted rules card of active workspace constraints,
   newest first. A dedicated classifier identifies external constraints, with separately

@@ -22,7 +22,7 @@ _JOBS = (
     ),
     (
         _LAUNCHD_WORKER_LABEL,
-        "smartmemory.cli",
+        "smartmemory_app.worker_entry",
         "main()",
     ),
 )
@@ -149,13 +149,9 @@ def test_launchd_install_embeds_guard_for_daemon_and_worker(tmp_path, monkeypatc
         (launch_agents / f"{_LAUNCHD_WORKER_LABEL}.plist").read_bytes()
     )
     args = worker["ProgramArguments"]
-    assert "from smartmemory.cli import main" in args[2]
+    assert "from smartmemory_app.worker_entry import main" in args[2]
     assert "enrichment_worker" not in args[2]
     assert args[3:] == [
         "--data-dir",
         str(data_dir),
-        "worker",
-        "run",
-        "--idle-exit",
-        "0",
     ]

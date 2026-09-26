@@ -1,18 +1,12 @@
 # Deprecated: retained for one release so core can migrate enrichment_queue.
 # All active wrapper saves and worker launchers use the core work graph.
-"""Enrichment worker — separate process that drains the SQLite queue.
+"""Retired consumer, kept importable for legacy migration compatibility.
 
-Polls enrichment_queue table, runs Tier 2 LLM extraction for each job,
-writes results back to the graph. Runs as its own launchd-managed process.
-
-Usage:
-    python -m smartmemory_app.enrichment_worker          # run once (drain queue)
-    python -m smartmemory_app.enrichment_worker --loop    # poll continuously
+The module entry point warns and exits; persistent work runs through
+smartmemory_app.worker_entry and the core work graph.
 """
 
 import logging
-import sys
-import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -220,25 +214,15 @@ def drain_queue() -> int:
 
 
 def run_loop(poll_interval: float = 2.0) -> None:
-    """Poll the queue continuously."""
-    logger.info("Enrichment worker started (poll every %.1fs)", poll_interval)
-    while True:
-        try:
-            n = drain_queue()
-            if n > 0:
-                logger.info("Processed %d jobs", n)
-        except Exception:
-            logger.warning("Drain cycle failed", exc_info=True)
-        time.sleep(poll_interval)
+    """Compatibility entry: the legacy consumer is retired."""
+    main()
 
 
 def main():
-    loop = "--loop" in sys.argv
-    if loop:
-        run_loop()
-    else:
-        n = drain_queue()
-        logger.info("Drained %d jobs", n)
+    logger.warning(
+        "Legacy enrichment_worker is retired; use smartmemory_app.worker_entry "
+        "to run the core work-graph worker."
+    )
 
 
 if __name__ == "__main__":
