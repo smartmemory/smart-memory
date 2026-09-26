@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 
 from filelock import FileLock
 
@@ -87,11 +88,32 @@ class SessionLessonExtractor(ReasoningExtractor):
             "Extract durable engineering findings, constraints and resolved decisions "
             "from this conversation, especially its final conclusions. Ignore abandoned "
             "hypotheses and requests that were not resolved. Do not invent findings. "
-            "Return a JSON array of objects with type and content. Use observation "
-            "for supporting facts and conclusion for each self-contained lesson "
+            "Return a JSON array of objects with type and content. Every rule, "
+            "constraint, requirement, limit, required format or resolved decision is "
+            "its own conclusion, even when it also supports a broader conclusion. Use "
+            "observation only for incidental context such as what was tried or checked "
             "(at most 8 conclusions). Preserve exact identifiers and limitations. "
             "Quote the conclusion text where possible. Return [] if none.\n\n" + text
         )
+
+
+# A stated rule survives even when the model files it as an observation: live Groq
+# output typed "a reversal's E2E ID must be exactly RV + the original ID" as
+# `observation`, which DecisionExtractor discards (DEMO-CC-UPLIFT-1 Stage 2a).
+_RULE = re.compile(
+    r"\b(?:must|never|exactly|only|required?|requires|not allowed|cannot|can't"
+    r"|at (?:most|least)|rejects?|rejected)\b|(?-i:\b[A-Z]{2,}-\d{2,}\b)",
+    re.IGNORECASE,
+)
+
+
+def _promote_rules(trace):
+    promoted = 0
+    for step in trace.steps:
+        if step.type == "observation" and _RULE.search(step.content or ""):
+            step.type = "conclusion"
+            promoted += 1
+    return promoted
 
 
 def capture_lessons(mem, job, turns, item_ids, session_date=None):
@@ -162,6 +184,9 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
         if trace is None:
             raise ValueError("reasoning extraction returned no usable trace")
         trace.session_id = job["session_id"]
+        promoted = _promote_rules(trace)
+        if promoted:
+            receipt["rules_promoted"] = promoted
         from smartmemory.plugins.extractors.decision import DecisionExtractor
 
         decisions = DecisionExtractor().extract_from_trace(trace)

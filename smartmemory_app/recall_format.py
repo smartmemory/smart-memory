@@ -112,41 +112,52 @@ def filter_hook_items(items, excluded=None):
     return kept
 
 
+_STOPWORDS = frozenset(
+    """the and for from with that this these those them they their there then than
+    into onto over under when where which what while who why how are was were been
+    being have has had not but all any can will would should could may might must
+    our your its also just only per via add support use using new now get set""".split()
+)
+
+
 def query_words(text):
-    return set(re.findall(r"[a-z0-9_]+", text.lower())) - {
-        "the",
-        "a",
-        "an",
-        "and",
-        "or",
-        "for",
-        "to",
-        "of",
-        "in",
-        "is",
-        "it",
-        "them",
-        "with",
-        "by",
-        "from",
-        "as",
-        "on",
-        "be",
-        "per",
-        "support",
-        "add",
+    """Content words shared by a query and a memory; tokens under 3 chars never count.
+
+    DEMO-CC-UPLIFT-1: "Stripe's" once yielded `s`, which matched every lesson with an
+    apostrophe and let irrelevant lessons evict relevant recall.
+    """
+    return {
+        word
+        for word in re.findall(r"[a-z0-9_]+", text.lower())
+        if len(word) >= 3 and word not in _STOPWORDS
     }
 
 
 def matching_lessons(items, query):
-    return [
+    """Active lessons relevant to `query`, strongest overlap first.
+
+    A lesson must share at least two content words with the query (one for a one-word
+    query); a single incidental shared word is not relevance.
+    """
+    rows = [
         item
         for item in filter_hook_items(items)
         if _item_to_recall_dict(item)["memory_type"] == "decision"
-        and (
-            not query
-            or query_words(query) & query_words(_item_to_recall_dict(item)["content"])
-        )
+    ]
+    if not query:
+        return rows
+    words = query_words(query)
+    needed = min(2, len(words))
+    if not needed:
+        return []
+    scored = [
+        (len(words & query_words(_item_to_recall_dict(item)["content"])), index, item)
+        for index, item in enumerate(rows)
+    ]
+    return [
+        item
+        for score, _, item in sorted(scored, key=lambda s: (-s[0], s[1]))
+        if score >= needed
     ]
 
 
@@ -163,7 +174,11 @@ def recall_item_label(item: dict) -> str:
 
 
 def format_recall_lines(
-    items: Iterable[dict], top_k: int, budget: int | None = None, query: str = ""
+    items: Iterable[dict],
+    top_k: int,
+    budget: int | None = None,
+    query: str = "",
+    lessons_first: bool = True,
 ) -> str:
     """Format items as the `## SmartMemory Context` block.
 
@@ -171,6 +186,8 @@ def format_recall_lines(
       - empty/whitespace content suppressed
       - dedup by item_id (then lowercased full content within memory type)
       - top_k cap applied AFTER dedup, not before
+      - `lessons_first=False` keeps the caller's relevance order (query recall ranks
+        matching lessons itself; a stray decision hit must not jump a relevant chunk)
 
     Returns "" if no items survive filtering.
     """
@@ -179,7 +196,8 @@ def format_recall_lines(
     lines: list[str] = []
 
     items = [_item_to_recall_dict(it) for it in filter_hook_items(items)]
-    items.sort(key=lambda it: it["memory_type"] != "decision")
+    if lessons_first:
+        items.sort(key=lambda it: it["memory_type"] != "decision")
     for it in items:
         body = (it.get("content") or "").strip()
         if not body:

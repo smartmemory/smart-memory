@@ -357,7 +357,7 @@ class RemoteMemory:
         results = [r for r in results if not r.get("reference", False)]
 
         # 6. Format (dedup + empty-suppress + top_k cap inside)
-        body = format_recall_lines(results, top_k=top_k)
+        body = format_recall_lines(results, top_k=top_k, lessons_first=not query)
         emitted = body.count("\n- ") if body else 0
 
         # 7. Compose

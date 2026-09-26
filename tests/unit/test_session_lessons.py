@@ -321,3 +321,32 @@ def test_classifier_failure_keeps_transcript_done(lesson_env, monkeypatch):
     assert retry["degradation"] == receipt["degradation"]
     assert retry["lesson_transitions"] == []
     assert mem.add_decision.call_count == 1
+
+
+LIVE_S2 = Path(__file__).parents[1] / "fixtures/lesson_rules_live/s2-groq-response.json"
+
+
+def test_hard_rule_typed_observation_still_becomes_lesson(lesson_env, monkeypatch):
+    """Real Groq output types the RV bank rule as `observation` (DEMO-CC-UPLIFT-1 Stage 2a)."""
+    monkeypatch.setattr(
+        "smartmemory.plugins.extractors.reasoning.call_llm",
+        lambda **kw: (None, LIVE_S2.read_text()),
+    )
+    enqueue()
+    capture_worker.run()
+    lessons = [record.content for record in lesson_env[1]]
+    assert any("must be exactly `RV` + the original E2E ID" in text for text in lessons)
+    assert any("NB-417" in text for text in lessons)
+    assert any(
+        "same clearing date" in text and "Two partial" in text for text in lessons
+    )
+    # Incidental context stays an observation.
+    assert not any("has not written" in text for text in lessons)
+
+
+def test_extraction_prompt_types_rules_as_conclusions(lesson_env):
+    enqueue()
+    capture_worker.run()
+    prompt = lesson_env[2][0]["user_content"]
+    assert "Every rule, constraint, requirement" in prompt
+    assert "supporting facts" not in prompt

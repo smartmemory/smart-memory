@@ -16,6 +16,18 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Session lessons keep every stated rule. Extraction now files each rule,
+  constraint, limit or required format as its own lesson, and a rule the model
+  still labels as background ("must", "exactly", "rejected", an error code)
+  is kept rather than discarded. Previously a bank rule could be extracted and
+  then silently dropped.
+
+- Prompt recall no longer lets loosely related lessons crowd out relevant
+  memories. A lesson must share at least two meaningful words with the prompt
+  (one for a one-word prompt), lessons are ranked by overlap, and words under
+  three letters no longer count ("Stripe's" used to match every lesson
+  containing an apostrophe).
+
 - Session lessons now retire outdated ones. When a new session explicitly
   replaces or withdraws an earlier lesson (verbatim evidence required), the old
   lesson is marked superseded or retracted and drops out of Orient/Recall.

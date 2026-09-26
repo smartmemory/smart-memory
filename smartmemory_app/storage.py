@@ -828,7 +828,9 @@ def recall(
             exhausted = len(raw) < fetch_k
 
         body = format_recall_lines(
-            [_item_to_recall_dict(r) for r in lessons + results], top_k=requested
+            [_item_to_recall_dict(r) for r in lessons + results],
+            top_k=requested,
+            lessons_first=not query,
         )
         emitted = body.count("\n- ") if body else 0
         if emitted >= requested or exhausted:
