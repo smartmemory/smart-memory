@@ -92,7 +92,11 @@ class SessionLessonExtractor(ReasoningExtractor):
             "constraint, requirement, limit, required format or resolved decision is "
             "its own conclusion, even when it also supports a broader conclusion. Use "
             "observation only for incidental context such as what was tried or checked "
-            "(at most 8 conclusions). Preserve exact identifiers and limitations. "
+            "(at most 8 conclusions). Make each conclusion self-contained: name the "
+            "system, counterparty or component it applies to and the task it matters "
+            "for (for example 'Stripe webhook retries: ...'), because it will be read "
+            "and searched without this conversation. "
+            "Preserve exact identifiers and limitations. "
             "Quote the conclusion text where possible. Return [] if none.\n\n" + text
         )
 

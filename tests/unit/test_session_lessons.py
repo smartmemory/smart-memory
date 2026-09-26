@@ -350,3 +350,6 @@ def test_extraction_prompt_types_rules_as_conclusions(lesson_env):
     prompt = lesson_env[2][0]["user_content"]
     assert "Every rule, constraint, requirement" in prompt
     assert "supporting facts" not in prompt
+    # Bare rules ("ID must be exactly RV + original") were unreachable by a task
+    # prompt that never names them; lessons must carry their own context.
+    assert "self-contained: name the system" in prompt
