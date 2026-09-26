@@ -1707,6 +1707,83 @@ def lifecycle_drain(timeout: float) -> None:
     raise SystemExit(code)
 
 
+@lifecycle_group.command("reclassify")
+@click.option(
+    "--cwd",
+    type=click.Path(exists=True, file_okay=False),
+    default=".",
+    show_default=True,
+)
+@click.option(
+    "--batch-size", type=click.IntRange(min=1, max=40), default=40, show_default=True
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Classify and report without writing metadata."
+)
+def lifecycle_reclassify(cwd: str, batch_size: int, dry_run: bool) -> None:
+    """Reclassify all active lessons in the current workspace."""
+    from collections import Counter
+
+    from smartmemory_app.lesson_classifier import classify_lessons
+    from smartmemory_app.recall_format import _item_to_recall_dict, derive_workspace_id
+    from smartmemory_app.remote_backend import RemoteMemory
+    from smartmemory_app.session_lessons import ORIGIN
+    from smartmemory_app.storage import get_memory
+
+    mem = get_memory()
+    if isinstance(mem, RemoteMemory):
+        raise click.ClickException("reclassify requires a local lesson store")
+    workspace = derive_workspace_id(cwd)
+    rows = []
+    for item in mem._graph.search_nodes({"memory_type": "decision", "origin": ORIGIN}):
+        meta = _item_to_recall_dict(item)["metadata"]
+        if (
+            meta.get("workspace_id") == workspace
+            and meta.get("status", "active") == "active"
+        ):
+            rows.append((item, meta))
+
+    def counts(kinds):
+        totals = Counter(kinds)
+        return ", ".join(
+            f"{kind}={totals[kind]}"
+            for kind in ("constraint", "finding", "unclassified")
+        )
+
+    click.echo(f"Workspace: {workspace}; active lessons: {len(rows)}")
+    click.echo(
+        "Before: "
+        + counts(meta.get("lesson_kind") or "unclassified" for _, meta in rows)
+    )
+    after = []
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start : start + batch_size]
+        try:
+            kinds = classify_lessons([item.content for item, _ in batch], {})
+        except Exception as exc:
+            raise click.ClickException(
+                f"Classifier failed for batch {start // batch_size + 1}; this batch was not written "
+                f"({start} prior lessons {'previewed' if dry_run else 'written'}): {exc}"
+            ) from exc
+        for (item, meta), kind in zip(batch, kinds):
+            if not dry_run:
+                updates = {"lesson_kind": kind, "lesson_kind_source": "classifier"}
+                # Keep the persisted decision snapshot consistent with flattened metadata.
+                context = (item.metadata or {}).get("context_snapshot")
+                if isinstance(context, dict):
+                    updates["context_snapshot"] = {**context, **updates}
+                mem.update_properties(item.item_id, updates)
+            after.append((item, kind))
+    click.echo(
+        ("After (dry-run): " if dry_run else "After: ")
+        + counts(kind for _, kind in after)
+    )
+    click.echo("Constraints:")
+    for item, kind in after:
+        if kind == "constraint":
+            click.echo(f"{item.item_id}: {item.content[:100]}")
+
+
 @lifecycle_group.command("status")
 def lifecycle_status() -> None:
     """Show lifecycle configuration and session stats."""

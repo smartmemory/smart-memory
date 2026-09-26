@@ -149,6 +149,7 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
             plan = json.loads(path.read_text())
             receipt = dict(plan["receipt"])
             receipt.pop("lesson_usage", None)  # retry performs no new LLM calls
+            receipt.pop("lesson_classifier_usage", None)
             plan["receipt"] = receipt
             return apply_plan(mem, plan, path)
         existing = mem._graph.search_nodes(
@@ -202,11 +203,8 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
         decisions = DecisionExtractor().extract_from_trace(trace)
         if not decisions:
             raise ValueError("reasoning trace contained no lessons/decisions")
-        regex_fallback = not any(
-            decision.content.strip().startswith("CONSTRAINT:") for decision in decisions
-        )
-        lesson_kind_source = "regex_fallback" if regex_fallback else "model"
-        fallback_count = 0
+        from smartmemory_app.lesson_classifier import classify_lessons
+
         lesson_kinds = {}
         for decision in decisions:
             content = decision.content.strip()
@@ -214,18 +212,19 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
             decision.content = (
                 content.removeprefix("CONSTRAINT:").strip() if tagged else content
             )
-            regex_constraint = regex_fallback and bool(_RULE.search(content))
-            fallback_count += int(regex_constraint)
-            kind = "constraint" if tagged or regex_constraint else "finding"
             if lesson_kinds.get(decision.content) != "constraint":
-                lesson_kinds[decision.content] = kind
-        if regex_fallback:
-            log.warning(
-                "model tagged no constraints; regex fallback classified %d of %d",
-                fallback_count,
-                len(decisions),
-            )
+                lesson_kinds[decision.content] = "constraint" if tagged else "finding"
         decisions = list({d.content: d for d in decisions if d.content}.values())[:8]
+        try:
+            kinds = classify_lessons([d.content for d in decisions], receipt)
+            lesson_kinds = dict(zip((d.content for d in decisions), kinds))
+            lesson_kind_source = "classifier"
+        except Exception as exc:
+            log.warning(
+                "Lesson constraint classifier failed; falling back to model_prefix: %s",
+                exc,
+            )
+            lesson_kind_source = "model_prefix"
         try:
             relations = classify(mem, decisions, job, turns, receipt)
         except Exception as exc:

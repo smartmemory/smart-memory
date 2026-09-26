@@ -268,3 +268,16 @@ def test_three_session_lifecycle_and_fresh_injection(tmp_path, monkeypatch):
                 )
         finally:
             mem.close()
+
+
+@pytest.fixture(autouse=True)
+def constraint_classifier_replay(monkeypatch):
+    """Isolate RC5 classification from existing extraction/lifecycle recordings."""
+    from pathlib import Path
+
+    response = (
+        Path(__file__).parents[1] / "fixtures/lesson_classifier/external-first.txt"
+    ).read_text()
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
+    )

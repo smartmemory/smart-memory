@@ -54,6 +54,14 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         )
 
     for index, session in enumerate(sessions):
+        kind_fixture = "external-two" if index == 1 else "external-first"
+        kind_response = (
+            FIXTURES.parent / "lesson_classifier" / f"{kind_fixture}.txt"
+        ).read_text()
+        monkeypatch.setattr(
+            "smartmemory_app.lesson_classifier.call_llm",
+            lambda **kwargs: (None, kind_response),
+        )
 
         def extraction(**kwargs):
             return None, json.dumps(

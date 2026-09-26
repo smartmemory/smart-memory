@@ -15,9 +15,9 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "rules_card"
 @pytest.mark.parametrize(
     ("response", "source"),
     [
-        ("response.json", "model"),
-        ("response-live-tagged.json", "model"),
-        ("response-live-untagged.json", "regex_fallback"),
+        ("response.json", "classifier"),
+        ("response-live-tagged.json", "classifier"),
+        ("response-live-untagged.json", "classifier"),
     ],
 )
 def test_capture_card_and_lifecycle_on_reopened_lite_store(
@@ -86,6 +86,69 @@ def test_capture_card_and_lifecycle_on_reopened_lite_store(
         card = build_rules_card()
         assert "UTF-8" not in card and "AP-409" in card
         monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "elsewhere")
+        assert build_rules_card() == ""
+    finally:
+        mem.close()
+
+
+@pytest.fixture(autouse=True)
+def constraint_classifier_replay(monkeypatch):
+    """Isolate RC5 classification from existing extraction/lifecycle recordings."""
+    from pathlib import Path
+
+    response = (
+        Path(__file__).parents[1] / "fixtures/lesson_classifier/external-two.txt"
+    ).read_text()
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
+    )
+
+
+def test_reclassify_persists_in_reopened_store(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from smartmemory.pipeline.config import PipelineConfig
+    from smartmemory.tools.factory import create_lite_memory
+
+    from smartmemory_app.cli import lifecycle_reclassify
+    from smartmemory_app.session_lessons import ORIGIN
+
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "ws")
+    monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
+    monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    response = (FIXTURES.parent / "lesson_classifier/internal.txt").read_text()
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
+    )
+    mem = create_lite_memory(str(tmp_path), pipeline_profile=PipelineConfig.tier1())
+    try:
+        decision = mem.add_decision(
+            content="Parser must reject negative inputs.",
+            origin=ORIGIN,
+            context_snapshot={"workspace_id": "ws", "lesson_kind": "constraint"},
+        )
+        mem.update_properties(
+            decision.decision_id, {"workspace_id": "ws", "lesson_kind": "constraint"}
+        )
+        monkeypatch.setattr(storage, "get_memory", lambda: mem)
+        dry = CliRunner().invoke(lifecycle_reclassify, ["--dry-run"])
+        assert dry.exit_code == 0, dry.output
+        assert "finding=1" in dry.output
+        assert mem.get(decision.decision_id).metadata["lesson_kind"] == "constraint"
+        result = CliRunner().invoke(lifecycle_reclassify, [])
+        assert result.exit_code == 0, result.output
+        assert "finding=1" in result.output
+    finally:
+        mem.close()
+    mem = create_lite_memory(str(tmp_path), pipeline_profile=PipelineConfig.tier1())
+    try:
+        item = mem.get(decision.decision_id)
+        assert item.metadata["lesson_kind"] == "finding"
+        assert item.metadata["lesson_kind_source"] == "classifier"
+        assert (
+            mem.get_decision(decision.decision_id).context_snapshot["lesson_kind"]
+            == "finding"
+        )
         assert build_rules_card() == ""
     finally:
         mem.close()

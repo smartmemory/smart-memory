@@ -353,3 +353,16 @@ def test_extraction_prompt_types_rules_as_conclusions(lesson_env):
     # Bare rules ("ID must be exactly RV + original") were unreachable by a task
     # prompt that never names them; lessons must carry their own context.
     assert "self-contained: name the system" in prompt
+
+
+@pytest.fixture(autouse=True)
+def constraint_classifier_replay(monkeypatch):
+    """Isolate RC5 classification from existing extraction/lifecycle recordings."""
+    from pathlib import Path
+
+    response = (
+        Path(__file__).parents[1] / "fixtures/lesson_classifier/external-first.txt"
+    ).read_text()
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
+    )

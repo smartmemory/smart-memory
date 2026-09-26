@@ -397,3 +397,16 @@ def test_empty_or_nonverbatim_evidence_rejected(setup, evidence):
     result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
     assert old.status == "active"
     assert result["lesson_transitions"][0]["downgrade_reason"] == "evidence_not_found"
+
+
+@pytest.fixture(autouse=True)
+def constraint_classifier_replay(monkeypatch):
+    """Isolate RC5 classification from existing extraction/lifecycle recordings."""
+    from pathlib import Path
+
+    response = (
+        Path(__file__).parents[1] / "fixtures/lesson_classifier/external-first.txt"
+    ).read_text()
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
+    )

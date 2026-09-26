@@ -51,10 +51,10 @@ def environment(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("response", "source", "promoted", "mixed_tags"),
     [
-        ("response.json", "model", 1, False),
-        ("response-live-tagged.json", "model", 0, False),
-        ("response-live-tagged.json", "model", 0, True),
-        ("response-live-untagged.json", "regex_fallback", 0, False),
+        ("response.json", "classifier", 1, False),
+        ("response-live-tagged.json", "classifier", 0, False),
+        ("response-live-tagged.json", "classifier", 0, True),
+        ("response-live-untagged.json", "classifier", 0, False),
     ],
 )
 def test_capture_replays_raw_fixture_and_persists_kind(
@@ -97,7 +97,7 @@ def test_capture_replays_raw_fixture_and_persists_kind(
     assert all("CONSTRAINT:" not in row["content"] for row in stored)
     assert [row["context_snapshot"]["lesson_kind"] for row in stored] == [
         "constraint",
-        "finding" if mixed_tags else "constraint",
+        "constraint",
         "finding",
     ]
     assert all(
@@ -107,24 +107,12 @@ def test_capture_replays_raw_fixture_and_persists_kind(
         call.args[1]["lesson_kind_source"] == source
         for call in mem.update_properties.call_args_list
     )
-    warnings = [
-        record
-        for record in caplog.records
-        if "model tagged no constraints" in record.getMessage()
-    ]
-    if source == "regex_fallback":
-        assert len(warnings) == 1
-        assert warnings[0].levelname == "WARNING"
-        assert warnings[0].getMessage() == (
-            "model tagged no constraints; regex fallback classified 2 of 3"
-        )
-    else:
-        assert warnings == []
+    assert "regex fallback classified" not in caplog.text
     if response == "response.json":
         assert stored[1]["context_snapshot"]["turn_range"] == [1, 2]
     assert [c.args[1]["lesson_kind"] for c in mem.update_properties.call_args_list] == [
         "constraint",
-        "finding" if mixed_tags else "constraint",
+        "constraint",
         "finding",
     ]
 
@@ -149,7 +137,9 @@ def test_card_eligibility_and_legacy_warning(environment, caplog):
     assert card.startswith("## Rules learned in this project")
     assert "[session:2026-09-26]" in card
     warnings = [r.message for r in caplog.records if "legacy lessons" in r.message]
-    assert warnings == ["Rules card classified 2 legacy lessons with rule regex"]
+    assert warnings == [
+        "Rules card classified 2 legacy lessons with rule regex; run smartmemory lifecycle reclassify"
+    ]
     environment._graph.search_nodes.assert_called_once_with(
         {"memory_type": "decision", "origin": ORIGIN}
     )
@@ -326,3 +316,16 @@ def test_status_surfaces_card_config(environment, monkeypatch):
     result = asyncio.run(lifecycle_api.status())
     assert result["rules_card_enabled"] is False
     assert result["rules_card_budget"] == 345
+
+
+@pytest.fixture(autouse=True)
+def constraint_classifier_replay(monkeypatch):
+    """Isolate RC5 classification from existing extraction/lifecycle recordings."""
+    from pathlib import Path
+
+    response = (
+        Path(__file__).parents[1] / "fixtures/lesson_classifier/external-two.txt"
+    ).read_text()
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
+    )
