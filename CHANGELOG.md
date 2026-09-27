@@ -16,6 +16,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Fresh Lite installs verify the spaCy model in the running Python environment. `sm status` and degraded startup explain when missing model files prevent queued work from draining.
+
 - Async lifecycle hooks remove captured payload files after the CLI exits, including
   failures, and purge stale hook payload files from existing installations.
 

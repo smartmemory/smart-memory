@@ -707,31 +707,14 @@ def uninstall(keep_data: bool) -> None:
 # ── Install helpers ───────────────────────────────────────────────────────────
 
 
-_SPACY_MODEL_SIZES = {
-    "en_core_web_sm": "~15MB",
-    "en_core_web_md": "~45MB",
-    "en_core_web_lg": "~590MB",
-}
-
-
 def _ensure_spacy(model: str = "en_core_web_sm") -> None:
-    try:
-        import spacy
+    from smartmemory.errors import MissingModelError
+    from smartmemory.tools.factory import _ensure_spacy_model
 
-        spacy.load(model)
-    except (ImportError, OSError):
-        size = _SPACY_MODEL_SIZES.get(model, "")
-        click.echo(f"Downloading {model} ({size})...")
-        result = subprocess.run(
-            [sys.executable, "-m", "spacy", "download", model],
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            click.echo(
-                f"WARNING: spaCy model download failed. Run manually:\n"
-                f"  python -m spacy download {model}",
-                err=True,
-            )
+    try:
+        _ensure_spacy_model(model)
+    except MissingModelError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _copy_hooks() -> None:

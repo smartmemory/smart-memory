@@ -401,3 +401,62 @@ def test_status_down_never_constructs_memory(tmp_path, monkeypatch):
     assert "Work:       pending=0, running=0, dead=0" in result.output
     assert "SmartMemory daemon is not running." in result.output
     assert "memories were saved without an LLM" not in result.output
+
+
+def test_status_explains_pending_work_with_missing_spacy(tmp_path, monkeypatch):
+    from smartmemory_app import config
+    from smartmemory_app.cli import cli
+
+    monkeypatch.setattr(
+        config, "load_config", lambda: config.SmartMemoryConfig(mode="local")
+    )
+    monkeypatch.setattr(
+        "smartmemory_app.work_graph.get_work_status",
+        lambda: {"pending": 2, "running": 0, "dead": 0, "worker_running": False},
+    )
+    monkeypatch.setattr("spacy.util.is_package", lambda name: False)
+    monkeypatch.setattr("smartmemory_app.daemon.get_status", lambda: None)
+    monkeypatch.setattr("smartmemory_app.daemon.should_be_running", lambda: False)
+    result = CliRunner().invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "pending=2" in result.output
+    assert "WARNING: 2 queued work box(es) cannot drain" in result.output
+    assert "sm setup" in result.output
+
+
+def test_degraded_start_explains_pending_work_with_missing_spacy(monkeypatch, capsys):
+    from smartmemory_app.cli import _report_start_status
+
+    monkeypatch.setattr(
+        "smartmemory_app.work_graph.get_work_status",
+        lambda: {"pending": 2, "running": 0, "dead": 0, "worker_running": False},
+    )
+    monkeypatch.setattr("spacy.util.is_package", lambda name: False)
+    _report_start_status(
+        {"status": "degraded", "degraded_reason": "spaCy model missing"}
+    )
+    output = capsys.readouterr()
+    assert "spaCy model missing" in output.out
+    assert "WARNING: 2 queued work box(es) cannot drain" in output.err
+
+
+def test_setup_uses_verified_core_spacy_installer(monkeypatch):
+    import click
+    from smartmemory.errors import MissingModelError
+
+    from smartmemory_app.setup import _ensure_spacy
+
+    seen = []
+    monkeypatch.setattr(
+        "smartmemory.tools.factory._ensure_spacy_model",
+        lambda model: seen.append(model),
+    )
+    _ensure_spacy("en_core_web_md")
+    assert seen == ["en_core_web_md"]
+
+    def missing(model):
+        raise MissingModelError("model still missing from this Python")
+
+    monkeypatch.setattr("smartmemory.tools.factory._ensure_spacy_model", missing)
+    with pytest.raises(click.ClickException, match="model still missing"):
+        _ensure_spacy("en_core_web_sm")

@@ -489,6 +489,15 @@ def _report_start_status(info: dict | None, *, just_started: bool = True) -> Non
         click.echo(f"SmartMemory {state}, but it needs attention.")
         click.echo(f"Problem: {reason}")
         click.echo("Next step: Run: sm doctor")
+        from smartmemory_app.work_graph import blocked_work_warning, get_work_status
+
+        try:
+            warning = blocked_work_warning(get_work_status())
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not hide degraded startup
+            click.echo(f"WARNING: Work status unavailable: {exc}", err=True)
+        else:
+            if warning:
+                click.echo(warning, err=True)
         return
     raise click.ClickException(
         "SmartMemory gave an unexpected health response. Run: sm doctor"
@@ -687,7 +696,7 @@ def status_cmd() -> None:
     from smartmemory_app.daemon import get_status, should_be_running
 
     from smartmemory_app.config import load_config
-    from smartmemory_app.work_graph import get_work_status
+    from smartmemory_app.work_graph import blocked_work_warning, get_work_status
 
     if load_config().mode != "remote":
         try:
@@ -695,6 +704,9 @@ def status_cmd() -> None:
             click.echo(
                 f"  Work:       pending={work['pending']}, running={work['running']}, dead={work['dead']}"
             )
+            warning = blocked_work_warning(work)
+            if warning:
+                click.echo(warning, err=True)
         except Exception as exc:
             click.echo(f"Work counts unavailable: {exc}", err=True)
     info = get_status()

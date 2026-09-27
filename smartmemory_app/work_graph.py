@@ -1,6 +1,7 @@
 """Thin wrapper adapters for the core-owned local work graph."""
 
 import logging
+import sys
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,21 @@ def get_work_status() -> dict:
         **get_work_graph().stats(),
         "worker_running": worker_is_running(_resolve_data_dir()),
     }
+
+
+def blocked_work_warning(work: dict) -> str | None:
+    """Explain a known prerequisite failure without constructing Lite memory."""
+    if not work["pending"]:
+        return None
+    import spacy
+
+    if spacy.util.is_package("en_core_web_sm"):
+        return None
+    return (
+        f"WARNING: {work['pending']} queued work box(es) cannot drain: spaCy model "
+        f"'en_core_web_sm' is missing from {sys.executable}. "
+        "Run sm setup to install it in this environment, then run sm worker."
+    )
 
 
 def get_reextract_offer() -> str | None:
