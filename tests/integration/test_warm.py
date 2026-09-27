@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-import smartmemory_app.warm as warm
+from smartmemory_app import warm
 
 pytestmark = pytest.mark.integration
 
@@ -67,7 +67,9 @@ def test_is_warm_false_when_unloaded(monkeypatch):
     import smartmemory.plugins.embedding as emb
 
     monkeypatch.setattr(emb.EmbeddingService, "_st_model", None, raising=False)
-    monkeypatch.setattr(emb.EmbeddingService, "_pinned_local_model", None, raising=False)
+    monkeypatch.setattr(
+        emb.EmbeddingService, "_pinned_local_model", None, raising=False
+    )
     assert warm.is_warm() is False
 
 
@@ -92,12 +94,14 @@ def test_add_cmd_direct_path_emits_notice(monkeypatch):
 
     from smartmemory_app import cli
 
-    monkeypatch.setattr(cli, "_daemon_request", lambda *a, **k: None)  # force direct path
+    monkeypatch.setattr(
+        cli, "_daemon_request", lambda *a, **k: None
+    )  # force direct path
     monkeypatch.setattr("smartmemory_app.storage.ingest", lambda *a, **k: "id-123")
     monkeypatch.setattr("smartmemory_app.warm.is_warm", lambda: False)
     cli._warm_notice_shown = False
 
-    r = CliRunner(mix_stderr=False).invoke(cli.cli, ["add", "hello world"])
+    r = CliRunner().invoke(cli.cli, ["add", "hello world"])
 
     assert r.exit_code == 0, r.output
     assert "id-123" in r.stdout

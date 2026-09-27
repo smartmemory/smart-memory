@@ -238,7 +238,10 @@ def test_socks_incident_chain_health_to_status_to_doctor(runner, tmp_path, monke
         doctor_result = runner.invoke(cli, ["doctor"])
 
     assert doctor_result.exit_code == 1
-    assert "SmartMemory cannot use your network's SOCKS proxy" in doctor_result.output
+    assert (
+        "SOCKS proxy support is missing for the daemon's local API calls (socksio)"
+        in doctor_result.output
+    )
     assert "pip install httpx[socks]" in doctor_result.output
 
 

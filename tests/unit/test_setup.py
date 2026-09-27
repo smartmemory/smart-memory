@@ -13,7 +13,7 @@ def test_register_hooks_idempotent(tmp_path):
         patch("smartmemory_app.setup.SETTINGS", settings_file),
         patch("smartmemory_app.setup.HOOKS_DEST", hooks_dest),
     ):
-        from smartmemory_app.setup import _register_hooks, _get_hook_registrations
+        from smartmemory_app.setup import _get_hook_registrations, _register_hooks
 
         _register_hooks()
         _register_hooks()  # second run
@@ -59,8 +59,9 @@ def test_copy_skills_no_overwrite(tmp_path):
     assert (skills_dest / "search.md").exists()
 
 
-def test_seed_data_dir_idempotent(tmp_path):
+def test_seed_data_dir_idempotent(tmp_path, monkeypatch):
     """_seed_data_dir() can be called twice without error or data corruption."""
+    monkeypatch.delenv("SMARTMEMORY_DATA_DIR", raising=False)
     with patch("smartmemory_app.setup.DATA_DIR", tmp_path):
         from smartmemory_app.setup import _seed_data_dir
 
@@ -83,7 +84,7 @@ def test_deregister_hooks_removes_entries(tmp_path):
         patch("smartmemory_app.setup.SETTINGS", settings_file),
         patch("smartmemory_app.setup.HOOKS_DEST", hooks_dest),
     ):
-        from smartmemory_app.setup import _register_hooks, _deregister_hooks
+        from smartmemory_app.setup import _deregister_hooks, _register_hooks
 
         _register_hooks()
         _deregister_hooks()
@@ -106,7 +107,7 @@ def test_deregister_hooks_preserves_other_hooks(tmp_path):
         patch("smartmemory_app.setup.SETTINGS", settings_file),
         patch("smartmemory_app.setup.HOOKS_DEST", hooks_dest),
     ):
-        from smartmemory_app.setup import _register_hooks, _deregister_hooks
+        from smartmemory_app.setup import _deregister_hooks, _register_hooks
 
         _register_hooks()
         _deregister_hooks()
@@ -156,7 +157,10 @@ def test_copy_hooks_namespaced_no_clobber(tmp_path):
         _copy_hooks()
 
     # Generic file must be untouched
-    assert other_app_hook.read_text() == "#!/bin/bash\n# coder-config hook — DO NOT CLOBBER"
+    assert (
+        other_app_hook.read_text()
+        == "#!/bin/bash\n# coder-config hook — DO NOT CLOBBER"
+    )
     # Namespaced files must exist
     assert (hooks_dest / "smartmemory-orient.sh").exists()
     assert (hooks_dest / "smartmemory-recall.sh").exists()

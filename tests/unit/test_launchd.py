@@ -9,7 +9,6 @@ from click.testing import CliRunner
 
 from smartmemory_app.install_check import PROXY_ENV_VARS
 
-
 PLIST_TEMPLATE = (
     Path(__file__).parent.parent.parent
     / "smartmemory_app"
@@ -334,6 +333,7 @@ class TestUninstallCommand:
         config_file = tmp_path / "config" / "smartmemory" / "config.toml"
         data_dir = tmp_path / ".smartmemory"
 
+        monkeypatch.delenv("SMARTMEMORY_DATA_DIR", raising=False)
         monkeypatch.setattr("smartmemory_app.config.config_path", lambda: config_file)
         monkeypatch.setattr("smartmemory_app.setup.DATA_DIR", data_dir)
 

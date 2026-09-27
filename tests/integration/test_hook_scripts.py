@@ -1,8 +1,9 @@
 """Integration tests for the current six lifecycle hook shell scripts."""
 
 import json
-import socket
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,16 @@ import pytest
 HOOKS_DIR = Path(__file__).parents[2] / "smartmemory_app" / "hooks"
 
 
+@pytest.fixture(autouse=True)
+def hook_cli_on_path(monkeypatch):
+    monkeypatch.setenv(
+        "PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
+    )
+
+
 def _unused_local_port() -> int:
-    """Reserve and release a local port so lifecycle commands take the direct path."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    """Port zero cannot host a listening daemon, so hooks take the direct path."""
+    return 0
 
 
 _HOOK_CASES = (
@@ -73,6 +79,7 @@ def test_lifecycle_hooks_exit_0_with_event_json(
         input=json.dumps(payload).encode(),
         capture_output=True,
         timeout=30,
+        check=False,
     )
 
     assert result.returncode == 0, (
@@ -97,6 +104,7 @@ def test_recall_hook_consumes_stdin_json(tmp_path, monkeypatch):
         input=json.dumps(payload).encode(),
         capture_output=True,
         timeout=30,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr.decode()

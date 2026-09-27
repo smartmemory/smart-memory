@@ -21,6 +21,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   coverage expects a durable work-graph run ID when deferred work is queued and
   isolates special-character entity extraction from Tier 1 deduplication.
 
+- Isolate wrapper tests from inherited data directories and sandbox-restricted
+  port binding; update Click and doctor assertions to the current interfaces.
+
 - Lite saves work without an LLM key, with deferred work owned by one core worker.
   `sm status` shows pending/running/dead work counts and a re-extraction offer.
   `sm admin reextract` queues work with `--yes`, `--all`, `--ruler`, or `--decline`;

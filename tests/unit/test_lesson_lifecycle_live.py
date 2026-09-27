@@ -60,18 +60,21 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         ).read_text()
         monkeypatch.setattr(
             "smartmemory_app.lesson_classifier.call_llm",
-            lambda **kwargs: (None, kind_response),
+            lambda _response=kind_response, **kwargs: (None, _response),
         )
 
-        def extraction(**kwargs):
+        def extraction(*, _session=session, **kwargs):
             return None, json.dumps(
-                [dict(type="conclusion", content=text) for text in session["lessons"]]
+                [
+                    {"type": "conclusion", "content": text}
+                    for text in _session["lessons"]
+                ]
             )
 
-        def classifier(**kwargs):
-            calls.append(index)
-            assert index > 0
-            rows = json.loads((FIXTURES / f"s{index}-response.json").read_text())
+        def classifier(*, _index=index, **kwargs):
+            calls.append(_index)
+            assert _index > 0
+            rows = json.loads((FIXTURES / f"s{_index}-response.json").read_text())
             pairs = {
                 (p["lesson"], p["old_id"])
                 for p in json.loads(kwargs["user_content"])["pairs"]
@@ -89,11 +92,11 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         )
         monkeypatch.setattr("smartmemory_app.lesson_lifecycle.call_llm", classifier)
         mem = make_memory()
-        job = dict(
-            session_id=f"live-s{index}",
-            workspace_id="payments",
-            transcript_path=f"/tmp/live-s{index}",
-        )
+        job = {
+            "session_id": f"live-s{index}",
+            "workspace_id": "payments",
+            "transcript_path": f"/tmp/live-s{index}",
+        }
         try:
             receipt = capture_lessons(mem, job, session["turns"], [])
             assert "degradation" not in receipt, receipt
@@ -110,9 +113,8 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
                     for r in receipt["lesson_transitions"]
                 )
             else:
-                assert all(
-                    r["relation"] == "unrelated" for r in receipt["lesson_transitions"]
-                )
+                assert receipt["lesson_transitions"] == []
+                assert mem.get_decision(receipt["lesson_ids"][0]).status == "active"
             if index > 0:
                 old = mem.get_decision(id_map[recorded_ids[0]])
                 assert old.status == "superseded"
@@ -135,7 +137,7 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
             continue
         mem = make_memory()
         try:
-            monkeypatch.setattr(storage, "get_memory", lambda: mem)
+            monkeypatch.setattr(storage, "get_memory", lambda _mem=mem: _mem)
             lifecycle = MemoryLifecycle(f"fresh-live-{index}")
             orient = lifecycle.orient("/tmp/payments")
             recall = lifecycle.recall(
@@ -160,4 +162,5 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
                 assert sessions[0]["lessons"][0] not in payload
         finally:
             mem.close()
-    assert calls == [1, 2]
+    # S2 has no eligible old candidate, so there is no pair to classify.
+    assert calls == [1]
