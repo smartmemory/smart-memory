@@ -6,6 +6,13 @@ if ! mkdir -p "$HOOK_DATA_DIR/tmp"; then
     echo "WARNING: lifecycle observe payload lost: cannot create hook temp directory" >&2
     exit 0
 fi
+# Purge only stale files created by these three async hooks.
+PURGED_COUNT=$(find "$HOOK_DATA_DIR/tmp" -maxdepth 1 -type f \
+    \( -name 'observe.??????' -o -name 'learn.??????' -o -name 'distill.??????' \) \
+    -mmin +60 -delete -print 2>>"$HOOK_DATA_DIR/hooks.log" | wc -l | tr -d '[:space:]')
+if [ "$PURGED_COUNT" -gt 0 ]; then
+    echo "WARNING: purged $PURGED_COUNT stale lifecycle hook payload file(s)" >>"$HOOK_DATA_DIR/hooks.log"
+fi
 PAYLOAD_FILE=$(mktemp "$HOOK_DATA_DIR/tmp/observe.XXXXXX" 2>>"$HOOK_DATA_DIR/hooks.log") || {
     echo "WARNING: lifecycle observe payload lost: cannot create payload file" >>"$HOOK_DATA_DIR/hooks.log"
     exit 0
@@ -16,8 +23,8 @@ if ! cat >"$PAYLOAD_FILE" 2>>"$HOOK_DATA_DIR/hooks.log"; then
     exit 0
 fi
 {
-    trap 'rm -f "$PAYLOAD_FILE"' EXIT
     smartmemory lifecycle observe <"$PAYLOAD_FILE"
+    rm -f "$PAYLOAD_FILE"
 } >/dev/null 2>>"$HOOK_DATA_DIR/hooks.log" &
 disown
 exit 0

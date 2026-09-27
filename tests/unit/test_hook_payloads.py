@@ -15,6 +15,10 @@ ASYNC_HOOKS = sorted(
     for path in HOOKS_DIR.glob("*.sh")
     if re.search(r"(?<!&)&\s*$", path.read_text(), re.MULTILINE)
 )
+BASHES = [Path("/bin/bash")]
+HOMEBREW_BASH = Path("/opt/homebrew/opt/bash/bin/bash")
+if HOMEBREW_BASH.is_file():
+    BASHES.append(HOMEBREW_BASH)
 
 
 @pytest.fixture
@@ -48,13 +52,15 @@ def wait_for(predicate):
 
 @pytest.mark.parametrize("script", ASYNC_HOOKS)
 @pytest.mark.parametrize("size", [32, 200_000])
-def test_async_hook_preserves_exact_payload(script, size, hook_stub):
+@pytest.mark.parametrize("bash", BASHES)
+def test_async_hook_preserves_exact_payload(script, size, bash, hook_stub):
     payload = (json.dumps({"tool_response": "x" * size}) + "\n\n").encode()
     result = subprocess.run(
-        ["bash", str(HOOKS_DIR / script)],
+        [str(bash), str(HOOKS_DIR / script)],
         input=payload,
         capture_output=True,
         timeout=10,
+        check=False,
     )
     assert result.returncode == 0
     wait_for(lambda: (hook_stub / "done").exists())
@@ -65,15 +71,19 @@ def test_async_hook_preserves_exact_payload(script, size, hook_stub):
 
 
 @pytest.mark.parametrize("script", ASYNC_HOOKS)
-def test_async_hook_returns_before_slow_failing_cli(script, hook_stub, monkeypatch):
+@pytest.mark.parametrize("bash", BASHES)
+def test_async_hook_returns_before_slow_failing_cli(
+    script, bash, hook_stub, monkeypatch
+):
     monkeypatch.setenv("STUB_DELAY", "3")
     monkeypatch.setenv("STUB_EXIT", "1")
     started = time.monotonic()
     result = subprocess.run(
-        ["bash", str(HOOKS_DIR / script)],
+        [str(bash), str(HOOKS_DIR / script)],
         input=b'{"session_id": "slow"}\n',
         capture_output=True,
         timeout=10,
+        check=False,
     )
     elapsed = time.monotonic() - started
     try:
@@ -85,6 +95,42 @@ def test_async_hook_returns_before_slow_failing_cli(script, hook_stub, monkeypat
         wait_for(lambda: not list((hook_stub / "data/tmp").glob("*")))
 
 
+@pytest.mark.parametrize("script", ASYNC_HOOKS)
+@pytest.mark.parametrize("bash", BASHES)
+def test_async_hook_purges_only_stale_payloads(script, bash, hook_stub):
+    temp_dir = hook_stub / "data/tmp"
+    temp_dir.mkdir(parents=True)
+    stale_files = [
+        temp_dir / f"{phase}.ABC123" for phase in ("observe", "learn", "distill")
+    ]
+    unrelated = temp_dir / "unrelated.ABC123"
+    wrong_suffix = temp_dir / "observe.ABC1234"
+    fresh = temp_dir / "learn.FRESH1"
+    for path in (*stale_files, unrelated, wrong_suffix, fresh):
+        path.write_text("private payload")
+    old = time.time() - 2 * 60 * 60
+    for path in (*stale_files, unrelated, wrong_suffix):
+        os.utime(path, (old, old))
+
+    result = subprocess.run(
+        [str(bash), str(HOOKS_DIR / script)],
+        input=b'{"session_id": "purge"}\n',
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0
+    wait_for(lambda: (hook_stub / "done").exists())
+    wait_for(
+        lambda: sorted(temp_dir.iterdir()) == sorted((unrelated, wrong_suffix, fresh))
+    )
+    assert all(not path.exists() for path in stale_files)
+    assert (
+        "WARNING: purged 3 stale lifecycle hook payload file(s)"
+        in (hook_stub / "data/hooks.log").read_text()
+    )
+
+
 @pytest.mark.parametrize("script", ["orient.sh", "recall.sh", "persist.sh"])
 def test_foreground_hooks_preserve_payload(script, hook_stub):
     payload = b'{"session_id": "foreground"}\n\n'
@@ -93,6 +139,7 @@ def test_foreground_hooks_preserve_payload(script, hook_stub):
         input=payload,
         capture_output=True,
         timeout=10,
+        check=False,
     )
     assert result.returncode == 0
     assert (hook_stub / "done").exists()

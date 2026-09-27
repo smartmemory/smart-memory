@@ -16,6 +16,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Async lifecycle hooks remove captured payload files after the CLI exits, including
+  failures, and purge stale hook payload files from existing installations.
+
 - Recall and confidence integration checks now use producer-supplied origins and
   verify stored provenance, tier filtering, and confidence markers. Lite async
   coverage expects a durable work-graph run ID when deferred work is queued and
