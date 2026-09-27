@@ -16,6 +16,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Local ingest warns when caller properties contain reserved keys that are dropped,
+  naming the keys while preserving producer-controlled provenance.
+
 - Fresh Lite installs verify the spaCy model in the running Python environment. `sm status` and degraded startup explain when missing model files prevent queued work from draining.
 
 - Async lifecycle hooks remove captured payload files after the CLI exits, including

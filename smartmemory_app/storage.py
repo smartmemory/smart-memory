@@ -399,6 +399,11 @@ def ingest(
     if origin:
         ctx["origin"] = origin
     if properties:
+        dropped = _RESERVED.intersection(properties)
+        if dropped:
+            log.warning(
+                "Dropped reserved ingest properties: %s", ", ".join(sorted(dropped))
+            )
         # Flatten user properties into context so they become top-level node
         # properties (metadata keys merge into graph node properties dict).
         for k, v in properties.items():

@@ -1,5 +1,7 @@
 """Tests for smartmemory_app.storage singleton and operations."""
 
+import logging
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -215,6 +217,44 @@ def test_ingest_remote_branch_skips_lock(tmp_path):
     mock_mem.ingest.assert_called_once_with("remote content", "episodic")
     mock_lock.assert_not_called()
     assert result == "remote-item-id"
+
+
+def test_ingest_warns_when_reserved_properties_are_dropped(
+    tmp_path, monkeypatch, caplog
+):
+    """Caller properties cannot override producer fields, and the loss is visible."""
+    import smartmemory_app.storage as storage
+
+    memory = MagicMock()
+    memory.ingest.return_value = "item-id"
+    monkeypatch.setattr(storage, "_data_path", tmp_path)
+    monkeypatch.setattr(storage, "get_memory", lambda: memory)
+
+    with caplog.at_level(logging.WARNING, logger="smartmemory_app.storage"):
+        result = storage.ingest(
+            "content",
+            origin="cli:add",
+            properties={
+                "origin": "import:vault",
+                "item_id": "forged",
+                "source": "user",
+            },
+        )
+
+    assert result == "item-id"
+    assert memory.ingest.call_args.kwargs["context"] == {
+        "memory_type": "episodic",
+        "origin": "cli:add",
+        "source": "user",
+    }
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "origin" in warnings[0]
+    assert "item_id" in warnings[0]
 
 
 def test_get_remote_memory_singleton(tmp_path):
