@@ -35,7 +35,7 @@ def temp_data(tmp_path, monkeypatch):
 @pytest.mark.integration
 def test_hook_recall_no_empty_buckets(temp_data):
     """Items with empty content must never produce bare `[type]` lines."""
-    storage_mod.ingest("real content here", properties={"origin": "cli:add"})
+    storage_mod.ingest("real content here", origin="cli:add")
     # An item with empty content shouldn't normally exist, but if one slips
     # through (extraction artifacts, malformed imports), recall must skip it.
     result = storage_mod.recall(top_k=5)
@@ -52,7 +52,7 @@ def test_hook_recall_dedup_distinct_ids_same_content(temp_data):
     `[concept] smartmemory ×3` symptom from the filing)."""
     same_content = "duplicate-by-content test memory"
     for _ in range(3):
-        storage_mod.ingest(same_content, properties={"origin": "cli:add"})
+        storage_mod.ingest(same_content, origin="cli:add")
     result = storage_mod.recall(top_k=10)
     occurrences = result.count(same_content)
     assert occurrences <= 1, (
@@ -63,9 +63,14 @@ def test_hook_recall_dedup_distinct_ids_same_content(temp_data):
 @pytest.mark.integration
 def test_hook_recall_origin_tier_4_excluded(temp_data):
     """Items with tier-4 origin (hook:*, structured:*) don't appear in recall."""
-    storage_mod.ingest("user-authored content", properties={"origin": "cli:add"})
-    storage_mod.ingest("hook noise content", properties={"origin": "hook:test"})
-    storage_mod.ingest("system noise content", properties={"origin": "structured:tool_call"})
+    storage_mod.ingest("user-authored content", origin="cli:add")
+    hook_id = storage_mod.ingest("hook noise content", origin="hook:test")
+    structured_id = storage_mod.ingest(
+        "system noise content", origin="structured:tool_call"
+    )
+
+    assert storage_mod.get_memory().get(hook_id).origin == "hook:test"
+    assert storage_mod.get_memory().get(structured_id).origin == "structured:tool_call"
 
     result = storage_mod.recall(top_k=10)
     assert "user-authored content" in result
@@ -78,11 +83,13 @@ def test_hook_recall_workspace_isolation(temp_data):
     """Items tagged with workspace_id A must not surface in workspace B recall."""
     storage_mod.ingest(
         "workspace A private memory",
-        properties={"origin": "cli:add", "workspace_id": "ws_alpha"},
+        properties={"workspace_id": "ws_alpha"},
+        origin="cli:add",
     )
     storage_mod.ingest(
         "workspace B private memory",
-        properties={"origin": "cli:add", "workspace_id": "ws_beta"},
+        properties={"workspace_id": "ws_beta"},
+        origin="cli:add",
     )
 
     a = storage_mod.recall(top_k=10, workspace_id="ws_alpha")
@@ -100,11 +107,12 @@ def test_hook_recall_strict_drops_untagged_legacy(temp_data):
     on the recall — eliminates the Alice/Atlas-style cross-workspace leak."""
     storage_mod.ingest(
         "legacy untagged memory",
-        properties={"origin": "cli:add"},  # no workspace_id
+        origin="cli:add",  # no workspace_id
     )
     storage_mod.ingest(
         "scoped memory",
-        properties={"origin": "cli:add", "workspace_id": "ws_alpha"},
+        properties={"workspace_id": "ws_alpha"},
+        origin="cli:add",
     )
 
     # Default (non-strict): legacy item passes through
@@ -135,8 +143,8 @@ def test_hook_recall_failure_mode_empty_string(temp_data):
     """When no items survive filtering, recall returns empty string —
     never bare labels or error text."""
     # Ingest only tier-4 items
-    storage_mod.ingest("hook noise 1", properties={"origin": "hook:test"})
-    storage_mod.ingest("hook noise 2", properties={"origin": "structured:tool_call"})
+    storage_mod.ingest("hook noise 1", origin="hook:test")
+    storage_mod.ingest("hook noise 2", origin="structured:tool_call")
 
     result = storage_mod.recall(top_k=5, include_snapshot=False)
     assert result == "", (
@@ -147,10 +155,10 @@ def test_hook_recall_failure_mode_empty_string(temp_data):
 @pytest.mark.integration
 def test_hook_recall_query_mode(temp_data):
     """UserPromptSubmit-style query: recall(query=...) does semantic search."""
-    storage_mod.ingest("the architecture uses FalkorDB for graph storage",
-                        properties={"origin": "cli:add"})
-    storage_mod.ingest("unrelated topic about marketing",
-                        properties={"origin": "cli:add"})
+    storage_mod.ingest(
+        "the architecture uses FalkorDB for graph storage", origin="cli:add"
+    )
+    storage_mod.ingest("unrelated topic about marketing", origin="cli:add")
 
     result = storage_mod.recall(query="what graph database do we use?", top_k=3)
     # Semantic search should rank FalkorDB content above marketing
@@ -168,7 +176,7 @@ def test_hook_recall_trace_jsonl_emitted(temp_data, tmp_path, monkeypatch):
     import smartmemory_app.recall_format as rf
     importlib.reload(rf)
 
-    storage_mod.ingest("trace test content", properties={"origin": "cli:add"})
+    storage_mod.ingest("trace test content", origin="cli:add")
     storage_mod.recall(top_k=5)
     storage_mod.recall(query="trace test", top_k=5)
 
@@ -188,8 +196,10 @@ def test_hook_recall_trace_jsonl_emitted(temp_data, tmp_path, monkeypatch):
 def test_hook_recall_seed_origin_filtered(temp_data):
     """seed:* origin (added via `smartmemory retag`) is tier-4 by virtue of
     matching no tier 1/2/3 prefix → falls to tier 4 → excluded by default."""
-    storage_mod.ingest("Alice leads Project Atlas", properties={"origin": "seed:demo"})
-    storage_mod.ingest("real user content", properties={"origin": "cli:add"})
+    seed_id = storage_mod.ingest("Alice leads Project Atlas", origin="seed:demo")
+    storage_mod.ingest("real user content", origin="cli:add")
+
+    assert storage_mod.get_memory().get(seed_id).origin == "seed:demo"
 
     result = storage_mod.recall(top_k=10)
     assert "real user content" in result

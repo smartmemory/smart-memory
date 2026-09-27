@@ -109,10 +109,11 @@ class TestTier1IngestLite:
         item = lite_memory.get(result["item_id"])
         assert item is not None, f"Item {result['item_id']} not found after sync=False ingest"
 
-    def test_ingest_sync_false_queued_is_false_without_redis(self, lite_memory):
-        """In lite mode (no Redis), queued should be False."""
+    def test_ingest_sync_false_queued_in_lite_work_graph(self, lite_memory):
+        """Lite saves queue durable work without Redis."""
         result = lite_memory.ingest("Carol manages the DevOps pipeline.", sync=False)
-        assert result.get("queued") is False, "queued must be False in lite mode (no Redis)"
+        assert result.get("queued") is True
+        assert isinstance(result.get("run_id"), str) and result["run_id"]
 
     def test_ingest_sync_false_preserves_memory_type(self, lite_memory):
         """memory_type passed via context should be preserved."""
@@ -784,7 +785,9 @@ class TestProductionEdgeCases:
 
     def test_entity_names_with_special_characters(self, lite_memory):
         """Entity names with quotes, newlines, backslashes — should survive round-trip."""
-        item_id = lite_memory.ingest("O'Reilly Media published the book.")
+        # Keep the source text free of these names so Tier 1 cannot pre-store
+        # one and correctly deduplicate it during Tier 2 extraction.
+        item_id = lite_memory.ingest("A publisher released a book.")
 
         llm_extraction = _make_llm_extraction(
             entities_data=[
@@ -804,6 +807,9 @@ class TestProductionEdgeCases:
             )
         assert result["status"] == "ok"
         assert result["new_entities"] == 3
+        assert {node["label"] for node in result["new_entity_nodes"]} == {
+            "O'Reilly Media", "Path\\to\\file", "Line\nBreak",
+        }
 
     def test_content_with_no_tier1_entities(self, lite_memory):
         """Content too short for EntityRuler → empty entity_ids → tier-2 still works."""

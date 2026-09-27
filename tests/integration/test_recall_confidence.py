@@ -25,7 +25,7 @@ def test_recall_excludes_below_confidence_floor(tmp_path, monkeypatch):
     # Ingest with origin that gives low ceiling (unknown → 0.3)
     storage_mod.ingest(
         "low confidence item should be filtered",
-        properties={"origin": "unknown"},
+        origin="unknown",
     )
 
     result = storage_mod.recall(top_k=5)
@@ -41,7 +41,7 @@ def test_recall_includes_above_confidence_floor(tmp_path, monkeypatch):
     # Ingest with origin that gives high ceiling (user → 1.0)
     storage_mod.ingest(
         "high confidence item should appear",
-        properties={"origin": "user:cli:persist"},
+        origin="user:cli:persist",
     )
 
     result = storage_mod.recall(top_k=5)
@@ -64,7 +64,7 @@ def test_recall_tilde_marker_on_low_confidence(tmp_path, monkeypatch):
     # unknown → ceiling 0.3, < 0.5 → ~ marker; survives tier filter as legacy
     storage_mod.ingest(
         "low confidence item with tilde marker",
-        properties={"origin": "unknown"},
+        origin="unknown",
     )
 
     result = storage_mod.recall(top_k=5)
@@ -77,10 +77,13 @@ def test_recall_no_tilde_on_high_confidence(tmp_path, monkeypatch):
     """Items with confidence >= 0.5 do NOT get a ~ prefix."""
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
 
-    storage_mod.ingest(
+    item_id = storage_mod.ingest(
         "user authored high confidence memory",
-        properties={"origin": "user:cli:persist"},
+        origin="user:cli:persist",
     )
+    stored = storage_mod.get_memory().get(item_id)
+    assert stored.origin == "user:cli:persist"
+    assert stored.confidence >= 0.5
 
     result = storage_mod.recall(top_k=5)
     # Should contain the content but no ~ marker

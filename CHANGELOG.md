@@ -16,6 +16,11 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Recall and confidence integration checks now use producer-supplied origins and
+  verify stored provenance, tier filtering, and confidence markers. Lite async
+  coverage expects a durable work-graph run ID when deferred work is queued and
+  isolates special-character entity extraction from Tier 1 deduplication.
+
 - Lite saves work without an LLM key, with deferred work owned by one core worker.
   `sm status` shows pending/running/dead work counts and a re-extraction offer.
   `sm admin reextract` queues work with `--yes`, `--all`, `--ruler`, or `--decline`;
