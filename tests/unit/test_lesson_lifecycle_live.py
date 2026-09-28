@@ -1,4 +1,4 @@
-"""Historical Groq rows adapted to FIX3; offline persistent-store regression only."""
+"""Historical Groq rows adapted with synthetic FIX4 changes; offline persistent-store regression only."""
 
 import json
 from pathlib import Path
@@ -75,6 +75,16 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
             calls.append(_index)
             assert _index > 0
             rows = json.loads((FIXTURES / f"s{_index}-response.json").read_text())
+            change = dict(
+                change_id="synthetic-C1",
+                evidence_turn="T0",
+                evidence=rows[0]["evidence"],
+                old_rule="Synthetic recorded deployment policy",
+                new_rule_or_null="Synthetic replacement deployment policy",
+                kind="replace",
+            )
+            if "COMPARISON_NOT_QUOTABLE" not in json.loads(kwargs["user_content"]):
+                return None, json.dumps([change])
             pairs = {
                 (p["lesson"], p["old_id"])
                 for p in json.loads(kwargs["user_content"])["COMPARISON_NOT_QUOTABLE"][
@@ -86,6 +96,8 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
                 # Synthetic adaptation: the recording predates evidence_turn.
                 # This is NOT evidence of FIX3 model compliance.
                 row["evidence_turn"] = "T0"
+                row["change_id"] = "synthetic-C1"
+                row["replaced_rule"] = change["old_rule"]
             # Fixed S1 changes S2's eligible candidates: never revive the old rule.
             rows = [r for r in rows if (r["lesson"], r["old_id"]) in pairs]
             assert len(rows) == 3
@@ -168,4 +180,4 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         finally:
             mem.close()
     # S2 has no eligible old candidate, so there is no pair to classify.
-    assert calls == [1]
+    assert calls == [1, 1]

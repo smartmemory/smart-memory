@@ -16,9 +16,13 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
-- Lesson lifecycle requests separate session evidence from comparison text and verify
-  each quote against its cited turn. Malformed/unknown rows warn without discarding
-  other pairs; repeated pairs are conservatively downgraded.
+- Lesson lifecycle first extracts explicit session rule changes, then matches stored
+  rules to verified changes, including implementation findings of the same old rule.
+  Matching now selects a verified change ID without asking the model to label the
+  relation; the product derives supersession or retraction from that change's kind.
+  Failed proof claims warn and appear in capture receipts; unverified claims never
+  retire rules. Matching is skipped without verified changes. Duplicate/refines
+  annotations are deferred. Malformed rows remain isolated and conflicts guarded.
 
 - Lesson supersession can retire differently worded copies of one old rule, including
   its implementation findings, when explicit per-pair evidence identifies the same
