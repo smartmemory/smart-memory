@@ -410,3 +410,120 @@ def constraint_classifier_replay(monkeypatch):
     monkeypatch.setattr(
         "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
     )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "same_rule",
+        "auth_rule",
+        "mixed",
+        "missing",
+        "empty",
+        "nonstring",
+        "null",
+        "retracts",
+        "duplicate",
+    ],
+)
+def test_s66_multi_target_supersession(setup, monkeypatch, case):
+    """Replay S66's policy plus implementation findings with neutral module names."""
+    mem, old, job, _, _, _ = setup
+    text = (
+        "Replace the previous support export policy: the owner now approves 1000 "
+        "rows for every workspace, replacing the old 250-row limit."
+    )
+    old.content = (
+        "support export row limit is 250 rows, including internal workspaces "
+        "(applies to support export task)."
+    )
+    targets = [old]
+    for content in (
+        "Define a module-level constant EXPORT_LIMIT = 250 in support_policy.py "
+        "(applies to the support_policy component).",
+        "Add a new module support_policy.py that defines export_limit() returning "
+        "the constant 250 (applies to the codebase).",
+    ):
+        targets.append(
+            mem.add_decision(content=content, context_snapshot={"workspace_id": "ws"})
+        )
+    new_rule = (
+        "Export policy for workspace data – the owner approved a hard limit of "
+        "1000 rows per workspace, replacing the previous 250‑row limit."
+    )
+    shared_rule = "Support export limit is 250 rows per workspace"
+    rows = [
+        dict(
+            lesson=0,
+            old_id=d.decision_id,
+            relation="supersedes",
+            evidence=text,
+            reason=reason,
+            explicit=True,
+            primary=True,
+            replaced_rule=shared_rule,
+        )
+        for d, reason in zip(
+            targets,
+            (
+                "The owner replaces the 250-row support export policy with 1000.",
+                "EXPORT_LIMIT encodes the replaced 250-row support export policy.",
+                "export_limit() returns the replaced support export limit of 250.",
+            ),
+        )
+    ]
+    if case == "auth_rule":
+        targets[1].content = "Authentication sessions expire after 250 minutes."
+        rows[1]["replaced_rule"] = "Authentication session lifetime is 250 minutes"
+        rows[1]["reason"] = "Claims the authentication lifetime was replaced."
+    elif case == "mixed":
+        rows[1]["relation"] = "retracts"
+    elif case == "missing":
+        rows[1].pop("replaced_rule")
+    elif case == "empty":
+        rows[1]["replaced_rule"] = "  "
+    elif case == "nonstring":
+        rows[1]["replaced_rule"] = {"rule": shared_rule}
+    elif case == "null":
+        rows[1]["replaced_rule"] = None
+    elif case in {"retracts", "duplicate"}:
+        for row in rows:
+            row["relation"] = case
+    monkeypatch.setattr(
+        "smartmemory.plugins.extractors.reasoning.call_llm",
+        lambda **kw: (None, json.dumps([dict(type="conclusion", content=new_rule)])),
+    )
+    calls = []
+
+    def classifier(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["model"] == "openai/gpt-oss-120b"
+        assert "response_format" not in kwargs  # Groq model has no JSON mode.
+        assert "unrelated OR uncertain" in kwargs["system_prompt"]
+        return None, json.dumps(rows)
+
+    monkeypatch.setattr("smartmemory_app.lesson_lifecycle.call_llm", classifier)
+    args = (mem, job, [dict(role="user", content=text)], [])
+    result = capture_lessons(*args)
+    assert "degradation" not in result, result
+    transitions = result["lesson_transitions"]
+    assert len(transitions) == 3
+    if case == "same_rule":
+        assert len(result["lesson_ids"]) == 1
+        successor = result["lesson_ids"][0]
+        assert all(d.status == "superseded" for d in targets)
+        assert {d.superseded_by for d in targets} == {successor}
+        assert {r["successor_of_record"] for r in transitions} == {successor}
+        assert all(r["relation"] == "supersedes" for r in transitions)
+        assert sum(d.status == "active" for d in mem.decisions.values()) == 1
+        assert mem.transitions == ["supersede"] * 3
+    else:
+        assert all(d.status == "active" for d in targets)
+        assert all(r["relation"] == "unrelated" for r in transitions)
+        assert all(
+            r["downgrade_reason"] == "conflicting_relations" for r in transitions
+        )
+        assert mem.transitions == []
+    again = capture_lessons(*args)
+    assert again["lesson_transitions"] == transitions
+    assert len(calls) == 1

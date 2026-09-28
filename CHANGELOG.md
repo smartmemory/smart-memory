@@ -16,6 +16,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Lesson supersession can retire differently worded copies of one old rule, including
+  its implementation findings, when explicit per-pair evidence identifies the same
+  replaced rule; unrelated targets and conflicting actions remain guarded.
+
 - Local ingest warns when caller properties contain reserved keys that are dropped,
   naming the keys while preserving producer-controlled provenance.
 
