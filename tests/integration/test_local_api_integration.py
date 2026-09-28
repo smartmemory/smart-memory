@@ -37,6 +37,8 @@ def client(backend, monkeypatch):
     import smartmemory_app.local_api as _mod
 
     monkeypatch.setattr(_mod, "_get_backend", lambda: backend)
+    # Keep route dispatch local without opening the user's configured database.
+    monkeypatch.setattr(_mod, "_get_mem", lambda: object())
 
     wrapper = FastAPI()
     wrapper.mount("/memory", local_api)
@@ -275,6 +277,38 @@ class TestGetNeighborsIntegration:
         body = client.get("/memory/n1/neighbors").json()
         neighbor_ids = [n["item_id"] for n in body["neighbors"]]
         assert "n2" in neighbor_ids
+
+    def test_neighbor_content_uses_entity_label_or_item_id(
+        self, client, backend, monkeypatch
+    ):
+        """Entity names reach clients, with an ID fallback for unlabelled nodes."""
+        _add_node(backend, "note-1", "Note")
+        _add_node(backend, "entity-1", "Ada Lovelace", "entity")
+        backend.add_node(item_id="entity-2", properties={}, memory_type="entity")
+        _add_edge(backend, "note-1", "entity-1", "CONTAINS_ENTITY")
+        _add_edge(backend, "note-1", "entity-2", "CONTAINS_ENTITY")
+        _add_edge(backend, "note-1", "entity-1", "MENTIONED_IN")
+
+        get_node_calls: list[str] = []
+        original_get_node = backend.get_node
+
+        def track_get_node(item_id: str) -> dict | None:
+            get_node_calls.append(item_id)
+            return original_get_node(item_id)
+
+        monkeypatch.setattr(backend, "get_node", track_get_node)
+
+        response = client.get("/memory/note-1/neighbors")
+        assert response.status_code == 200
+        neighbors = {
+            neighbor["item_id"]: neighbor
+            for neighbor in response.json()["neighbors"]
+            if neighbor["link_type"] == "CONTAINS_ENTITY"
+        }
+        assert neighbors["entity-1"]["content"] == "Ada Lovelace"
+        assert neighbors["entity-1"]["content"]
+        assert neighbors["entity-2"]["content"] == "entity-2"
+        assert sorted(get_node_calls) == ["entity-1", "entity-2"]
 
     def test_edges_key_present(self, client, backend):
         _add_node(backend, "n1", "Node 1")

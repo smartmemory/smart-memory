@@ -16,6 +16,11 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Lite daemon: `GET /memory/{id}/neighbors` now returns each neighbor's `content` (its
+  human-readable label, falling back to the item ID). Without it the Obsidian plugin, which
+  reads that field for entity names, wrote an empty entity list to every note and left
+  entity chips and auto-link with nothing to work with in local mode. Neighbor labels are
+  resolved once per request under a single lock.
 - Lesson lifecycle first extracts explicit session rule changes, then matches stored
   rules to verified changes, including implementation findings of the same old rule.
   Matching now selects a verified change ID without asking the model to label the

@@ -365,9 +365,10 @@ def get_neighbors(memory_id: str) -> dict:
     (e.g. SUPERSEDES, written one-way newer→older). Mirrors the service
     contract added in DIST-OBSIDIAN-1 (links.py:148-158).
 
-    Response shape:
+    Local response shape (RemoteMemory forwards the hosted response unchanged):
       {
-        "neighbors": [{"item_id": str, "link_type": str, "direction": "outgoing"|"incoming"}, ...],
+        "neighbors": [{"item_id": str, "link_type": str, "direction": "outgoing"|"incoming",
+                       "content": str}, ...],
         "edges": [...]   # unchanged; raw edge rows
       }
 
@@ -888,29 +889,45 @@ def _get_neighbor_payload(memory_id: str) -> dict:
     with _rw_lock:
         backend = _get_backend()
         edges = backend.get_edges_for_node(memory_id)
-
-    seen: set[tuple[str, str, str]] = set()
-    neighbors = []
-    for edge in edges:
-        source_id = edge.get("source_id")
-        target_id = edge.get("target_id")
-        link_type = edge.get("edge_type") or edge.get("link_type")
-        if not link_type:
-            continue
-        if source_id == memory_id and target_id and target_id != memory_id:
-            direction, other_id = "outgoing", target_id
-        elif target_id == memory_id and source_id and source_id != memory_id:
-            direction, other_id = "incoming", source_id
-        else:
-            continue
-        key = (other_id, str(link_type), direction)
-        if key in seen:
-            continue
-        seen.add(key)
-        neighbors.append(
-            {"item_id": other_id, "link_type": link_type, "direction": direction}
-        )
+        seen: set[tuple[str, str, str]] = set()
+        labels: dict[str, str] = {}
+        neighbors: list[dict[str, str]] = []
+        for edge in edges:
+            source_id = edge.get("source_id")
+            target_id = edge.get("target_id")
+            link_type = edge.get("edge_type") or edge.get("link_type")
+            if not link_type:
+                continue
+            if source_id == memory_id and target_id and target_id != memory_id:
+                direction, other_id = "outgoing", target_id
+            elif target_id == memory_id and source_id and source_id != memory_id:
+                direction, other_id = "incoming", source_id
+            else:
+                continue
+            key = (other_id, str(link_type), direction)
+            if key in seen:
+                continue
+            seen.add(key)
+            if other_id not in labels:
+                labels[other_id] = _node_label_from_record(
+                    other_id, backend.get_node(other_id)
+                )
+            neighbors.append(
+                {
+                    "item_id": other_id,
+                    "link_type": link_type,
+                    "direction": direction,
+                    "content": labels[other_id],
+                }
+            )
     return {"neighbors": neighbors, "edges": edges}
+
+
+def _node_label_from_record(item_id: str, node: object) -> str:
+    """Use a node's human-readable field, falling back to its item ID."""
+    if not isinstance(node, dict):
+        return item_id
+    return str(node.get("label") or node.get("name") or node.get("content") or item_id)
 
 
 def _node_label(item_id: str) -> str:
@@ -923,9 +940,7 @@ def _node_label(item_id: str) -> str:
     else:
         with _rw_lock:
             node = _get_backend().get_node(item_id)
-    if not isinstance(node, dict):
-        return item_id
-    return str(node.get("label") or node.get("name") or node.get("content") or item_id)
+    return _node_label_from_record(item_id, node)
 
 
 def _ask_relations(hits: list[dict]) -> list[dict[str, str]]:
