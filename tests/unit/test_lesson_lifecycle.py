@@ -7,6 +7,7 @@ import pytest
 from smartmemory.models.decision import Decision
 from smartmemory.utils.llm_client.openai_chat import set_last_usage
 
+from smartmemory_app import lesson_lifecycle as lifecycle
 from smartmemory_app.session_lessons import capture_lessons
 
 
@@ -59,163 +60,359 @@ class Memory:
         pass
 
 
+TEXT = "Replace the old support export limit of 250 rows with 1000 rows."
+OLD = "Support export limit of 250 rows"
+
+
+def change(**overrides):
+    return dict(
+        dict(
+            change_id="C1",
+            evidence_turn="T0",
+            evidence=TEXT,
+            old_rule=OLD,
+            new_rule_or_null="Support export limit of 1000 rows",
+            kind="replace",
+        ),
+        **overrides,
+    )
+
+
+def pair(oid, **overrides):
+    return dict(
+        dict(
+            lesson=0,
+            old_id=oid,
+            change_id="C1",
+            reason="This target encodes the old support export limit",
+            primary=True,
+            replaced_rule=OLD,
+        ),
+        **overrides,
+    )
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "fake")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     mem = Memory()
-    old = mem.add_decision(
-        content="Rule X = A", context_snapshot={"workspace_id": "ws"}
-    )
+    old = mem.add_decision(content=OLD, context_snapshot={"workspace_id": "ws"})
     job = dict(session_id="new", workspace_id="ws", transcript_path="/tmp/session")
-    text = "Rule X changed to B. The old rule X = A no longer holds."
     calls = []
-
-    def install(relation, evidence=None, explicit=True, failure=False):
-        def extraction(**kwargs):
-            set_last_usage(
-                dict(model="openai/gpt-oss-120b", prompt_tokens=10, completion_tokens=5)
-            )
-            return None, json.dumps(
+    monkeypatch.setattr(
+        "smartmemory.plugins.extractors.reasoning.call_llm",
+        lambda **kw: (
+            None,
+            json.dumps(
                 [
                     dict(
                         type="conclusion",
-                        content="Rule X = B for all production deployments.",
+                        content="Support export limit is now 1000 rows.",
                     )
                 ]
-            )
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "smartmemory_app.lesson_classifier.call_llm", lambda **kw: (None, "[]")
+    )
 
-        def classifier(**kwargs):
-            calls.append(kwargs)
-            assert kwargs["api_key"] == "fake"
+    def install(changes, rows):
+        responses = iter([changes, rows])
+
+        def fake(**kw):
+            calls.append(kw)
             set_last_usage(
-                dict(model="openai/gpt-oss-120b", prompt_tokens=20, completion_tokens=7)
+                dict(model=lifecycle.MODEL, prompt_tokens=20, completion_tokens=7)
             )
-            if failure:
-                raise RuntimeError("classifier down")
-            return None, json.dumps(
-                [
-                    dict(
-                        lesson=0,
-                        old_id=old.decision_id,
-                        relation=relation,
-                        evidence=text if evidence is None else evidence,
-                        reason="Session explicitly changed the rule",
-                        explicit=explicit,
-                    )
-                ]
-            )
+            response = next(responses)
+            if isinstance(response, Exception):
+                raise response
+            return None, json.dumps(response)
 
-        monkeypatch.setattr(
-            "smartmemory.plugins.extractors.reasoning.call_llm", extraction
+        monkeypatch.setattr(lifecycle, "call_llm", fake)
+
+    return mem, old, job, calls, install
+
+
+def capture(setup):
+    mem, _, job, _, _ = setup
+    return capture_lessons(mem, job, [dict(role="user", content=TEXT)], [])
+
+
+def test_empty_step_one_skips_matching_and_retirement(setup):
+    mem, old, _, calls, install = setup
+    install([], AssertionError("must skip"))
+    result = capture(setup)
+    assert len(calls) == 1
+    assert old.status == "active" and len(mem.decisions) == 2
+    assert result["lifecycle_unverified_claims"] == 0
+    assert result["lifecycle_verified_changes"] == []
+    assert result["lesson_transitions"][0]["relation"] == "unrelated"
+    assert set(json.loads(calls[0]["user_content"])) == {"SESSION_ONLY_QUOTABLE_SOURCE"}
+
+
+def test_verified_change_multi_target_receipt_retry_and_requests(setup):
+    mem, old, job, calls, install = setup
+    targets = [old] + [
+        mem.add_decision(content=t, context_snapshot={"workspace_id": "ws"})
+        for t in (
+            "EXPORT_LIMIT = 250 for support exports",
+            "export_limit() returns 250 for support exports",
+            "Support export test asserts a limit of 250 rows",
         )
-        monkeypatch.setattr("smartmemory_app.lesson_lifecycle.call_llm", classifier)
+    ]
+    install([change()], [pair(d.decision_id) for d in targets])
+    result = capture(setup)
+    assert "degradation" not in result
+    assert len(calls) == 2
+    assert all(d.status == "superseded" for d in targets)
+    assert len({d.superseded_by for d in targets}) == 1
+    assert all(
+        r["evidence"] == TEXT and r["evidence_turn"] == "T0" and r["change_id"] == "C1"
+        for r in result["lesson_transitions"]
+    )
+    payload = json.loads(calls[1]["user_content"])
+    assert set(payload) == {"VERIFIED_CHANGES", "COMPARISON_NOT_QUOTABLE"}
+    assert payload["VERIFIED_CHANGES"] == [change()]
+    assert payload["COMPARISON_NOT_QUOTABLE"]["pairs"][0]["content"] == OLD
+    retry = capture_lessons(mem, job, [], [])
+    assert retry["lesson_transitions"] == result["lesson_transitions"]
+    assert retry["lifecycle_unverified_claims"] == 0
+    assert len(calls) == 2
 
-    return mem, old, job, text, calls, install
+
+@pytest.mark.parametrize("relation", ["replace", "replaces", "garbage", []])
+def test_step_two_relation_field_is_ignored(setup, relation):
+    _, old, _, _, install = setup
+    install([change()], [pair(old.decision_id, relation=relation)])
+    result = capture(setup)
+    assert old.status == "superseded"
+    assert result["lesson_transitions"][0]["relation"] == "supersedes"
+    assert result["lifecycle_unverified_claims"] == 0
+
+
+def test_null_change_id_is_unrelated_even_with_legacy_relation(setup):
+    _, old, _, _, install = setup
+    install([change()], [pair(old.decision_id, change_id=None, relation="replace")])
+    result = capture(setup)
+    assert old.status == "active"
+    assert result["lesson_transitions"][0]["relation"] == "unrelated"
+    assert result["lifecycle_unverified_claims"] == 0
+
+
+def test_legacy_explicit_field_is_not_required(setup):
+    _, old, _, _, install = setup
+    install([change()], [pair(old.decision_id, explicit=False)])
+    result = capture(setup)
+    assert old.status == "superseded"
+    assert result["lifecycle_unverified_claims"] == 0
+
+
+def test_recorded_s66_step_two_row_derives_supersedes():
+    # Minimal fixture copied from /tmp/fix4-lifecycle-S66-k5.jsonl, D response.
+    quote = (
+        "Replace the previous support export policy: the owner now approves "
+        "1000 rows for every workspace, replacing the old 250-row limit."
+    )
+    recorded_change = {
+        "change_id": "export_limit_update_1",
+        "evidence_turn": "T0",
+        "evidence": quote,
+        "old_rule": "export limit is 250 rows per workspace",
+        "new_rule_or_null": "export limit is 1000 rows per workspace",
+        "kind": "replace",
+    }
+    recorded_row = {
+        "lesson": 0,
+        "old_id": "dec_8d641aa6a8f9",
+        "change_id": "export_limit_update_1",
+        "relation": "replace",
+        "reason": "Test asserts that export_limit() returns 250 rows, directly encoding the old export‑limit rule.",
+        "explicit": True,
+        "primary": True,
+        "replaced_rule": "export limit is 250 rows per workspace",
+    }
+    turns = [{"content": quote}]
+    verified = lifecycle.verify_changes([recorded_change], turns, {})
+    receipt = {}
+    rows = lifecycle.validate_pairs(
+        {
+            (
+                0,
+                recorded_row["old_id"],
+            ): "Added tests that assert export_limit() returns 250."
+        },
+        turns,
+        [recorded_row],
+        receipt,
+        verified,
+    )
+    assert rows[0]["relation"] == "supersedes"
+    assert rows[0]["evidence"] == quote
+    assert rows[0]["evidence_turn"] == "T0"
+    assert receipt.get("lifecycle_unverified_claims", 0) == 0
 
 
 @pytest.mark.parametrize(
-    "relation,status,count",
+    "overrides",
     [
-        ("supersedes", "superseded", 1),
-        ("retracts", "retracted", 0),
-        ("duplicate", "active", 1),
-        ("refines", "active", 2),
-        ("unrelated", "active", 2),
+        {"evidence": "invented"},
+        {"evidence": OLD},
+        {"evidence": ""},
+        {"evidence": None},
+        {"evidence_turn": "T1"},
+        {"evidence_turn": None},
+        {"evidence_turn": []},
+        {"change_id": None},
+        {"change_id": []},
+        {"change_id": ""},
+        {"old_rule": None},
+        {"old_rule": ""},
+        {"kind": "other"},
+        {"new_rule_or_null": None},
+        {"kind": "withdraw"},
     ],
 )
-def test_relations_and_retry(setup, relation, status, count):
-    mem, old, job, text, calls, install = setup
-    install(relation)
-    args = (mem, job, [dict(role="user", content=text)], [])
-    result = capture_lessons(*args)
-    assert "degradation" not in result, result
-    assert result["lesson_usage"]["prompt_tokens"] == 30
-    assert result["lesson_usage"]["completion_tokens"] == 12
-    assert old.status == status
-    assert sum(d.status == "active" for d in mem.decisions.values()) == count
-    assert result["lesson_transitions"][0]["relation"] == relation
-    if relation == "supersedes":
-        assert old.superseded_by == result["lesson_ids"][0]
-        assert text in old.context_snapshot["superseded_reason"]
-    if relation == "duplicate":
-        assert result["lesson_ids"] == [old.decision_id]
-    again = capture_lessons(*args)
-    assert again["lesson_ids"] == result["lesson_ids"]
-    assert again["lesson_transitions"] == result["lesson_transitions"]
+def test_invalid_change_dropped_warning_receipt(setup, caplog, overrides):
+    mem, old, _, calls, install = setup
+    install([change(**overrides)], [pair(old.decision_id)])
+    result = capture(setup)
+    assert old.status == "active" and len(mem.decisions) == 2
     assert len(calls) == 1
-    assert len(mem.transitions) <= 1
-    assert "lesson_usage" not in again
+    assert result["lifecycle_unverified_claims"] == 1
+    assert "change" in caplog.text and "rejected" in caplog.text
+    assert any(r.levelname == "WARNING" for r in caplog.records)
 
 
 @pytest.mark.parametrize(
-    "evidence,explicit", [("invented evidence", True), (None, False)]
+    "overrides,reason",
+    [
+        ({"change_id": "unknown"}, "unknown_change_id"),
+        ({"change_id": []}, "unknown_change_id"),
+        ({"replaced_rule": "Different policy with 250"}, "replaced_rule_mismatch"),
+        ({"replaced_rule": ""}, "replaced_rule_mismatch"),
+        ({"replaced_rule": None}, "replaced_rule_mismatch"),
+        ({"replaced_rule": {}}, "replaced_rule_mismatch"),
+        ({"reason": ""}, "missing_reason"),
+        ({"reason": []}, "missing_reason"),
+    ],
 )
-def test_ambiguous_keeps_both(setup, caplog, evidence, explicit):
-    mem, old, job, text, _, install = setup
-    install("supersedes", evidence=evidence, explicit=explicit)
-    with caplog.at_level("INFO"):
-        result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
+def test_bad_match_never_retires(setup, caplog, overrides, reason):
+    _, old, _, _, install = setup
+    install([change()], [pair(old.decision_id, **overrides)])
+    result = capture(setup)
     assert old.status == "active"
-    assert len(mem.decisions) == 2
-    assert result["lesson_transitions"][0]["relation"] == "unrelated"
-    reason = "not_explicit" if not explicit else "evidence_not_found"
     assert result["lesson_transitions"][0]["downgrade_reason"] == reason
-    assert reason in caplog.text
-    assert "keeping both" in caplog.text
+    assert result["lifecycle_unverified_claims"] == 1
+    assert old.decision_id in caplog.text and reason in caplog.text
 
 
-def test_failure_degrades_and_usage_sums(setup, caplog):
-    mem, old, job, text, _, install = setup
-    install("supersedes", failure=True)
-    result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
+def test_sibling_unrelated_and_unverified_id_rejected(setup):
+    mem, old, _, _, install = setup
+    sibling = mem.add_decision(
+        content="Support export requires nonempty names",
+        context_snapshot={"workspace_id": "ws"},
+    )
+    install(
+        [change(), change(change_id="bad", evidence="invented")],
+        [
+            pair(old.decision_id, change_id="bad"),
+            pair(sibling.decision_id, change_id=None),
+        ],
+    )
+    result = capture(setup)
+    assert old.status == sibling.status == "active"
+    assert result["lifecycle_unverified_claims"] == 2
+    assert all(r["relation"] == "unrelated" for r in result["lesson_transitions"])
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        [],
+        {"lesson": []},
+        {"lesson": True, "old_id": "bad"},
+        {"lesson": 0, "old_id": "unknown"},
+        "repeat",
+    ],
+)
+def test_bad_pair_isolation(setup, caplog, bad):
+    mem, old, _, _, install = setup
+    other = mem.add_decision(content=OLD, context_snapshot={"workspace_id": "ws"})
+    rows = [pair(old.decision_id), pair(other.decision_id)]
+    rows.insert(0, dict(rows[0]) if bad == "repeat" else bad)
+    install([change()], rows)
+    result = capture(setup)
+    assert other.status == "superseded"
+    assert old.status == ("active" if bad == "repeat" else "superseded")
+    assert result["lifecycle_unverified_claims"] == 1
+    assert "WARNING" in caplog.text
+
+
+def test_withdrawal(setup):
+    _, old, _, _, install = setup
+    install(
+        [change(kind="withdraw", new_rule_or_null=None)],
+        [pair(old.decision_id)],
+    )
+    result = capture(setup)
+    assert old.status == "retracted"
+    assert result["lesson_transitions"][0]["relation"] == "retracts"
+    assert result["lesson_ids"] == []
+
+
+def test_conflicting_shared_changes_do_not_bypass_guard(setup):
+    mem, old, _, _, install = setup
+    other = mem.add_decision(
+        content="Different requirement", context_snapshot={"workspace_id": "ws"}
+    )
+    install(
+        [change(), change(change_id="C2")],
+        [pair(old.decision_id), pair(other.decision_id, change_id="C2")],
+    )
+    result = capture(setup)
+    assert old.status == other.status == "active"
+    assert all(
+        r["downgrade_reason"] == "conflicting_relations"
+        for r in result["lesson_transitions"]
+    )
+    assert result["lifecycle_unverified_claims"] == 2
+
+
+def test_repeated_changes_rejected_but_valid_change_survives(setup):
+    _, old, _, _, install = setup
+    install(
+        [change(), change(), change(change_id="C2")],
+        [pair(old.decision_id, change_id="C2")],
+    )
+    result = capture(setup)
+    assert old.status == "superseded"
+    assert [r["change_id"] for r in result["lifecycle_verified_changes"]] == ["C2"]
+    assert result["lifecycle_unverified_claims"] == 1
+
+
+@pytest.mark.parametrize("step", [1, 2])
+def test_call_failure_accounts_usage_and_keeps_old(setup, step):
+    _, old, _, calls, install = setup
+    install(RuntimeError("down") if step == 1 else [change()], RuntimeError("down"))
+    result = capture(setup)
     assert "lifecycle classification" in result["degradation"]
-    assert "classifier down" in caplog.text
     assert old.status == "active"
-    assert len(mem.decisions) == 2
-    usage = result["lesson_usage"]
-    assert usage["prompt_tokens"] == 30
-    assert usage["completion_tokens"] == 12
-    assert usage["cost_usd"] == pytest.approx((30 * 0.00015 + 12 * 0.0006) / 1000)
-    assert usage["usage_scope"] == "final_response_only"
-    assert usage["call_count"] is None
+    assert len(calls) == step
+    # Inspect measured lifecycle records; extraction has unmeasured fake usage.
+    assert result["lesson_usage"]["calls"][-1]["prompt_tokens"] == 20
 
 
-def test_cross_workspace_excluded(setup):
-    mem, old, job, text, calls, install = setup
-    old.context_snapshot["workspace_id"] = "elsewhere"
-    install("supersedes")
-    result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
-    assert result["lesson_transitions"] == []
+def test_no_cross_workspace_discovery(setup):
+    _, old, _, calls, install = setup
+    old.context_snapshot["workspace_id"] = "other"
+    install([change()], [])
+    assert capture(setup)["lesson_transitions"] == []
     assert calls == []
-    assert old.status == "active"
-
-
-def test_crash_after_transition_resumes_without_resurrection(setup, monkeypatch):
-    from smartmemory_app import lesson_lifecycle
-
-    mem, old, job, text, calls, install = setup
-    install("supersedes")
-    save = lesson_lifecycle.save_plan
-    writes = []
-
-    def crash(path, plan):
-        writes.append(True)
-        if len(writes) == 2:
-            raise RuntimeError("crash before checkpoint")
-        save(path, plan)
-
-    monkeypatch.setattr(lesson_lifecycle, "save_plan", crash)
-    args = (mem, job, [dict(role="user", content=text)], [])
-    assert "degradation" in capture_lessons(*args)
-    replacement = mem.get_decision(old.superseded_by)
-    replacement.status = "retracted"  # a subsequent session retired it
-    result = capture_lessons(*args)
-    assert "degradation" not in result
-    assert replacement.status == "retracted"
-    assert mem.transitions == ["supersede"]
-    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -229,301 +426,148 @@ def test_crash_after_transition_resumes_without_resurrection(setup, monkeypatch)
         ("platform‑team", "platform-team"),
         ("a‐b‑c‒d–e—f―g−h", "a-b-c-d-e-f-g-h"),
         ("a\n\t b\u00a0c", "a b c"),
-        ("Ａ says “yes” and ‘no’", "A says \"yes\" and 'no'"),
         ('"  "', ""),
-        ("“mismatched'", "\"mismatched'"),
     ],
 )
 def test_normalize_evidence(raw, expected):
-    from smartmemory_app.lesson_lifecycle import normalize_evidence
+    assert lifecycle.normalize_evidence(raw) == expected
 
-    assert normalize_evidence(raw) == expected
+
+def test_cited_turn_not_any_turn():
+    receipt = {}
+    turns = [dict(content="Other turn"), dict(content=TEXT)]
+    assert lifecycle.verify_changes([change()], turns, receipt) == {}
+    assert lifecycle.verify_changes([change(evidence_turn="T1")], turns, {})
+
+
+def test_duplicate_refines_deferred_explicitly():
+    assert "relation label" in lifecycle.MATCH_PROMPT
+    assert "default and common answer is []" in lifecycle.CHANGE_PROMPT
 
 
 @pytest.mark.parametrize(
     "primary,chosen", [([False, True, False], 1), ([False] * 3, 0), ([True] * 3, 0)]
 )
-def test_agreeing_successors_and_retry(setup, monkeypatch, caplog, primary, chosen):
-    mem, old, job, text, _, _ = setup
-    monkeypatch.setattr(
-        "smartmemory.plugins.extractors.reasoning.call_llm",
-        lambda **kw: (
-            None,
-            json.dumps(
-                [
-                    dict(type="conclusion", content=f"New deployment rule {i}")
-                    for i in range(3)
-                ]
-            ),
-        ),
+def test_primary_and_conflict_guard(primary, chosen):
+    pairs = {(i, "old"): OLD for i in range(3)}
+    rows = [pair("old", lesson=i, primary=p) for i, p in enumerate(primary)]
+    result = lifecycle.validate_pairs(
+        pairs, [dict(content=TEXT)], rows, {}, {"C1": change()}
     )
-    monkeypatch.setattr(
-        "smartmemory_app.lesson_lifecycle.call_llm",
-        lambda **kw: (
-            None,
-            json.dumps(
-                [
-                    dict(
-                        lesson=i,
-                        old_id=old.decision_id,
-                        relation="supersedes",
-                        evidence='"' + text + '"',
-                        explicit=True,
-                        reason="Rule changed",
-                        primary=p,
-                    )
-                    for i, p in enumerate(primary)
-                ]
-            ),
-        ),
+    assert all(r["successor_lesson"] == chosen for r in result)
+    rows[1]["change_id"] = "C2"
+    result = lifecycle.validate_pairs(
+        pairs,
+        [dict(content=TEXT)],
+        rows,
+        {},
+        {"C1": change(), "C2": change(kind="withdraw", new_rule_or_null=None)},
     )
-    with caplog.at_level("INFO"):
-        result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
+    assert all(r["relation"] == "unrelated" for r in result)
+
+
+def test_crash_resume_does_not_repeat_calls_or_resurrect(setup, monkeypatch):
+    mem, old, job, calls, install = setup
+    install([change()], [pair(old.decision_id)])
+    save = lifecycle.save_plan
+    writes = []
+
+    def crash(path, plan):
+        writes.append(True)
+        if len(writes) == 2:
+            raise RuntimeError("crash before checkpoint")
+        save(path, plan)
+
+    monkeypatch.setattr(lifecycle, "save_plan", crash)
+    assert "degradation" in capture(setup)
+    successor = mem.get_decision(old.superseded_by)
+    successor.status = "retracted"
+    result = capture_lessons(mem, job, [], [])
     assert "degradation" not in result
-    assert old.superseded_by == result["lesson_ids"][chosen]
-    assert len(mem.transitions) == 1
-    assert all(mem.get_decision(i).status == "active" for i in result["lesson_ids"])
-    assert all(
-        r["successor_of_record"] == old.superseded_by and r["relation"] == "supersedes"
-        for r in result["lesson_transitions"]
+    assert successor.status == "retracted"
+    assert mem.transitions == ["supersede"]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("raw", [None, {}, "invalid"])
+def test_nonarray_change_response_warns_and_degrades(setup, raw):
+    _, old, _, _, install = setup
+    install(raw, [])
+    result = capture(setup)
+    assert "degradation" in result
+    assert result["lifecycle_unverified_claims"] == 1
+    assert old.status == "active"
+
+
+def test_usage_sums_both_steps(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "fake")
+    responses = iter([[change()], [pair("old")]])
+
+    def fake(**kw):
+        set_last_usage(
+            dict(model=lifecycle.MODEL, prompt_tokens=20, completion_tokens=7)
+        )
+        return None, json.dumps(next(responses))
+
+    monkeypatch.setattr(lifecycle, "call_llm", fake)
+    from smartmemory_app.session_lessons import _lesson_usage
+
+    receipt = {
+        "lesson_usage": _lesson_usage(
+            dict(model=lifecycle.MODEL, prompt_tokens=10, completion_tokens=5),
+            lifecycle.MODEL,
+        )
+    }
+    lifecycle.classify_pairs(
+        [dict(content=TEXT)],
+        ["new rule"],
+        [dict(lesson=0, old_id="old", content=OLD)],
+        receipt,
     )
-    assert ("primary fallback" in caplog.text) == (sum(primary) != 1)
-    again = capture_lessons(mem, job, [], [])
-    assert again["lesson_transitions"] == result["lesson_transitions"]
-    assert len(mem.transitions) == 1
+    assert receipt["lesson_usage"]["prompt_tokens"] == 50
+    assert receipt["lesson_usage"]["completion_tokens"] == 19
 
 
-@pytest.mark.parametrize("duplicate_targets", [False, True])
-def test_multiple_old_targets(setup, monkeypatch, duplicate_targets, caplog):
-    mem, old, job, text, _, install = setup
-    install("supersedes")
-    other = mem.add_decision(
-        content=old.content if duplicate_targets else "Different rule",
+def test_valid_replacement_leaves_complementary_sibling_active(setup):
+    mem, old, _, _, install = setup
+    sibling = mem.add_decision(
+        content="Support export names must be nonempty strings",
         context_snapshot={"workspace_id": "ws"},
     )
-    monkeypatch.setattr(
-        "smartmemory_app.lesson_lifecycle.call_llm",
-        lambda **kw: (
-            None,
-            json.dumps(
-                [
-                    dict(
-                        lesson=0,
-                        old_id=d.decision_id,
-                        relation="supersedes",
-                        evidence=text,
-                        explicit=True,
-                        reason="Changed",
-                    )
-                    for d in (old, other)
-                ]
+    install(
+        [change()],
+        [
+            pair(old.decision_id),
+            pair(
+                sibling.decision_id,
+                change_id=None,
+                replaced_rule=None,
             ),
-        ),
+        ],
     )
-    with caplog.at_level("INFO"):
-        result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
-    assert "degradation" not in result
-    if duplicate_targets:
-        assert old.status == other.status == "superseded"
-        assert old.superseded_by == other.superseded_by == result["lesson_ids"][0]
-    else:
-        assert old.status == other.status == "active"
-        assert all(
-            r["downgrade_reason"] == "conflicting_relations"
-            for r in result["lesson_transitions"]
-        )
-        assert "conflicting_relations" in caplog.text
-
-
-def test_conflicting_successors(setup, monkeypatch, caplog):
-    mem, old, job, text, _, _ = setup
-    monkeypatch.setattr(
-        "smartmemory.plugins.extractors.reasoning.call_llm",
-        lambda **kw: (
-            None,
-            json.dumps(
-                [
-                    dict(type="conclusion", content=f"Deployment conclusion {i}")
-                    for i in range(2)
-                ]
-            ),
-        ),
-    )
-    monkeypatch.setattr(
-        "smartmemory_app.lesson_lifecycle.call_llm",
-        lambda **kw: (
-            None,
-            json.dumps(
-                [
-                    dict(
-                        lesson=i,
-                        old_id=old.decision_id,
-                        relation=relation,
-                        evidence=text,
-                        explicit=True,
-                        reason="Changed",
-                    )
-                    for i, relation in enumerate(["supersedes", "retracts"])
-                ]
-            ),
-        ),
-    )
-    with caplog.at_level("INFO"):
-        result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
-    assert old.status == "active"
-    assert len(mem.decisions) == 3
-    assert all(
-        r["downgrade_reason"] == "conflicting_relations"
-        for r in result["lesson_transitions"]
-    )
-    assert "conflicting_relations" in caplog.text
-
-
-@pytest.mark.parametrize(
-    "evidence", ["“Rule X changed\n to B.”", "`Rule X changed to B.`"]
-)
-def test_normalized_match_is_stored(setup, evidence):
-    mem, old, job, text, _, install = setup
-    install("supersedes", evidence=evidence)
-    result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
+    result = capture(setup)
     assert old.status == "superseded"
-    assert result["lesson_transitions"][0]["evidence"] == "Rule X changed to B."
-
-
-@pytest.mark.parametrize("evidence", ['" "', "Rule X changed to C."])
-def test_empty_or_nonverbatim_evidence_rejected(setup, evidence):
-    mem, old, job, text, _, install = setup
-    install("supersedes", evidence=evidence)
-    result = capture_lessons(mem, job, [dict(role="user", content=text)], [])
-    assert old.status == "active"
-    assert result["lesson_transitions"][0]["downgrade_reason"] == "evidence_not_found"
-
-
-@pytest.fixture(autouse=True)
-def constraint_classifier_replay(monkeypatch):
-    """Isolate RC5 classification from existing extraction/lifecycle recordings."""
-    from pathlib import Path
-
-    response = (
-        Path(__file__).parents[1] / "fixtures/lesson_classifier/external-first.txt"
-    ).read_text()
-    monkeypatch.setattr(
-        "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
-    )
+    assert sibling.status == "active"
+    assert result["lifecycle_unverified_claims"] == 0
 
 
 @pytest.mark.parametrize(
-    "case",
+    "quote",
     [
-        "same_rule",
-        "auth_rule",
-        "mixed",
-        "missing",
-        "empty",
-        "nonstring",
-        "null",
-        "retracts",
-        "duplicate",
+        '"Replace the old support export limit of 250 rows with 1000 rows."',
+        "Replace the old support export limit of 250\nrows with 1000 rows.",
     ],
 )
-def test_s66_multi_target_supersession(setup, monkeypatch, case):
-    """Replay S66's policy plus implementation findings with neutral module names."""
-    mem, old, job, _, _, _ = setup
-    text = (
-        "Replace the previous support export policy: the owner now approves 1000 "
-        "rows for every workspace, replacing the old 250-row limit."
+def test_change_typography_normalization(quote):
+    result = lifecycle.verify_changes(
+        [change(evidence=quote)], [dict(content=TEXT)], {}
     )
-    old.content = (
-        "support export row limit is 250 rows, including internal workspaces "
-        "(applies to support export task)."
-    )
-    targets = [old]
-    for content in (
-        "Define a module-level constant EXPORT_LIMIT = 250 in support_policy.py "
-        "(applies to the support_policy component).",
-        "Add a new module support_policy.py that defines export_limit() returning "
-        "the constant 250 (applies to the codebase).",
-    ):
-        targets.append(
-            mem.add_decision(content=content, context_snapshot={"workspace_id": "ws"})
-        )
-    new_rule = (
-        "Export policy for workspace data – the owner approved a hard limit of "
-        "1000 rows per workspace, replacing the previous 250‑row limit."
-    )
-    shared_rule = "Support export limit is 250 rows per workspace"
-    rows = [
-        dict(
-            lesson=0,
-            old_id=d.decision_id,
-            relation="supersedes",
-            evidence=text,
-            reason=reason,
-            explicit=True,
-            primary=True,
-            replaced_rule=shared_rule,
-        )
-        for d, reason in zip(
-            targets,
-            (
-                "The owner replaces the 250-row support export policy with 1000.",
-                "EXPORT_LIMIT encodes the replaced 250-row support export policy.",
-                "export_limit() returns the replaced support export limit of 250.",
-            ),
-        )
-    ]
-    if case == "auth_rule":
-        targets[1].content = "Authentication sessions expire after 250 minutes."
-        rows[1]["replaced_rule"] = "Authentication session lifetime is 250 minutes"
-        rows[1]["reason"] = "Claims the authentication lifetime was replaced."
-    elif case == "mixed":
-        rows[1]["relation"] = "retracts"
-    elif case == "missing":
-        rows[1].pop("replaced_rule")
-    elif case == "empty":
-        rows[1]["replaced_rule"] = "  "
-    elif case == "nonstring":
-        rows[1]["replaced_rule"] = {"rule": shared_rule}
-    elif case == "null":
-        rows[1]["replaced_rule"] = None
-    elif case in {"retracts", "duplicate"}:
-        for row in rows:
-            row["relation"] = case
-    monkeypatch.setattr(
-        "smartmemory.plugins.extractors.reasoning.call_llm",
-        lambda **kw: (None, json.dumps([dict(type="conclusion", content=new_rule)])),
-    )
-    calls = []
+    assert result["C1"]["evidence"] == TEXT
 
-    def classifier(**kwargs):
-        calls.append(kwargs)
-        assert kwargs["model"] == "openai/gpt-oss-120b"
-        assert "response_format" not in kwargs  # Groq model has no JSON mode.
-        assert "unrelated OR uncertain" in kwargs["system_prompt"]
-        return None, json.dumps(rows)
 
-    monkeypatch.setattr("smartmemory_app.lesson_lifecycle.call_llm", classifier)
-    args = (mem, job, [dict(role="user", content=text)], [])
-    result = capture_lessons(*args)
-    assert "degradation" not in result, result
-    transitions = result["lesson_transitions"]
-    assert len(transitions) == 3
-    if case == "same_rule":
-        assert len(result["lesson_ids"]) == 1
-        successor = result["lesson_ids"][0]
-        assert all(d.status == "superseded" for d in targets)
-        assert {d.superseded_by for d in targets} == {successor}
-        assert {r["successor_of_record"] for r in transitions} == {successor}
-        assert all(r["relation"] == "supersedes" for r in transitions)
-        assert sum(d.status == "active" for d in mem.decisions.values()) == 1
-        assert mem.transitions == ["supersede"] * 3
-    else:
-        assert all(d.status == "active" for d in targets)
-        assert all(r["relation"] == "unrelated" for r in transitions)
-        assert all(
-            r["downgrade_reason"] == "conflicting_relations" for r in transitions
-        )
-        assert mem.transitions == []
-    again = capture_lessons(*args)
-    assert again["lesson_transitions"] == transitions
-    assert len(calls) == 1
+def test_malformed_change_does_not_discard_valid_sibling(setup):
+    _, old, _, _, install = setup
+    install([None, change()], [pair(old.decision_id)])
+    result = capture(setup)
+    assert old.status == "superseded"
+    assert result["lifecycle_unverified_claims"] == 1
