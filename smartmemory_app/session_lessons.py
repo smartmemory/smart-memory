@@ -86,20 +86,46 @@ class SessionLessonExtractor(ReasoningExtractor):
     def _build_extraction_prompt(self, text):
         return (
             "Extract durable engineering findings, constraints and resolved decisions "
-            "from this conversation, especially its final conclusions. Ignore abandoned "
+            "from this conversation, especially its final conclusions. Preserve "
+            "implementation findings and resolved decisions as conclusions even "
+            "when there are no external constraints. Inspect USER turns also for "
+            "standing rules: explicitly forward-looking or general policies meant "
+            "to apply beyond the current task, including an aside about another "
+            "component or future workflow ('for the future', 'from now on', or "
+            "'always/never in this project'). 'By the way' or 'must' alone does "
+            "not establish that scope. The current task's requirements are NOT "
+            "standing rules: requested validation, data types, defaults, tests, "
+            "example inputs, endpoints and payloads for this task must not be "
+            "tagged CONSTRAINT or attributed as user rules merely because the "
+            "user requested them. Capture their implemented behavior as findings. "
+            "For each explicit standing rule, add its own self-contained "
+            "CONSTRAINT:-prefixed conclusion in addition to, not instead of, "
+            "the implementation findings. State the rule and its continuing or "
+            "future scope, even when the assistant also implemented it; a future "
+            "policy need not have been implemented. Only for such standing rules, "
+            "use 'User-stated rule: ' (or 'Owner policy: ' if the owner stated it); "
+            "keep that attribution in the lesson text after CONSTRAINT:. Example: "
+            "'For future reports, dates must be ISO-8601' is a standing rule; "
+            "'Add date validation to this helper and add tests' is a task request. "
+            "Independently preserve learned counterparty/API rejections, exact "
+            "error codes, required formats, limits and resulting impossibilities "
+            "as constraints, whether or not a user stated a standing rule. These "
+            "must not be displaced by task-specification details. Ignore abandoned "
             "hypotheses and requests that were not resolved. Do not invent findings. "
             "Return a JSON array of objects with type and content. Every rule, "
-            "constraint, requirement, limit, required format or resolved decision is "
+            "constraint, learned limit, required external format or resolved decision is "
             "its own conclusion, even when it also supports a broader conclusion. Use "
             "observation only for incidental context such as what was tried or checked "
-            "(at most 8 conclusions). Make each conclusion self-contained: name the "
+            "(at most 8 conclusions total; consolidate redundant findings if needed "
+            "to retain a separate standing rule and distinct learned constraints). "
+            "Make each conclusion self-contained: name the "
             "system, counterparty or component it applies to and the task it matters "
             "for (for example 'Stripe webhook retries: ...'), because it will be read "
             "and searched without this conversation. "
             "Prefix a conclusion with CONSTRAINT: when it is a hard rule imposed "
             "from outside the code’s own design and learned from evidence: a "
             "counterparty/API/system rejection or error code, a required format or "
-            "limit, or a policy the owner or a partner stated. Do not tag design "
+            "limit, or a standing policy the user, owner or a partner stated. Do not tag design "
             "choices, code structure facts, status, or what was tried as constraints. "
             "Preserve exact identifiers and limitations. "
             "Quote the conclusion text where possible. Return [] if none.\n\n" + text
@@ -112,6 +138,46 @@ _RULE = re.compile(
     r"|at (?:most|least)|rejects?|rejected)\b|(?-i:\b[A-Z]{2,}-\d{2,}\b)",
     re.IGNORECASE,
 )
+_ATTRIBUTED_RULE = re.compile(
+    r"^(User-stated rule|Owner policy)\s*(?::|[-–—])\s*", re.IGNORECASE
+)
+
+
+def _normalize_lesson_content(content):
+    content = content.strip()
+    tagged = content.startswith("CONSTRAINT:")
+    if tagged:
+        content = content.removeprefix("CONSTRAINT:").strip()
+    attributed = bool(_ATTRIBUTED_RULE.match(content))
+    if attributed:
+        content = _ATTRIBUTED_RULE.sub(r"\1: ", content, count=1)
+    return content, tagged, attributed
+
+
+def _prepare_lesson_decisions(decisions):
+    """Normalize and deduplicate decisions while retaining any extractor tag."""
+    tagged_by_content = {}
+    attributed_by_content = {}
+    for decision in decisions:
+        content, tagged, attributed = _normalize_lesson_content(decision.content)
+        decision.content = content
+        tagged_by_content[content] = tagged_by_content.get(content, False) or tagged
+        attributed_by_content[content] = attributed
+    decisions = list({d.content: d for d in decisions if d.content}.values())[:8]
+    return decisions, tagged_by_content, attributed_by_content
+
+
+def _choose_lesson_kind(content, tagged, attributed, classifier_kind=None):
+    """Honor an extractor-tagged standing rule; otherwise trust the classifier."""
+    if tagged and attributed:
+        if classifier_kind == "finding":
+            log.info(
+                "Attributed standing rule overrides classifier finding: %s", content
+            )
+        return "constraint", "attributed_rule"
+    if classifier_kind is not None:
+        return classifier_kind, "classifier"
+    return ("constraint" if tagged else "finding"), "model_prefix"
 
 
 def _promote_rules(trace):
@@ -205,26 +271,26 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
             raise ValueError("reasoning trace contained no lessons/decisions")
         from smartmemory_app.lesson_classifier import classify_lessons
 
-        lesson_kinds = {}
-        for decision in decisions:
-            content = decision.content.strip()
-            tagged = content.startswith("CONSTRAINT:")
-            decision.content = (
-                content.removeprefix("CONSTRAINT:").strip() if tagged else content
-            )
-            if lesson_kinds.get(decision.content) != "constraint":
-                lesson_kinds[decision.content] = "constraint" if tagged else "finding"
-        decisions = list({d.content: d for d in decisions if d.content}.values())[:8]
+        decisions, tagged_by_content, attributed_by_content = _prepare_lesson_decisions(
+            decisions
+        )
         try:
             kinds = classify_lessons([d.content for d in decisions], receipt)
-            lesson_kinds = dict(zip((d.content for d in decisions), kinds))
-            lesson_kind_source = "classifier"
         except Exception as exc:
             log.warning(
                 "Lesson constraint classifier failed; falling back to model_prefix: %s",
                 exc,
             )
-            lesson_kind_source = "model_prefix"
+            kinds = [None] * len(decisions)
+        lesson_kinds = {
+            decision.content: _choose_lesson_kind(
+                decision.content,
+                tagged_by_content[decision.content],
+                attributed_by_content[decision.content],
+                classifier_kind,
+            )
+            for decision, classifier_kind in zip(decisions, kinds)
+        }
         try:
             relations = classify(mem, decisions, job, turns, receipt)
         except Exception as exc:
@@ -240,8 +306,8 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
                 "transcript_path": job["transcript_path"],
                 "session_date": session_date,
                 "lesson_operation": f"{path.stem}:{index}",
-                "lesson_kind": lesson_kinds[decision.content],
-                "lesson_kind_source": lesson_kind_source,
+                "lesson_kind": lesson_kinds[decision.content][0],
+                "lesson_kind_source": lesson_kinds[decision.content][1],
             }
             spans = [
                 [i, i + 1]

@@ -19,6 +19,11 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Lesson supersession can retire differently worded copies of one old rule, including
   its implementation findings, when explicit per-pair evidence identifies the same
   replaced rule; unrelated targets and conflicting actions remain guarded.
+- Session lesson extraction keeps standing user policies as separate constraints, including
+  forward-looking asides when the assistant also implements part of the rule, and
+  preserves their attribution without treating current-task requirements as policies.
+  Tagged, attributed standing rules remain constraints when the classifier calls them
+  findings; stored attribution punctuation is normalized for consistent recall.
 
 - Local ingest warns when caller properties contain reserved keys that are dropped,
   naming the keys while preserving producer-controlled provenance.

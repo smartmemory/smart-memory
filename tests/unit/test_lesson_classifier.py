@@ -1,6 +1,7 @@
 """Offline RC5 classifier validation, prefix fallback, and CLI batch contracts."""
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -135,6 +136,103 @@ def test_capture_authority_and_failure(
         [],
     )
     assert "lesson_classifier_usage" not in retry
+
+
+@pytest.mark.parametrize("separator", [":", "–", "—", "-"])
+@pytest.mark.parametrize(
+    "attribution",
+    ["User-stated rule", "Owner policy", "user-stated rule", "OWNER POLICY"],
+)
+@pytest.mark.parametrize("classifier_response", ["internal", "http-error"])
+def test_tagged_attributed_rule_overrides_finding(
+    replay, monkeypatch, caplog, separator, attribution, classifier_response
+):
+    replay[0](classifier_response)
+    caplog.set_level(logging.INFO, logger="smartmemory_app.session_lessons")
+    content = f"{attribution} {separator} For future exports, preserve the slug case."
+    monkeypatch.setattr(
+        "smartmemory.plugins.extractors.reasoning.call_llm",
+        lambda **kwargs: (
+            None,
+            json.dumps([{"type": "conclusion", "content": "CONSTRAINT: " + content}]),
+        ),
+    )
+    mem = Mock()
+    mem._graph.search_nodes.return_value = []
+    mem.find_decision_conflicts.return_value = []
+    mem.search.return_value = []
+    mem.add_decision.return_value = SimpleNamespace(decision_id="d1")
+    result = capture_lessons(
+        mem,
+        dict(session_id="s", workspace_id="ws", transcript_path="/tmp/s"),
+        [dict(role="user", content=content)],
+        [],
+    )
+    assert result["lessons_complete"]
+    stored = mem.add_decision.call_args.kwargs
+    assert stored["content"] == (
+        f"{attribution}: For future exports, preserve the slug case."
+    )
+    assert stored["context_snapshot"]["lesson_kind"] == "constraint"
+    assert stored["context_snapshot"]["lesson_kind_source"] == "attributed_rule"
+    if classifier_response == "internal":
+        assert any(
+            record.levelname == "INFO"
+            and "overrides classifier finding" in record.message
+            for record in caplog.records
+        )
+    else:
+        assert any(
+            record.levelname == "WARNING"
+            and "falling back to model_prefix" in record.message
+            for record in caplog.records
+        )
+
+
+@pytest.mark.parametrize(
+    "tagged,content,expected",
+    [
+        (False, "User-stated rule — For future exports, preserve case.", "finding"),
+        (True, "Export helper preserves workspace slug case.", "finding"),
+    ],
+)
+def test_attribution_and_tag_each_need_the_other(
+    replay, monkeypatch, tagged, content, expected
+):
+    replay[0]("internal")
+    monkeypatch.setattr(
+        "smartmemory.plugins.extractors.reasoning.call_llm",
+        lambda **kwargs: (
+            None,
+            json.dumps(
+                [
+                    {
+                        "type": "conclusion",
+                        "content": ("CONSTRAINT: " if tagged else "") + content,
+                    }
+                ]
+            ),
+        ),
+    )
+    mem = Mock()
+    mem._graph.search_nodes.return_value = []
+    mem.find_decision_conflicts.return_value = []
+    mem.search.return_value = []
+    mem.add_decision.return_value = SimpleNamespace(decision_id="d1")
+    result = capture_lessons(
+        mem,
+        dict(session_id="s", workspace_id="ws", transcript_path="/tmp/s"),
+        [dict(role="user", content=content)],
+        [],
+    )
+    assert result["lessons_complete"]
+    stored = mem.add_decision.call_args.kwargs
+    assert stored["context_snapshot"]["lesson_kind"] == expected
+    assert stored["context_snapshot"]["lesson_kind_source"] == "classifier"
+    if not tagged:
+        assert (
+            stored["content"] == "User-stated rule: For future exports, preserve case."
+        )
 
 
 def make_item(i, **meta):
