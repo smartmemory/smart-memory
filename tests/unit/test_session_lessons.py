@@ -348,11 +348,99 @@ def test_extraction_prompt_types_rules_as_conclusions(lesson_env):
     enqueue()
     capture_worker.run()
     prompt = lesson_env[2][0]["user_content"]
-    assert "Every rule, constraint, requirement" in prompt
+    assert "Every rule, constraint, learned limit" in prompt
     assert "supporting facts" not in prompt
     # Bare rules ("ID must be exactly RV + original") were unreachable by a task
     # prompt that never names them; lessons must carry their own context.
     assert "self-contained: name the system" in prompt
+    assert "standing rules: explicitly forward-looking or general policies" in prompt
+    assert "By the way" in prompt
+    assert "for the future" in prompt
+    assert "from now on" in prompt
+    assert "even when the assistant also implemented it" in prompt
+    assert "CONSTRAINT:-prefixed conclusion" in prompt
+    assert "User-stated rule: " in prompt
+    assert "keep that attribution in the lesson text after CONSTRAINT:" in prompt
+    assert "The current task's requirements are NOT standing rules" in prompt
+    assert "must not be tagged CONSTRAINT or attributed as user rules" in prompt
+    assert "in addition to, not instead of, the implementation findings" in prompt
+    assert "Independently preserve learned counterparty/API rejections" in prompt
+    assert "at most 8 conclusions total" in prompt
+    assert "Do not invent findings" in prompt
+
+
+def test_user_aside_rule_is_separate_from_implementation_finding(
+    lesson_env, monkeypatch
+):
+    """Replay the missing-rule shape, then the required two-conclusion shape."""
+    rule = (
+        "For future support exports, workspace slug field-team must retain its "
+        "original case-sensitive customer reference; all other workspaces use "
+        "uppercase references."
+    )
+    attributed_rule = "User-stated rule: " + rule
+    implementation = (
+        "Added an export helper that uppercases workspace references except "
+        "for field-team."
+    )
+    user_turn = (
+        "Add optional maximum-length validation to normalize_label without "
+        "truncating labels. By the way, " + rule
+    )
+    turns = [
+        {"role": "user", "content": user_turn},
+        {"role": "assistant", "content": implementation},
+    ]
+    job = dict(
+        session_id="aside-session",
+        workspace_id="ws-test",
+        transcript_path="/tmp/aside-session.jsonl",
+    )
+
+    def extract_response(steps):
+        monkeypatch.setattr(
+            "smartmemory.plugins.extractors.reasoning.call_llm",
+            lambda **kwargs: (None, json.dumps(steps)),
+        )
+
+    classifier_calls = []
+
+    def classify_response(**kwargs):
+        prompt = kwargs["user_content"]
+        classifier_calls.append(prompt)
+        if attributed_rule in prompt:
+            assert "1. " + implementation in prompt
+            return None, '{"external": [0]}'
+        return None, '{"external": []}'
+
+    monkeypatch.setattr("smartmemory_app.lesson_classifier.call_llm", classify_response)
+    extract_response([{"type": "conclusion", "content": implementation}])
+    first = capture_lessons(lesson_env[0], job, turns, [])
+    assert first["lessons_complete"]
+    assert [record.content for record in lesson_env[1]] == [implementation]
+    assert lesson_env[1][0].metadata["context_snapshot"]["lesson_kind"] == "finding"
+
+    # A fresh session avoids the capture journal's intended retry reuse.
+    job["session_id"] = "aside-session-corrected"
+    extract_response(
+        [
+            {"type": "conclusion", "content": "CONSTRAINT: " + attributed_rule},
+            {"type": "conclusion", "content": "CONSTRAINT: " + implementation},
+        ]
+    )
+    second = capture_lessons(lesson_env[0], job, turns, [])
+    assert second["lessons_complete"]
+    stored = lesson_env[1][1:]
+    assert [record.content for record in stored] == [attributed_rule, implementation]
+    assert "0. " + attributed_rule in classifier_calls[1]
+    assert "1. " + implementation in classifier_calls[1]
+    assert "CONSTRAINT:" not in classifier_calls[1]
+    assert [
+        record.metadata["context_snapshot"]["lesson_kind"] for record in stored
+    ] == [
+        "constraint",
+        "finding",
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -366,3 +454,68 @@ def constraint_classifier_replay(monkeypatch):
     monkeypatch.setattr(
         "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)
     )
+
+
+@pytest.mark.parametrize("case", ["task-only", "future-aside", "provider-rejection"])
+def test_standing_rule_boundary_recorded_shapes(lesson_env, monkeypatch, case):
+    """Recorded-shape fakes verify capture wiring, not model semantic accuracy."""
+    findings = [
+        "Date helper rejects invalid calendar dates.",
+        "Date helper preserves valid input unchanged.",
+        "Date helper rejects empty input.",
+        "Date helper accepts leap days in leap years.",
+        "Date helper raises ValueError for non-string input.",
+        "Date helper validation runs before formatting.",
+        "Date helper tests cover invalid dates and leap days.",
+    ]
+    request = "Add date validation to this helper. Reject empty inputs and add tests."
+    constraint = None
+    if case == "future-aside":
+        request += " By the way, for future reports, dates must be ISO-8601."
+        constraint = "User-stated rule: For future reports, dates must be ISO-8601."
+    elif case == "provider-rejection":
+        constraint = "Report provider rejects duplicate references with ERR-17."
+    contents = findings + (["CONSTRAINT: " + constraint] if constraint else [])
+    steps = [{"type": "conclusion", "content": content} for content in contents]
+
+    def extract(**kwargs):
+        assert request in kwargs["user_content"]
+        assert "response_format" not in kwargs
+        assert "response_model" not in kwargs
+        return None, json.dumps(steps)
+
+    def classify(**kwargs):
+        prompt = kwargs["user_content"]
+        for index, finding in enumerate(findings):
+            assert f"{index}. {finding}" in prompt
+        if constraint:
+            assert "7. " + constraint in prompt
+        return None, json.dumps({"external": [7] if constraint else []})
+
+    monkeypatch.setattr("smartmemory.plugins.extractors.reasoning.call_llm", extract)
+    monkeypatch.setattr("smartmemory_app.lesson_classifier.call_llm", classify)
+    turns = [
+        {"role": "user", "content": request},
+        {
+            "role": "assistant",
+            "content": " ".join(findings)
+            + (" " + constraint if case == "provider-rejection" else ""),
+        },
+    ]
+    receipt = capture_lessons(
+        lesson_env[0],
+        dict(
+            session_id=case, workspace_id="ws-test", transcript_path="/tmp/dates.jsonl"
+        ),
+        turns,
+        [],
+    )
+    assert receipt["lessons_complete"]
+    records = lesson_env[1]
+    assert [record.content for record in records] == findings + (
+        [constraint] if constraint else []
+    )
+    assert [
+        record.metadata["context_snapshot"]["lesson_kind"] for record in records
+    ] == (["finding"] * 7 + (["constraint"] if constraint else []))
+    assert all("User-stated rule:" not in record.content for record in records[:7])
