@@ -16,6 +16,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Lesson lifecycle requests separate session evidence from comparison text and verify
+  each quote against its cited turn. Malformed/unknown rows warn without discarding
+  other pairs; repeated pairs are conservatively downgraded.
+
 - Lesson supersession can retire differently worded copies of one old rule, including
   its implementation findings, when explicit per-pair evidence identifies the same
   replaced rule; unrelated targets and conflicting actions remain guarded.

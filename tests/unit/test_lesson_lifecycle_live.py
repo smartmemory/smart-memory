@@ -1,4 +1,4 @@
-"""Saved Groq classifications replayed through a real persistent lite store."""
+"""Historical Groq rows adapted to FIX3; offline persistent-store regression only."""
 
 import json
 from pathlib import Path
@@ -77,10 +77,15 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
             rows = json.loads((FIXTURES / f"s{_index}-response.json").read_text())
             pairs = {
                 (p["lesson"], p["old_id"])
-                for p in json.loads(kwargs["user_content"])["pairs"]
+                for p in json.loads(kwargs["user_content"])["COMPARISON_NOT_QUOTABLE"][
+                    "pairs"
+                ]
             }
             for row in rows:
                 row["old_id"] = id_map[row["old_id"]]
+                # Synthetic adaptation: the recording predates evidence_turn.
+                # This is NOT evidence of FIX3 model compliance.
+                row["evidence_turn"] = "T0"
             # Fixed S1 changes S2's eligible candidates: never revive the old rule.
             rows = [r for r in rows if (r["lesson"], r["old_id"]) in pairs]
             assert len(rows) == 3

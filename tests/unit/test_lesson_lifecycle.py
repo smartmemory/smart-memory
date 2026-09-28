@@ -100,6 +100,7 @@ def setup(tmp_path, monkeypatch):
                         lesson=0,
                         old_id=old.decision_id,
                         relation=relation,
+                        evidence_turn="T0",
                         evidence=text if evidence is None else evidence,
                         reason="Session explicitly changed the rule",
                         explicit=explicit,
@@ -267,6 +268,7 @@ def test_agreeing_successors_and_retry(setup, monkeypatch, caplog, primary, chos
                         lesson=i,
                         old_id=old.decision_id,
                         relation="supersedes",
+                        evidence_turn="T0",
                         evidence='"' + text + '"',
                         explicit=True,
                         reason="Rule changed",
@@ -311,6 +313,7 @@ def test_multiple_old_targets(setup, monkeypatch, duplicate_targets, caplog):
                         lesson=0,
                         old_id=d.decision_id,
                         relation="supersedes",
+                        evidence_turn="T0",
                         evidence=text,
                         explicit=True,
                         reason="Changed",
@@ -359,6 +362,7 @@ def test_conflicting_successors(setup, monkeypatch, caplog):
                         lesson=i,
                         old_id=old.decision_id,
                         relation=relation,
+                        evidence_turn="T0",
                         evidence=text,
                         explicit=True,
                         reason="Changed",
@@ -457,6 +461,7 @@ def test_s66_multi_target_supersession(setup, monkeypatch, case):
             lesson=0,
             old_id=d.decision_id,
             relation="supersedes",
+            evidence_turn="T0",
             evidence=text,
             reason=reason,
             explicit=True,
@@ -498,7 +503,9 @@ def test_s66_multi_target_supersession(setup, monkeypatch, case):
     def classifier(**kwargs):
         calls.append(kwargs)
         assert kwargs["model"] == "openai/gpt-oss-120b"
-        assert "response_format" not in kwargs  # Groq model has no JSON mode.
+        assert (
+            "response_format" not in kwargs
+        )  # This request uses plain JSON text, not schema mode.
         assert "unrelated OR uncertain" in kwargs["system_prompt"]
         return None, json.dumps(rows)
 
@@ -527,3 +534,108 @@ def test_s66_multi_target_supersession(setup, monkeypatch, case):
     again = capture_lessons(*args)
     assert again["lesson_transitions"] == transitions
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "evidence,turn_id,kept",
+    [
+        ("Rule X changed to B.", "T0", True),
+        ("Rule X = B for all production deployments.", "T0", False),
+        ("Rule X = A", "T0", False),
+        ("Rule X changed to B.", "T1", False),
+        ("Rule X changed to B.", "T9", False),
+        ("Rule X changed to B.", None, False),
+        ("Rule X changed to B.", [], False),
+    ],
+)
+def test_cited_turn_verification(setup, monkeypatch, evidence, turn_id, kept):
+    from smartmemory_app import lesson_lifecycle as lifecycle
+
+    mem, old, job, text, _, _ = setup
+    calls = []
+
+    def classifier(**kwargs):
+        calls.append(kwargs)
+        return None, json.dumps(
+            [
+                dict(
+                    lesson=0,
+                    old_id=old.decision_id,
+                    relation="supersedes",
+                    evidence=evidence,
+                    evidence_turn=turn_id,
+                    explicit=True,
+                    reason="Changed",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(lifecycle, "call_llm", classifier)
+    turns = [
+        dict(role="user", content=text),
+        dict(role="assistant", content="Other turn"),
+    ]
+    lessons = [SimpleNamespace(content="Rule X = B for all production deployments.")]
+    result = lifecycle.classify(
+        mem, lessons, job, turns, {"lesson_usage": {"usage_source": "unmeasured"}}
+    )
+    row = result[0]
+    assert (row["relation"] == "supersedes") == kept
+    if not kept:
+        assert row["downgrade_reason"] == "evidence_not_found"
+        assert row["evidence"] == ""
+    payload = json.loads(calls[0]["user_content"])
+    assert payload == {
+        "COMPARISON_NOT_QUOTABLE": {
+            "lessons": [lessons[0].content],
+            "pairs": [dict(lesson=0, old_id=old.decision_id, content=old.content)],
+        },
+        "SESSION_ONLY_QUOTABLE_SOURCE": [
+            dict(turn_id=f"T{i}", **t) for i, t in enumerate(turns)
+        ],
+    }
+    assert turns[0] == dict(role="user", content=text)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        [],
+        {"lesson": []},
+        {"lesson": True, "old_id": "bad"},
+        {"lesson": 0, "old_id": "unknown"},
+        "repeat",
+    ],
+)
+def test_bad_row_isolation(setup, monkeypatch, caplog, bad):
+    from smartmemory_app import lesson_lifecycle as lifecycle
+
+    mem, old, job, text, _, _ = setup
+    other = mem.add_decision(
+        content=old.content, context_snapshot={"workspace_id": "ws"}
+    )
+    rows = [
+        dict(
+            lesson=0,
+            old_id=d.decision_id,
+            relation="supersedes",
+            evidence=text,
+            evidence_turn="T0",
+            explicit=True,
+            reason="Changed",
+        )
+        for d in (old, other)
+    ]
+    rows.insert(0, dict(rows[0]) if bad == "repeat" else bad)
+    monkeypatch.setattr(lifecycle, "call_llm", lambda **kw: (None, json.dumps(rows)))
+    result = lifecycle.classify(
+        mem,
+        [SimpleNamespace(content="new rule")],
+        job,
+        [dict(role="user", content=text)],
+        {"lesson_usage": {"usage_source": "unmeasured"}},
+    )
+    assert result[1]["relation"] == "supersedes"
+    assert result[0]["relation"] == ("unrelated" if bad == "repeat" else "supersedes")
+    assert any(r.levelname == "WARNING" for r in caplog.records)
