@@ -896,10 +896,11 @@ def _warm_notice() -> None:
         _warm_notice_shown = True
 
 
-# LITE-FIRSTRUN-SPACY-1: `sm add` fetches the Lite prerequisites that `sm setup`
-# would have installed (spaCy + the default embedding model), terminal or not.
-# Other direct commands (recall runs in hooks) and runtime startup (storage,
-# daemon, MCP, viewer, worker) never download; they print the setup line.
+# LITE-FIRSTRUN-SPACY-1: direct-storage `sm add`/`search`/`get` fetch the Lite
+# prerequisites that `sm setup` would have installed (spaCy + the default
+# embedding model), terminal or not. `sm recall` (runs in hooks), the hook
+# `lifecycle` commands and runtime startup (storage, daemon, MCP, viewer, worker)
+# never download; they print the setup line.
 AUTO_DOWNLOAD_ENV = "SMARTMEMORY_AUTO_DOWNLOAD_MODELS"  # "0" = never download
 _SETUP_HINT = "Run: smartmemory setup"
 _first_run_models_ready = False
@@ -1204,7 +1205,7 @@ def recall_cmd(
         from smartmemory_app.storage import recall
 
         log.debug("daemon unreachable; using in-process fallback: %s", "recall")
-        _prepare_direct_access()
+        _prepare_direct_access()  # recall runs in hooks: never downloads
         context = recall(
             cwd,
             top_k,
@@ -1368,7 +1369,7 @@ def search_cmd(
         from smartmemory_app.remote_backend import RemoteBackendError
 
         log.debug("daemon unreachable; using in-process fallback: %s", "search")
-        _prepare_direct_access()
+        _prepare_direct_access(download=True)
         # One-shot in-process search: this interpreter exits right after the
         # query, so the reranker's background load can never finish in time —
         # "async" here means every result comes back in fusion order with a
@@ -1700,7 +1701,7 @@ def get_cmd(item_id: str) -> None:
         from smartmemory_app.storage import get
 
         log.debug("daemon unreachable; using in-process fallback: %s", "get")
-        _prepare_direct_access()
+        _prepare_direct_access(download=True)
         result = get(item_id)
 
     if not result:

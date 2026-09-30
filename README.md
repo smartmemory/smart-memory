@@ -33,7 +33,7 @@ sm search "which database did we pick"
 
 `sm` is the short alias for `smartmemory`. Every command works with either.
 
-**First run.** SmartMemory runs two small models on your machine: a spaCy language model (about 15 MB) and a local embedding model (about 100 MB). `smartmemory setup` downloads both. If you skip setup, your first `sm add` downloads them once and tells you what it is downloading and when it is done. If the download fails, for example without a network connection, it stops with a one-line message asking you to run `smartmemory setup`. Other commands such as `sm search` do not download and ask you to run setup instead. To turn off the download in `sm add`, for example in CI, set `SMARTMEMORY_AUTO_DOWNLOAD_MODELS=0`.
+**First run.** SmartMemory runs two small models on your machine: a spaCy language model (about 15 MB) and a local embedding model (about 100 MB). `smartmemory setup` downloads both. If you skip setup, the first `sm add`, `sm search` or `sm get` downloads them once and tells you what it is downloading and when it is done. If the download fails, for example without a network connection, it stops with a one-line message asking you to run `smartmemory setup`. The Claude Code hooks never download models. To turn off the download, for example in CI, set `SMARTMEMORY_AUTO_DOWNLOAD_MODELS=0`.
 
 ### What you get from here
 

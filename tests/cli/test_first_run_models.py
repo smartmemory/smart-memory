@@ -3,9 +3,9 @@
 `pip install smartmemory` cannot bring spaCy's `en_core_web_sm` (it is not on PyPI)
 or the default embedding snapshot. `sm add` fetches both once, terminal or not,
 through the downloaders `sm setup` uses, with one-line notices on stderr, then saves.
-Other direct commands (recall runs in hooks, search, get), an opt-out, a failed
-download, or a non-default (remote-code) embedder give one line naming
-`smartmemory setup` and a WARNING, never a traceback. Runtime startup (storage,
+`sm search` and `sm get` fetch the same way. `sm recall` and the hook `lifecycle`
+commands, an opt-out, a failed download, or a non-default (remote-code) embedder
+give one line naming `smartmemory setup` and a WARNING, never a traceback. Runtime startup (storage,
 daemon, worker) stays disk-only.
 """
 
@@ -128,6 +128,12 @@ def _invoke(argv):
     import smartmemory_app.cli as cli_module
 
     return CliRunner().invoke(cli_module.cli, argv)
+
+
+def _invoke_with_input(argv, text):
+    import smartmemory_app.cli as cli_module
+
+    return CliRunner().invoke(cli_module.cli, argv, input=text)
 
 
 def _assert_one_line_setup_error(result):
@@ -369,24 +375,18 @@ def test_opt_out_env_blocks_download(machine, monkeypatch, caplog, value):
     embed_dl.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "argv, fallback",
-    [
-        (["recall", "--cwd", "/tmp"], "smartmemory_app.storage.recall"),
-        (["search", "hello"], "smartmemory_app.storage.search"),
-        (["get", "item-1"], "smartmemory_app.storage.get"),
-    ],
-    ids=["recall-hook", "search", "get"],
-)
-def test_other_direct_commands_never_download(machine, caplog, argv, fallback):
-    """Only `sm add` and `sm setup` download. recall runs inside SessionStart hooks."""
+def test_recall_never_downloads(machine, caplog):
+    """`sm recall` runs inside the SessionStart hook with a timeout: setup line only."""
     with (
         patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
-        patch(fallback, side_effect=AssertionError("reached storage before the check")),
+        patch(
+            "smartmemory_app.storage.recall",
+            side_effect=AssertionError("reached storage before the check"),
+        ),
         caplog.at_level(logging.WARNING),
     ):
-        result = _invoke(argv)
+        result = _invoke(["recall", "--cwd", "/tmp"])
     line = _assert_one_line_setup_error(result)
     assert line.startswith(
         "Error: Not installed: spaCy language model 'en_core_web_sm'"
@@ -394,6 +394,61 @@ def test_other_direct_commands_never_download(machine, caplog, argv, fallback):
     spacy_dl.assert_not_called()
     embed_dl.assert_not_called()
     assert _warned(caplog, "never downloads")
+
+
+def test_hook_lifecycle_recall_never_downloads(machine):
+    """Hooks call `smartmemory lifecycle ...`; that path never reaches a downloader."""
+    import json
+
+    with (
+        patch("smartmemory_app.cli._lifecycle_via_daemon", return_value=None),
+        patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
+        patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
+        patch("smartmemory_app.setup._ensure_spacy") as setup_spacy,
+        patch(
+            "smartmemory_app.lifecycle.MemoryLifecycle.recall",
+            side_effect=MissingModelError("spaCy model 'en_core_web_sm' is required"),
+        ) as lifecycle_recall,
+    ):
+        result = _invoke_with_input(
+            ["lifecycle", "recall"],
+            json.dumps({"session_id": "s1", "cwd": "/tmp", "prompt": "hello"}),
+        )
+    lifecycle_recall.assert_called_once()  # the direct-storage hook path ran
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert errors == [
+        "Error: A required local model is not installed. Run: smartmemory setup"
+    ]
+    spacy_dl.assert_not_called()
+    embed_dl.assert_not_called()
+    setup_spacy.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "argv, fallback, value",
+    [
+        (["search", "hello"], "smartmemory_app.storage.search", []),
+        (["get", "item-1"], "smartmemory_app.storage.get", {"item_id": "item-1"}),
+    ],
+    ids=["search", "get"],
+)
+def test_search_and_get_download_missing_models(machine, argv, fallback, value):
+    """Direct-storage user commands fetch the models like `sm add`, terminal or not."""
+    with (
+        patch(
+            "smartmemory.tools.factory._ensure_spacy_model",
+            side_effect=machine.install_spacy,
+        ) as spacy_dl,
+        patch(fallback, return_value=value),
+    ):
+        result = _invoke(argv)
+    assert result.exit_code == 0, result.output
+    spacy_dl.assert_called_once_with("en_core_web_sm")
+    assert machine.embedding
+    assert "Downloaded spaCy language model 'en_core_web_sm'." in result.stderr
+    assert "ownload" not in result.stdout
 
 
 # ── other surfaces ───────────────────────────────────────────────────────────
