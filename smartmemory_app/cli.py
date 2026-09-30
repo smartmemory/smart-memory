@@ -341,7 +341,9 @@ class _CLIGroup(click.Group):
                 if isinstance(cause, (MissingModelError, HFModelUnavailable)):
                     break
                 seen.add(id(cause))
-                cause = cause.__cause__ or cause.__context__
+                cause = cause.__cause__ or (
+                    None if cause.__suppress_context__ else cause.__context__
+                )
             else:
                 raise
             raise _model_error(
@@ -1006,6 +1008,15 @@ def _ensure_first_run_models(*, download: bool) -> None:
                     _failure_detail(exc),
                 ) from exc
         if embedding_model:
+            from huggingface_hub.utils import (
+                are_progress_bars_disabled,
+                disable_progress_bars,
+                enable_progress_bars,
+            )
+
+            # The notice and done lines are the progress report; no HF bars.
+            bars_were_disabled = are_progress_bars_disabled()
+            disable_progress_bars()
             try:
                 setup._ensure_embedding_model("local", missing=True)
             except (Exception, SystemExit) as exc:
@@ -1013,6 +1024,9 @@ def _ensure_first_run_models(*, download: bool) -> None:
                     f"Could not download {embedding_what}. {_SETUP_HINT}",
                     _failure_detail(exc),
                 ) from exc
+            finally:
+                if not bars_were_disabled:
+                    enable_progress_bars()
     _first_run_models_ready = True
 
 

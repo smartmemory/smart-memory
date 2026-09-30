@@ -590,3 +590,38 @@ def test_add_failure_keeps_installer_chatter_off_the_console(
         r.levelno == logging.DEBUG and "(first run only)" in r.getMessage()
         for r in caplog.records
     ), "the installer output is kept in the debug log"
+
+
+def test_suppressed_context_is_not_mislabelled(machine):
+    """`raise X from None` after a handled model error keeps X."""
+    machine.spacy = True
+    machine.install_embedding()
+
+    def ingest(*args, **kwargs):
+        try:
+            raise MissingModelError("recovered")
+        except MissingModelError:
+            raise ValueError("invalid unrelated field") from None
+
+    with patch("smartmemory_app.storage.ingest", side_effect=ingest):
+        result = _add()
+    assert isinstance(result.exception, ValueError)
+
+
+def test_add_embedding_download_shows_no_progress_bars(machine):
+    """sm add reports the embedding download with its two lines, not HF bars."""
+    from huggingface_hub.utils import are_progress_bars_disabled
+
+    machine.spacy = True
+    seen = []
+
+    def download(provider, *, missing=False):
+        seen.append(are_progress_bars_disabled())
+        machine.install_embedding()
+
+    before = are_progress_bars_disabled()
+    with patch("smartmemory_app.setup._ensure_embedding_model", side_effect=download):
+        result = _add()
+    assert result.exit_code == 0, result.output
+    assert seen == [True]
+    assert are_progress_bars_disabled() == before, "global HF state restored"
