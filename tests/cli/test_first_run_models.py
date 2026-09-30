@@ -335,26 +335,49 @@ def test_non_default_embedder_is_never_auto_fetched(machine, monkeypatch, caplog
 
 
 def test_non_default_embedder_without_torch_is_one_line(machine, monkeypatch, caplog):
-    """Backend resolution fails before the prerequisite's own error wrapping."""
-    from smartmemory.plugins.embedding import EmbeddingService
+    """Backend resolution fails before the prerequisite's own error wrapping.
+
+    Core's real resolver runs (torch reported missing); the line names the
+    configured nomic model and why setup owns it, and core's advice goes to the log.
+    """
+    import importlib
 
     machine.spacy = True
-    monkeypatch.setenv(
-        "SMARTMEMORY_EMBEDDING_LOCAL_MODEL", "nomic-ai/nomic-embed-text-v1.5"
-    )
-    advice = 'nomic needs torch; run pip install "smartmemory-core[torch]"'
+    nomic = "nomic-ai/nomic-embed-text-v1.5"
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_LOCAL_MODEL", nomic)
+    real_import = importlib.import_module
+
+    def no_torch(name, *args, **kwargs):
+        if name in {"sentence_transformers", "torch"}:
+            raise ImportError(f"No module named {name!r}")
+        return real_import(name, *args, **kwargs)
+
     with (
-        patch.object(
-            EmbeddingService, "_resolve_backend", side_effect=RuntimeError(advice)
-        ),
+        patch("importlib.import_module", side_effect=no_torch),
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
         caplog.at_level(logging.WARNING),
     ):
         result = _add()
     line = _assert_one_line_setup_error(result)
-    assert line == f"Error: {advice}. Then run: smartmemory setup"
+    assert nomic in line
+    assert "runs code from its model repository" in line
     embed_dl.assert_not_called()
-    assert _warned(caplog, advice)
+
+
+def test_default_embedder_without_runtime_shows_core_advice(machine, caplog):
+    from smartmemory.plugins.embedding import EmbeddingService
+
+    machine.spacy = True
+    advice = 'MiniLM needs onnxruntime; pip install "smartmemory-core[onnx]"'
+    with (
+        patch.object(
+            EmbeddingService, "_resolve_backend", side_effect=RuntimeError(advice)
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = _add()
+    line = _assert_one_line_setup_error(result)
+    assert line == f"Error: {advice}. Then run: smartmemory setup"
 
 
 # ── who may download ─────────────────────────────────────────────────────────

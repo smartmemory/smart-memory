@@ -969,8 +969,16 @@ def _ensure_first_run_models(*, download: bool) -> None:
                 exc,
             ) from exc
     except Exception as exc:
-        # Backend/dependency resolution (e.g. a torch-only model without the torch
-        # extra). A download cannot fix it; surface core's own advice in one line.
+        # Backend/dependency resolution failed before the model check.
+        configured = EmbeddingService().local_model_name()
+        if hf_models.canonical_id(configured) != DEFAULT_LOCAL_MODEL:
+            # A remote-code model: setup owns it (and its torch backend).
+            raise _model_error(
+                f"Embedding model {configured!r} is not installed, and only setup "
+                f"installs it because it runs code from its model repository. {_SETUP_HINT}",
+                exc,
+            ) from exc
+        # Default model: a download cannot fix a missing runtime; show core's advice.
         first_line = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
         raise _model_error(
             f"{first_line.rstrip('.')}. Then {_SETUP_HINT[0].lower()}{_SETUP_HINT[1:]}",
