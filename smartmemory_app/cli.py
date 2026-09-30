@@ -982,7 +982,9 @@ def _ensure_first_run_models() -> None:
         # extra). A download cannot fix it; surface core's own advice in one line.
         log.warning("Local embedding backend unavailable: %s", exc)
         first_line = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
-        raise click.ClickException(first_line) from exc
+        raise click.ClickException(
+            f"{first_line.rstrip('.')}. Then {_SETUP_HINT[0].lower()}{_SETUP_HINT[1:]}"
+        ) from exc
 
     if missing_spacy or embedding_model:
         spacy_what = " and ".join(f"spaCy model {m!r}" for m in missing_spacy)

@@ -430,7 +430,7 @@ def test_non_default_embedder_without_torch_is_one_line(machine, monkeypatch, ca
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit), repr(result.exception)
     errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
-    assert errors == [f"Error: {advice}"]
+    assert errors == [f"Error: {advice}. Then run: smartmemory setup"]
     embed_dl.assert_not_called()
     assert _warned(caplog, advice)
 
@@ -450,3 +450,24 @@ def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
         result = CliRunner().invoke(cli_module.cli, ["get", "remote-1"])
     assert result.exit_code == 0, result.output
     assert "loading local models" not in result.output
+
+
+@pytest.mark.parametrize(
+    "argv, fallback",
+    [
+        (["search", "hello"], "smartmemory_app.storage.search"),
+        (["get", "item-1"], "smartmemory_app.storage.get"),
+    ],
+    ids=["search", "get"],
+)
+def test_other_direct_commands_run_the_first_run_check(machine, argv, fallback):
+    """search and get are routed through the same gate as add and recall."""
+    import smartmemory_app.cli as cli_module
+
+    with (
+        patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
+        patch(fallback, side_effect=AssertionError("reached storage before the check")),
+    ):
+        result = CliRunner().invoke(cli_module.cli, argv)
+    _assert_one_line_setup_error(result)
+    spacy_dl.assert_not_called()
