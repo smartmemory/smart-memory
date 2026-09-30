@@ -7,6 +7,7 @@ Covers the wrapper half of the launch-telemetry pipeline with a mock daemon:
   forwards to the hosted service (authenticated) in remote mode, falling back
   to local JSONL when the forward fails.
 """
+
 import json
 
 import pytest
@@ -57,12 +58,17 @@ class TestCliEmit:
                 return _FakeResponse(200)
 
         monkeypatch.setattr(httpx, "Client", FakeClient)
-        monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
+        monkeypatch.setattr(
+            launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014"
+        )
 
         assert launch_metrics.emit("setup.complete", {"mode": "local"}) is True
         assert calls["client_kwargs"] == {"trust_env": False}
-        assert calls["url"] == "http://127.0.0.1:9014/launch/event"
-        assert calls["json"] == {"event_type": "setup.complete", "props": {"mode": "local"}}
+        assert calls["url"] == "http://127.0.0.1:9014/memory/launch/event"
+        assert calls["json"] == {
+            "event_type": "setup.complete",
+            "props": {"mode": "local"},
+        }
         assert calls["timeout"] == 2.0
 
     def test_emit_ignores_socks_proxy_env_for_daemon_post(self, monkeypatch):
@@ -89,7 +95,9 @@ class TestCliEmit:
 
         monkeypatch.setenv("ALL_PROXY", "socks5://127.0.0.1:1080")
         monkeypatch.setattr(httpx, "Client", FakeClient)
-        monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
+        monkeypatch.setattr(
+            launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014"
+        )
 
         assert launch_metrics.emit("setup.complete", {"mode": "local"}) is True
         assert calls["client_kwargs"] == {"trust_env": False}
@@ -101,7 +109,9 @@ class TestCliEmit:
             raise AssertionError("must not POST for unknown event type")
 
         monkeypatch.setattr(httpx, "post", fail_post)
-        monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
+        monkeypatch.setattr(
+            launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014"
+        )
         assert launch_metrics.emit("not.a.real.event") is False
 
     def test_emit_honors_disable_env(self, monkeypatch):
@@ -125,22 +135,26 @@ class TestCliEmit:
                 raise httpx.ConnectError("nope")
 
         monkeypatch.setattr(httpx, "Client", FakeClient)
-        monkeypatch.setattr(launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014")
+        monkeypatch.setattr(
+            launch_metrics, "_daemon_url", lambda: "http://127.0.0.1:9014"
+        )
         assert launch_metrics.emit("setup.complete") is False
 
     def test_valid_event_types_match_contract(self):
         # Contract: docs/features/LAUNCH-METRICS-1/launch-event-contract.json
-        assert launch_metrics.VALID_EVENT_TYPES == frozenset({
-            "install.start",
-            "setup.complete",
-            "mcp.install",
-            "index.start",
-            "index.complete",
-            "recall.invoke",
-            "recall.first",
-            "recall.accepted",
-            "decision.create",
-        })
+        assert launch_metrics.VALID_EVENT_TYPES == frozenset(
+            {
+                "install.start",
+                "setup.complete",
+                "mcp.install",
+                "index.start",
+                "index.complete",
+                "recall.invoke",
+                "recall.first",
+                "recall.accepted",
+                "decision.create",
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +212,9 @@ class TestDaemonIngest:
             forwarded["url"] = url
             forwarded["json"] = json
             forwarded["headers"] = headers
-            return _FakeResponse(200, {"event_id": "svc-1", "event_type": json["event_type"]})
+            return _FakeResponse(
+                200, {"event_id": "svc-1", "event_type": json["event_type"]}
+            )
 
         monkeypatch.setattr(httpx, "post", fake_post)
         monkeypatch.setattr(
@@ -215,7 +231,10 @@ class TestDaemonIngest:
         assert resp.status_code == 200
         assert resp.json()["event_id"] == "svc-1"
         assert forwarded["url"] == "https://api.example.test/memory/launch/event"
-        assert forwarded["json"] == {"event_type": "mcp.install", "props": {"client": "claude"}}
+        assert forwarded["json"] == {
+            "event_type": "mcp.install",
+            "props": {"client": "claude"},
+        }
         assert forwarded["headers"]["Authorization"] == "Bearer test-key-123"
         # Forwarded events must NOT also be written locally.
         assert not (tmp_path / "launch_events.jsonl").exists()
@@ -239,10 +258,40 @@ class TestDaemonIngest:
         )
 
         resp = client.post(
-            "/launch/event", json={"event_type": "index.complete", "props": {"repo": "r"}}
+            "/launch/event",
+            json={"event_type": "index.complete", "props": {"repo": "r"}},
         )
         # No-silent-degradation: the event still lands (locally), request succeeds.
         assert resp.status_code == 200
         lines = (tmp_path / "launch_events.jsonl").read_text().strip().splitlines()
         assert len(lines) == 1
         assert json.loads(lines[0])["event_type"] == "index.complete"
+
+
+@pytest.mark.parametrize("event_type", sorted(launch_metrics.VALID_EVENT_TYPES))
+def test_real_emitter_persists_event_through_daemon_mount(
+    event_type, tmp_path, monkeypatch
+):
+    """Run the actual emitter and mounted daemon API without a network server."""
+    import httpx
+    from smartmemory_app.config import SmartMemoryConfig, save_config
+    from smartmemory_app.viewer_server import _build_app
+
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("SMARTMEMORY_DISABLE_LAUNCH_METRICS", raising=False)
+    save_config(SmartMemoryConfig(mode="local", daemon_port=19015))
+    # Only replace the HTTP transport. _daemon_url, emit, mount, route, config,
+    # storage-directory resolution, and JSONL persistence are all real.
+    client = TestClient(_build_app(), base_url="http://127.0.0.1:19015")
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client)
+    props = {"mode": "local", "warming": True}
+    assert launch_metrics.emit(event_type, props) is True
+
+    rows = (tmp_path / "data" / "launch_events.jsonl").read_text().splitlines()
+    assert len(rows) == 1
+    record = json.loads(rows[0])
+    assert record["event_type"] == event_type
+    assert record["props"] == props
+    assert record["event_id"]
+    assert record["ts"] > 0

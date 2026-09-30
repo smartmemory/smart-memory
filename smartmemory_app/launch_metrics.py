@@ -1,6 +1,6 @@
 """LAUNCH-METRICS-1 — CLI-side launch event emission.
 
-Lightweight wrapper that POSTs to the daemon HTTP API at /launch/event. The
+Lightweight wrapper that POSTs to the daemon HTTP API at /memory/launch/event. The
 daemon forwards to the hosted service when configured for remote mode; in
 local mode it appends to ``launch_events.jsonl`` in the data dir (local data
 stays local). Failures are best-effort (logged at WARNING) — observability
@@ -16,17 +16,19 @@ from typing import Any, Mapping, Optional
 log = logging.getLogger(__name__)
 
 
-VALID_EVENT_TYPES = frozenset({
-    "install.start",
-    "setup.complete",
-    "mcp.install",
-    "index.start",
-    "index.complete",
-    "recall.invoke",
-    "recall.first",
-    "recall.accepted",
-    "decision.create",
-})
+VALID_EVENT_TYPES = frozenset(
+    {
+        "install.start",
+        "setup.complete",
+        "mcp.install",
+        "index.start",
+        "index.complete",
+        "recall.invoke",
+        "recall.first",
+        "recall.accepted",
+        "decision.create",
+    }
+)
 
 
 def _daemon_url() -> Optional[str]:
@@ -64,7 +66,7 @@ def emit(event_type: str, props: Optional[Mapping[str, Any]] = None) -> bool:
         # SOCKS proxies require optional httpx extras and can break setup even
         # though the daemon is running normally.
         with httpx.Client(trust_env=False) as client:
-            r = client.post(f"{base}/launch/event", json=payload, timeout=2.0)
+            r = client.post(f"{base}/memory/launch/event", json=payload, timeout=2.0)
         return 200 <= r.status_code < 300
     except Exception as e:
         log.warning("launch_metrics: daemon emit failed event=%s err=%s", event_type, e)

@@ -375,8 +375,10 @@ class ProgressScreen(Screen):
             _apply_setup_result(self.app._result, on_step=on_step)
 
             self.app.call_from_thread(self._begin_daemon_wait)
-            daemon_status = _start_daemon_local(on_log=self._show_daemon_log)
-            self.app.call_from_thread(self._finish_daemon_wait)
+            try:
+                daemon_status = _start_daemon_local(on_log=self._show_daemon_log)
+            finally:
+                self.app.call_from_thread(self._finish_daemon_wait)
 
             if daemon_status and daemon_status.get("status") == "ok":
                 self.app.call_from_thread(
@@ -384,6 +386,17 @@ class ProgressScreen(Screen):
                     "[green]✓[/green] SmartMemory started",
                 )
                 status_text = '\n[bold green]SmartMemory is ready![/bold green]\n\nTry: [cyan]smartmemory add "hello world"[/cyan]\n\nPress any key to exit.'
+            elif daemon_status and daemon_status.get("status") == "warming":
+                self.app._result.daemon_warming = True
+                self.app.call_from_thread(
+                    self.query_one("#step-daemon", Static).update,
+                    "[yellow]⚠[/yellow] SmartMemory is still warming up",
+                )
+                status_text = (
+                    "\n[bold yellow]Setup is configured; SmartMemory is still warming up.[/bold yellow]"
+                    "\nCheck: [cyan]sm status[/cyan]. Additional worker startup is deferred; once warmup finishes, run [cyan]sm start --wait[/cyan]."
+                    "\n\nPress any key to exit."
+                )
             elif daemon_status and daemon_status.get("status") == "degraded":
                 reason = (
                     daemon_status.get("degraded_reason") or "No reason was reported."
@@ -406,6 +419,7 @@ class ProgressScreen(Screen):
             self.app.call_from_thread(self._set_final_status, status_text)
         except BaseException as e:
             message = str(e) or e.__class__.__name__
+            self.app._setup_error = message
             self.app.call_from_thread(
                 self._set_final_status,
                 f"\n[bold red]Setup failed: {message}[/bold red]\n\nPress any key to exit.",
@@ -491,6 +505,7 @@ class SetupApp(App):
     def __init__(self) -> None:
         super().__init__()
         self._result = SetupResult()
+        self._setup_error: str | None = None
 
     def on_mount(self) -> None:
         self.push_screen(WelcomeScreen())
@@ -502,4 +517,9 @@ class SetupApp(App):
 def run_setup_tui() -> SetupResult | None:
     """Launch the Textual TUI. Returns SetupResult on success, None on cancel."""
     app = SetupApp()
-    return app.run()
+    result = app.run()
+    if app._setup_error is not None:
+        import click
+
+        raise click.ClickException(app._setup_error)
+    return result

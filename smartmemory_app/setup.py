@@ -66,6 +66,7 @@ class SetupResult:
     spacy_model: str = "en_core_web_sm"
     coreference: bool = False
     data_dir: str = "~/.smartmemory"
+    daemon_warming: bool = False  # transient TUI outcome; not a config setting
 
 
 HOOKS_SRC = Path(__file__).parent / "hooks"
@@ -257,17 +258,24 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
                     pass
             else:
                 # TUI ProgressScreen already ran config + hooks + daemon
+                props = {"mode": "local"}
+                if result.daemon_warming:
+                    props["warming"] = True
                 try:
                     from smartmemory_app.launch_metrics import emit as _lm_emit
 
-                    _lm_emit("setup.complete", {"mode": "local"})
+                    _lm_emit("setup.complete", props)
                 except Exception:
                     pass
-                if first_run:
+                if result.daemon_warming:
+                    click.echo(_SETUP_WARMING_WARNING)
+                elif first_run:
                     click.echo("All done. Run 'sm tour' if this is your first time.")
             if for_tool:
                 _setup_tool_config(for_tool)
             return
+        except click.ClickException:
+            raise
         except Exception as e:
             click.echo(f"TUI unavailable ({e}), using text prompts.\n")
 
@@ -304,10 +312,13 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
                 click.echo("All done. Run 'sm tour' if this is your first time.")
             else:
                 click.echo("Done. SmartMemory is ready.")
+        props = {"mode": "local"}
+        if daemon_status.get("status") == "warming":
+            props["warming"] = True
         try:
             from smartmemory_app.launch_metrics import emit as _lm_emit
 
-            _lm_emit("setup.complete", {"mode": "local"})
+            _lm_emit("setup.complete", props)
         except Exception:
             pass
 
@@ -330,7 +341,7 @@ def _can_run_tui() -> bool:
 
 def _start_daemon_local(
     on_log: Callable[[str], None] | None = None,
-) -> dict | None:
+) -> dict:
     """Start daemon automatically in local mode.
 
     On macOS: let launchd own the process (RunAtLoad starts it immediately).
@@ -339,46 +350,63 @@ def _start_daemon_local(
     """
     from smartmemory_app.daemon import _retire_legacy_workers, _upgrade_worker_agent
 
-    _upgrade_worker_agent()
-    _retire_legacy_workers()
-    launchd_ok = _install_launchd_plist()
-    if on_log is None:
-        action = (
-            "Waiting for SmartMemory to start..."
-            if launchd_ok
-            else "Starting SmartMemory..."
-        )
-        click.echo(f"\n{action}")
     try:
+        _upgrade_worker_agent()
+        _retire_legacy_workers()
+        launchd_ok = _install_launchd_plist()
+        if on_log is None:
+            action = (
+                "Waiting for SmartMemory to start..."
+                if launchd_ok
+                else "Starting SmartMemory..."
+            )
+            click.echo(f"\n{action}")
         from smartmemory_app.daemon import start_daemon
 
         if on_log is not None:
-            status = start_daemon(on_log=on_log)
+            status = start_daemon(on_log=on_log, allow_warming_on_timeout=True)
         else:
             from smartmemory_app.progress import startup_progress
 
             with startup_progress("Starting SmartMemory", emit=click.echo) as emit:
-                status = start_daemon(on_log=emit)
-    except Exception:
-        if on_log is not None:
-            on_log("SmartMemory did not start. Run: sm doctor")
-        else:
-            click.echo("SmartMemory did not start. Run: sm doctor")
-        return None
+                status = start_daemon(on_log=emit, allow_warming_on_timeout=True)
+    except Exception as exc:
+        raise _daemon_setup_error(str(exc) or exc.__class__.__name__) from exc
 
-    if on_log is None:
-        if status is None:
-            click.echo("SmartMemory did not respond after startup. Run: sm doctor")
-        elif status.get("status") == "ok":
-            click.echo("SmartMemory is running.")
-        else:
-            reason = status.get("degraded_reason") or "No reason was reported."
-            click.echo("SmartMemory started, but it needs attention.")
-            click.echo(f"Problem: {reason}")
-            click.echo("Next step: Run: sm doctor")
-    if status and status.get("reextract_offer"):
+    if status is None:
+        raise _daemon_setup_error("No health response was received after startup.")
+    if status.get("status") not in {"ok", "warming"}:
+        reason = status.get("degraded_reason") or (
+            f"Daemon health status: {status.get('status', 'unknown')}."
+        )
+        raise _daemon_setup_error(reason)
+
+    if status.get("status") == "warming":
+        (on_log or click.echo)(_SETUP_WARMING_WARNING)
+    elif on_log is None:
+        click.echo("SmartMemory is running.")
+    if status.get("reextract_offer"):
         (on_log or click.echo)(status["reextract_offer"])
     return status
+
+
+_SETUP_WARMING_WARNING = (
+    "Warning: SmartMemory daemon is still warming up. Setup is configured, "
+    "but SmartMemory is not ready yet.\n"
+    "Check: sm status. Additional worker startup is deferred; once warmup finishes, run sm start --wait."
+)
+
+
+def _daemon_setup_error(reason: str) -> click.ClickException:
+    """Name the failed setup step and point to the daemon's actual log location."""
+    from smartmemory_app.daemon import _data_dir
+
+    return click.ClickException(
+        "Setup failed: SmartMemory daemon did not start or become ready.\n"
+        f"Problem: {reason}\n"
+        f"Log: {_data_dir() / 'daemon.log'}\n"
+        "Next step: run sm doctor, then sm start --wait."
+    )
 
 
 def _apply_setup_result(
@@ -1021,6 +1049,7 @@ def _install_launchd_plist() -> bool:
 
     replacements = {
         "{PYTHON_PATH}": python_path,
+        "{HOME}": escape(os.environ.get("HOME") or str(Path.home())),
         "{DAEMON_PORT}": str(cfg.daemon_port),
         "{DATA_DIR}": data_dir,
         "{BIN_DIR}": bin_dir,

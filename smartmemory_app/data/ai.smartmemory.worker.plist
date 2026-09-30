@@ -31,6 +31,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
+        <key>HOME</key>
+        <string>{HOME}</string>
         <key>PATH</key>
         <string>{BIN_DIR}:/usr/local/bin:/usr/bin:/bin</string>
         <key>SMARTMEMORY_DATA_DIR</key>

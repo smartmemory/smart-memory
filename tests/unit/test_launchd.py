@@ -74,6 +74,33 @@ class TestInstallLaunchdPlist:
             )
         ]
 
+    @pytest.mark.parametrize(
+        "home_name", ["isolated-home", "home & <scratch>", "home-with-slash/"]
+    )
+    def test_install_captures_setup_home_for_both_jobs(
+        self, tmp_path, monkeypatch, home_name
+    ):
+        """Both parsed plists preserve setup HOME, including XML metacharacters."""
+        home = f"{tmp_path}/{home_name}"
+        launch_agents = tmp_path / "LaunchAgents"
+        monkeypatch.setenv("HOME", home)
+        monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", launch_agents)
+        mock_cfg = MagicMock(daemon_port=9014, data_dir=str(tmp_path / "data"))
+        with (
+            patch("smartmemory_app.setup.subprocess.run") as run,
+            patch("smartmemory_app.config.load_config", return_value=mock_cfg),
+            patch("platform.system", return_value="Darwin"),
+            patch("keyring.get_password", return_value=None),
+        ):
+            run.return_value = MagicMock(returncode=0)
+            from smartmemory_app.setup import _install_launchd_plist
+
+            assert _install_launchd_plist() is True
+
+        for environment in self._installed_environments(launch_agents):
+            assert environment["HOME"] == home
+            assert environment["SMARTMEMORY_DATA_DIR"] == mock_cfg.data_dir
+
     def test_install_substitutes_placeholders(self, tmp_path, monkeypatch):
         """_install_launchd_plist() substitutes all placeholders and writes valid plist."""
         launch_agents = tmp_path / "LaunchAgents"

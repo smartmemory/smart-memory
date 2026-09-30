@@ -5,6 +5,8 @@ import os
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
+from unittest.mock import Mock, PropertyMock
 
 
 def test_register_hooks_idempotent(tmp_path):
@@ -276,3 +278,443 @@ def test_embedding_setup_surfaces_core_error_unchanged(monkeypatch):
             _ensure_embedding_model("local")
     assert str(caught.value) == str(failure)
     assert "SMARTMEMORY_EMBEDDING_PROVIDER" not in os.environ
+
+
+@pytest.fixture
+def setup_runtime(tmp_path, monkeypatch):
+    """Exercise setup dispatch/startup without models or real service managers."""
+    from smartmemory_app import daemon, setup
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(setup, "_can_run_tui", lambda: False)
+    monkeypatch.setattr(setup, "_setup_local", Mock(return_value=True))
+    monkeypatch.setattr(setup, "_install_launchd_plist", Mock(return_value=True))
+    monkeypatch.setattr(daemon, "_upgrade_worker_agent", Mock())
+    monkeypatch.setattr(daemon, "_retire_legacy_workers", Mock(return_value=False))
+    start = Mock(return_value={"status": "ok"})
+    start.real_start = daemon.start_daemon
+    monkeypatch.setattr(daemon, "start_daemon", start)
+    metrics = Mock()
+    monkeypatch.setattr("smartmemory_app.launch_metrics.emit", metrics)
+    return setup, start, metrics, tmp_path / "data" / "daemon.log"
+
+
+@pytest.mark.parametrize("flags", [True, False], ids=["flags", "prompts"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("startup timed out"),
+        None,
+        {"status": "error"},
+        {"status": "degraded", "degraded_reason": "missing model"},
+    ],
+    ids=["exception", "no-response", "error", "degraded"],
+)
+def test_setup_exits_nonzero_when_daemon_is_not_ready(setup_runtime, flags, failure):
+    setup, start, metrics, log_path = setup_runtime
+    if isinstance(failure, Exception):
+        start.side_effect = failure
+    else:
+        start.return_value = failure
+
+    result = CliRunner().invoke(
+        setup.setup, ["--mode", "local"] if flags else [], input="1\n"
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "daemon" in result.output.lower()
+    assert str(log_path) in result.output
+    assert "sm doctor" in result.output
+    assert "sm start --wait" in result.output
+    if isinstance(failure, Exception):
+        assert str(failure) in result.output
+    if failure and isinstance(failure, dict) and failure.get("degraded_reason"):
+        assert failure["degraded_reason"] in result.output
+    assert "All done" not in result.output
+    assert "SmartMemory is ready" not in result.output
+    metrics.assert_not_called()
+    start.assert_called_once()
+
+
+@pytest.mark.parametrize("first_run", [True, False])
+def test_setup_success_still_exits_zero(setup_runtime, first_run):
+    setup, start, metrics, _ = setup_runtime
+    setup._setup_local.return_value = first_run
+    result = CliRunner().invoke(setup.setup, ["--mode", "local"])
+    assert result.exit_code == 0, result.output
+    assert "SmartMemory is running" in result.output
+    metrics.assert_called_once_with("setup.complete", {"mode": "local"})
+    start.assert_called_once()
+
+
+def test_setup_remote_and_cancel_do_not_start_daemon(setup_runtime, monkeypatch):
+    setup, start, metrics, _ = setup_runtime
+    remote = Mock()
+    monkeypatch.setattr(setup, "_setup_remote", remote)
+    result = CliRunner().invoke(setup.setup, ["--mode", "remote"])
+    assert result.exit_code == 0, result.output
+    remote.assert_called_once_with(None)
+    metrics.assert_called_once_with("setup.complete", {"mode": "remote"})
+
+    metrics.reset_mock()
+    monkeypatch.setattr(setup, "_can_run_tui", lambda: True)
+    monkeypatch.setattr("smartmemory_app.setup_tui.run_setup_tui", lambda: None)
+    result = CliRunner().invoke(setup.setup, [])
+    assert result.exit_code == 0, result.output
+    assert "Setup cancelled" in result.output
+    start.assert_not_called()
+    metrics.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", ["failed", "ready", "warming"])
+def test_setup_tui_propagates_startup_result(setup_runtime, monkeypatch, outcome):
+    from smartmemory_app.setup_tui import ProgressScreen
+
+    setup, start, metrics, log_path = setup_runtime
+    if outcome == "failed":
+        start.side_effect = RuntimeError("startup timed out")
+    elif outcome == "warming":
+        start.return_value = {"status": "warming"}
+    screen = ProgressScreen()
+    widget = Mock()
+
+    class AppStub:
+        _result = setup.SetupResult()
+        _setup_error = None
+
+        def call_from_thread(self, callback, *args):
+            callback(*args)
+
+        def exit(self, result):
+            self.result = result
+
+        def run(self):
+            ProgressScreen._run_setup.__wrapped__(screen)
+            screen.on_key()
+            return self.result
+
+    app = AppStub()
+    fallback = Mock()
+    monkeypatch.setattr(setup, "_can_run_tui", lambda: True)
+    monkeypatch.setattr(setup, "_setup_click", fallback)
+    monkeypatch.setattr(setup, "_apply_setup_result", Mock())
+    monkeypatch.setattr("smartmemory_app.setup_tui.SetupApp", lambda: app)
+    with (
+        patch.object(
+            ProgressScreen, "app", new_callable=PropertyMock, return_value=app
+        ),
+        patch.object(screen, "query_one", return_value=widget),
+        patch.object(screen, "_begin_daemon_wait"),
+        patch.object(screen, "_finish_daemon_wait"),
+        patch.object(screen, "_show_daemon_log"),
+    ):
+        result = CliRunner().invoke(setup.setup, [])
+
+    assert result.exit_code == (1 if outcome == "failed" else 0), result.output
+    fallback.assert_not_called()
+    start.assert_called_once()
+    if outcome == "failed":
+        assert str(log_path) in result.output
+        assert "sm doctor" in result.output
+        assert "sm start --wait" in result.output
+        assert "All done" not in result.output
+        metrics.assert_not_called()
+    elif outcome == "warming":
+        assert "still warming" in result.output
+        assert "once warmup finishes" in result.output
+        assert "sm status" in result.output
+        assert "sm start --wait" in result.output
+        assert "All done" not in result.output
+        assert "SmartMemory is ready" not in result.output
+        assert any(
+            "once warmup finishes" in call.args[0]
+            for call in widget.update.call_args_list
+        )
+        metrics.assert_called_once_with(
+            "setup.complete", {"mode": "local", "warming": True}
+        )
+    else:
+        metrics.assert_called_once_with("setup.complete", {"mode": "local"})
+
+
+@pytest.mark.parametrize("flags", [True, False], ids=["flags", "prompts"])
+def test_setup_warns_when_daemon_is_still_warming(setup_runtime, flags):
+    setup, start, metrics, _ = setup_runtime
+    start.return_value = {"status": "warming"}
+    result = CliRunner().invoke(
+        setup.setup, ["--mode", "local"] if flags else [], input="1\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "still warming" in result.output
+    assert "once warmup finishes" in result.output
+    assert "sm status" in result.output
+    assert "sm start --wait" in result.output
+    assert "SmartMemory is ready" not in result.output
+    assert "All done" not in result.output
+    metrics.assert_called_once_with(
+        "setup.complete", {"mode": "local", "warming": True}
+    )
+
+
+@pytest.mark.parametrize("path", ["existing", "launchd", "subprocess"])
+@pytest.mark.parametrize(
+    "outcome",
+    ["warming", "ready", "no-response", "lost-response", "degraded", "error", "crash"],
+)
+def test_setup_real_readiness_loop(setup_runtime, monkeypatch, tmp_path, path, outcome):
+    """Run actual readiness polling with a virtual clock and fake OS boundaries."""
+    from smartmemory_app import daemon
+
+    setup, start, metrics, _ = setup_runtime
+    monkeypatch.setattr(daemon, "start_daemon", start.real_start)
+    monkeypatch.setattr(daemon, "_launchd_manages_daemon", lambda: path == "launchd")
+    monkeypatch.setattr(daemon, "_launchd_plist_path", lambda label: tmp_path / label)
+    monkeypatch.setattr(daemon, "_launchd_job_summary", lambda label: [])
+    workers = Mock()
+    monkeypatch.setattr(daemon, "_start_workers", workers)
+    elapsed = [0.0]
+    health_calls = [0]
+
+    def sleep(seconds):
+        elapsed[0] += seconds
+
+    def health():
+        health_calls[0] += 1
+        if path == "existing" and health_calls[0] == 1 and outcome == "no-response":
+            return {"status": "warming"}
+        if path != "existing" and health_calls[0] == 1:
+            return None
+        if outcome == "no-response" or (
+            outcome == "lost-response" and elapsed[0] >= 59
+        ):
+            return None
+        if outcome == "crash" and elapsed[0] >= 1:
+            raise RuntimeError("health connection failed")
+        if outcome == "degraded":
+            return {"status": "degraded", "degraded_reason": "missing model"}
+        if outcome == "error":
+            return {"status": "error"}
+        return {
+            "status": "ok"
+            if outcome == "ready" and elapsed[0] >= 2 or elapsed[0] >= 75
+            else "warming"
+        }
+
+    monkeypatch.setattr(daemon, "get_status", health)
+    monkeypatch.setattr(daemon.time, "sleep", sleep)
+    proc = Mock(returncode=1)
+    proc.poll.side_effect = (
+        lambda: 1 if outcome == "crash" and elapsed[0] >= 1 else None
+    )
+
+    def popen(*args, **kwargs):
+        kwargs["stdout"].close()
+        return proc
+
+    socket = Mock()
+    socket.connect_ex.return_value = 0
+    # No real daemon processes, ports, or service manager calls in these tests.
+    with (
+        patch(
+            "subprocess.Popen",
+            side_effect=popen
+            if path == "subprocess"
+            else AssertionError("unexpected launch"),
+        ),
+        patch(
+            "subprocess.run",
+            side_effect=AssertionError("unexpected service manager call"),
+        ),
+        patch("socket.socket", return_value=socket),
+    ):
+        result = CliRunner().invoke(setup.setup, ["--mode", "local"])
+
+    if outcome == "warming":
+        assert result.exit_code == 0, result.output
+        assert elapsed[0] == 60
+        workers.assert_not_called()
+        assert health()["status"] == "warming"
+        proc.terminate.assert_not_called()
+        assert "still warming" in result.output
+        assert "once warmup finishes" in result.output
+        assert "sm status" in result.output
+        assert "sm start --wait" in result.output
+        assert "SmartMemory is ready" not in result.output
+        assert "All done" not in result.output
+        metrics.assert_called_once_with(
+            "setup.complete", {"mode": "local", "warming": True}
+        )
+        elapsed[0] = 75
+        assert health()["status"] == "ok"
+    elif outcome == "ready":
+        assert result.exit_code == 0, result.output
+        assert "SmartMemory is running" in result.output
+        metrics.assert_called_once_with("setup.complete", {"mode": "local"})
+        proc.terminate.assert_not_called()
+    else:
+        assert result.exit_code == 1, result.output
+        assert "sm doctor" in result.output
+        metrics.assert_not_called()
+
+
+def test_start_wait_strict_timeout_restores_head_termination(
+    setup_runtime, monkeypatch
+):
+    """The setup-only warming policy never changes strict sm start --wait."""
+    from smartmemory_app import daemon
+    from smartmemory_app.cli import cli
+
+    _, start, _, _ = setup_runtime
+    monkeypatch.setattr(daemon, "start_daemon", start.real_start)
+    checks = [0]
+
+    def health():
+        checks[0] += 1
+        return None if checks[0] <= 2 else {"status": "warming"}
+
+    monkeypatch.setattr(daemon, "get_status", health)
+    monkeypatch.setattr(daemon, "_launchd_manages_daemon", lambda: False)
+    sleep = Mock()
+    monkeypatch.setattr(daemon.time, "sleep", sleep)
+    workers = Mock()
+    monkeypatch.setattr(daemon, "_start_workers", workers)
+    proc = Mock()
+    proc.poll.return_value = None
+
+    def popen(*args, **kwargs):
+        kwargs["stdout"].close()
+        return proc
+
+    socket = Mock()
+    socket.connect_ex.return_value = 0
+    with (
+        patch("smartmemory_app.cli._configure_cli_logging"),
+        patch("subprocess.Popen", side_effect=popen) as spawn,
+        patch("socket.socket", return_value=socket),
+    ):
+        result = CliRunner().invoke(cli, ["start", "--wait"])
+
+    assert result.exit_code == 1, result.output
+    assert "SmartMemory is ready" not in result.output
+    spawn.assert_called_once()
+    assert sleep.call_count == 120
+    proc.terminate.assert_called_once()
+    workers.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [["start", "--wait"], ["setup", "--mode", "local"]],
+    ids=["start", "setup"],
+)
+def test_real_warmup_crash_does_not_start_an_orphan_worker(
+    setup_runtime, monkeypatch, command
+):
+    from smartmemory_app import daemon
+    from smartmemory_app.cli import cli
+
+    _, start, _, _ = setup_runtime
+    monkeypatch.setattr(daemon, "start_daemon", start.real_start)
+    monkeypatch.setattr(daemon, "_launchd_manages_daemon", lambda: False)
+    elapsed = [0.0]
+    started = [False]
+    commands = []
+
+    def health():
+        return {"status": "warming"} if started[0] else None
+
+    def sleep(seconds):
+        elapsed[0] += seconds
+
+    def spawn(args, **kwargs):
+        kwargs["stdout"].close()
+        commands.append(args)
+        if "smartmemory_app.worker_entry" not in args:
+            started[0] = True
+        proc = Mock(returncode=42)
+        proc.poll.side_effect = lambda: 42 if elapsed[0] >= 1 else None
+        return proc
+
+    monkeypatch.setattr(daemon, "get_status", health)
+    monkeypatch.setattr(daemon.time, "sleep", sleep)
+    socket = Mock()
+    socket.connect_ex.return_value = 0
+    with (
+        patch("smartmemory_app.cli._configure_cli_logging"),
+        patch("subprocess.Popen", side_effect=spawn),
+        patch("socket.socket", return_value=socket),
+    ):
+        result = CliRunner().invoke(cli, command)
+    assert result.exit_code == 1, result.output
+    assert elapsed[0] == 1
+    assert len(commands) == 1
+    assert "smartmemory_app.worker_entry" not in commands[0]
+
+
+@pytest.mark.parametrize("mode", ["local", "remote"])
+def test_existing_daemon_returns_never_spawn_workers_before_a_child_lock(
+    setup_runtime, monkeypatch, mode
+):
+    """Keep HEAD fast paths; no artificial synchronous child lock masks a race."""
+    from smartmemory_app import daemon
+    from smartmemory_app.cli import cli
+    from smartmemory_app.config import SmartMemoryConfig, save_config
+
+    _, start, _, log_path = setup_runtime
+    save_config(SmartMemoryConfig(mode=mode))
+    log_path.parent.mkdir(parents=True)
+    (log_path.parent / ".worker.lock").touch()
+    (log_path.parent / ".worker.pid").write_text("123456")
+    monkeypatch.setattr(daemon, "start_daemon", start.real_start)
+    monkeypatch.setattr(daemon, "get_status", lambda: {"status": "ok", "mode": mode})
+    with (
+        patch("smartmemory_app.cli._configure_cli_logging"),
+        patch("subprocess.Popen") as spawn,
+    ):
+        # No child acquires a worker lock during these repeated calls.
+        assert daemon.start_daemon()["status"] == "ok"
+        assert daemon.start_daemon()["status"] == "ok"
+        for args in (["start"], ["start", "--wait"]):
+            result = CliRunner().invoke(cli, args)
+            assert result.exit_code == 0, result.output
+            assert "already running" in result.output
+    spawn.assert_not_called()
+
+
+def test_remote_setup_and_start_real_existing_readiness_spawn_no_local_workers(
+    setup_runtime, monkeypatch
+):
+    from smartmemory_app import daemon
+    from smartmemory_app.cli import cli
+    from smartmemory_app.config import SmartMemoryConfig, save_config
+
+    setup, start, _, _ = setup_runtime
+    save_config(SmartMemoryConfig(mode="remote"))
+    monkeypatch.setattr(daemon, "start_daemon", start.real_start)
+    monkeypatch.setattr(setup, "_setup_remote", Mock())
+    elapsed = [0.0]
+
+    def health():
+        return {"status": "warming" if elapsed[0] < 2 else "ok", "mode": "remote"}
+
+    def sleep(seconds):
+        elapsed[0] += seconds
+
+    monkeypatch.setattr(daemon, "get_status", health)
+    monkeypatch.setattr(daemon.time, "sleep", sleep)
+    with (
+        patch("smartmemory_app.cli._configure_cli_logging"),
+        patch("subprocess.Popen") as spawn,
+        patch("subprocess.run", side_effect=AssertionError("no service manager calls")),
+    ):
+        runner = CliRunner()
+        configured = runner.invoke(cli, ["setup", "--mode", "remote"])
+        assert configured.exit_code == 0, configured.output
+        warming = runner.invoke(cli, ["start"])
+        assert warming.exit_code == 0, warming.output
+        ready = runner.invoke(cli, ["start", "--wait"])
+        assert ready.exit_code == 0, ready.output
+        assert elapsed[0] == 2
+    spawn.assert_not_called()

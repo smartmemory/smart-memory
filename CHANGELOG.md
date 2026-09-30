@@ -29,6 +29,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed
 
+- CLI launch-funnel events now reach the daemon at `/memory/launch/event` and persist locally (or forward in remote mode). The emitter previously missed the daemon's `/memory` mount and silently returned false.
+- Local `sm setup` now exits non-zero for failed or degraded daemon startup, with the failure reason, daemon log path, and `sm doctor` / `sm start --wait` recovery steps. Failed TUI setup also propagates the error to the command exit status. A daemon verified to be responding and still warming at the wait deadline stays running; setup exits zero without claiming readiness, defers additional worker startup, and warns to check `sm status` and run `sm start --wait` once warmup finishes. Its `setup.complete` event includes `warming: true`.
+- Generated macOS daemon and worker launchd plists preserve the setup-time `HOME`, so custom homes keep their config and model caches after login startup.
 - `sm setup` also installs `en_core_web_sm` alongside the selected spaCy model so background workers can drain deferred work.
 - Local startup checks model files on disk without downloading. `sm setup` prepares the configured local embedding backend's model files and transitive remote code for pinned torch models. The selected spaCy sm/md/lg model persists in config and is required at startup. Missing models return their setup instructions through the viewer API (HTTP 503) and daemon-backed CLI.
 - Inference-time loaders still honor explicit `SMARTMEMORY_HF_ALLOW_DOWNLOAD=true` as an operator opt-in, including image builds.

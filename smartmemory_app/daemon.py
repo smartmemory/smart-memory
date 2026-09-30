@@ -245,6 +245,7 @@ def start_daemon(
     on_log: Optional[Callable[[str], None]] = None,
     *,
     wait_until_ready: bool = True,
+    allow_warming_on_timeout: bool = False,
 ) -> dict | None:
     """Start the daemon and enrichment workers.
 
@@ -252,7 +253,9 @@ def start_daemon(
     startup times out. With ``wait_until_ready=False``, an observed ``warming``
     payload is returnable so interactive startup can finish as soon as HTTP is up.
     The caller decides how to render healthy, warming, or degraded states.
-    Then starts num_workers background enrichment worker processes.
+    Then starts num_workers background enrichment worker processes. Setup alone
+    may accept a fresh warming response at the deadline with
+    ``allow_warming_on_timeout=True``; that return defers worker startup.
 
     Warmup takes ~22s cold (first run), ~2s warm (model cached). When `on_log` is
     given, the daemon's own startup progress lines (written to daemon.log) are
@@ -286,6 +289,16 @@ def start_daemon(
             not wait_until_ready or status.get("status") != "warming"
         )
 
+    def _setup_timeout_status() -> dict | None:
+        # Do not change strict start's probes or timeout behavior. Setup may keep
+        # a daemon only when a fresh health response verifies it is still alive.
+        if allow_warming_on_timeout:
+            status = get_status()
+            if status is not None:
+                _pump()
+                return status
+        return None
+
     # Another caller may already have launched this daemon. Blocking callers keep
     # observing that process; they must not fall through and launch a duplicate.
     if existing is not None:
@@ -296,6 +309,9 @@ def start_daemon(
                 _pump()
                 return status
             time.sleep(0.5)
+        status = _setup_timeout_status()
+        if status is not None:
+            return status
         raise TimeoutError(
             _startup_failure_message(
                 "SmartMemory did not finish warming within 60 seconds.",
@@ -333,6 +349,9 @@ def start_daemon(
                 _pump()
                 return status
             time.sleep(0.5)
+        status = _setup_timeout_status()
+        if status is not None:
+            return status
         raise TimeoutError(
             _startup_failure_message(
                 "SmartMemory did not respond within 60 seconds.",
@@ -417,13 +436,19 @@ def start_daemon(
                 break
             time.sleep(0.5)
         else:
-            proc.terminate()
-            raise TimeoutError(
-                _startup_failure_message(
-                    "SmartMemory did not finish warming within 60 seconds.",
-                    log_path,
+            status = _setup_timeout_status()
+            if status is None:
+                proc.terminate()
+                raise TimeoutError(
+                    _startup_failure_message(
+                        "SmartMemory did not finish warming within 60 seconds.",
+                        log_path,
+                    )
                 )
-            )
+            if status.get("status") == "warming":
+                # Setup accepts a responding daemon, without starting workers
+                # before readiness or treating warmup as ready.
+                return status
 
     # Phase 3: Start enrichment worker(s)
     _start_workers(num_workers)
