@@ -234,7 +234,7 @@ def test_multiline_item_atomic_and_markers() -> None:
         "memory_type": "semantic",
     }
     full = recall_format.format_recall_lines([row], 1, budget=100)
-    assert "- ⚠~[semantic] [mem:multi]" in full
+    assert "- ⚠~[semantic] [date?] [mem:multi]" in full
     assert body.replace("\n", "\n  ") in full
     assert recall_format.payload_ids(full) == ["multi"]
 
@@ -439,7 +439,7 @@ def test_snapshot_tag_or_failure_in_orient_trace(
         ]
         assert (
             record["snapshot_used"]
-            and "[snapshot] [mem:snapshot] Snapshot fact." in payload
+            and "[snapshot] [date?] [mem:snapshot] Snapshot fact." in payload
         )
 
 

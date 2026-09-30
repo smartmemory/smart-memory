@@ -7,6 +7,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - `sm setup` now also prefetches the models that load lazily on first use (the MiniLM embedder shared by the domain/type classifiers and hybrid retrieval, and the MiniLM cross-encoder reranker), including when embeddings run on ONNX, so first queries no longer stall on a download. Setup no longer asks for remote code when preloading the embedder; approval now follows core's model registry.
 - The Claude Code plugin manifest starts the MCP server from `smartmemory_mcp.server` (the old `smartmemory_app.server` entry point no longer exists).
 - Dev tooling pins ruff 0.11.4 (`dev` extra, `required-version`) to match CI formatting.
+- Claude Code auto-recall now dates every recalled memory (CORE-RECALL-FRESHNESS-1). Each non-decision line carries `[YYYY-MM-DD]`, the date the fact became true (reference time, then valid-from, then session date, then write time), so a months-old memory no longer looks as current as yesterday's conflicting one. Decisions keep their `[session:…]` tag. A memory with no usable date shows `[date?]` and logs a warning. Costs about 8 tokens per recalled memory.
 
 ## [1.4.118] - 2026-09-24
 

@@ -97,7 +97,7 @@ def test_format_preserves_full_content():
     out = format_recall_lines(
         [{"item_id": "a", "memory_type": "semantic", "content": body}], top_k=10
     )
-    assert out == "## SmartMemory Context\n- [semantic] [mem:a] " + body
+    assert out == "## SmartMemory Context\n- [semantic] [date?] [mem:a] " + body
 
 
 def test_format_low_confidence_marker():

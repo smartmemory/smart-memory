@@ -55,6 +55,8 @@ def _item_to_recall_dict(item: Any) -> dict:
                 "node_category",
                 "created_at",
                 "reference",
+                "valid_start_time",
+                "transaction_time",
             )
         }
     )
@@ -84,8 +86,57 @@ def _item_to_recall_dict(item: Any) -> dict:
         else 1.0,
         "stale": raw.get("stale", False),
         "reference": raw.get("reference", False),
+        "valid_start_time": raw.get("valid_start_time"),
+        "transaction_time": raw.get("transaction_time"),
         "metadata": metadata,
     }
+
+
+def _as_utc(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return None
+
+
+def event_date(item: dict) -> str | None:
+    """When the recalled fact became true, as YYYY-MM-DD (CORE-RECALL-FRESHNESS-1).
+
+    Mirrors core's `smartmemory.plugins.evolvers._item_time.resolve_event_time`
+    precedence (private there, so kept in step here; see CORE-EVOLVER-ITEMTIME-DUP-1):
+    reference_time -> valid_start_time -> session_date -> created_at (write time)
+    -> transaction_time. Unlike core it never falls back to "now": None means unknown.
+    """
+    meta = item.get("metadata") or {}
+    for value in (meta.get("reference_time"), item.get("valid_start_time")):
+        dt = _as_utc(value)
+        if dt is not None:
+            return dt.date().isoformat()
+    session_date = meta.get("session_date")
+    if session_date:
+        dt = _as_utc(str(session_date))
+        if dt is None:
+            from smartmemory.search.rerank import parse_session_date
+
+            parsed = parse_session_date(str(session_date))
+            dt = None if parsed == datetime.max else parsed
+        if dt is not None:
+            return dt.date().isoformat()
+        log.warning(
+            "recall lost event date for %s: unparseable session_date %r; using write time",
+            recall_item_label(item),
+            session_date,
+        )
+    for value in (meta.get("created_at"), item.get("transaction_time")):
+        dt = _as_utc(value)
+        if dt is not None:
+            return dt.date().isoformat()
+    return None
 
 
 def filter_hook_items(items, excluded=None):
@@ -250,9 +301,19 @@ def format_recall_lines(
                 :10
             ]
             body = f"[session:{date}] {body}"
+            date_tag = ""
+        else:
+            date = event_date(it)
+            if date is None:
+                log.warning(
+                    "recall lost freshness for %s: no event or write date",
+                    recall_item_label(it),
+                )
+            date_tag = f"[{date or 'date?'}] "
         body = body.replace("\n", "\n  ")
         lines.append(
-            f"- {stale_marker}{conf_marker}[{mtype}] [mem:{recall_item_label(it)}] {body}"
+            f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}"
+            f"[mem:{recall_item_label(it)}] {body}"
         )
 
     if not lines:
