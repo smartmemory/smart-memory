@@ -471,3 +471,26 @@ def test_other_direct_commands_run_the_first_run_check(machine, argv, fallback):
         result = CliRunner().invoke(cli_module.cli, argv)
     _assert_one_line_setup_error(result)
     spacy_dl.assert_not_called()
+
+
+def test_model_unavailable_at_embed_time_is_one_line(machine, caplog):
+    """Safety net also covers core's HFModelUnavailable (e.g. a local fallback embedder)."""
+    from smartmemory.utils.hf_models import HFModelUnavailable
+
+    machine.spacy = True
+    machine.install_embedding()
+    with (
+        patch(
+            "smartmemory_app.storage.ingest",
+            side_effect=HFModelUnavailable("MiniLM not cached"),
+        ),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = _add()
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert errors == [
+        "Error: Not installed: a required local model. Run: smartmemory setup"
+    ]
+    assert _warned(caplog, "MiniLM not cached")

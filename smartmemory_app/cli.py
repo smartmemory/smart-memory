@@ -331,8 +331,9 @@ class _CLIGroup(click.Group):
             return super().invoke(ctx)
         except Exception as exc:
             from smartmemory.errors import MissingModelError
+            from smartmemory.utils.hf_models import HFModelUnavailable
 
-            if not isinstance(exc, MissingModelError):
+            if not isinstance(exc, (MissingModelError, HFModelUnavailable)):
                 raise
             raise _first_run_refusal(
                 "a required local model", "startup prerequisite check failed", exc
