@@ -99,6 +99,7 @@ class TestApplySetupResult:
         with (
             patch("smartmemory_app.setup._ensure_spacy"),
             patch("smartmemory_app.setup._ensure_embedding_model"),
+            patch("smartmemory_app.setup._ensure_lazy_models"),
             patch("smartmemory_app.setup._copy_hooks"),
             patch("smartmemory_app.setup._copy_skills"),
             patch("smartmemory_app.setup._register_hooks"),
@@ -121,6 +122,7 @@ class TestApplySetupResult:
         with (
             patch("smartmemory_app.setup._ensure_spacy"),
             patch("smartmemory_app.setup._ensure_embedding_model"),
+            patch("smartmemory_app.setup._ensure_lazy_models"),
             patch("smartmemory_app.setup._copy_hooks"),
             patch("smartmemory_app.setup._copy_skills"),
             patch("smartmemory_app.setup._register_hooks"),
@@ -145,6 +147,7 @@ class TestApplySetupResult:
         with (
             patch("smartmemory_app.setup._ensure_spacy"),
             patch("smartmemory_app.setup._ensure_embedding_model"),
+            patch("smartmemory_app.setup._ensure_lazy_models"),
             patch("smartmemory_app.setup._copy_hooks"),
             patch("smartmemory_app.setup._copy_skills"),
             patch("smartmemory_app.setup._register_hooks"),

@@ -91,6 +91,7 @@ def test_setup_pinned_embedder_fetches_transitive_code(
     from smartmemory.utils import hf_models
 
     model_id = "nomic-ai/nomic-embed-text-v1.5"
+    monkeypatch.setenv(hf_models.TRUST_REMOTE_CODE_ENV, "true")
     monkeypatch.setenv("SMARTMEMORY_EMBEDDING_LOCAL_MODEL", model_id)
     monkeypatch.setenv("SMARTMEMORY_EMBEDDING_BACKEND", "torch")
     if previous is not None:
@@ -142,6 +143,7 @@ def test_setup_installs_persisted_spacy_choice(local_config, model):
     with (
         patch("smartmemory_app.setup._ensure_spacy") as install,
         patch("smartmemory_app.setup._ensure_embedding_model"),
+        patch("smartmemory_app.setup._ensure_lazy_models"),
         patch("smartmemory_app.setup._copy_hooks"),
         patch("smartmemory_app.setup._copy_skills"),
         patch("smartmemory_app.setup._register_hooks"),

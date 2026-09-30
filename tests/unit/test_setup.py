@@ -229,6 +229,7 @@ def test_setup_downloads_only_local_embedding(
 
     with (
         patch("smartmemory_app.setup._ensure_spacy"),
+        patch("smartmemory_app.setup._ensure_lazy_models") as lazy_models,
         patch("smartmemory_app.setup._copy_hooks"),
         patch("smartmemory_app.setup._copy_skills"),
         patch("smartmemory_app.setup._register_hooks"),
@@ -247,6 +248,7 @@ def test_setup_downloads_only_local_embedding(
             )
         else:
             setup._setup_local()
+    lazy_models.assert_called_once_with()
     if provider == "local":
         download.assert_called_once_with(allow_download=True)
         assert "Preparing local embedding model" in capsys.readouterr().out

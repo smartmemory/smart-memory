@@ -2,6 +2,12 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## Unreleased
+
+- `sm setup` now also prefetches the models that load lazily on first use (the MiniLM embedder shared by the domain/type classifiers and hybrid retrieval, and the MiniLM cross-encoder reranker), including when embeddings run on ONNX, so first queries no longer stall on a download. Setup no longer asks for remote code when preloading the embedder; approval now follows core's model registry.
+- The Claude Code plugin manifest starts the MCP server from `smartmemory_mcp.server` (the old `smartmemory_app.server` entry point no longer exists).
+- Dev tooling pins ruff 0.11.4 (`dev` extra, `required-version`) to match CI formatting.
+
 ## [1.4.118] - 2026-09-24
 
 - Pins `smartmemory-core==1.4.118` (proof trees show evidence and supersede history; relation aliases that changed a fact's meaning removed).

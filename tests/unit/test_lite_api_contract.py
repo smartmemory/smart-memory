@@ -322,6 +322,7 @@ class TestNeighborsDirection:
         """A -[SUPERSEDES]-> B; query A; assert outgoing direction."""
         backend = MagicMock()
         backend.get_edges_for_node.return_value = [_edge("A", "B", "SUPERSEDES")]
+        backend.get_node.return_value = {"content": "Predecessor memory"}
         with patch("smartmemory_app.local_api._get_backend", return_value=backend):
             body = client.get("/A/neighbors").json()
         neighbors = body["neighbors"]
@@ -330,7 +331,9 @@ class TestNeighborsDirection:
             "item_id": "B",
             "link_type": "SUPERSEDES",
             "direction": "outgoing",
+            "content": "Predecessor memory",
         }
+        backend.get_node.assert_called_once_with("B")
 
     def test_incoming_supersedes(self, client):
         """Same edge, query B; assert incoming direction."""

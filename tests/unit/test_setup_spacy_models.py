@@ -25,6 +25,7 @@ def test_setup_ensures_selected_and_worker_spacy_models(tmp_path, path, size, ex
             "smartmemory.tools.factory._ensure_spacy_model", side_effect=calls.append
         ),
         patch("smartmemory_app.setup._ensure_embedding_model"),
+        patch("smartmemory_app.setup._ensure_lazy_models"),
         patch("smartmemory_app.setup._copy_hooks"),
         patch("smartmemory_app.setup._copy_skills"),
         patch("smartmemory_app.setup._register_hooks"),

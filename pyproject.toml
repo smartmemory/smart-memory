@@ -33,6 +33,7 @@ smartmemory-core = { workspace = true }
 smartmemory-mcp = { workspace = true }
 
 [project.optional-dependencies]
+dev = ["pytest>=8", "ruff==0.11.4"]
 tui = ["textual>=8.0"]         # kept for backward compat (now included by default)
 
 [project.scripts]
@@ -55,3 +56,6 @@ markers = [
     "integration: tests requiring real filesystem/subprocess (no mocks)",
     "needs_live_daemon: tests that bind localhost and require an unsandboxed daemon",
 ]
+
+[tool.ruff]
+required-version = "==0.11.4"

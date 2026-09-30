@@ -16,6 +16,7 @@ DIST-SETUP-TUI-1: When running interactively with textual installed,
 """
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -37,6 +38,7 @@ from smartmemory_app.daemon import (
     _LAUNCHD_WORKER_LABEL,
 )
 
+logger = logging.getLogger(__name__)
 
 _SETUP_INSTALLATION_ERROR = """Setup stopped because your SmartMemory version is old or incomplete.
 
@@ -411,6 +413,7 @@ def _apply_setup_result(
         on_step("spaCy model ready")
 
     _ensure_embedding_model(cfg.embedding_provider)
+    _ensure_lazy_models()
     if on_step and cfg.embedding_provider == "local":
         on_step("Embedding model ready")
 
@@ -611,6 +614,7 @@ def _setup_local() -> bool:
     # Wire Claude Code hooks (preserved from original setup.py)
     _ensure_spacy(spacy_model)
     _ensure_embedding_model(cfg.embedding_provider)
+    _ensure_lazy_models()
     _copy_hooks()
     _copy_skills()
     _register_hooks()
@@ -737,7 +741,6 @@ def _ensure_embedding_model(provider: str) -> None:
             try:
                 hf_models.load_sentence_transformer(
                     model,
-                    trust_remote_code=True,
                     device=service.backend_name.removeprefix("torch/"),
                 )
             except Exception as exc:
@@ -755,6 +758,27 @@ def _ensure_embedding_model(provider: str) -> None:
             os.environ.pop("SMARTMEMORY_EMBEDDING_PROVIDER", None)
         else:
             os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = previous
+
+
+def _ensure_lazy_models() -> None:
+    """Prefetch default-on torch consumers, including when embeddings use ONNX."""
+    from smartmemory.utils import hf_models
+
+    # MiniLM is shared by domain/type classifiers, hybrid retrieval and clustering.
+    # These consume torch weights even when the primary embedder uses ONNX.
+    models = (
+        "sentence-transformers/all-MiniLM-L6-v2",
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    )
+    for model in models:
+        try:
+            hf_models.resolve_local_path(model, allow_download=True, backend="torch")
+        except Exception as exc:
+            logger.warning(
+                "Could not prefetch lazy model %s; its runtime feature may be unavailable: %s",
+                model,
+                exc,
+            )
 
 
 def _ensure_spacy(model: str = "en_core_web_sm") -> None:
