@@ -562,3 +562,31 @@ def test_setup_spacy_non_missing_failures_are_click_errors(machine, capsys, fail
     assert "Could not install spaCy model 'en_core_web_sm'" in caught.value.message
     assert "Rerun sm setup" in caught.value.message
     assert "compatibility table unavailable" in capsys.readouterr().err
+
+
+def test_add_failure_keeps_installer_chatter_off_the_console(
+    machine, caplog, monkeypatch
+):
+    """sm add's failure is the notice, the WARNING and one Error line, nothing else."""
+    machine.install_embedding()
+    # The CLI resets console handler levels; DEBUG lets caplog see the debug record.
+    monkeypatch.setenv("SMARTMEMORY_LOG_LEVEL", "DEBUG")
+
+    def install(model):
+        print(f"Downloading spaCy model '{model}' (first run only)...")
+        raise MissingModelError(f"Could not install spaCy model {model!r}: offline")
+
+    with (
+        patch("smartmemory.tools.factory._ensure_spacy_model", side_effect=install),
+        caplog.at_level(logging.DEBUG),
+    ):
+        result = _add()
+    assert result.exit_code == 1
+    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert len(errors) == 1 and "smartmemory setup" in errors[0]
+    assert "Traceback" not in result.output
+    assert "(first run only)" not in result.output
+    assert any(
+        r.levelno == logging.DEBUG and "(first run only)" in r.getMessage()
+        for r in caplog.records
+    ), "the installer output is kept in the debug log"

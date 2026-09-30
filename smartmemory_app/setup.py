@@ -814,8 +814,17 @@ def _download_note(model: str) -> str:
     return f"{size}, one time only" if size else "one time only"
 
 
-def _ensure_spacy(model: str = "en_core_web_sm") -> None:
-    """Prepare the selected model and the default used by background workers."""
+def _ensure_spacy(
+    model: str = "en_core_web_sm", *, replay_on_failure: bool = True
+) -> None:
+    """Prepare the selected model and the default used by background workers.
+
+    Args:
+        model: The configured spaCy model; ``en_core_web_sm`` is always added.
+        replay_on_failure: Show core's captured installer output when it fails
+            (setup). ``sm add`` passes False to keep its failure to one line; the
+            output then goes to the debug log.
+    """
     import contextlib
     import io
 
@@ -838,9 +847,14 @@ def _ensure_spacy(model: str = "en_core_web_sm") -> None:
                 with contextlib.redirect_stdout(chatter):
                     _ensure_spacy_model(required_model)
             except (Exception, SystemExit) as exc:
-                # On failure the installer's own output is the diagnosis; show it.
+                # On failure the installer's own output is the diagnosis.
                 if chatter.getvalue().strip():
-                    click.echo(chatter.getvalue().rstrip(), err=True)
+                    if replay_on_failure:
+                        click.echo(chatter.getvalue().rstrip(), err=True)
+                    else:
+                        logger.debug(
+                            "spaCy installer output: %s", chatter.getvalue().strip()
+                        )
                 if isinstance(exc, MissingModelError):
                     raise
                 raise MissingModelError(

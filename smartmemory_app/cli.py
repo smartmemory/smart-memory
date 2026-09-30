@@ -997,7 +997,7 @@ def _ensure_first_run_models(*, download: bool) -> None:
     with contextlib.redirect_stdout(sys.stderr):
         if missing_spacy:
             try:
-                setup._ensure_spacy(cfg.spacy_model)
+                setup._ensure_spacy(cfg.spacy_model, replay_on_failure=False)
             except (Exception, SystemExit) as exc:
                 # spaCy's downloader can also SystemExit or KeyError on a bad
                 # compatibility lookup; every failure gets the same one line.
