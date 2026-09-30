@@ -808,7 +808,9 @@ _MODEL_SIZES = {
 
 
 def _download_note(model: str) -> str:
-    size = _MODEL_SIZES.get(model)
+    from smartmemory.utils.hf_models import canonical_id
+
+    size = _MODEL_SIZES.get(model) or _MODEL_SIZES.get(canonical_id(model))
     return f"{size}, one time only" if size else "one time only"
 
 

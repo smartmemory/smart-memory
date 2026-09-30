@@ -354,8 +354,9 @@ def test_non_default_embedder_without_torch_is_one_line(machine, monkeypatch, ca
 # ── who may download ─────────────────────────────────────────────────────────
 
 
-def test_opt_out_env_blocks_download(machine, monkeypatch, caplog):
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "0")
+@pytest.mark.parametrize("value", ["0", "false", "FALSE"])
+def test_opt_out_env_blocks_download(machine, monkeypatch, caplog, value):
+    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", value)
     with (
         patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
@@ -482,3 +483,24 @@ def test_setup_embedding_messages(machine, capsys, monkeypatch):
         f"Local embedding model '{DEFAULT_MODEL}' ready.",
     ]
     assert machine.embedding
+
+
+@pytest.mark.parametrize("value", ["1", "no", "off", "yes"])
+def test_only_zero_or_false_turns_download_off(machine, monkeypatch, value):
+    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", value)
+    machine.install_embedding()
+    with patch(
+        "smartmemory.tools.factory._ensure_spacy_model",
+        side_effect=machine.install_spacy,
+    ) as spacy_dl:
+        result = _add()
+    assert result.exit_code == 0, result.output
+    spacy_dl.assert_called_once()
+
+
+def test_download_note_sizes_the_default_model_alias():
+    from smartmemory_app import setup
+
+    assert setup._download_note("all-MiniLM-L6-v2") == "about 100 MB, one time only"
+    assert setup._download_note(DEFAULT_MODEL) == "about 100 MB, one time only"
+    assert setup._download_note("some/other-model") == "one time only"

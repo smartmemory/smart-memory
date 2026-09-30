@@ -896,7 +896,7 @@ _first_run_models_ready = False
 
 def _auto_download_disabled() -> bool:
     raw = os.environ.get(AUTO_DOWNLOAD_ENV, "").strip().lower()
-    return raw in {"0", "false", "no", "off"}
+    return raw in {"0", "false"}
 
 
 def _model_error(message: str, detail: object) -> click.ClickException:
