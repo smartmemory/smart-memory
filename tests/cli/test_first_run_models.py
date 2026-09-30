@@ -384,3 +384,69 @@ def test_missing_model_elsewhere_is_one_line_not_traceback(machine, caplog):
         "Error: Not installed: a required local model. Run: smartmemory setup"
     ]
     assert _warned(caplog, "spaCy model gone")
+
+
+# ── review findings (Codex sol, 2026-09-30) ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [SystemExit(1), KeyError("en_core_web_sm")],
+    ids=["spacy-compat-503-exits", "spacy-compat-malformed"],
+)
+def test_spacy_downloader_non_missing_model_failures_are_one_line(
+    machine, monkeypatch, caplog, failure
+):
+    """spaCy's compatibility lookup can SystemExit or KeyError, not only MissingModelError."""
+    machine.install_embedding()
+    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
+    with (
+        patch("smartmemory.tools.factory._ensure_spacy_model", side_effect=failure),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = _add()
+    _assert_one_line_setup_error(result)
+    assert _warned(caplog, "en_core_web_sm")
+
+
+def test_non_default_embedder_without_torch_is_one_line(machine, monkeypatch, caplog):
+    """Backend resolution fails before the prerequisite's own error wrapping."""
+    from smartmemory.plugins.embedding import EmbeddingService
+
+    machine.spacy = True
+    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
+    monkeypatch.setenv(
+        "SMARTMEMORY_EMBEDDING_LOCAL_MODEL", "nomic-ai/nomic-embed-text-v1.5"
+    )
+    advice = 'nomic needs torch; run pip install "smartmemory-core[torch]"'
+    with (
+        patch.object(
+            EmbeddingService, "_resolve_backend", side_effect=RuntimeError(advice)
+        ),
+        patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
+        caplog.at_level(logging.WARNING),
+    ):
+        result = _add()
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert errors == [f"Error: {advice}"]
+    embed_dl.assert_not_called()
+    assert _warned(caplog, advice)
+
+
+def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
+    import smartmemory_app.cli as cli_module
+
+    monkeypatch.setenv("SMARTMEMORY_MODE", "remote")
+    with (
+        patch(
+            "smartmemory_app.warm.is_warm",
+            side_effect=AssertionError("local warm probe"),
+        ),
+        patch("spacy.util.is_package", side_effect=AssertionError("local model check")),
+        patch("smartmemory_app.storage.get", return_value={"item_id": "remote-1"}),
+    ):
+        result = CliRunner().invoke(cli_module.cli, ["get", "remote-1"])
+    assert result.exit_code == 0, result.output
+    assert "loading local models" not in result.output

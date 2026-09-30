@@ -927,6 +927,11 @@ def _first_run_refusal(
     return click.ClickException(f"Not installed: {what}. {_SETUP_HINT}")
 
 
+def _failure_detail(exc: BaseException) -> str:
+    message = exc.message if isinstance(exc, click.ClickException) else str(exc)
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def _ensure_first_run_models() -> None:
     """Fetch missing spaCy and default embedding models once, before direct local access.
 
@@ -972,6 +977,12 @@ def _ensure_first_run_models() -> None:
                 "non-default models are only downloaded by setup",
                 exc,
             ) from exc
+    except Exception as exc:
+        # Backend/dependency resolution (e.g. a torch-only model without the torch
+        # extra). A download cannot fix it; surface core's own advice in one line.
+        log.warning("Local embedding backend unavailable: %s", exc)
+        first_line = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        raise click.ClickException(first_line) from exc
 
     if missing_spacy or embedding_model:
         spacy_what = " and ".join(f"spaCy model {m!r}" for m in missing_spacy)
@@ -996,9 +1007,11 @@ def _ensure_first_run_models() -> None:
             if missing_spacy:
                 try:
                     setup._ensure_spacy(cfg.spacy_model)
-                except click.ClickException as exc:
+                except (Exception, SystemExit) as exc:
+                    # spaCy's downloader can also SystemExit or KeyError on a bad
+                    # compatibility lookup; every failure gets the same one line.
                     raise _first_run_refusal(
-                        spacy_what, "download failed", exc.message
+                        spacy_what, "download failed", _failure_detail(exc)
                     ) from exc
             if embedding_model:
                 click.echo(
@@ -1008,15 +1021,19 @@ def _ensure_first_run_models() -> None:
                 )
                 try:
                     setup._ensure_embedding_model("local")
-                except click.ClickException as exc:
+                except (Exception, SystemExit) as exc:
                     raise _first_run_refusal(
-                        embedding_what, "download failed", exc.message
+                        embedding_what, "download failed", _failure_detail(exc)
                     ) from exc
     _first_run_models_ready = True
 
 
 def _prepare_direct_access() -> None:
     """Prerequisites first, then the cold-load notice (never "loading" before a check)."""
+    from smartmemory_app.config import load_config
+
+    if load_config().mode == "remote":
+        return  # no local models to fetch or load
     _ensure_first_run_models()
     _warm_notice()
 
