@@ -35,8 +35,13 @@ def _runner() -> CliRunner:
 
 
 def _text(result) -> str:
-    """Everything the user saw. ``_text(result)`` is stdout-only on click < 8.2."""
-    return result.stdout + result.stderr
+    """Both streams, for substring checks (click < 8.2's ``output`` is stdout-only).
+
+    A newline separates them so an unterminated stdout fragment cannot merge into
+    the first stderr line. Line counts use ``result.stderr`` directly.
+    """
+    sep = "\n" if result.stdout and not result.stdout.endswith("\n") else ""
+    return result.stdout + sep + result.stderr
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +163,7 @@ def _assert_one_line_setup_error(result):
     assert result.exit_code == 1, _text(result)
     assert isinstance(result.exception, SystemExit), repr(result.exception)
     assert "Traceback" not in _text(result)
-    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
+    errors = [ln for ln in result.stderr.splitlines() if ln.startswith("Error:")]
     assert len(errors) == 1, _text(result)
     assert "smartmemory setup" in errors[0]
     assert "loading local models" not in _text(result), "banner must follow the check"
@@ -540,7 +545,8 @@ def test_model_missing_later_is_one_line_not_traceback(machine, caplog, error):
         result = _add()
     assert result.exit_code == 1
     assert "Traceback" not in _text(result)
-    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
+    errors = [ln for ln in result.stderr.splitlines() if ln.startswith("Error:")]
+    assert result.stdout == "", "errors stay off stdout"
     assert errors == [
         "Error: A required local model is not installed. Run: smartmemory setup"
     ]
@@ -625,7 +631,8 @@ def test_wrapped_model_error_is_one_line(machine, caplog):
         result = _add()
     assert result.exit_code == 1
     assert "Traceback" not in _text(result)
-    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
+    errors = [ln for ln in result.stderr.splitlines() if ln.startswith("Error:")]
+    assert result.stdout == "", "errors stay off stdout"
     assert errors == [
         "Error: A required local model is not installed. Run: smartmemory setup"
     ]
@@ -678,7 +685,8 @@ def test_add_failure_keeps_installer_chatter_off_the_console(
     ):
         result = _add()
     assert result.exit_code == 1
-    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
+    errors = [ln for ln in result.stderr.splitlines() if ln.startswith("Error:")]
+    assert result.stdout == "", "errors stay off stdout"
     assert len(errors) == 1 and "smartmemory setup" in errors[0]
     assert "Traceback" not in _text(result)
     assert "(first run only)" not in _text(result)
