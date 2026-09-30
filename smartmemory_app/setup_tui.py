@@ -301,6 +301,8 @@ class ProgressScreen(Screen):
                 yield Static("\n[bold]Setting up SmartMemory...[/bold]\n")
                 yield Static("○ Config written", id="step-config")
                 yield Static("○ spaCy model ready", id="step-spacy")
+                if self.app._result.embedding_provider == "local":
+                    yield Static("○ Embedding model ready", id="step-embedding")
                 yield Static("○ Hooks installed", id="step-hooks")
                 yield Static("○ Skills installed", id="step-skills")
                 yield Static("○ Hooks registered", id="step-registered")
@@ -352,6 +354,7 @@ class ProgressScreen(Screen):
         step_map = {
             "Config written": "step-config",
             "spaCy model ready": "step-spacy",
+            "Embedding model ready": "step-embedding",
             "Hooks installed": "step-hooks",
             "Skills installed": "step-skills",
             "Hooks registered": "step-registered",

@@ -16,6 +16,12 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+### Fixed
+
+- `sm setup` also installs `en_core_web_sm` alongside the selected spaCy model so background workers can drain deferred work.
+- Local startup checks model files on disk without downloading. `sm setup` prepares the configured local embedding backend's model files and transitive remote code for pinned torch models. The selected spaCy sm/md/lg model persists in config and is required at startup. Missing models return their setup instructions through the viewer API (HTTP 503) and daemon-backed CLI.
+- Inference-time loaders still honor explicit `SMARTMEMORY_HF_ALLOW_DOWNLOAD=true` as an operator opt-in, including image builds.
+
 - Lite daemon: `GET /memory/{id}/neighbors` now returns each neighbor's `content` (its
   human-readable label, falling back to the item ID). Without it the Obsidian plugin, which
   reads that field for entity names, wrote an empty entity list to every note and left

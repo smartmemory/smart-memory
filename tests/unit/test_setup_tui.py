@@ -98,6 +98,7 @@ class TestApplySetupResult:
 
         with (
             patch("smartmemory_app.setup._ensure_spacy"),
+            patch("smartmemory_app.setup._ensure_embedding_model"),
             patch("smartmemory_app.setup._copy_hooks"),
             patch("smartmemory_app.setup._copy_skills"),
             patch("smartmemory_app.setup._register_hooks"),
@@ -119,6 +120,7 @@ class TestApplySetupResult:
 
         with (
             patch("smartmemory_app.setup._ensure_spacy"),
+            patch("smartmemory_app.setup._ensure_embedding_model"),
             patch("smartmemory_app.setup._copy_hooks"),
             patch("smartmemory_app.setup._copy_skills"),
             patch("smartmemory_app.setup._register_hooks"),
@@ -130,6 +132,7 @@ class TestApplySetupResult:
         assert steps_seen == [
             "Config written",
             "spaCy model ready",
+            "Embedding model ready",
             "Hooks installed",
             "Skills installed",
             "Hooks registered",
@@ -141,6 +144,7 @@ class TestApplySetupResult:
 
         with (
             patch("smartmemory_app.setup._ensure_spacy"),
+            patch("smartmemory_app.setup._ensure_embedding_model"),
             patch("smartmemory_app.setup._copy_hooks"),
             patch("smartmemory_app.setup._copy_skills"),
             patch("smartmemory_app.setup._register_hooks"),

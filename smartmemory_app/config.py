@@ -7,6 +7,7 @@ API keys are stored in the OS keychain via `keyring`, never in the config file.
 The config only stores `api_key_set = true` as a sentinel. The SMARTMEMORY_API_KEY
 env var bypasses the keychain entirely — the correct path for CI/Docker.
 """
+
 from __future__ import annotations
 
 import os
@@ -28,7 +29,13 @@ _VALID_MODES = frozenset({"local", "remote"})
 # endpoint (Tier-2 enqueue), the boot banner, and `smartmemory status` all agree.
 # Previously each site hardcoded its own GROQ|OPENAI check, so an Anthropic- or
 # DeepSeek-only user silently got NO extraction even with a valid key.
-LLM_KEY_ENV_VARS = ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY")
+LLM_KEY_ENV_VARS = (
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+)
 
 # Local OpenAI-compatible LLM servers → default base URL. These speak the OpenAI
 # Chat Completions API, so extraction needs NO provider-specific code: the core
@@ -52,16 +59,18 @@ class UnconfiguredError(RuntimeError):
 
 @dataclass
 class SmartMemoryConfig:
-    mode: Optional[str] = None    # None = unconfigured; "local" | "remote"
+    mode: Optional[str] = None  # None = unconfigured; "local" | "remote"
     api_url: str = "https://api.smartmemory.ai"
-    api_key_set: bool = False      # sentinel — actual key in OS keychain, never here
+    api_key_set: bool = False  # sentinel — actual key in OS keychain, never here
     team_id: str = ""
     coreference: bool = False
     llm_provider: str = "none"
     llm_model: str = ""
     llm_base_url: str = ""  # override for OpenAI-compatible endpoints (ollama/lmstudio/localai); "" = provider default
     embedding_provider: str = "local"  # "local" | "openai" | "ollama"
-    spacy_model: str = "en_core_web_sm"  # "en_core_web_sm" | "en_core_web_md" | "en_core_web_lg"
+    spacy_model: str = (
+        "en_core_web_sm"  # "en_core_web_sm" | "en_core_web_md" | "en_core_web_lg"
+    )
     daemon_port: int = 9014
     data_dir: str = "~/.smartmemory"
 
@@ -112,6 +121,7 @@ def load_config() -> SmartMemoryConfig:
             cfg.llm_model = local.get("llm_model", "")
             cfg.llm_base_url = local.get("llm_base_url", "")
             cfg.embedding_provider = local.get("embedding_provider", "local")
+            cfg.spacy_model = local.get("spacy_model", cfg.spacy_model)
             cfg.daemon_port = local.get("daemon_port", 9014)
             cfg.data_dir = local.get("data_dir", "~/.smartmemory")
         except Exception as exc:
@@ -191,6 +201,7 @@ def save_config(cfg: SmartMemoryConfig) -> None:
             "llm_model": cfg.llm_model,
             "llm_base_url": cfg.llm_base_url,
             "embedding_provider": cfg.embedding_provider,
+            "spacy_model": cfg.spacy_model,
             "daemon_port": cfg.daemon_port,
             "data_dir": cfg.data_dir,
         },
@@ -235,6 +246,7 @@ def get_api_key() -> str:
         return key
     try:
         import keyring
+
         key = keyring.get_password("smartmemory", "api_key") or ""
     except Exception:
         key = ""
@@ -266,6 +278,7 @@ def set_api_key(key: str) -> None:
     """
     try:
         import keyring
+
         keyring.set_password("smartmemory", "api_key", key)
     except Exception:
         warnings.warn(

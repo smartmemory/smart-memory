@@ -420,3 +420,102 @@ def test_ingest_acquires_lock(tmp_path):
         "test content", context={"memory_type": "episodic"}, sync=True
     )
     assert result == "item-123"
+
+
+@pytest.mark.parametrize("progress", [False, True])
+def test_local_startup_is_disk_only(tmp_path, monkeypatch, progress):
+    from smartmemory_app import storage
+    from smartmemory_app.config import SmartMemoryConfig
+
+    monkeypatch.setenv("SMARTMEMORY_NO_WARM", "1")
+    with (
+        patch(
+            "smartmemory_app.storage.load_config",
+            return_value=SmartMemoryConfig(mode="local"),
+        ),
+        patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
+        patch("smartmemory.tools.factory.create_lite_memory") as create,
+        patch("smartmemory.tools.factory._require_spacy_model") as spacy,
+        patch(
+            "smartmemory.tools.factory._ensure_spacy_model",
+            side_effect=AssertionError("runtime download"),
+        ),
+        patch("smartmemory.tools.factory._require_embedding_model") as embedding,
+        patch("atexit.register"),
+    ):
+        storage._get_local_memory(on_progress=(lambda line: None) if progress else None)
+    assert create.call_args.kwargs["auto_download_models"] is False
+    if progress:
+        spacy.assert_called_once_with("en_core_web_sm")
+        embedding.assert_called_once_with(allow_download=False)
+
+
+@pytest.mark.parametrize("progress", [False, True])
+def test_missing_embedding_startup_preserves_setup_error(
+    tmp_path, monkeypatch, progress
+):
+    from smartmemory.errors import MissingModelError
+    from smartmemory.tools import factory
+    from smartmemory.utils import hf_models
+    from smartmemory_app import storage
+    from smartmemory_app.config import SmartMemoryConfig
+
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_PROVIDER", "local")
+    service = MagicMock(provider="local", backend_name="onnxruntime/cpu")
+    service.local_model_name.return_value = "sentence-transformers/all-MiniLM-L6-v2"
+    with (
+        patch(
+            "smartmemory_app.storage.load_config",
+            return_value=SmartMemoryConfig(mode="local"),
+        ),
+        patch("smartmemory_app.storage._resolve_data_dir", return_value=tmp_path),
+        patch("smartmemory.tools.factory._require_spacy_model"),
+        patch("smartmemory.plugins.embedding.EmbeddingService", return_value=service),
+        patch(
+            "smartmemory.utils.hf_models.resolve_local_path",
+            side_effect=hf_models.HFModelUnavailable("not cached"),
+        ) as resolve,
+    ):
+        with pytest.raises(MissingModelError) as expected:
+            factory._require_embedding_model(allow_download=False)
+        resolve.reset_mock()
+        with pytest.raises(MissingModelError) as caught:
+            storage._get_local_memory(
+                on_progress=(lambda line: None) if progress else None
+            )
+    assert str(caught.value) == str(expected.value)
+    assert "Run sm setup" in str(caught.value)
+    resolve.assert_called_once_with(
+        service.local_model_name(), allow_download=False, backend="onnx"
+    )
+    assert storage._memory is None
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_daemon_missing_model_message_reaches_user_unchanged(
+    monkeypatch, capsys, grouped
+):
+    from smartmemory.errors import MissingModelError
+    from smartmemory_app import viewer_server
+
+    message = (
+        "Embedding model 'sentence-transformers/all-MiniLM-L6-v2' for backend "
+        "'onnxruntime/cpu' is unavailable. Run sm setup or call "
+        "create_lite_memory(auto_download_models=True) to download the required files. "
+        "Details: not cached"
+    )
+    monkeypatch.setattr(viewer_server, "_last_warmup_failure", None)
+    failure = MissingModelError(message)
+    if grouped:
+        failure = ExceptionGroup(
+            "Startup prerequisite warmups failed",
+            [MissingModelError("spaCy unavailable. Rerun sm setup."), failure],
+        )
+    with (
+        patch("smartmemory_app.storage.get_memory", side_effect=failure),
+        patch("smartmemory.plugins.embedding.EmbeddingService") as embedder,
+    ):
+        assert viewer_server._warm_backend() is False
+    assert message in capsys.readouterr().out.splitlines()
+    embedder.assert_not_called()
+    assert "Run sm setup" in viewer_server._last_warmup_failure

@@ -452,7 +452,7 @@ def test_setup_uses_verified_core_spacy_installer(monkeypatch):
         lambda model: seen.append(model),
     )
     _ensure_spacy("en_core_web_md")
-    assert seen == ["en_core_web_md"]
+    assert seen == ["en_core_web_md", "en_core_web_sm"]
 
     def missing(model):
         raise MissingModelError("model still missing from this Python")

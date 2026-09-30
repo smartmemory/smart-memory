@@ -191,6 +191,8 @@ def _get_local_memory(
         # its explicit coreference preference; ground/evolve remain opt-in.
         profile = PipelineConfig.lite()
         profile.coreference.enabled = cfg.coreference
+        profile.extraction.entity_ruler.spacy_model = cfg.spacy_model
+        profile.extraction.relation_ruler.spacy_model = cfg.spacy_model
 
         data_path = _resolve_data_dir(data_dir)
         data_path.mkdir(parents=True, exist_ok=True)
@@ -206,21 +208,21 @@ def _get_local_memory(
             # Direct library callers keep the core factory's established one-shot path.
             _memory = create_lite_memory(
                 **create_kwargs,
-                auto_download_models=True,
+                auto_download_models=False,
             )
         else:
             # The daemon owns the interactive startup surface. Split core's combined
             # prerequisite check into timed steps, then construct from the verified
             # local files. The final factory call repeats only cheap presence checks.
             from smartmemory.tools.factory import (
-                _ensure_spacy_model,
+                _require_spacy_model,
                 _require_embedding_model,
             )
 
             _run_startup_warmups(
                 on_progress,
-                _ensure_spacy_model,
-                lambda: _require_embedding_model(allow_download=True),
+                lambda: _require_spacy_model(cfg.spacy_model),
+                lambda: _require_embedding_model(allow_download=False),
             )
             _memory = _timed_startup_step(
                 on_progress,

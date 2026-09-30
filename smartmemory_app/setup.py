@@ -410,6 +410,10 @@ def _apply_setup_result(
     if on_step:
         on_step("spaCy model ready")
 
+    _ensure_embedding_model(cfg.embedding_provider)
+    if on_step and cfg.embedding_provider == "local":
+        on_step("Embedding model ready")
+
     _copy_hooks()
     if on_step:
         on_step("Hooks installed")
@@ -606,6 +610,7 @@ def _setup_local() -> bool:
 
     # Wire Claude Code hooks (preserved from original setup.py)
     _ensure_spacy(spacy_model)
+    _ensure_embedding_model(cfg.embedding_provider)
     _copy_hooks()
     _copy_skills()
     _register_hooks()
@@ -707,12 +712,59 @@ def uninstall(keep_data: bool) -> None:
 # ── Install helpers ───────────────────────────────────────────────────────────
 
 
+def _ensure_embedding_model(provider: str) -> None:
+    """Fetch the configured local embedder's files and any transitive remote code."""
+    if provider != "local":
+        return
+    from smartmemory.errors import MissingModelError
+    from smartmemory.tools.factory import _require_embedding_model
+    from smartmemory.plugins.embedding import DEFAULT_LOCAL_MODEL, EmbeddingService
+    from smartmemory.utils import hf_models
+
+    click.echo("Preparing local embedding model (downloads missing files)...")
+    previous = os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER")
+    previous_download = os.environ.get(hf_models.ALLOW_DOWNLOAD_ENV)
+    os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = provider
+    try:
+        _require_embedding_model(allow_download=True)
+        service = EmbeddingService()
+        model = service.local_model_name()
+        # Pinned torch models use trust_remote_code at inference. A snapshot alone
+        # omits external modeling repos; reuse the core loader to cache those now.
+        # MiniLM needs no remote code and stays a fast file-only setup check.
+        if hf_models.canonical_id(model) != DEFAULT_LOCAL_MODEL:
+            os.environ[hf_models.ALLOW_DOWNLOAD_ENV] = "true"
+            try:
+                hf_models.load_sentence_transformer(
+                    model,
+                    trust_remote_code=True,
+                    device=service.backend_name.removeprefix("torch/"),
+                )
+            except Exception as exc:
+                raise MissingModelError(
+                    f"Embedding model {model!r} could not be prepared. Run sm setup. Details: {exc}"
+                ) from exc
+    except MissingModelError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        if previous_download is None:
+            os.environ.pop(hf_models.ALLOW_DOWNLOAD_ENV, None)
+        else:
+            os.environ[hf_models.ALLOW_DOWNLOAD_ENV] = previous_download
+        if previous is None:
+            os.environ.pop("SMARTMEMORY_EMBEDDING_PROVIDER", None)
+        else:
+            os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = previous
+
+
 def _ensure_spacy(model: str = "en_core_web_sm") -> None:
+    """Prepare the selected model and the default used by background workers."""
     from smartmemory.errors import MissingModelError
     from smartmemory.tools.factory import _ensure_spacy_model
 
     try:
-        _ensure_spacy_model(model)
+        for required_model in dict.fromkeys((model, "en_core_web_sm")):
+            _ensure_spacy_model(required_model)
     except MissingModelError as exc:
         raise click.ClickException(str(exc)) from exc
 

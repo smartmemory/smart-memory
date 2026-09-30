@@ -28,6 +28,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from smartmemory.errors import MissingModelError
 from smartmemory_app.config import UnconfiguredError, llm_key_present
 from smartmemory_app.storage import get_memory
 
@@ -60,12 +61,16 @@ _TOP_LEVEL_FIELDS = frozenset(
 def _get_mem():
     """Return the active memory backend. Converts config errors → meaningful HTTP responses.
 
-    FastAPI surfaces unhandled exceptions as 500. Two typed exceptions escape get_memory():
+    FastAPI surfaces unhandled exceptions as 500. Typed startup failures are mapped here:
+      MissingModelError — required model missing; HTTP 503 (run setup to fix)
       UnconfiguredError — no config exists; HTTP 503 (run setup to fix)
       ValueError        — invalid mode value in env var; HTTP 400 (fix the env var)
     """
     try:
         return get_memory()
+    except MissingModelError as e:
+        log.warning("Local model unavailable: %s", e)
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except UnconfiguredError as e:
         raise HTTPException(
             status_code=503,

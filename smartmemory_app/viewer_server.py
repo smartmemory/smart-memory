@@ -284,6 +284,7 @@ def _startup_line(message: str) -> None:
 
 def _warm_backend() -> bool:
     """Warm the local backend with timed, newline-only progress reporting."""
+    from smartmemory.errors import MissingModelError
     from smartmemory_app.hf_progress import discrete_huggingface_progress
     from smartmemory_app.storage import get_memory
 
@@ -303,6 +304,12 @@ def _warm_backend() -> bool:
                 "Saved memories and startup model prerequisites are unavailable: %s",
                 reason,
             )
+            failures = exc.exceptions if isinstance(exc, ExceptionGroup) else (exc,)
+            if any(isinstance(failure, MissingModelError) for failure in failures):
+                for failure in failures:
+                    _startup_line(str(failure))
+                _set_last_warmup_failure(reason)
+                return False
             _startup_line(
                 "Warning: SmartMemory could not open saved memories. "
                 "Run sm doctor after startup for help."

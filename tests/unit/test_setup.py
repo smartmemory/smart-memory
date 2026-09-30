@@ -1,7 +1,10 @@
 """Tests for the idempotent setup installer."""
 
 import json
+import os
 from unittest.mock import patch
+
+import pytest
 
 
 def test_register_hooks_idempotent(tmp_path):
@@ -207,3 +210,67 @@ def test_seed_data_dir_honours_env_var(tmp_path, monkeypatch):
     assert not (tmp_path / "default" / "entity_patterns.jsonl").exists(), (
         "default DATA_DIR must not be seeded when SMARTMEMORY_DATA_DIR is set"
     )
+
+
+@pytest.mark.parametrize("path", ["tui", "click"])
+@pytest.mark.parametrize("provider", ["local", "openai", "ollama"])
+def test_setup_downloads_only_local_embedding(
+    tmp_path, monkeypatch, capsys, path, provider
+):
+    from smartmemory_app import setup
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_PROVIDER", "openai")
+    steps = []
+
+    def require(*, allow_download):
+        assert allow_download is True
+        assert os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] == "local"
+
+    with (
+        patch("smartmemory_app.setup._ensure_spacy"),
+        patch("smartmemory_app.setup._copy_hooks"),
+        patch("smartmemory_app.setup._copy_skills"),
+        patch("smartmemory_app.setup._register_hooks"),
+        patch("smartmemory_app.setup._seed_data_dir"),
+        patch("smartmemory_app.config.save_config"),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch(
+            "smartmemory.tools.factory._require_embedding_model", side_effect=require
+        ) as download,
+        patch("click.confirm", return_value=False),
+        patch("click.prompt", side_effect=["none", provider, "sm", str(tmp_path)]),
+    ):
+        if path == "tui":
+            setup._apply_setup_result(
+                setup.SetupResult(embedding_provider=provider), on_step=steps.append
+            )
+        else:
+            setup._setup_local()
+    if provider == "local":
+        download.assert_called_once_with(allow_download=True)
+        assert "Preparing local embedding model" in capsys.readouterr().out
+        if path == "tui":
+            assert "Embedding model ready" in steps
+    else:
+        download.assert_not_called()
+        assert "Preparing local embedding model" not in capsys.readouterr().out
+    assert os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] == "openai"
+
+
+def test_embedding_setup_surfaces_core_error_unchanged(monkeypatch):
+    import click
+    from smartmemory.errors import MissingModelError
+    from smartmemory_app.setup import _ensure_embedding_model
+
+    failure = MissingModelError(
+        "Embedding model unavailable. Run sm setup after checking network access."
+    )
+    monkeypatch.delenv("SMARTMEMORY_EMBEDDING_PROVIDER", raising=False)
+    with patch(
+        "smartmemory.tools.factory._require_embedding_model", side_effect=failure
+    ):
+        with pytest.raises(click.ClickException) as caught:
+            _ensure_embedding_model("local")
+    assert str(caught.value) == str(failure)
+    assert "SMARTMEMORY_EMBEDDING_PROVIDER" not in os.environ
