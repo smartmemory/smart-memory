@@ -21,6 +21,24 @@ from smartmemory.errors import MissingModelError
 DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
+def _runner() -> CliRunner:
+    """A runner that keeps stdout and stderr apart on every supported click.
+
+    click < 8.2 mixes stderr into ``result.stdout`` unless ``mix_stderr=False``;
+    click 8.2 removed the parameter and always separates them.
+    """
+    import inspect
+
+    if "mix_stderr" in inspect.signature(CliRunner.__init__).parameters:
+        return CliRunner(mix_stderr=False)
+    return CliRunner()
+
+
+def _text(result) -> str:
+    """Everything the user saw. ``_text(result)`` is stdout-only on click < 8.2."""
+    return result.stdout + result.stderr
+
+
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, monkeypatch):
     """Fresh HOME, config, data dir and HF cache; no daemon; process-level caches reset."""
@@ -121,29 +139,29 @@ def machine(_isolated):
 def _add(text="hello world test"):
     import smartmemory_app.cli as cli_module
 
-    return CliRunner().invoke(cli_module.cli, ["add", text])
+    return _runner().invoke(cli_module.cli, ["add", text])
 
 
 def _invoke(argv):
     import smartmemory_app.cli as cli_module
 
-    return CliRunner().invoke(cli_module.cli, argv)
+    return _runner().invoke(cli_module.cli, argv)
 
 
 def _invoke_with_input(argv, text):
     import smartmemory_app.cli as cli_module
 
-    return CliRunner().invoke(cli_module.cli, argv, input=text)
+    return _runner().invoke(cli_module.cli, argv, input=text)
 
 
 def _assert_one_line_setup_error(result):
-    assert result.exit_code == 1, result.output
+    assert result.exit_code == 1, _text(result)
     assert isinstance(result.exception, SystemExit), repr(result.exception)
-    assert "Traceback" not in result.output
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
-    assert len(errors) == 1, result.output
+    assert "Traceback" not in _text(result)
+    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
+    assert len(errors) == 1, _text(result)
     assert "smartmemory setup" in errors[0]
-    assert "loading local models" not in result.output, "banner must follow the check"
+    assert "loading local models" not in _text(result), "banner must follow the check"
     assert result.stdout == "", "errors and notices stay off stdout"
     return errors[0]
 
@@ -175,7 +193,7 @@ def test_golden_fresh_install_first_add_fetches_both_models_and_saves(
     ) as spacy_dl:
         result = _add()
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, _text(result)
     assert result.stdout == "item-first-run\n", "scripts piping stdout see only the id"
     notices = result.stderr
     assert (
@@ -188,7 +206,7 @@ def test_golden_fresh_install_first_add_fetches_both_models_and_saves(
         in notices
     )
     assert f"Downloaded local embedding model '{DEFAULT_MODEL}'." in notices
-    assert "Traceback" not in result.output
+    assert "Traceback" not in _text(result)
     spacy_dl.assert_called_once_with("en_core_web_sm")
     assert machine.spacy and machine.embedding
     assert machine.runtime_download_flags == [False], (
@@ -205,8 +223,8 @@ def test_golden_second_run_downloads_nothing(machine):
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
     ):
         result = _add()
-    assert result.exit_code == 0, result.output
-    assert "ownload" not in result.output
+    assert result.exit_code == 0, _text(result)
+    assert "ownload" not in _text(result)
     spacy_dl.assert_not_called()
     embed_dl.assert_not_called()
 
@@ -222,7 +240,7 @@ def test_add_fetches_missing_spacy_model_once_and_saves(machine):
     ) as ensure:
         result = _add()
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, _text(result)
     assert result.stdout == "item-first-run\n"
     assert "Downloaded spaCy language model 'en_core_web_sm'." in result.stderr
     ensure.assert_called_once_with("en_core_web_sm")
@@ -236,8 +254,8 @@ def test_add_via_stdin_fetches_too(machine):
         "smartmemory.tools.factory._ensure_spacy_model",
         side_effect=machine.install_spacy,
     ) as ensure:
-        result = CliRunner().invoke(cli_module.cli, ["add", "-"], input="line one\n")
-    assert result.exit_code == 0, result.output
+        result = _runner().invoke(cli_module.cli, ["add", "-"], input="line one\n")
+    assert result.exit_code == 0, _text(result)
     ensure.assert_called_once_with("en_core_web_sm")
 
 
@@ -251,7 +269,7 @@ def test_configured_spacy_model_and_worker_default_both_fetched(machine):
         side_effect=machine.install_spacy,
     ) as ensure:
         result = _add()
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, _text(result)
     # The fake installs every spaCy model at once, so setup announces only the first.
     assert [c.args[0] for c in ensure.call_args_list] == [
         "en_core_web_md",
@@ -438,12 +456,14 @@ def test_hook_lifecycle_recall_never_downloads(machine, caplog):
             ["lifecycle", "recall"],
             json.dumps({"session_id": "s1", "cwd": "/tmp", "prompt": "hello"}),
         )
-    assert result.exit_code == 0, result.output
-    assert "Traceback" not in result.output
+    assert result.exit_code == 0, _text(result)
+    assert "Traceback" not in _text(result)
     spacy_dl.assert_not_called()
     embed_dl.assert_not_called()
     setup_spacy.assert_not_called()
-    assert _warned(caplog, "Run sm setup"), "the hook still names the fix"
+    # Core's wording varies by release ("Run sm setup ..." in 1.5.x, "... then
+    # rerun sm setup" in 1.4.x); both name the fix.
+    assert _warned(caplog, "sm setup"), "the hook still names the fix"
     assert not machine.spacy and not machine.embedding
 
 
@@ -465,7 +485,7 @@ def test_search_and_get_download_missing_models(machine, argv, fallback, value):
         patch(fallback, return_value=value),
     ):
         result = _invoke(argv)
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, _text(result)
     spacy_dl.assert_called_once_with("en_core_web_sm")
     assert machine.embedding
     assert "Downloaded spaCy language model 'en_core_web_sm'." in result.stderr
@@ -497,8 +517,8 @@ def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
         patch("smartmemory_app.storage.get", return_value={"item_id": "remote-1"}),
     ):
         result = _invoke(["get", "remote-1"])
-    assert result.exit_code == 0, result.output
-    assert "loading local models" not in result.output
+    assert result.exit_code == 0, _text(result)
+    assert "loading local models" not in _text(result)
 
 
 @pytest.mark.parametrize("error", ["missing", "hf"])
@@ -519,8 +539,8 @@ def test_model_missing_later_is_one_line_not_traceback(machine, caplog, error):
     ):
         result = _add()
     assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert "Traceback" not in _text(result)
+    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
     assert errors == [
         "Error: A required local model is not installed. Run: smartmemory setup"
     ]
@@ -570,7 +590,7 @@ def test_only_zero_or_false_turns_download_off(machine, monkeypatch, value):
         side_effect=machine.install_spacy,
     ) as spacy_dl:
         result = _add()
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 0, _text(result)
     spacy_dl.assert_called_once()
 
 
@@ -604,8 +624,8 @@ def test_wrapped_model_error_is_one_line(machine, caplog):
     ):
         result = _add()
     assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert "Traceback" not in _text(result)
+    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
     assert errors == [
         "Error: A required local model is not installed. Run: smartmemory setup"
     ]
@@ -658,10 +678,10 @@ def test_add_failure_keeps_installer_chatter_off_the_console(
     ):
         result = _add()
     assert result.exit_code == 1
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    errors = [ln for ln in _text(result).splitlines() if ln.startswith("Error:")]
     assert len(errors) == 1 and "smartmemory setup" in errors[0]
-    assert "Traceback" not in result.output
-    assert "(first run only)" not in result.output
+    assert "Traceback" not in _text(result)
+    assert "(first run only)" not in _text(result)
     assert any(
         r.levelno == logging.DEBUG and "(first run only)" in r.getMessage()
         for r in caplog.records
@@ -701,8 +721,8 @@ def test_add_embedding_download_shows_no_progress_bars(machine):
 
     with patch("smartmemory_app.setup._ensure_embedding_model", side_effect=download):
         result = _add()
-    assert result.exit_code == 0, result.output
-    assert "Fetching 2 files" not in result.output
+    assert result.exit_code == 0, _text(result)
+    assert "Fetching 2 files" not in _text(result)
     assert "Downloaded local embedding model 'x'." in result.stderr
     assert result.stdout == "item-first-run\n"
     assert are_progress_bars_disabled() == before, "HF global state untouched"
