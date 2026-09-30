@@ -33,6 +33,8 @@ sm search "which database did we pick"
 
 `sm` is the short alias for `smartmemory`. Every command works with either.
 
+**First run.** SmartMemory runs two small models on your machine: a spaCy language model (about 15 MB) and a local embedding model (about 100 MB). `smartmemory setup` downloads both. If you skip setup, the first command that needs them downloads them once and tells you it is doing so. Without a network connection it stops with a one-line message asking you to run `smartmemory setup` later. In scripts and CI, set `SMARTMEMORY_AUTO_DOWNLOAD_MODELS=1` to allow the download, or `0` to never download.
+
 ### What you get from here
 
 - **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts. No more re-explaining your project every morning.

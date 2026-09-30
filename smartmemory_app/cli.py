@@ -323,7 +323,23 @@ def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
         return None
 
 
-@click.group()
+class _CLIGroup(click.Group):
+    """Report a missing local model as one setup line, never a traceback."""
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except Exception as exc:
+            from smartmemory.errors import MissingModelError
+
+            if not isinstance(exc, MissingModelError):
+                raise
+            raise _first_run_refusal(
+                "a required local model", "startup prerequisite check failed", exc
+            ) from exc
+
+
+@click.group(cls=_CLIGroup)
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
@@ -868,6 +884,143 @@ def _warm_notice() -> None:
         _warm_notice_shown = True
 
 
+# LITE-FIRSTRUN-SPACY-1: the interactive CLI fetches the Lite prerequisites that
+# `sm setup` would have installed. Runtime startup (storage, daemon, MCP, viewer,
+# worker) stays disk-only; only direct CLI commands call this.
+AUTO_DOWNLOAD_ENV = "SMARTMEMORY_AUTO_DOWNLOAD_MODELS"
+_SETUP_HINT = "Run: smartmemory setup"
+_SPACY_SIZES = {
+    "en_core_web_sm": "about 15 MB",
+    "en_core_web_md": "about 40 MB",
+    "en_core_web_lg": "about 560 MB",
+}
+_first_run_models_ready = False
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except Exception:
+        return False
+
+
+def _auto_download_allowed() -> bool:
+    """Unset: interactive terminals only. Truthy forces (CI), falsy never downloads."""
+    raw = os.environ.get(AUTO_DOWNLOAD_ENV, "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return _stderr_is_tty()
+
+
+def _first_run_refusal(
+    what: str, reason: str, detail: object = None
+) -> click.ClickException:
+    log.warning(
+        "Not installed: %s (%s). Local memory commands cannot run until "
+        "`smartmemory setup` succeeds.%s",
+        what,
+        reason,
+        f" Details: {detail}" if detail else "",
+    )
+    return click.ClickException(f"Not installed: {what}. {_SETUP_HINT}")
+
+
+def _ensure_first_run_models() -> None:
+    """Fetch missing spaCy and default embedding models once, before direct local access.
+
+    Reuses the `sm setup` downloaders. Non-default embedders (which may run
+    repository code) are never fetched here. Raises a one-line ClickException
+    naming `smartmemory setup` when a model is missing and cannot be fetched.
+    """
+    global _first_run_models_ready
+    if _first_run_models_ready:
+        return
+    from smartmemory_app.config import load_config
+
+    cfg = load_config()
+    if cfg.mode == "remote":
+        _first_run_models_ready = True
+        return
+
+    import contextlib
+
+    import spacy
+
+    from smartmemory.errors import MissingModelError
+    from smartmemory.plugins.embedding import DEFAULT_LOCAL_MODEL, EmbeddingService
+    from smartmemory.tools.factory import _require_embedding_model
+    from smartmemory.utils import hf_models
+    from smartmemory_app import setup
+    from smartmemory_app.storage import apply_runtime_config
+
+    apply_runtime_config()  # same embedding-provider pin storage applies next
+    missing_spacy = [
+        m
+        for m in dict.fromkeys((cfg.spacy_model, "en_core_web_sm"))
+        if not spacy.util.is_package(m)
+    ]
+    embedding_model = None
+    try:
+        _require_embedding_model(allow_download=False)
+    except MissingModelError as exc:
+        embedding_model = EmbeddingService().local_model_name()
+        if hf_models.canonical_id(embedding_model) != DEFAULT_LOCAL_MODEL:
+            raise _first_run_refusal(
+                f"embedding model {embedding_model!r}",
+                "non-default models are only downloaded by setup",
+                exc,
+            ) from exc
+
+    if missing_spacy or embedding_model:
+        spacy_what = " and ".join(f"spaCy model {m!r}" for m in missing_spacy)
+        embedding_what = (
+            f"embedding model {embedding_model!r}" if embedding_model else ""
+        )
+        what = " and ".join(filter(None, (spacy_what, embedding_what)))
+        if not _auto_download_allowed():
+            raise _first_run_refusal(
+                what,
+                f"automatic download needs an interactive terminal or {AUTO_DOWNLOAD_ENV}=1",
+            )
+        # Keep stdout for command output (item ids); downloader chatter goes to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            for model in missing_spacy:
+                size = _SPACY_SIZES.get(model)
+                note = f"{size}, one time only" if size else "one time only"
+                click.echo(
+                    f"First run: downloading spaCy language model {model!r} ({note})...",
+                    err=True,
+                )
+            if missing_spacy:
+                try:
+                    setup._ensure_spacy(cfg.spacy_model)
+                except click.ClickException as exc:
+                    raise _first_run_refusal(
+                        spacy_what, "download failed", exc.message
+                    ) from exc
+            if embedding_model:
+                click.echo(
+                    f"First run: downloading local embedding model {embedding_model!r} "
+                    "(about 100 MB, one time only)...",
+                    err=True,
+                )
+                try:
+                    setup._ensure_embedding_model("local")
+                except click.ClickException as exc:
+                    raise _first_run_refusal(
+                        embedding_what, "download failed", exc.message
+                    ) from exc
+    _first_run_models_ready = True
+
+
+def _prepare_direct_access() -> None:
+    """Prerequisites first, then the cold-load notice (never "loading" before a check)."""
+    _ensure_first_run_models()
+    _warm_notice()
+
+
 @cli.command(
     "add",
     context_settings=dict(
@@ -943,7 +1096,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 from smartmemory_app.remote_backend import RemoteBackendError
 
                 log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
-                _warm_notice()
+                _prepare_direct_access()
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
                     ids.append(
@@ -981,7 +1134,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         from smartmemory_app.remote_backend import RemoteBackendError
 
         log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
-        _warm_notice()
+        _prepare_direct_access()
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
             click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))
@@ -1031,7 +1184,7 @@ def recall_cmd(
         from smartmemory_app.storage import recall
 
         log.debug("daemon unreachable; using in-process fallback: %s", "recall")
-        _warm_notice()
+        _prepare_direct_access()
         context = recall(
             cwd,
             top_k,
@@ -1195,6 +1348,7 @@ def search_cmd(
         from smartmemory_app.remote_backend import RemoteBackendError
 
         log.debug("daemon unreachable; using in-process fallback: %s", "search")
+        _prepare_direct_access()
         # One-shot in-process search: this interpreter exits right after the
         # query, so the reranker's background load can never finish in time —
         # "async" here means every result comes back in fusion order with a
@@ -1526,6 +1680,7 @@ def get_cmd(item_id: str) -> None:
         from smartmemory_app.storage import get
 
         log.debug("daemon unreachable; using in-process fallback: %s", "get")
+        _prepare_direct_access()
         result = get(item_id)
 
     if not result:
