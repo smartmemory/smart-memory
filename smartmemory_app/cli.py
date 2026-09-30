@@ -1008,25 +1008,26 @@ def _ensure_first_run_models(*, download: bool) -> None:
                     _failure_detail(exc),
                 ) from exc
         if embedding_model:
-            from huggingface_hub.utils import (
-                are_progress_bars_disabled,
-                disable_progress_bars,
-                enable_progress_bars,
-            )
+            import io
 
-            # The notice and done lines are the progress report; no HF bars.
-            bars_were_disabled = are_progress_bars_disabled()
-            disable_progress_bars()
+            # The notice and done lines are the progress report. HF progress bars
+            # write to stderr; capture them for the debug log instead of the console
+            # (no HF global state is touched). Our own lines go to the real stderr
+            # through the stdout redirect above.
+            hub_output = io.StringIO()
             try:
-                setup._ensure_embedding_model("local", missing=True)
+                with contextlib.redirect_stderr(hub_output):
+                    setup._ensure_embedding_model("local", missing=True)
             except (Exception, SystemExit) as exc:
                 raise _model_error(
                     f"Could not download {embedding_what}. {_SETUP_HINT}",
                     _failure_detail(exc),
                 ) from exc
             finally:
-                if not bars_were_disabled:
-                    enable_progress_bars()
+                if hub_output.getvalue().strip():
+                    log.debug(
+                        "Embedding download output: %s", hub_output.getvalue().strip()
+                    )
     _first_run_models_ready = True
 
 

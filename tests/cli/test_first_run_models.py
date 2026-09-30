@@ -610,18 +610,23 @@ def test_suppressed_context_is_not_mislabelled(machine):
 
 def test_add_embedding_download_shows_no_progress_bars(machine):
     """sm add reports the embedding download with its two lines, not HF bars."""
+    import sys
+
     from huggingface_hub.utils import are_progress_bars_disabled
 
     machine.spacy = True
-    seen = []
+    before = are_progress_bars_disabled()
 
     def download(provider, *, missing=False):
-        seen.append(are_progress_bars_disabled())
+        print("Downloading local embedding model 'x' (about 100 MB, one time only)...")
+        sys.stderr.write("Fetching 2 files:  50%|#####     | 1/2\r")
         machine.install_embedding()
+        print("Downloaded local embedding model 'x'.")
 
-    before = are_progress_bars_disabled()
     with patch("smartmemory_app.setup._ensure_embedding_model", side_effect=download):
         result = _add()
     assert result.exit_code == 0, result.output
-    assert seen == [True]
-    assert are_progress_bars_disabled() == before, "global HF state restored"
+    assert "Fetching 2 files" not in result.output
+    assert "Downloaded local embedding model 'x'." in result.stderr
+    assert result.stdout == "item-first-run\n"
+    assert are_progress_bars_disabled() == before, "HF global state untouched"
