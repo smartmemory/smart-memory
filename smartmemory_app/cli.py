@@ -329,11 +329,20 @@ class _CLIGroup(click.Group):
     def invoke(self, ctx):
         try:
             return super().invoke(ctx)
+        except click.ClickException:
+            raise  # already a one-line user error (it may chain a model error)
         except Exception as exc:
             from smartmemory.errors import MissingModelError
             from smartmemory.utils.hf_models import HFModelUnavailable
 
-            if not isinstance(exc, (MissingModelError, HFModelUnavailable)):
+            # Core may wrap the model error (e.g. VectorWriteError from the store stage).
+            cause, seen = exc, set()
+            while cause is not None and id(cause) not in seen:
+                if isinstance(cause, (MissingModelError, HFModelUnavailable)):
+                    break
+                seen.add(id(cause))
+                cause = cause.__cause__ or cause.__context__
+            else:
                 raise
             raise _model_error(
                 f"A required local model is not installed. {_SETUP_HINT}", exc

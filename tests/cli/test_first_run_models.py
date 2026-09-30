@@ -504,3 +504,61 @@ def test_download_note_sizes_the_default_model_alias():
     assert setup._download_note("all-MiniLM-L6-v2") == "about 100 MB, one time only"
     assert setup._download_note(DEFAULT_MODEL) == "about 100 MB, one time only"
     assert setup._download_note("some/other-model") == "one time only"
+
+
+def test_wrapped_model_error_is_one_line(machine, caplog):
+    """Core's store stage wraps embed failures (VectorWriteError); unwrap the cause."""
+    from smartmemory.utils.hf_models import HFModelUnavailable
+
+    machine.spacy = True
+    machine.install_embedding()
+
+    class VectorWriteError(RuntimeError):
+        pass
+
+    def ingest(*args, **kwargs):
+        try:
+            raise HFModelUnavailable("MiniLM vanished")
+        except HFModelUnavailable as inner:
+            raise VectorWriteError("vector write failed") from inner
+
+    with (
+        patch("smartmemory_app.storage.ingest", side_effect=ingest),
+        caplog.at_level(logging.WARNING),
+    ):
+        result = _add()
+    assert result.exit_code == 1
+    assert "Traceback" not in result.output
+    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
+    assert errors == [
+        "Error: A required local model is not installed. Run: smartmemory setup"
+    ]
+    assert _warned(caplog, "vector write failed")
+
+
+def test_unrelated_error_still_raises(machine):
+    machine.spacy = True
+    machine.install_embedding()
+    with patch("smartmemory_app.storage.ingest", side_effect=ValueError("boom")):
+        result = _add()
+    assert isinstance(result.exception, ValueError)
+
+
+@pytest.mark.parametrize(
+    "failure", [SystemExit(1), KeyError("x")], ids=["exit", "keyerror"]
+)
+def test_setup_spacy_non_missing_failures_are_click_errors(machine, capsys, failure):
+    from smartmemory_app import setup
+
+    def install(model):
+        print("spaCy says: compatibility table unavailable")
+        raise failure
+
+    with (
+        patch("smartmemory.tools.factory._ensure_spacy_model", side_effect=install),
+        pytest.raises(click.ClickException) as caught,
+    ):
+        setup._ensure_spacy("en_core_web_sm")
+    assert "Could not install spaCy model 'en_core_web_sm'" in caught.value.message
+    assert "Rerun sm setup" in caught.value.message
+    assert "compatibility table unavailable" in capsys.readouterr().err

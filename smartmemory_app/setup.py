@@ -837,11 +837,19 @@ def _ensure_spacy(model: str = "en_core_web_sm") -> None:
             try:
                 with contextlib.redirect_stdout(chatter):
                     _ensure_spacy_model(required_model)
-            finally:
+            except (Exception, SystemExit) as exc:
+                # On failure the installer's own output is the diagnosis; show it.
                 if chatter.getvalue().strip():
-                    logger.debug(
-                        "spaCy installer output: %s", chatter.getvalue().strip()
-                    )
+                    click.echo(chatter.getvalue().rstrip(), err=True)
+                if isinstance(exc, MissingModelError):
+                    raise
+                raise MissingModelError(
+                    f"Could not install spaCy model {required_model!r}: "
+                    f"{type(exc).__name__}: {exc}. "
+                    "Rerun sm setup after checking network access."
+                ) from exc
+            if chatter.getvalue().strip():
+                logger.debug("spaCy installer output: %s", chatter.getvalue().strip())
             if downloading:
                 click.echo(f"Downloaded spaCy language model {required_model!r}.")
     except MissingModelError as exc:
