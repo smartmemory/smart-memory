@@ -335,8 +335,8 @@ class _CLIGroup(click.Group):
 
             if not isinstance(exc, (MissingModelError, HFModelUnavailable)):
                 raise
-            raise _first_run_refusal(
-                "a required local model", "startup prerequisite check failed", exc
+            raise _model_error(
+                f"A required local model is not installed. {_SETUP_HINT}", exc
             ) from exc
 
 
@@ -885,47 +885,24 @@ def _warm_notice() -> None:
         _warm_notice_shown = True
 
 
-# LITE-FIRSTRUN-SPACY-1: the interactive CLI fetches the Lite prerequisites that
-# `sm setup` would have installed. Runtime startup (storage, daemon, MCP, viewer,
-# worker) stays disk-only; only direct CLI commands call this.
-AUTO_DOWNLOAD_ENV = "SMARTMEMORY_AUTO_DOWNLOAD_MODELS"
+# LITE-FIRSTRUN-SPACY-1: `sm add` fetches the Lite prerequisites that `sm setup`
+# would have installed (spaCy + the default embedding model), terminal or not.
+# Other direct commands (recall runs in hooks) and runtime startup (storage,
+# daemon, MCP, viewer, worker) never download; they print the setup line.
+AUTO_DOWNLOAD_ENV = "SMARTMEMORY_AUTO_DOWNLOAD_MODELS"  # "0" = never download
 _SETUP_HINT = "Run: smartmemory setup"
-_SPACY_SIZES = {
-    "en_core_web_sm": "about 15 MB",
-    "en_core_web_md": "about 40 MB",
-    "en_core_web_lg": "about 560 MB",
-}
 _first_run_models_ready = False
 
 
-def _stderr_is_tty() -> bool:
-    try:
-        return sys.stderr.isatty()
-    except Exception:
-        return False
-
-
-def _auto_download_allowed() -> bool:
-    """Unset: interactive terminals only. Truthy forces (CI), falsy never downloads."""
+def _auto_download_disabled() -> bool:
     raw = os.environ.get(AUTO_DOWNLOAD_ENV, "").strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return _stderr_is_tty()
+    return raw in {"0", "false", "no", "off"}
 
 
-def _first_run_refusal(
-    what: str, reason: str, detail: object = None
-) -> click.ClickException:
-    log.warning(
-        "Not installed: %s (%s). Local memory commands cannot run until "
-        "`smartmemory setup` succeeds.%s",
-        what,
-        reason,
-        f" Details: {detail}" if detail else "",
-    )
-    return click.ClickException(f"Not installed: {what}. {_SETUP_HINT}")
+def _model_error(message: str, detail: object) -> click.ClickException:
+    """One user-facing line; the cause goes to a WARNING (no-silent-degradation)."""
+    log.warning("%s Details: %s", message, detail)
+    return click.ClickException(message)
 
 
 def _failure_detail(exc: BaseException) -> str:
@@ -933,12 +910,13 @@ def _failure_detail(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
 
-def _ensure_first_run_models() -> None:
-    """Fetch missing spaCy and default embedding models once, before direct local access.
+def _ensure_first_run_models(*, download: bool) -> None:
+    """Check the Lite models before direct local access; fetch them when ``download``.
 
-    Reuses the `sm setup` downloaders. Non-default embedders (which may run
-    repository code) are never fetched here. Raises a one-line ClickException
-    naming `smartmemory setup` when a model is missing and cannot be fetched.
+    Reuses the `sm setup` downloaders, whose notices name the model, size and
+    "one time only". Non-default embedders (which run repository code) are only
+    installed by setup. Raises a one-line ClickException naming `smartmemory setup`
+    when a model is missing and is not (or cannot be) fetched.
     """
     global _first_run_models_ready
     if _first_run_models_ready:
@@ -973,71 +951,69 @@ def _ensure_first_run_models() -> None:
     except MissingModelError as exc:
         embedding_model = EmbeddingService().local_model_name()
         if hf_models.canonical_id(embedding_model) != DEFAULT_LOCAL_MODEL:
-            raise _first_run_refusal(
-                f"embedding model {embedding_model!r}",
-                "non-default models are only downloaded by setup",
+            raise _model_error(
+                f"Embedding model {embedding_model!r} is not installed, and only setup "
+                f"installs it because it runs code from its model repository. {_SETUP_HINT}",
                 exc,
             ) from exc
     except Exception as exc:
         # Backend/dependency resolution (e.g. a torch-only model without the torch
         # extra). A download cannot fix it; surface core's own advice in one line.
-        log.warning("Local embedding backend unavailable: %s", exc)
         first_line = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
-        raise click.ClickException(
-            f"{first_line.rstrip('.')}. Then {_SETUP_HINT[0].lower()}{_SETUP_HINT[1:]}"
+        raise _model_error(
+            f"{first_line.rstrip('.')}. Then {_SETUP_HINT[0].lower()}{_SETUP_HINT[1:]}",
+            exc,
         ) from exc
 
-    if missing_spacy or embedding_model:
-        spacy_what = " and ".join(f"spaCy model {m!r}" for m in missing_spacy)
-        embedding_what = (
-            f"embedding model {embedding_model!r}" if embedding_model else ""
+    if not (missing_spacy or embedding_model):
+        _first_run_models_ready = True
+        return
+    spacy_what = " and ".join(f"spaCy language model {m!r}" for m in missing_spacy)
+    embedding_what = (
+        f"local embedding model {embedding_model!r}" if embedding_model else ""
+    )
+    what = " and ".join(filter(None, (spacy_what, embedding_what)))
+    if not download:
+        raise _model_error(
+            f"Not installed: {what}. {_SETUP_HINT}",
+            "this command never downloads models",
         )
-        what = " and ".join(filter(None, (spacy_what, embedding_what)))
-        if not _auto_download_allowed():
-            raise _first_run_refusal(
-                what,
-                f"automatic download needs an interactive terminal or {AUTO_DOWNLOAD_ENV}=1",
-            )
-        # Keep stdout for command output (item ids); downloader chatter goes to stderr.
-        with contextlib.redirect_stdout(sys.stderr):
-            for model in missing_spacy:
-                size = _SPACY_SIZES.get(model)
-                note = f"{size}, one time only" if size else "one time only"
-                click.echo(
-                    f"First run: downloading spaCy language model {model!r} ({note})...",
-                    err=True,
-                )
-            if missing_spacy:
-                try:
-                    setup._ensure_spacy(cfg.spacy_model)
-                except (Exception, SystemExit) as exc:
-                    # spaCy's downloader can also SystemExit or KeyError on a bad
-                    # compatibility lookup; every failure gets the same one line.
-                    raise _first_run_refusal(
-                        spacy_what, "download failed", _failure_detail(exc)
-                    ) from exc
-            if embedding_model:
-                click.echo(
-                    f"First run: downloading local embedding model {embedding_model!r} "
-                    "(about 100 MB, one time only)...",
-                    err=True,
-                )
-                try:
-                    setup._ensure_embedding_model("local")
-                except (Exception, SystemExit) as exc:
-                    raise _first_run_refusal(
-                        embedding_what, "download failed", _failure_detail(exc)
-                    ) from exc
+    if _auto_download_disabled():
+        raise _model_error(
+            f"Not installed: {what}, and {AUTO_DOWNLOAD_ENV}=0 turns off automatic "
+            f"download. {_SETUP_HINT}",
+            "automatic download disabled",
+        )
+    # stdout carries command output (item ids); download messages go to stderr.
+    with contextlib.redirect_stdout(sys.stderr):
+        if missing_spacy:
+            try:
+                setup._ensure_spacy(cfg.spacy_model)
+            except (Exception, SystemExit) as exc:
+                # spaCy's downloader can also SystemExit or KeyError on a bad
+                # compatibility lookup; every failure gets the same one line.
+                raise _model_error(
+                    f"Could not download {spacy_what}. {_SETUP_HINT}",
+                    _failure_detail(exc),
+                ) from exc
+        if embedding_model:
+            try:
+                setup._ensure_embedding_model("local", missing=True)
+            except (Exception, SystemExit) as exc:
+                raise _model_error(
+                    f"Could not download {embedding_what}. {_SETUP_HINT}",
+                    _failure_detail(exc),
+                ) from exc
     _first_run_models_ready = True
 
 
-def _prepare_direct_access() -> None:
+def _prepare_direct_access(*, download: bool = False) -> None:
     """Prerequisites first, then the cold-load notice (never "loading" before a check)."""
     from smartmemory_app.config import load_config
 
     if load_config().mode == "remote":
         return  # no local models to fetch or load
-    _ensure_first_run_models()
+    _ensure_first_run_models(download=download)
     _warm_notice()
 
 
@@ -1116,7 +1092,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 from smartmemory_app.remote_backend import RemoteBackendError
 
                 log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
-                _prepare_direct_access()
+                _prepare_direct_access(download=True)
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
                     ids.append(
@@ -1154,7 +1130,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         from smartmemory_app.remote_backend import RemoteBackendError
 
         log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
-        _prepare_direct_access()
+        _prepare_direct_access(download=True)
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
             click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))

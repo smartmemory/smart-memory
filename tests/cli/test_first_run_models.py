@@ -1,11 +1,12 @@
 """LITE-FIRSTRUN-SPACY-1: a fresh install's first direct `sm add` must not crash.
 
 `pip install smartmemory` cannot bring spaCy's `en_core_web_sm` (it is not on PyPI)
-or the default embedding snapshot. The interactive CLI fetches both once through the
-downloaders `sm setup` uses, then continues. Without a terminal, when opted out, when
-the download fails, or for a non-default (remote-code) embedder, the user gets one
-line naming `smartmemory setup` and a WARNING, never a traceback. Runtime startup
-(storage, daemon, worker) stays disk-only.
+or the default embedding snapshot. `sm add` fetches both once, terminal or not,
+through the downloaders `sm setup` uses, with one-line notices on stderr, then saves.
+Other direct commands (recall runs in hooks, search, get), an opt-out, a failed
+download, or a non-default (remote-code) embedder give one line naming
+`smartmemory setup` and a WARNING, never a traceback. Runtime startup (storage,
+daemon, worker) stays disk-only.
 """
 
 import logging
@@ -123,6 +124,12 @@ def _add(text="hello world test"):
     return CliRunner().invoke(cli_module.cli, ["add", text])
 
 
+def _invoke(argv):
+    import smartmemory_app.cli as cli_module
+
+    return CliRunner().invoke(cli_module.cli, argv)
+
+
 def _assert_one_line_setup_error(result):
     assert result.exit_code == 1, result.output
     assert isinstance(result.exception, SystemExit), repr(result.exception)
@@ -131,6 +138,8 @@ def _assert_one_line_setup_error(result):
     assert len(errors) == 1, result.output
     assert "smartmemory setup" in errors[0]
     assert "loading local models" not in result.output, "banner must follow the check"
+    assert result.stdout == "", "errors and notices stay off stdout"
+    return errors[0]
 
 
 def _warned(caplog, text):
@@ -143,17 +152,16 @@ def _warned(caplog, text):
 
 
 def test_golden_fresh_install_first_add_fetches_both_models_and_saves(
-    machine, monkeypatch, _isolated
+    machine, _isolated
 ):
-    """Unconfigured install, empty HF cache, no spaCy: first `sm add` fetches and saves.
+    """Unconfigured install, empty HF cache, no spaCy, no terminal: `sm add` saves.
 
-    Guards the owner-approved contract. A future "never download" change in the CLI
+    Guards the owner-approved contract. A future "never download" change in `sm add`
     fails here. So does moving the download into runtime startup (the factory must
     still be called with auto_download_models=False).
     """
     from smartmemory_app.config import config_path
 
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
     assert not config_path().exists()
     with patch(
         "smartmemory.tools.factory._ensure_spacy_model",
@@ -162,15 +170,18 @@ def test_golden_fresh_install_first_add_fetches_both_models_and_saves(
         result = _add()
 
     assert result.exit_code == 0, result.output
-    assert "item-first-run" in result.output
+    assert result.stdout == "item-first-run\n", "scripts piping stdout see only the id"
+    notices = result.stderr
     assert (
-        "downloading spaCy language model 'en_core_web_sm' (about 15 MB, one time only)"
-        in result.output
+        "Downloading spaCy language model 'en_core_web_sm' (about 15 MB, one time only)..."
+        in notices
     )
+    assert "Downloaded spaCy language model 'en_core_web_sm'." in notices
     assert (
-        f"downloading local embedding model '{DEFAULT_MODEL}' (about 100 MB, one time only)"
-        in result.output
+        f"Downloading local embedding model '{DEFAULT_MODEL}' (about 100 MB, one time only)..."
+        in notices
     )
+    assert f"Downloaded local embedding model '{DEFAULT_MODEL}'." in notices
     assert "Traceback" not in result.output
     spacy_dl.assert_called_once_with("en_core_web_sm")
     assert machine.spacy and machine.embedding
@@ -180,17 +191,16 @@ def test_golden_fresh_install_first_add_fetches_both_models_and_saves(
     assert config_path().exists(), "unconfigured install migrates to local"
 
 
-def test_golden_second_run_downloads_nothing(machine, monkeypatch):
+def test_golden_second_run_downloads_nothing(machine):
     machine.spacy = True
     machine.install_embedding()
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
     with (
         patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
     ):
         result = _add()
     assert result.exit_code == 0, result.output
-    assert "downloading" not in result.output
+    assert "ownload" not in result.output
     spacy_dl.assert_not_called()
     embed_dl.assert_not_called()
 
@@ -198,9 +208,8 @@ def test_golden_second_run_downloads_nothing(machine, monkeypatch):
 # ── spaCy arm ────────────────────────────────────────────────────────────────
 
 
-def test_first_add_fetches_missing_spacy_model_once_and_saves(machine, monkeypatch):
+def test_add_fetches_missing_spacy_model_once_and_saves(machine):
     machine.install_embedding()
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
     with patch(
         "smartmemory.tools.factory._ensure_spacy_model",
         side_effect=machine.install_spacy,
@@ -208,59 +217,79 @@ def test_first_add_fetches_missing_spacy_model_once_and_saves(machine, monkeypat
         result = _add()
 
     assert result.exit_code == 0, result.output
-    assert "item-first-run" in result.output
-    assert "en_core_web_sm" in result.output, "the one-time download must be announced"
+    assert result.stdout == "item-first-run\n"
+    assert "Downloaded spaCy language model 'en_core_web_sm'." in result.stderr
     ensure.assert_called_once_with("en_core_web_sm")
 
 
-def test_configured_spacy_model_and_worker_default_both_fetched(machine, monkeypatch):
+def test_add_via_stdin_fetches_too(machine):
+    machine.install_embedding()
+    import smartmemory_app.cli as cli_module
+
+    with patch(
+        "smartmemory.tools.factory._ensure_spacy_model",
+        side_effect=machine.install_spacy,
+    ) as ensure:
+        result = CliRunner().invoke(cli_module.cli, ["add", "-"], input="line one\n")
+    assert result.exit_code == 0, result.output
+    ensure.assert_called_once_with("en_core_web_sm")
+
+
+def test_configured_spacy_model_and_worker_default_both_fetched(machine):
     from smartmemory_app.config import SmartMemoryConfig, save_config
 
     save_config(SmartMemoryConfig(mode="local", spacy_model="en_core_web_md"))
     machine.install_embedding()
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
     with patch(
         "smartmemory.tools.factory._ensure_spacy_model",
         side_effect=machine.install_spacy,
     ) as ensure:
         result = _add()
     assert result.exit_code == 0, result.output
+    # The fake installs every spaCy model at once, so setup announces only the first.
     assert [c.args[0] for c in ensure.call_args_list] == [
         "en_core_web_md",
         "en_core_web_sm",
     ]
-    assert "'en_core_web_md' (about 40 MB, one time only)" in result.output
+    assert "'en_core_web_md' (about 40 MB, one time only)" in result.stderr
 
 
-def test_first_add_download_failure_prints_setup_instruction(
-    machine, monkeypatch, caplog
-):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MissingModelError("Could not install spaCy model 'en_core_web_sm': offline"),
+        SystemExit(1),
+        KeyError("en_core_web_sm"),
+    ],
+    ids=["missing-model", "spacy-compat-503-exits", "spacy-compat-malformed"],
+)
+def test_spacy_download_failure_is_one_line(machine, caplog, failure):
     machine.install_embedding()
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
-    failure = MissingModelError(
-        "Could not install spaCy model 'en_core_web_sm': network unreachable"
-    )
     with (
         patch("smartmemory.tools.factory._ensure_spacy_model", side_effect=failure),
         caplog.at_level(logging.WARNING),
     ):
         result = _add()
 
-    _assert_one_line_setup_error(result)
+    line = _assert_one_line_setup_error(result)
+    assert line == (
+        "Error: Could not download spaCy language model 'en_core_web_sm'. "
+        "Run: smartmemory setup"
+    )
     assert _warned(caplog, "en_core_web_sm"), (
         "no-silent-degradation: name the lost model"
     )
-    assert _warned(caplog, "network unreachable"), "the real cause goes to the log"
+    cause = (
+        "offline" if isinstance(failure, MissingModelError) else type(failure).__name__
+    )
+    assert _warned(caplog, cause), "the real cause goes to the log"
 
 
 # ── embedding arm ────────────────────────────────────────────────────────────
 
 
-def test_embedding_download_failure_prints_setup_instruction(
-    machine, monkeypatch, caplog
-):
+def test_embedding_download_failure_is_one_line(machine, caplog):
     machine.spacy = True
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
     with (
         patch(
             "smartmemory_app.setup._ensure_embedding_model",
@@ -269,17 +298,19 @@ def test_embedding_download_failure_prints_setup_instruction(
         caplog.at_level(logging.WARNING),
     ):
         result = _add()
-    _assert_one_line_setup_error(result)
-    assert _warned(caplog, DEFAULT_MODEL)
+    line = _assert_one_line_setup_error(result)
+    assert line == (
+        f"Error: Could not download local embedding model '{DEFAULT_MODEL}'. "
+        "Run: smartmemory setup"
+    )
+    assert _warned(caplog, "hub down")
 
 
 def test_non_default_embedder_is_never_auto_fetched(machine, monkeypatch, caplog):
     """Remote-code embedders (nomic) are prepared only by an explicit setup."""
     machine.spacy = True
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
-    monkeypatch.setenv(
-        "SMARTMEMORY_EMBEDDING_LOCAL_MODEL", "nomic-ai/nomic-embed-text-v1.5"
-    )
+    nomic = "nomic-ai/nomic-embed-text-v1.5"
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_LOCAL_MODEL", nomic)
     monkeypatch.setenv("SMARTMEMORY_EMBEDDING_BACKEND", "torch")
     with (
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
@@ -287,68 +318,81 @@ def test_non_default_embedder_is_never_auto_fetched(machine, monkeypatch, caplog
             "smartmemory.tools.factory._require_embedding_model",
             side_effect=MissingModelError("nomic not cached"),
         ),
-        patch("smartmemory.plugins.embedding.EmbeddingService") as service,
         caplog.at_level(logging.WARNING),
     ):
-        service.return_value.local_model_name.return_value = (
-            "nomic-ai/nomic-embed-text-v1.5"
-        )
         result = _add()
-    _assert_one_line_setup_error(result)
+    line = _assert_one_line_setup_error(result)
     embed_dl.assert_not_called()
-    assert "nomic-ai/nomic-embed-text-v1.5" in result.output
-    assert _warned(caplog, "nomic-ai/nomic-embed-text-v1.5")
+    assert nomic in line
+    assert "runs code from its model repository" in line, "say why setup is required"
+    assert _warned(caplog, "nomic not cached")
 
 
-# ── interactive gating (Q3/Q4) ───────────────────────────────────────────────
+def test_non_default_embedder_without_torch_is_one_line(machine, monkeypatch, caplog):
+    """Backend resolution fails before the prerequisite's own error wrapping."""
+    from smartmemory.plugins.embedding import EmbeddingService
+
+    machine.spacy = True
+    monkeypatch.setenv(
+        "SMARTMEMORY_EMBEDDING_LOCAL_MODEL", "nomic-ai/nomic-embed-text-v1.5"
+    )
+    advice = 'nomic needs torch; run pip install "smartmemory-core[torch]"'
+    with (
+        patch.object(
+            EmbeddingService, "_resolve_backend", side_effect=RuntimeError(advice)
+        ),
+        patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
+        caplog.at_level(logging.WARNING),
+    ):
+        result = _add()
+    line = _assert_one_line_setup_error(result)
+    assert line == f"Error: {advice}. Then run: smartmemory setup"
+    embed_dl.assert_not_called()
+    assert _warned(caplog, advice)
 
 
-def test_non_tty_default_never_downloads(machine, caplog):
-    """Hooks (sm recall in SessionStart), CI and scripts get the setup line."""
+# ── who may download ─────────────────────────────────────────────────────────
+
+
+def test_opt_out_env_blocks_download(machine, monkeypatch, caplog):
+    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "0")
     with (
         patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
         caplog.at_level(logging.WARNING),
     ):
         result = _add()
-    _assert_one_line_setup_error(result)
+    line = _assert_one_line_setup_error(result)
+    assert "SMARTMEMORY_AUTO_DOWNLOAD_MODELS=0" in line
     spacy_dl.assert_not_called()
     embed_dl.assert_not_called()
-    assert _warned(caplog, "SMARTMEMORY_AUTO_DOWNLOAD_MODELS=1")
 
 
-def test_hook_recall_non_tty_never_downloads(machine):
-    import smartmemory_app.cli as cli_module
-
-    with patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl:
-        result = CliRunner().invoke(cli_module.cli, ["recall", "--cwd", "/tmp"])
-    _assert_one_line_setup_error(result)
-    spacy_dl.assert_not_called()
-
-
-def test_interactive_terminal_downloads_by_default(machine):
-    machine.install_embedding()
+@pytest.mark.parametrize(
+    "argv, fallback",
+    [
+        (["recall", "--cwd", "/tmp"], "smartmemory_app.storage.recall"),
+        (["search", "hello"], "smartmemory_app.storage.search"),
+        (["get", "item-1"], "smartmemory_app.storage.get"),
+    ],
+    ids=["recall-hook", "search", "get"],
+)
+def test_other_direct_commands_never_download(machine, caplog, argv, fallback):
+    """Only `sm add` and `sm setup` download. recall runs inside SessionStart hooks."""
     with (
-        patch("smartmemory_app.cli._stderr_is_tty", return_value=True),
-        patch(
-            "smartmemory.tools.factory._ensure_spacy_model",
-            side_effect=machine.install_spacy,
-        ) as spacy_dl,
-    ):
-        result = _add()
-    assert result.exit_code == 0, result.output
-    spacy_dl.assert_called_once()
-
-
-def test_opt_out_env_blocks_download_on_terminal(machine, monkeypatch):
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "0")
-    with (
-        patch("smartmemory_app.cli._stderr_is_tty", return_value=True),
         patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
+        patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
+        patch(fallback, side_effect=AssertionError("reached storage before the check")),
+        caplog.at_level(logging.WARNING),
     ):
-        result = _add()
-    _assert_one_line_setup_error(result)
+        result = _invoke(argv)
+    line = _assert_one_line_setup_error(result)
+    assert line.startswith(
+        "Error: Not installed: spaCy language model 'en_core_web_sm'"
+    )
     spacy_dl.assert_not_called()
+    embed_dl.assert_not_called()
+    assert _warned(caplog, "never downloads")
 
 
 # ── other surfaces ───────────────────────────────────────────────────────────
@@ -362,82 +406,10 @@ def test_remote_mode_skips_local_model_check(_isolated, monkeypatch):
         "spacy.util.is_package",
         side_effect=AssertionError("local check in remote mode"),
     ):
-        cli_module._ensure_first_run_models()
-
-
-def test_missing_model_elsewhere_is_one_line_not_traceback(machine, caplog):
-    """Safety net: any command that still meets MissingModelError reports one line."""
-    machine.spacy = True
-    machine.install_embedding()
-    with (
-        patch(
-            "smartmemory_app.storage.ingest",
-            side_effect=MissingModelError("spaCy model gone"),
-        ),
-        caplog.at_level(logging.WARNING),
-    ):
-        result = _add()
-    assert result.exit_code == 1
-    assert "Traceback" not in result.output
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
-    assert errors == [
-        "Error: Not installed: a required local model. Run: smartmemory setup"
-    ]
-    assert _warned(caplog, "spaCy model gone")
-
-
-# ── review findings (Codex sol, 2026-09-30) ──────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "failure",
-    [SystemExit(1), KeyError("en_core_web_sm")],
-    ids=["spacy-compat-503-exits", "spacy-compat-malformed"],
-)
-def test_spacy_downloader_non_missing_model_failures_are_one_line(
-    machine, monkeypatch, caplog, failure
-):
-    """spaCy's compatibility lookup can SystemExit or KeyError, not only MissingModelError."""
-    machine.install_embedding()
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
-    with (
-        patch("smartmemory.tools.factory._ensure_spacy_model", side_effect=failure),
-        caplog.at_level(logging.WARNING),
-    ):
-        result = _add()
-    _assert_one_line_setup_error(result)
-    assert _warned(caplog, "en_core_web_sm")
-
-
-def test_non_default_embedder_without_torch_is_one_line(machine, monkeypatch, caplog):
-    """Backend resolution fails before the prerequisite's own error wrapping."""
-    from smartmemory.plugins.embedding import EmbeddingService
-
-    machine.spacy = True
-    monkeypatch.setenv("SMARTMEMORY_AUTO_DOWNLOAD_MODELS", "1")
-    monkeypatch.setenv(
-        "SMARTMEMORY_EMBEDDING_LOCAL_MODEL", "nomic-ai/nomic-embed-text-v1.5"
-    )
-    advice = 'nomic needs torch; run pip install "smartmemory-core[torch]"'
-    with (
-        patch.object(
-            EmbeddingService, "_resolve_backend", side_effect=RuntimeError(advice)
-        ),
-        patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
-        caplog.at_level(logging.WARNING),
-    ):
-        result = _add()
-    assert result.exit_code == 1
-    assert isinstance(result.exception, SystemExit), repr(result.exception)
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
-    assert errors == [f"Error: {advice}. Then run: smartmemory setup"]
-    embed_dl.assert_not_called()
-    assert _warned(caplog, advice)
+        cli_module._ensure_first_run_models(download=True)
 
 
 def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
-    import smartmemory_app.cli as cli_module
-
     monkeypatch.setenv("SMARTMEMORY_MODE", "remote")
     with (
         patch(
@@ -447,43 +419,25 @@ def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
         patch("spacy.util.is_package", side_effect=AssertionError("local model check")),
         patch("smartmemory_app.storage.get", return_value={"item_id": "remote-1"}),
     ):
-        result = CliRunner().invoke(cli_module.cli, ["get", "remote-1"])
+        result = _invoke(["get", "remote-1"])
     assert result.exit_code == 0, result.output
     assert "loading local models" not in result.output
 
 
-@pytest.mark.parametrize(
-    "argv, fallback",
-    [
-        (["search", "hello"], "smartmemory_app.storage.search"),
-        (["get", "item-1"], "smartmemory_app.storage.get"),
-    ],
-    ids=["search", "get"],
-)
-def test_other_direct_commands_run_the_first_run_check(machine, argv, fallback):
-    """search and get are routed through the same gate as add and recall."""
-    import smartmemory_app.cli as cli_module
-
-    with (
-        patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
-        patch(fallback, side_effect=AssertionError("reached storage before the check")),
-    ):
-        result = CliRunner().invoke(cli_module.cli, argv)
-    _assert_one_line_setup_error(result)
-    spacy_dl.assert_not_called()
-
-
-def test_model_unavailable_at_embed_time_is_one_line(machine, caplog):
-    """Safety net also covers core's HFModelUnavailable (e.g. a local fallback embedder)."""
+@pytest.mark.parametrize("error", ["missing", "hf"])
+def test_model_missing_later_is_one_line_not_traceback(machine, caplog, error):
+    """Safety net: a model error past the check still reports one line."""
     from smartmemory.utils.hf_models import HFModelUnavailable
 
     machine.spacy = True
     machine.install_embedding()
+    failure = (
+        MissingModelError("spaCy model gone")
+        if error == "missing"
+        else HFModelUnavailable("MiniLM not cached")
+    )
     with (
-        patch(
-            "smartmemory_app.storage.ingest",
-            side_effect=HFModelUnavailable("MiniLM not cached"),
-        ),
+        patch("smartmemory_app.storage.ingest", side_effect=failure),
         caplog.at_level(logging.WARNING),
     ):
         result = _add()
@@ -491,6 +445,40 @@ def test_model_unavailable_at_embed_time_is_one_line(machine, caplog):
     assert "Traceback" not in result.output
     errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
     assert errors == [
-        "Error: Not installed: a required local model. Run: smartmemory setup"
+        "Error: A required local model is not installed. Run: smartmemory setup"
     ]
-    assert _warned(caplog, "MiniLM not cached")
+    assert _warned(caplog, str(failure))
+
+
+# ── sm setup uses the same messages ──────────────────────────────────────────
+
+
+def test_setup_spacy_messages_only_for_missing_models(machine, capsys):
+    from smartmemory_app import setup
+
+    def install(model):
+        print(f"core chatter for {model}")  # core's own lines go to the debug log
+        machine.install_spacy(model)
+
+    with patch("smartmemory.tools.factory._ensure_spacy_model", side_effect=install):
+        setup._ensure_spacy("en_core_web_sm")
+        out = capsys.readouterr().out
+        assert out.splitlines() == [
+            "Downloading spaCy language model 'en_core_web_sm' (about 15 MB, one time only)...",
+            "Downloaded spaCy language model 'en_core_web_sm'.",
+        ]
+        setup._ensure_spacy("en_core_web_sm")
+        assert capsys.readouterr().out == "", "installed models are silent"
+
+
+def test_setup_embedding_messages(machine, capsys, monkeypatch):
+    from smartmemory_app import setup
+
+    monkeypatch.delenv("SMARTMEMORY_EMBEDDING_PROVIDER", raising=False)
+    setup._ensure_embedding_model("local")
+    assert capsys.readouterr().out.splitlines() == [
+        f"Preparing local embedding model '{DEFAULT_MODEL}' "
+        "(downloads missing files, about 100 MB, one time only)...",
+        f"Local embedding model '{DEFAULT_MODEL}' ready.",
+    ]
+    assert machine.embedding

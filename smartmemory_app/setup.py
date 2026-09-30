@@ -716,8 +716,14 @@ def uninstall(keep_data: bool) -> None:
 # ── Install helpers ───────────────────────────────────────────────────────────
 
 
-def _ensure_embedding_model(provider: str) -> None:
-    """Fetch the configured local embedder's files and any transitive remote code."""
+def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
+    """Fetch the configured local embedder's files and any transitive remote code.
+
+    Args:
+        provider: Configured embedding provider; only ``local`` has files to fetch.
+        missing: The caller already knows the files are absent (``sm add`` first
+            run), so the notice says "Downloading" instead of "Preparing".
+    """
     if provider != "local":
         return
     from smartmemory.errors import MissingModelError
@@ -725,14 +731,21 @@ def _ensure_embedding_model(provider: str) -> None:
     from smartmemory.plugins.embedding import DEFAULT_LOCAL_MODEL, EmbeddingService
     from smartmemory.utils import hf_models
 
-    click.echo("Preparing local embedding model (downloads missing files)...")
     previous = os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER")
     previous_download = os.environ.get(hf_models.ALLOW_DOWNLOAD_ENV)
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = provider
     try:
+        model = EmbeddingService().local_model_name()
+        note = _download_note(model)
+        if missing:
+            click.echo(f"Downloading local embedding model {model!r} ({note})...")
+        else:
+            click.echo(
+                f"Preparing local embedding model {model!r} "
+                f"(downloads missing files, {note})..."
+            )
         _require_embedding_model(allow_download=True)
         service = EmbeddingService()
-        model = service.local_model_name()
         # Pinned torch models use trust_remote_code at inference. A snapshot alone
         # omits external modeling repos; reuse the core loader to cache those now.
         # MiniLM needs no remote code and stays a fast file-only setup check.
@@ -747,6 +760,10 @@ def _ensure_embedding_model(provider: str) -> None:
                 raise MissingModelError(
                     f"Embedding model {model!r} could not be prepared. Run sm setup. Details: {exc}"
                 ) from exc
+        if missing:
+            click.echo(f"Downloaded local embedding model {model!r}.")
+        else:
+            click.echo(f"Local embedding model {model!r} ready.")
     except MissingModelError as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
@@ -781,14 +798,50 @@ def _ensure_lazy_models() -> None:
             )
 
 
+# LITE-FIRSTRUN-SPACY-1: sizes for the one-line download notices (setup and sm add).
+_MODEL_SIZES = {
+    "en_core_web_sm": "about 15 MB",
+    "en_core_web_md": "about 40 MB",
+    "en_core_web_lg": "about 560 MB",
+    "sentence-transformers/all-MiniLM-L6-v2": "about 100 MB",
+}
+
+
+def _download_note(model: str) -> str:
+    size = _MODEL_SIZES.get(model)
+    return f"{size}, one time only" if size else "one time only"
+
+
 def _ensure_spacy(model: str = "en_core_web_sm") -> None:
     """Prepare the selected model and the default used by background workers."""
+    import contextlib
+    import io
+
+    import spacy
+
     from smartmemory.errors import MissingModelError
     from smartmemory.tools.factory import _ensure_spacy_model
 
     try:
         for required_model in dict.fromkeys((model, "en_core_web_sm")):
-            _ensure_spacy_model(required_model)
+            downloading = not spacy.util.is_package(required_model)
+            if downloading:
+                click.echo(
+                    f"Downloading spaCy language model {required_model!r} "
+                    f"({_download_note(required_model)})..."
+                )
+            # Core's own progress lines would repeat ours; keep them for the debug log.
+            chatter = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(chatter):
+                    _ensure_spacy_model(required_model)
+            finally:
+                if chatter.getvalue().strip():
+                    logger.debug(
+                        "spaCy installer output: %s", chatter.getvalue().strip()
+                    )
+            if downloading:
+                click.echo(f"Downloaded spaCy language model {required_model!r}.")
     except MissingModelError as exc:
         raise click.ClickException(str(exc)) from exc
 
