@@ -396,8 +396,12 @@ def test_recall_never_downloads(machine, caplog):
     assert _warned(caplog, "never downloads")
 
 
-def test_hook_lifecycle_recall_never_downloads(machine):
-    """Hooks call `smartmemory lifecycle ...`; that path never reaches a downloader."""
+def test_hook_lifecycle_recall_never_downloads(machine, caplog):
+    """Hooks call `smartmemory lifecycle ...`; the real path never reaches a downloader.
+
+    The lifecycle degrades by design (a hook must not fail the session): exit 0 and
+    a WARNING that carries core's own "Run sm setup" instruction.
+    """
     import json
 
     with (
@@ -405,25 +409,19 @@ def test_hook_lifecycle_recall_never_downloads(machine):
         patch("smartmemory.tools.factory._ensure_spacy_model") as spacy_dl,
         patch("smartmemory_app.setup._ensure_embedding_model") as embed_dl,
         patch("smartmemory_app.setup._ensure_spacy") as setup_spacy,
-        patch(
-            "smartmemory_app.lifecycle.MemoryLifecycle.recall",
-            side_effect=MissingModelError("spaCy model 'en_core_web_sm' is required"),
-        ) as lifecycle_recall,
+        caplog.at_level(logging.WARNING),
     ):
         result = _invoke_with_input(
             ["lifecycle", "recall"],
             json.dumps({"session_id": "s1", "cwd": "/tmp", "prompt": "hello"}),
         )
-    lifecycle_recall.assert_called_once()  # the direct-storage hook path ran
-    assert result.exit_code == 1
+    assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
-    errors = [ln for ln in result.output.splitlines() if ln.startswith("Error:")]
-    assert errors == [
-        "Error: A required local model is not installed. Run: smartmemory setup"
-    ]
     spacy_dl.assert_not_called()
     embed_dl.assert_not_called()
     setup_spacy.assert_not_called()
+    assert _warned(caplog, "Run sm setup"), "the hook still names the fix"
+    assert not machine.spacy and not machine.embedding
 
 
 @pytest.mark.parametrize(
