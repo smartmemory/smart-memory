@@ -12,6 +12,9 @@ from click.testing import CliRunner
 from smartmemory_app import daemon
 from smartmemory_app.cli import cli
 
+_REAL_RUN = subprocess.run
+_REAL_POPEN = subprocess.Popen
+
 
 @pytest.fixture
 def launchd(tmp_path, monkeypatch):
@@ -216,3 +219,233 @@ def test_inspection_failure_is_not_treated_as_job_removal(launchd, monkeypatch, 
     monkeypatch.setattr(subprocess, "run", failed)
     with pytest.raises((OSError, RuntimeError), match="unavailable|inspection denied"):
         daemon._launchd_loaded(daemon._LAUNCHD_DAEMON_LABEL)
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_failure_redacts_credentials_preserving_path(launchd, command):
+    launchd.fail_bootstrap = True
+    path = daemon._data_dir() / "daemon.log"
+    path.write_text(
+        "RuntimeError: Authorization: Bearer fixture-bearer\n"
+        "api_key=fixture-key\n"
+        "https://alice:fixture-password@example.com/api?token=fixture-token&x=ok\n"
+        '{"api_key": "fixture-json-key"}\n'
+        "https://fixture-userinfo@example.com/api\n"
+    )
+    result = CliRunner().invoke(cli, [command])
+    assert result.exit_code != 0
+    for secret in (
+        "fixture-bearer",
+        "fixture-key",
+        "fixture-password",
+        "fixture-token",
+        "fixture-json-key",
+        "fixture-userinfo",
+    ):
+        assert secret not in result.output
+    assert "RuntimeError" in result.output
+    assert str(path) in result.output
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "_launchd_loaded",
+        "_launchd_bootout",
+        "_launchd_job_summary",
+        "_launchd_bootstrap",
+    ],
+)
+def test_launchctl_boundaries_have_timeouts(launchd, monkeypatch, helper):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(command, 0, "state = running", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    getattr(daemon, helper)(daemon._LAUNCHD_DAEMON_LABEL)
+    assert calls and all(0 < call.get("timeout", 0) <= 5 for call in calls)
+
+
+def test_worker_disappears_after_second_inspection(launchd, monkeypatch):
+    daemon._launchd_plist_path(daemon._LAUNCHD_WORKER_LABEL).write_text(
+        "smartmemory_app.worker_entry"
+    )
+    launchd.start()
+    bootouts = 0
+
+    def run(command, **kwargs):
+        nonlocal bootouts
+        if daemon._LAUNCHD_WORKER_LABEL in command[-1]:
+            if command[1] == "print":
+                rc = 0 if bootouts < 2 else 113
+                return subprocess.CompletedProcess(
+                    command,
+                    rc,
+                    "state = SIGTERMed",
+                    "Could not find service" if rc else "",
+                )
+            if command[1] == "bootout":
+                bootouts += 1
+                if bootouts == 1:
+                    return subprocess.CompletedProcess(command, 0, "", "")
+            if command[1] in ("bootstrap", "load"):
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(
+                command, 113, "", "Could not find service"
+            )
+        return launchd.run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    result = CliRunner().invoke(cli, ["restart"])
+    assert result.exit_code == 0, result.output
+    assert "bootstrap" in launchd.events
+    assert bootouts == 2
+
+
+@pytest.mark.parametrize("command", ["stop", "restart"])
+def test_unmanaged_missing_gui_domain_uses_pid_path(
+    launchd, monkeypatch, caplog, command
+):
+    daemon._launchd_plist_path(daemon._LAUNCHD_DAEMON_LABEL).unlink()
+    daemon._pid_file().write_text("424242")
+    signals = []
+
+    def run(command, **kwargs):
+        if command[0] == "launchctl":
+            return subprocess.CompletedProcess(
+                command, 112, "", "Could not find domain for user gui: 501"
+            )
+        assert command[0] == "ps"
+        return subprocess.CompletedProcess(
+            command, 0, "smartmemory_app.viewer_server", ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(daemon.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    if command == "restart":
+
+        class Child:
+            def poll(self):
+                return None
+
+        def popen(*args, **kwargs):
+            assert signals
+            launchd.start()
+            return Child()
+
+        monkeypatch.setattr(subprocess, "Popen", popen)
+        monkeypatch.setattr(daemon, "_start_workers", lambda *args: None)
+    result = CliRunner().invoke(cli, [command])
+    assert result.exit_code == 0, result.output
+    assert signals
+    assert "WARNING" in caplog.text and "Skipping launchd" in caplog.text
+    assert "gui" in caplog.text.lower()
+
+
+def test_slow_health_shares_shutdown_deadline(launchd, monkeypatch):
+    import time
+    import httpx
+    from smartmemory_app.daemon import lifecycle_budget
+
+    launchd.start()
+    # Job disappears immediately, but health remains responsive and slow.
+    launchd.close()
+
+    def run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 113, "", "Could not find service")
+
+    def get(self, url, **kwargs):
+        time.sleep(min(0.06, kwargs["timeout"]))
+        return httpx.Response(200, json={"service": "smartmemory", "pid": 424242})
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(daemon.os, "kill", lambda *args: None)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="deadline|shutdown"):
+        with lifecycle_budget(0.2):
+            daemon.stop_daemon()
+    assert time.monotonic() - started < 0.6
+    assert daemon._pid_file().exists()
+
+
+@pytest.mark.parametrize("action", ["print", "bootout"])
+def test_blocked_launchctl_is_killed_by_shared_deadline(launchd, monkeypatch, action):
+    import sys
+    import time
+    from smartmemory_app.daemon import lifecycle_budget
+
+    launchd.loaded = True
+    daemon._pid_file().write_text("424242")
+    monkeypatch.setattr(subprocess, "Popen", _REAL_POPEN)
+
+    def run(command, **kwargs):
+        if command[1] == action:
+            return _REAL_RUN(
+                [sys.executable, "-c", "import time; time.sleep(5)"], **kwargs
+            )
+        return launchd.run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    started = time.monotonic()
+    with lifecycle_budget(0.2):
+        result = CliRunner().invoke(cli, ["restart"])
+    assert result.exit_code != 0
+    assert "timed out" in result.output or "deadline expired" in result.output
+    assert time.monotonic() - started < 0.8
+    assert daemon._pid_file().exists()
+    assert "bootstrap" not in launchd.events
+
+
+@pytest.mark.parametrize("command", ["start", "restart"])
+def test_cli_redacts_direct_exception(launchd, monkeypatch, command):
+    from importlib import import_module
+
+    def fail(**kwargs):
+        raise RuntimeError(
+            'API key="fixture spaced secret" https://example.com/?X-Signature=fixture-signature Authorization: Basic fixture-basic'
+        )
+
+    monkeypatch.setattr(
+        import_module("smartmemory_app.cli"), "_start_with_progress", fail
+    )
+    result = CliRunner().invoke(cli, [command])
+    assert result.exit_code != 0
+    assert "fixture" not in result.output
+    assert "RuntimeError" in result.output
+    assert str(daemon._data_dir() / "daemon.log") in result.output
+
+
+def test_restart_deadline_includes_startup_health_waits(launchd, monkeypatch):
+    import httpx
+
+    launchd.start()
+    (daemon._data_dir() / "daemon.log").write_text(
+        "RuntimeError: startup deadline probe\n"
+    )
+    now = [0.0]
+    original_get = httpx.Client.get
+
+    def get(client, url, **kwargs):
+        response = original_get(client, url, **kwargs)
+        now[0] += 0.4
+        if "bootstrap" in launchd.events:
+            return httpx.Response(
+                200, json={"service": "smartmemory", "status": "warming"}
+            )
+        return response
+
+    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        daemon.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)
+    )
+    result = CliRunner().invoke(cli, ["restart"])
+    assert result.exit_code != 0
+    assert "deadline expired" in result.output
+    assert "RuntimeError: startup deadline probe" in result.output
+    assert now[0] <= 75.4
+    assert "bootstrap" in launchd.events
+    assert "SmartMemory is ready" not in result.output

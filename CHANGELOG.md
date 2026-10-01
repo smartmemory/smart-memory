@@ -4,7 +4,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
-- On macOS, stopping SmartMemory now waits for launchd to finish removing its job before a restart can begin. Status correctly reports a deliberate stop, and stop/restart also handle an unresponsive daemon. Startup failures now show the underlying error and daemon log details.
+- On macOS, stopping SmartMemory now waits for launchd to finish removing its job before a restart can begin. Status correctly reports a deliberate stop, and stop/restart also handle an unresponsive daemon. Shutdown and restart use bounded waits, tolerate workers already removed by launchd, and support unmanaged shutdown without a GUI login. Startup failures now show the underlying error and daemon log details with credential values redacted.
 
 ## [1.5.15] - 2026-10-01
 

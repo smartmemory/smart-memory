@@ -17,6 +17,9 @@ from pathlib import Path
 
 import click
 
+from smartmemory_app.daemon import bounded_lifecycle
+from smartmemory_app.diagnostics import redact_credentials
+
 log = logging.getLogger(__name__)
 
 
@@ -550,9 +553,15 @@ def _start_with_progress(
 def _daemon_failure(action: str, exc: Exception) -> click.ClickException:
     from smartmemory_app.storage import _resolve_data_dir
 
+    log_path = _resolve_data_dir() / "daemon.log"
+    detail = str(exc)
+    if isinstance(exc, TimeoutError) and str(log_path) not in detail:
+        from smartmemory_app.daemon import _startup_failure_message
+
+        detail = _startup_failure_message(detail, log_path)
     return click.ClickException(
-        f"SmartMemory did not {action}: {type(exc).__name__}: {exc}\n"
-        f"Daemon log: {_resolve_data_dir() / 'daemon.log'}\nRun: sm doctor"
+        f"SmartMemory did not {action}: {type(exc).__name__}: {redact_credentials(detail)}\n"
+        f"Daemon log: {log_path}\nRun: sm doctor"
     )
 
 
@@ -595,6 +604,7 @@ def start_cmd(num_workers: int, wait: bool) -> None:
 
 
 @cli.command("stop")
+@bounded_lifecycle(10)
 def stop_cmd() -> None:
     """Stop the SmartMemory daemon."""
     from smartmemory_app.daemon import stop_daemon, is_running, should_be_running
@@ -616,6 +626,7 @@ def stop_cmd() -> None:
     show_default=True,
     help="Compatibility option; local mode always uses one core worker.",
 )
+@bounded_lifecycle(75)
 def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status, stop_daemon, should_be_running

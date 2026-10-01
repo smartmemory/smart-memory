@@ -1009,6 +1009,9 @@ def _install_launchd_plist() -> bool:
     call start_daemon — launchd owns the process via RunAtLoad).
     Returns False on non-macOS, missing template, or launchctl failure.
     """
+    from smartmemory_app.daemon import _run_command
+    from smartmemory_app.diagnostics import redact_credentials
+
     import platform
 
     if platform.system() != "Darwin":
@@ -1108,14 +1111,14 @@ def _install_launchd_plist() -> bool:
 
         # Unload existing plist before overwriting (launchctl requires this)
         if plist_dest.exists():
-            subprocess.run(
+            _run_command(
                 ["launchctl", "unload", str(plist_dest)],
                 capture_output=True,
             )
 
         plist_dest.write_text(content)
 
-        result = subprocess.run(
+        result = _run_command(
             ["launchctl", "load", str(plist_dest)],
             capture_output=True,
             text=True,
@@ -1125,7 +1128,7 @@ def _install_launchd_plist() -> bool:
         else:
             click.echo(
                 f"Warning: launchctl load failed for {display_name}: "
-                f"{result.stderr.strip()}"
+                f"{redact_credentials(result.stderr.strip())}"
             )
             click.echo(f"Load manually: launchctl load {plist_dest}")
             all_ok = False

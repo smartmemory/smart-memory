@@ -12,10 +12,68 @@ import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 from typing import Callable, Optional
 
+from smartmemory_app.diagnostics import redact_credentials
+
 log = logging.getLogger(__name__)
+_deadline: ContextVar[float | None] = ContextVar("daemon_deadline", default=None)
+
+
+@contextmanager
+def lifecycle_budget(seconds: float):
+    """Nested operations share the earliest monotonic lifecycle deadline."""
+    parent = _deadline.get()
+    deadline = time.monotonic() + seconds
+    token = _deadline.set(min(parent, deadline) if parent is not None else deadline)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
+def bounded_lifecycle(seconds: float):
+    def decorate(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            with lifecycle_budget(seconds):
+                return function(*args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+def _remaining(limit: float) -> float:
+    deadline = _deadline.get()
+    if deadline is None:
+        return limit
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(
+            "Lifecycle deadline expired; shutdown did not complete or startup remains unverified."
+        )
+    return min(limit, remaining)
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(_remaining(seconds))
+    _remaining(seconds)
+
+
+def _run_command(command, **kwargs):
+    try:
+        result = subprocess.run(command, timeout=_remaining(5), **kwargs)
+        _remaining(5)
+        return result
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(
+            f"{command[0]} {command[1]} timed out; lifecycle operation unverified"
+        ) from None
 
 
 def _data_dir() -> Path:
@@ -54,7 +112,7 @@ def _launchd_loaded(label: str) -> bool:
     """True if a launchd job with this label is currently loaded (macOS only)."""
     if sys.platform != "darwin":
         return False
-    r = subprocess.run(
+    r = _run_command(
         ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
         capture_output=True,
         text=True,
@@ -62,6 +120,12 @@ def _launchd_loaded(label: str) -> bool:
     if r.returncode == 0:
         return True
     if r.returncode == 113 and "Could not find service" in r.stderr:
+        return False
+    if r.returncode == 112 and "Could not find domain for user gui:" in r.stderr:
+        log.warning(
+            "Skipping launchd inspection/bootout for %s: GUI domain absent; using unmanaged PID shutdown",
+            label,
+        )
         return False
     raise RuntimeError(
         f"Cannot inspect launchd job {label}: "
@@ -80,19 +144,19 @@ def _launchd_bootout(label: str) -> bool:
         ["launchctl", "unload", str(_launchd_plist_path(label))],
     ):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            result = _run_command(cmd, capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 return True
             log.warning(
                 "launchd bootout via %s failed; restart prevention unverified: %s",
                 cmd[1],
-                result.stderr.strip(),
+                redact_credentials(result.stderr.strip()),
             )
         except OSError as exc:
             log.warning(
                 "launchd bootout via %s unavailable; restart prevention unverified: %s",
                 cmd[1],
-                exc,
+                redact_credentials(str(exc)),
             )
     return False
 
@@ -110,7 +174,7 @@ def _launchd_bootstrap(label: str, errors: Optional[list[str]] = None) -> bool:
         ["launchctl", "load", str(plist)],
     ):
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = _run_command(cmd, capture_output=True, text=True)
             if result.returncode == 0:
                 return True
             if errors is not None:
@@ -154,14 +218,18 @@ def is_running(require_healthy: bool = True) -> bool:
         import httpx
 
         with httpx.Client(trust_env=False) as client:
-            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
+            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=_remaining(2))
+        _remaining(2)
         data = r.json()
         if data.get("service") != "smartmemory":
             return False
         if require_healthy and data.get("status") != "ok":
             return False
         return True
+    except TimeoutError:
+        raise
     except Exception:
+        _remaining(2)
         return False
 
 
@@ -188,7 +256,7 @@ def _stream_new_log_lines(
             return last_pos  # no complete line yet
         for line in text[:nl].split("\n"):
             if line.strip():
-                emit(line)
+                emit(redact_credentials(line))
         return last_pos + len(text[: nl + 1].encode("utf-8"))
     except Exception:
         return last_pos
@@ -207,7 +275,7 @@ def _tail_log_lines(log_path: Path, limit: int = 20) -> list[str]:
 def _launchd_job_summary(label: str) -> list[str]:
     """Return only non-secret launchd state lines for diagnostics."""
     try:
-        result = subprocess.run(
+        result = _run_command(
             ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
             capture_output=True,
             text=True,
@@ -245,7 +313,7 @@ def _startup_failure_message(
         details.append(f"Last {len(tail)} lines of {log_path}:\n  " + "\n  ".join(tail))
     else:
         details.append(f"No daemon log was written at {log_path}")
-    return "\n".join(details)
+    return redact_credentials("\n".join(details))
 
 
 def start_daemon(
@@ -316,7 +384,7 @@ def start_daemon(
             if _returnable(status):
                 _pump()
                 return status
-            time.sleep(0.5)
+            _pause(0.5)
         status = _setup_timeout_status()
         if status is not None:
             return status
@@ -356,7 +424,7 @@ def start_daemon(
             if _returnable(status):
                 _pump()
                 return status
-            time.sleep(0.5)
+            _pause(0.5)
         status = _setup_timeout_status()
         if status is not None:
             return status
@@ -401,12 +469,13 @@ def start_daemon(
             )
         _pump()
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(_remaining(2))
         try:
             if s.connect_ex(("127.0.0.1", port)) == 0:
                 break  # port is open
         finally:
             s.close()
-        time.sleep(0.5)
+        _pause(0.5)
     else:
         proc.terminate()
         raise TimeoutError(
@@ -442,7 +511,7 @@ def start_daemon(
             status = get_status()
             if _returnable(status):
                 break
-            time.sleep(0.5)
+            _pause(0.5)
         else:
             status = _setup_timeout_status()
             if status is None:
@@ -478,11 +547,11 @@ def _wait_legacy_exit(pid: int) -> None:
     while _pid_alive(pid):
         if time.monotonic() >= deadline:
             raise RuntimeError(f"Legacy enrichment worker {pid} did not stop")
-        time.sleep(0.05)
+        _pause(0.05)
 
 
 def _legacy_agent_state() -> str | None:
-    result = subprocess.run(
+    result = _run_command(
         ["launchctl", "print", f"gui/{os.getuid()}/{_LAUNCHD_WORKER_LABEL}"],
         capture_output=True,
         text=True,
@@ -554,7 +623,7 @@ def _retire_legacy_workers() -> bool:
                 raise RuntimeError(f"Invalid legacy PID in {pid_file}: {pid}")
             if _pid_alive(pid):
                 try:
-                    result = subprocess.run(
+                    result = _run_command(
                         ["ps", "-o", "command=", "-p", str(pid)],
                         capture_output=True,
                         text=True,
@@ -666,9 +735,11 @@ def _stop_workers() -> None:
         )
     if sys.platform == "darwin" and _launchd_loaded(_LAUNCHD_WORKER_LABEL):
         _launchd_bootout(_LAUNCHD_WORKER_LABEL)
-    stop_worker(_data_dir())
+    stop_worker(_data_dir(), timeout=_remaining(10))
+    _remaining(10)
 
 
+@bounded_lifecycle(10)
 def stop_daemon() -> None:
     """Stop the daemon and all workers. Idempotent — no-op if not running.
 
@@ -683,7 +754,7 @@ def stop_daemon() -> None:
         booted = []
         for label in (_LAUNCHD_WORKER_LABEL, _LAUNCHD_DAEMON_LABEL):
             if _launchd_loaded(label):
-                if not _launchd_bootout(label):
+                if not _launchd_bootout(label) and _launchd_loaded(label):
                     raise RuntimeError(
                         _startup_failure_message(
                             f"Failed to bootout launchd job {label}; stop unverified.",
@@ -693,7 +764,7 @@ def stop_daemon() -> None:
                     )
                 booted.append(label)
         if booted:
-            for _ in range(40):  # up to 10s for launchd to tear it down
+            while True:  # Shared deadline includes workers, commands, and HTTP.
                 # HTTP closes before asynchronous bootout removes a SIGTERMed
                 # job. Returning then makes the next start skip bootstrap.
                 if not any(
@@ -701,14 +772,7 @@ def stop_daemon() -> None:
                 ) and not is_running(require_healthy=False):
                     _pid_file().unlink(missing_ok=True)
                     return
-                time.sleep(0.25)
-            raise TimeoutError(
-                _startup_failure_message(
-                    "launchd shutdown did not complete within 10 seconds; stop unverified.",
-                    _data_dir() / "daemon.log",
-                    include_job_state=True,
-                )
-            )
+                _pause(0.25)
 
     import httpx
 
@@ -716,7 +780,7 @@ def stop_daemon() -> None:
     if is_running(require_healthy=False):
         try:
             with httpx.Client(trust_env=False) as _hc:
-                r = _hc.get(f"http://127.0.0.1:{_port()}/health", timeout=2)
+                r = _hc.get(f"http://127.0.0.1:{_port()}/health", timeout=_remaining(2))
             pid = r.json().get("pid")
             if pid:
                 os.kill(pid, signal.SIGTERM)
@@ -724,13 +788,15 @@ def stop_daemon() -> None:
                     if not is_running(require_healthy=False):
                         _pid_file().unlink(missing_ok=True)
                         return
-                    time.sleep(0.25)
+                    _pause(0.25)
                 # Still running after 5s — force kill
                 os.kill(pid, signal.SIGKILL)
                 _pid_file().unlink(missing_ok=True)
                 return
+        except TimeoutError:
+            raise
         except Exception:
-            pass
+            _remaining(2)
 
     # Fallback: PID file (only if health unreachable but file exists)
     pf = _pid_file()
@@ -738,7 +804,7 @@ def stop_daemon() -> None:
         try:
             pid = int(pf.read_text().strip())
             # Verify it's actually a smartmemory process before killing
-            result = subprocess.run(
+            result = _run_command(
                 ["ps", "-p", str(pid), "-o", "command="],
                 capture_output=True,
                 text=True,
@@ -758,10 +824,14 @@ def get_status() -> dict | None:
         import httpx
 
         with httpx.Client(trust_env=False) as client:
-            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=3)
+            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=_remaining(3))
+        _remaining(2)
         data = r.json()
         if data.get("service") != "smartmemory":
             return None
         return data
+    except TimeoutError:
+        raise
     except Exception:
+        _remaining(3)
         return None

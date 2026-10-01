@@ -62,18 +62,9 @@ def _get_last_warmup_failure() -> str | None:
 def _safe_degraded_reason(exc: Exception) -> str:
     """Return a short exception summary without paths or credential values."""
     message = " ".join(str(exc).split())
-    message = re.sub(
-        r"(?i)([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@",
-        r"\1<redacted>@",
-        message,
-    )
-    message = re.sub(
-        r"(?i)\b(api[_ -]?key|token|password|secret|authorization)\b"
-        r"(?:\s*[:=]\s*|\s+)(?:bearer\s+)?[^\s,;]+",
-        r"\1=<redacted>",
-        message,
-    )
-    message = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer <redacted>", message)
+    from smartmemory_app.diagnostics import redact_credentials
+
+    message = redact_credentials(message)
     message = re.sub(r"(?<![A-Za-z0-9:/])/(?:[^\s'\";,)]*)", "<path>", message)
     message = re.sub(r"(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\s'\";,)]*)", "<path>", message)
     summary = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
