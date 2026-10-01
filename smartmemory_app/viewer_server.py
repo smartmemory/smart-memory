@@ -406,6 +406,18 @@ def _start_background_warmup() -> threading.Thread:
     return thread
 
 
+def _print_llm_extraction_status() -> None:
+    """Disclose the effective LLM route without hiding local extraction/enrichment."""
+    from smartmemory_app.storage import apply_runtime_config, llm_extraction_warning
+
+    apply_runtime_config()
+    warning = llm_extraction_warning()
+    if warning:
+        print(f"  {warning}", flush=True)
+    else:
+        print("  LLM extraction: enabled (deferred)", flush=True)
+
+
 def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """Start the SmartMemory daemon.
 
@@ -421,7 +433,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # Load LLM API keys: env → keychain → shell profile.
     # setup stores keys in all three locations. Keychain and profile
     # are available immediately without sourcing .zshrc in a new shell.
-    from smartmemory_app.config import LLM_KEY_ENV_VARS, llm_key_present
+    from smartmemory_app.config import LLM_KEY_ENV_VARS
 
     for key_name in LLM_KEY_ENV_VARS:
         if os.environ.get(key_name):
@@ -448,19 +460,9 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         except Exception:
             pass
 
-    # no-silent-degradation: make the LLM-extraction state explicit at boot so a
-    # missing key is a loud, actionable banner line — not a thing the user only
-    # discovers when `add` quietly stores Tier-1-only memories.
-    if llm_key_present():
-        _present = [k for k in LLM_KEY_ENV_VARS if os.environ.get(k)]
-        print(f"  LLM extraction: enabled ({', '.join(_present)})", flush=True)
-    else:
-        print(
-            "  LLM extraction: DISABLED — no LLM API key found. Memories will store "
-            "with Tier-1 (spaCy) extraction only; entity extraction and enrichment "
-            "are off. Run `smartmemory setup` to add a key.",
-            flush=True,
-        )
+    # no-silent-degradation: the boot banner and per-add disclosure use the same
+    # core route decision, including configured local and subscription providers.
+    _print_llm_extraction_status()
 
     # Publish the process marker before warmup so stop/status lifecycle commands
     # refer to the same process that serves the observed warming health response.

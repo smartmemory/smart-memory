@@ -349,6 +349,25 @@ def _split_recall_counts(top_k: int) -> tuple[int, int]:
 # --- Operations ------------------------------------------------------------------
 
 
+def llm_extraction_warning() -> str | None:
+    """Describe missing LLM extraction using the same route resolver as Lite saves.
+
+    API-key presence is insufficient: core also supports local endpoints and
+    subscription routes, and rejects keys that cannot serve the selected model.
+    Call after runtime configuration has been applied by memory initialization.
+    """
+    from smartmemory.utils.llm import llm_route_available
+
+    available, _ = llm_route_available()
+    if available:
+        return None
+    return (
+        "LLM entity/relation extraction unavailable (no usable provider configured); "
+        "ruler extraction and local enrichers still run. "
+        "Run `smartmemory setup` to configure an LLM provider."
+    )
+
+
 def ingest(
     content: str,
     memory_type: str = "episodic",
@@ -363,7 +382,8 @@ def ingest(
         memory_type: Memory type (episodic, semantic, etc.).
         sync: Both values save through discoverability and queue deferred core work.
               True returns an item_id string; False returns the core result dict
-              including item_id, entity_ids, queued and run_id.
+              including item_id, entity_ids, queued and run_id, plus an optional
+              warning when core cannot route LLM extraction.
         properties: Optional user-supplied key-value properties stored in metadata.
         origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by local write
             surfaces (CLI sm add → "cli:add"). Threaded into core ingest via context
@@ -416,8 +436,15 @@ def ingest(
     lock = _get_lock_file(data_path)
     with lock:
         result = mem.ingest(content, context=ctx, sync=sync)
-    if not sync and isinstance(result, dict):
-        return result  # Return full dict with entity_ids for async enrichment
+        if not sync and isinstance(result, dict):
+            # Initialization has applied the effective provider/model settings.
+            # Use core's placement resolver, not the foreground extraction status:
+            # even a configured LLM is deferred and reports ruler_only at save time.
+            warning = llm_extraction_warning()
+            if warning:
+                log.warning("%s", warning)
+                return {**result, "warning": warning}
+            return result
     return _normalize_ingest_result(result)
 
 

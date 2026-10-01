@@ -1139,7 +1139,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         for item_id in ids:
             click.echo(item_id)
         if warning:
-            # Surfaced once for the whole batch — the daemon degraded to Tier-1.
+            # Surface the daemon's extraction disclosure once for the whole batch.
             click.echo(f"⚠  {warning}", err=True)
         return
     if not text.strip():

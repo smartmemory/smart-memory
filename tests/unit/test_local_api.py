@@ -498,8 +498,9 @@ class TestUnconfiguredReturns503:
 
 
 # ---------------------------------------------------------------------------
-# Ingest LLM-key surfacing — no-silent-degradation: when no LLM key is set the
-# daemon degrades to Tier-1 (spaCy) and MUST tell the caller, not store quietly.
+# Ingest disclosure — no-silent-degradation: when core has no usable LLM route,
+# the daemon MUST tell the caller that LLM entity/relation extraction is unavailable.
+# Ruler extraction and local enrichers still run.
 # ---------------------------------------------------------------------------
 # Derive the clear-set from the canonical provider list (not a hardcoded tuple)
 # so adding a provider — e.g. GEMINI_API_KEY for CORE-LLM-GEMINI-1 — can't leave
@@ -509,7 +510,11 @@ _LLM_ENV = {k: "" for k in LLM_KEY_ENV_VARS}
 
 class TestIngestCorePlacement:
     def test_keyless_uses_core_work_result(self, client):
-        """Keyless saves still defer local enrichment via the core work graph."""
+        """Preserve core's disclosure while hiding internal deferred-work fields."""
+        warning = (
+            "LLM entity/relation extraction unavailable (no usable provider configured); "
+            "ruler extraction and local enrichers still run."
+        )
         with patch.dict("os.environ", _LLM_ENV, clear=False):
             for k in list(_LLM_ENV):
                 os.environ.pop(k, None)
@@ -519,6 +524,7 @@ class TestIngestCorePlacement:
                     "item_id": "itm_123",
                     "queued": True,
                     "run_id": "run-123",
+                    "warning": warning,
                 },
             ):
                 r = client.post(
@@ -528,10 +534,10 @@ class TestIngestCorePlacement:
         assert r.status_code == 200
         body = r.json()
         assert body["item_id"] == "itm_123"
-        assert body == {"item_id": "itm_123"}
+        assert body == {"item_id": "itm_123", "warning": warning}
 
-    def test_no_warning_when_llm_key_present(self, client):
-        """With a key, the two-tier path runs and the response carries NO warning."""
+    def test_no_warning_when_core_has_llm_route(self, client):
+        """A usable route queues deferred LLM work without a missing-route warning."""
         with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
             with patch(
                 "smartmemory_app.storage.ingest",
@@ -560,7 +566,7 @@ class TestIngestCorePlacement:
                     json={"content": "Carol owns Core", "memory_type": "episodic"},
                 )
         assert r.status_code == 200
-        assert "warning" not in r.json()  # key present → no downgrade
+        assert "warning" not in r.json()  # preserve the producer's route decision
 
     def test_keyless_path_runs_tier1_only_not_full_pipeline(self, client):
         """The API asks core for the result dict, including durable work status."""

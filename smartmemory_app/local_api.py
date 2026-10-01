@@ -790,7 +790,10 @@ def ingest_endpoint(body: IngestRequest) -> dict:
             raise HTTPException(
                 status_code=502, detail=f"Hosted SmartMemory API error: {exc}"
             ) from exc
-    return {"item_id": result["item_id"] if isinstance(result, dict) else result}
+    response = {"item_id": result["item_id"] if isinstance(result, dict) else result}
+    if isinstance(result, dict) and result.get("warning"):
+        response["warning"] = result["warning"]
+    return response
 
 
 class SearchRequest(BaseModel):
