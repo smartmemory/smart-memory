@@ -4,6 +4,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Daemon-backed `sm add` now warns on stderr when no usable LLM provider is configured, while keeping the memory UUID on stdout. The response and startup banner disclose that LLM entity/relation extraction is unavailable while ruler extraction and local enrichers still run, using core's effective route resolution.
 - On macOS, stopping SmartMemory now waits for launchd to finish removing its job before a restart can begin. Status correctly reports a deliberate stop, and stop/restart also handle an unresponsive daemon. Startup, shutdown and restart share an absolute deadline, allow individual health probes to time out, and reserve time to force-stop resistant workers and verify their exit. They also tolerate workers already removed by launchd and support unmanaged shutdown without a GUI login. Startup failures show the underlying error and daemon log details with credential values, including provider API keys, redacted while preserving diagnostic file paths.
 
 ## [1.5.15] - 2026-10-01
@@ -40,7 +41,6 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed
 
-- Daemon-backed `sm add` now warns on stderr when no usable LLM provider is configured, while keeping the memory UUID on stdout. The response and startup banner disclose that LLM entity/relation extraction is unavailable while ruler extraction and local enrichers still run, using core's effective route resolution.
 - `sm setup` also installs `en_core_web_sm` alongside the selected spaCy model so background workers can drain deferred work.
 - Local startup checks model files on disk without downloading. `sm setup` prepares the configured local embedding backend's model files and transitive remote code for pinned torch models. The selected spaCy sm/md/lg model persists in config and is required at startup. Missing models return their setup instructions through the viewer API (HTTP 503) and daemon-backed CLI.
 - Inference-time loaders still honor explicit `SMARTMEMORY_HF_ALLOW_DOWNLOAD=true` as an operator opt-in, including image builds.
