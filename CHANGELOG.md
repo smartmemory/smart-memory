@@ -2,6 +2,13 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## [1.5.15] - 2026-10-01
+
+- Pins `smartmemory-core==1.5.15` (Lite recency recall returns the newest memories; Lite recall no longer returns raw entity nodes; a failed spaCy model download raises `MissingModelError` instead of exiting the process; OKF export/import round-trips edges; newly ingested structured documents are searchable).
+- CLI launch-funnel events now reach the daemon at `/memory/launch/event` and persist locally (or forward in remote mode). The emitter previously missed the daemon's `/memory` mount and silently returned false.
+- Local `sm setup` now exits non-zero for failed or degraded daemon startup, with the failure reason, daemon log path, and `sm doctor` / `sm start --wait` recovery steps. Failed TUI setup also propagates the error to the command exit status. A daemon verified to be responding and still warming at the wait deadline stays running; setup exits zero without claiming readiness, defers additional worker startup, and warns to check `sm status` and run `sm start --wait` once warmup finishes. Its `setup.complete` event includes `warming: true`.
+- Generated macOS daemon and worker launchd plists preserve the setup-time `HOME`, so custom homes keep their config and model caches after login startup.
+
 ## [1.5.13] - 2026-09-30
 
 - A fresh install's first `sm add` no longer crashes with a `MissingModelError` traceback (LITE-FIRSTRUN-SPACY-1). When the daemon is not running, `sm add`, `sm search` and `sm get` download a missing spaCy model (the configured one plus `en_core_web_sm`) and the default local embedding model once, in a terminal or not, using the same downloaders as `sm setup`. Before each download they print one line naming the model, its size and "one time only", and after it one line saying it is done. These messages go to stderr, so scripts reading stdout are unaffected. `sm setup` now uses the same messages. If a download fails, the command prints one line naming what failed and asking you to run `smartmemory setup`, and logs a WARNING with the cause. A non-default embedding model that runs code from its model repository is only installed by `smartmemory setup`, and the message says so. `sm recall` and the hook `lifecycle` commands never download: they print the one-line setup instruction instead of a traceback. Set `SMARTMEMORY_AUTO_DOWNLOAD_MODELS=0` to turn off the download. The daemon, MCP server, viewer and background worker still never download. The "First run: loading local models" notice now prints only after the models are present.
@@ -29,9 +36,6 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ### Fixed
 
-- CLI launch-funnel events now reach the daemon at `/memory/launch/event` and persist locally (or forward in remote mode). The emitter previously missed the daemon's `/memory` mount and silently returned false.
-- Local `sm setup` now exits non-zero for failed or degraded daemon startup, with the failure reason, daemon log path, and `sm doctor` / `sm start --wait` recovery steps. Failed TUI setup also propagates the error to the command exit status. A daemon verified to be responding and still warming at the wait deadline stays running; setup exits zero without claiming readiness, defers additional worker startup, and warns to check `sm status` and run `sm start --wait` once warmup finishes. Its `setup.complete` event includes `warming: true`.
-- Generated macOS daemon and worker launchd plists preserve the setup-time `HOME`, so custom homes keep their config and model caches after login startup.
 - `sm setup` also installs `en_core_web_sm` alongside the selected spaCy model so background workers can drain deferred work.
 - Local startup checks model files on disk without downloading. `sm setup` prepares the configured local embedding backend's model files and transitive remote code for pinned torch models. The selected spaCy sm/md/lg model persists in config and is required at startup. Missing models return their setup instructions through the viewer API (HTTP 503) and daemon-backed CLI.
 - Inference-time loaders still honor explicit `SMARTMEMORY_HF_ALLOW_DOWNLOAD=true` as an operator opt-in, including image builds.
