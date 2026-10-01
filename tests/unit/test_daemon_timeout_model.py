@@ -162,6 +162,79 @@ def test_nested_lifecycle_calls_share_one_deadline():
     assert daemon._deadline.get() is None
 
 
+@pytest.mark.parametrize("entry", ["core", "daemon", "stop", "restart"])
+def test_default_worker_grace_preserves_core_timeout(launchd, monkeypatch, entry):
+    from smartmemory.pipeline.work_graph import spawn
+
+    launchd.start()
+    calls = []
+    function_type = daemon.FunctionType
+
+    def bind(code, scope, name, defaults, closure):
+        function = function_type(code, scope, name, defaults, closure)
+        if name != "stop_worker":
+            return function
+
+        def stop(data, *, timeout):
+            calls.append((timeout, daemon._remaining(200)))
+            return function(data, timeout=timeout)
+
+        return stop
+
+    monkeypatch.setattr(daemon, "FunctionType", bind)
+    monkeypatch.setattr(spawn, "worker_is_running", lambda data: False)
+    monkeypatch.setattr(
+        "smartmemory_app.cli._start_with_progress",
+        lambda **kwargs: {"service": "smartmemory", "status": "ok"},
+    )
+    if entry == "core":
+        daemon._stop_core_worker()
+    elif entry == "daemon":
+        daemon.stop_daemon()
+    else:
+        result = CliRunner().invoke(cli, [entry])
+        assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    grace, remaining = calls[0]
+    assert grace >= 10.0
+    assert remaining > grace + 3 + 6  # Identity checks and exit verification.
+
+
+def test_cooperative_worker_finishes_after_old_grace(tmp_path, monkeypatch):
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(daemon.sys, "platform", "linux")
+    code = """from smartmemory.pipeline.work_graph.worker import run_worker
+from filelock import FileLock
+import os, pathlib, signal, sys, threading, time
+stopped = threading.Event()
+signal.signal(signal.SIGTERM, lambda *args: stopped.set())
+d = pathlib.Path(sys.argv[1])
+with FileLock(str(d / '.worker.lock')):
+    (d / '.worker.pid').write_text(str(os.getpid()))
+    stopped.wait(60)
+    time.sleep(5)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-B", "-c", code, str(tmp_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        until = time.monotonic() + 15
+        while not (tmp_path / ".worker.pid").exists() and time.monotonic() < until:
+            assert process.poll() is None, process.stderr.read()
+            time.sleep(0.05)
+        assert (tmp_path / ".worker.pid").exists()
+        daemon._stop_core_worker()
+        assert process.wait(timeout=1) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        process.stderr.close()
+
+
 @pytest.mark.parametrize("slow_identity", [False, True])
 def test_real_sigterm_resistant_worker_exits_before_stop_returns(
     tmp_path, monkeypatch, slow_identity

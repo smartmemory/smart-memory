@@ -180,9 +180,14 @@ def test_sqlite_lock_does_not_delay_stop_signals(
             result = CliRunner().invoke(cli, ["stop"])
         elapsed = time.monotonic() - started
         print(
-            "SQLite locked stop", budget or 10, "elapsed", elapsed, "signals", signals
+            "SQLite locked stop",
+            budget or daemon.STOP_TIMEOUT,
+            "elapsed",
+            elapsed,
+            "signals",
+            signals,
         )
-        assert elapsed < (budget or 10) + 0.4
+        assert elapsed < (budget or daemon.STOP_TIMEOUT) + 0.4
         assert result.exit_code == 0, result.output
         assert writer.is_alive(), "Shutdown waited for the database writer"
         assert signal.SIGTERM in signals

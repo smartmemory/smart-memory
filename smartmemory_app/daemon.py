@@ -24,6 +24,9 @@ from smartmemory_app.diagnostics import redact_credentials
 
 log = logging.getLogger(__name__)
 _deadline: ContextVar[float | None] = ContextVar("daemon_deadline", default=None)
+STOP_TIMEOUT = 30
+START_TIMEOUT = 75
+RESTART_TIMEOUT = STOP_TIMEOUT + START_TIMEOUT
 
 
 @contextmanager
@@ -345,7 +348,7 @@ def _startup_failure_message(
     return redact_credentials("\n".join(details))
 
 
-@bounded_lifecycle(75)
+@bounded_lifecycle(START_TIMEOUT)
 def start_daemon(
     num_workers: int = 1,
     on_log: Optional[Callable[[str], None]] = None,
@@ -765,7 +768,7 @@ def _start_workers(num_workers: int = 1) -> None:
         )
 
 
-@bounded_lifecycle(10)
+@bounded_lifecycle(STOP_TIMEOUT)
 def _stop_core_worker() -> None:
     """Bind pinned core's stop logic to bounded I/O without global monkeypatches.
 
@@ -779,10 +782,12 @@ def _stop_core_worker() -> None:
     # Core starts its grace clock AFTER the initial identity inspection. Budget
     # that inspection, the last polling inspection and SIGKILL revalidation as
     # well: 0.1B + 0.4B + 0.1B + 0.1B leaves at least 0.3B for verification and
-    # daemon retirement. All subprocess caps also respect the absolute deadline.
-    budget = _remaining(10)
+    # daemon retirement. The default 30s window gives core its full 10s grace;
+    # shorter caller budgets retain these reserves for escalation/verification.
+    # All subprocess caps also respect the absolute deadline.
+    budget = _remaining(STOP_TIMEOUT)
     inspection_cap = min(1, budget / 10)
-    grace = min(5, budget * 0.4)
+    grace = min(10, budget * 0.4)
 
     def inspect_worker(command, **kwargs):
         try:
@@ -817,7 +822,7 @@ def _stop_core_worker() -> None:
         if remaining <= 0:
             raise TimeoutError("Core worker exit unverified; replacement blocked")
         _pause(min(0.01, remaining))
-    _remaining(10)
+    _remaining(STOP_TIMEOUT)
 
 
 def _stop_workers() -> None:
@@ -834,7 +839,7 @@ def _stop_workers() -> None:
     _stop_core_worker()
 
 
-@bounded_lifecycle(10)
+@bounded_lifecycle(STOP_TIMEOUT)
 def stop_daemon() -> None:
     """Stop the daemon and all workers. Idempotent — no-op if not running.
 

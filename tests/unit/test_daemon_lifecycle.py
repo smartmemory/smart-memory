@@ -447,6 +447,6 @@ def test_restart_deadline_includes_startup_health_waits(launchd, monkeypatch):
     assert result.exit_code != 0
     assert "deadline expired" in result.output
     assert "RuntimeError: startup deadline probe" in result.output
-    assert now[0] <= 75.4
+    assert now[0] <= daemon.RESTART_TIMEOUT + 0.4
     assert "bootstrap" in launchd.events
     assert "SmartMemory is ready" not in result.output

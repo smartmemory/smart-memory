@@ -17,7 +17,12 @@ from pathlib import Path
 
 import click
 
-from smartmemory_app.daemon import bounded_lifecycle
+from smartmemory_app.daemon import (
+    RESTART_TIMEOUT,
+    START_TIMEOUT,
+    STOP_TIMEOUT,
+    bounded_lifecycle,
+)
 from smartmemory_app.diagnostics import redact_credentials
 
 log = logging.getLogger(__name__)
@@ -580,7 +585,7 @@ def _daemon_failure(action: str, exc: Exception) -> click.ClickException:
     is_flag=True,
     help="Wait for models and saved memories to be fully ready.",
 )
-@bounded_lifecycle(75)
+@bounded_lifecycle(START_TIMEOUT)
 def start_cmd(num_workers: int, wait: bool) -> None:
     """Start the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status
@@ -611,7 +616,7 @@ def start_cmd(num_workers: int, wait: bool) -> None:
 
 
 @cli.command("stop")
-@bounded_lifecycle(10)
+@bounded_lifecycle(STOP_TIMEOUT)
 def stop_cmd() -> None:
     """Stop the SmartMemory daemon."""
     from smartmemory_app.daemon import stop_daemon, is_running, should_be_running
@@ -633,7 +638,7 @@ def stop_cmd() -> None:
     show_default=True,
     help="Compatibility option; local mode always uses one core worker.",
 )
-@bounded_lifecycle(75)
+@bounded_lifecycle(RESTART_TIMEOUT)
 def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status, stop_daemon, should_be_running
