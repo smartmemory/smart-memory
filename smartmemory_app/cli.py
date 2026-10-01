@@ -518,17 +518,20 @@ def _report_start_status(info: dict | None, *, just_started: bool = True) -> Non
         reason = info.get("degraded_reason") or "No reason was reported."
         state = "started" if just_started else "is running"
         click.echo(f"SmartMemory {state}, but it needs attention.")
-        click.echo(f"Problem: {reason}")
+        click.echo(f"Problem: {redact_credentials(reason)}")
         click.echo("Next step: Run: sm doctor")
         from smartmemory_app.work_graph import blocked_work_warning, get_work_status
 
         try:
             warning = blocked_work_warning(get_work_status())
         except Exception as exc:  # noqa: BLE001 - diagnostics must not hide degraded startup
-            click.echo(f"WARNING: Work status unavailable: {exc}", err=True)
+            click.echo(
+                f"WARNING: Work status unavailable: {redact_credentials(str(exc))}",
+                err=True,
+            )
         else:
             if warning:
-                click.echo(warning, err=True)
+                click.echo(redact_credentials(warning), err=True)
         return
     raise click.ClickException(
         "SmartMemory gave an unexpected health response. Run: sm doctor"
@@ -577,11 +580,15 @@ def _daemon_failure(action: str, exc: Exception) -> click.ClickException:
     is_flag=True,
     help="Wait for models and saved memories to be fully ready.",
 )
+@bounded_lifecycle(75)
 def start_cmd(num_workers: int, wait: bool) -> None:
     """Start the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status
 
-    current = get_status()
+    try:
+        current = get_status()
+    except Exception as exc:
+        raise _daemon_failure("start", exc) from None
     if current is not None:
         if current.get("status") == "ok":
             click.echo("SmartMemory is already running.")

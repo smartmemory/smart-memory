@@ -356,12 +356,12 @@ def test_slow_health_shares_shutdown_deadline(launchd, monkeypatch):
     def run(command, **kwargs):
         return subprocess.CompletedProcess(command, 113, "", "Could not find service")
 
-    def get(self, url, **kwargs):
+    async def get(self, url, **kwargs):
         time.sleep(min(0.06, kwargs["timeout"]))
         return httpx.Response(200, json={"service": "smartmemory", "pid": 424242})
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
     monkeypatch.setattr(daemon.os, "kill", lambda *args: None)
     started = time.monotonic()
     with pytest.raises(TimeoutError, match="deadline|shutdown"):
@@ -426,10 +426,10 @@ def test_restart_deadline_includes_startup_health_waits(launchd, monkeypatch):
         "RuntimeError: startup deadline probe\n"
     )
     now = [0.0]
-    original_get = httpx.Client.get
+    original_get = httpx.AsyncClient.get
 
-    def get(client, url, **kwargs):
-        response = original_get(client, url, **kwargs)
+    async def get(client, url, **kwargs):
+        response = await original_get(client, url, **kwargs)
         now[0] += 0.4
         if "bootstrap" in launchd.events:
             return httpx.Response(
@@ -437,7 +437,7 @@ def test_restart_deadline_includes_startup_health_waits(launchd, monkeypatch):
             )
         return response
 
-    monkeypatch.setattr(httpx.Client, "get", get)
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
     monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(
         daemon.time, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds)

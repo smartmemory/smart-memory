@@ -4,6 +4,7 @@ Not a server itself — just functions for managing the daemon process.
 The daemon IS viewer_server.main() running in a detached subprocess.
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
+from types import FunctionType, SimpleNamespace
 from typing import Callable, Optional
 
 from smartmemory_app.diagnostics import redact_credentials
@@ -205,6 +207,34 @@ def should_be_running() -> bool:
     )
 
 
+def _health_response(limit: float):
+    """Cancel the entire response at the lifecycle deadline, including its body."""
+    import httpx
+
+    url = f"http://127.0.0.1:{_port()}/health"
+    if _deadline.get() is None:
+        with httpx.Client(trust_env=False) as client:
+            return client.get(url, timeout=limit)
+
+    async def request():
+        # Cancellation exits the client context and closes the socket. A read
+        # inactivity timeout alone cannot bound a continuously trickling body.
+        async with httpx.AsyncClient(trust_env=False) as client:
+            return await client.get(url, timeout=_remaining(limit))
+
+    async def bounded_request():
+        return await asyncio.wait_for(request(), timeout=_remaining(limit))
+
+    try:
+        response = asyncio.run(bounded_request())
+    except TimeoutError:
+        raise TimeoutError(
+            "Health request deadline expired; lifecycle operation unverified"
+        ) from None
+    _remaining(limit)
+    return response
+
+
 def is_running(require_healthy: bool = True) -> bool:
     """Check daemon is running AND is SmartMemory (not a random process on the port).
 
@@ -215,10 +245,7 @@ def is_running(require_healthy: bool = True) -> bool:
     through a proxy and falsely report the daemon as down (L4).
     """
     try:
-        import httpx
-
-        with httpx.Client(trust_env=False) as client:
-            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=_remaining(2))
+        r = _health_response(2)
         _remaining(2)
         data = r.json()
         if data.get("service") != "smartmemory":
@@ -316,6 +343,7 @@ def _startup_failure_message(
     return redact_credentials("\n".join(details))
 
 
+@bounded_lifecycle(75)
 def start_daemon(
     num_workers: int = 1,
     on_log: Optional[Callable[[str], None]] = None,
@@ -723,9 +751,44 @@ def _start_workers(num_workers: int = 1) -> None:
         )
 
 
+def _stop_core_worker() -> None:
+    """Bind pinned core's stop logic to bounded I/O without global monkeypatches.
+
+    Core 1.5.15 has no subprocess/deadline injection parameter. A private globals
+    dictionary keeps its identity, lock, successor and signal policy intact,
+    while binding all three functions in its identity call graph to our runner.
+    Other callers and concurrent threads keep the original core functions.
+    """
+    from smartmemory.pipeline.work_graph import spawn
+
+    def inspect_worker(command, **kwargs):
+        try:
+            return _run_command(command, **kwargs)
+        except TimeoutError as exc:
+            log.warning(
+                "Core worker identity inspection timed out; shutdown unverified: %s",
+                exc,
+            )
+            # Core catches OSError (including TimeoutError) as an absent identity.
+            # Keep expiry fatal so restart cannot proceed with an unknown worker.
+            raise RuntimeError(
+                "Core worker identity inspection timed out; shutdown unverified"
+            ) from None
+
+    scope = vars(spawn).copy()
+    scope["subprocess"] = SimpleNamespace(run=inspect_worker)
+    scope["time"] = SimpleNamespace(monotonic=time.monotonic, sleep=_pause)
+    for name in ("_is_worker_process", "worker_pid", "stop_worker"):
+        original = getattr(spawn, name)
+        scope[name] = FunctionType(
+            original.__code__, scope, name, original.__defaults__, original.__closure__
+        )
+    scope["stop_worker"](_data_dir(), timeout=_remaining(10))
+    _remaining(10)
+
+
 def _stop_workers() -> None:
     """Stop every core launch path and any identified legacy consumer."""
-    from smartmemory.pipeline.work_graph.spawn import stop_worker
 
     try:
         _retire_legacy_workers()
@@ -735,8 +798,7 @@ def _stop_workers() -> None:
         )
     if sys.platform == "darwin" and _launchd_loaded(_LAUNCHD_WORKER_LABEL):
         _launchd_bootout(_LAUNCHD_WORKER_LABEL)
-    stop_worker(_data_dir(), timeout=_remaining(10))
-    _remaining(10)
+    _stop_core_worker()
 
 
 @bounded_lifecycle(10)
@@ -774,13 +836,10 @@ def stop_daemon() -> None:
                     return
                 _pause(0.25)
 
-    import httpx
-
     # Prefer health-check-based stop — confirms we're killing SmartMemory, not a reused PID
     if is_running(require_healthy=False):
         try:
-            with httpx.Client(trust_env=False) as _hc:
-                r = _hc.get(f"http://127.0.0.1:{_port()}/health", timeout=_remaining(2))
+            r = _health_response(2)
             pid = r.json().get("pid")
             if pid:
                 os.kill(pid, signal.SIGTERM)
@@ -821,10 +880,7 @@ def get_status() -> dict | None:
     if not is_running(require_healthy=False):
         return None
     try:
-        import httpx
-
-        with httpx.Client(trust_env=False) as client:
-            r = client.get(f"http://127.0.0.1:{_port()}/health", timeout=_remaining(3))
+        r = _health_response(3)
         _remaining(2)
         data = r.json()
         if data.get("service") != "smartmemory":
