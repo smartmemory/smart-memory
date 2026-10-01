@@ -7,7 +7,10 @@ def redact_credentials(message: str) -> str:
     """Preserve useful error text and file paths while hiding credential values."""
     # Provider keys also appear in free-text exceptions without a field name.
     message = re.sub(
-        r"\b(?:gsk_|sk-(?:proj-|ant-)?)[A-Za-z0-9_-]+", "<redacted>", message
+        r"(?<![\w/\\.-])(?:gsk_[A-Za-z0-9]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,})"
+        r"(?![\w/\\-]|\.[\w])",
+        "<redacted>",
+        message,
     )
     message = re.sub(
         r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@",
@@ -21,8 +24,8 @@ def redact_credentials(message: str) -> str:
         message,
     )
     message = re.sub(
-        r"(?i)\b([\w-]*(?:api[_ -]?key|key|token|password|secret|authorization))\b[\"\x27]?"
-        r"(?:\s*[:=]\s*|\s+)(?:\"[^\"]*\"|'[^']*'|"
+        r"(?i)(?<![\w/\\-])([\w-]*(?:api[_ -]?key|key|token|password|secret|authorization))\b[\"\x27]?"
+        r"\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|"
         r"(?:(?:bearer|basic|token)\s+)?[^\s,;&\"\x27]+)",
         r"\1=<redacted>",
         message,

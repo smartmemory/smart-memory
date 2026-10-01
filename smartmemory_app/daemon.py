@@ -28,10 +28,11 @@ _deadline: ContextVar[float | None] = ContextVar("daemon_deadline", default=None
 
 @contextmanager
 def lifecycle_budget(seconds: float):
-    """Nested operations share the earliest monotonic lifecycle deadline."""
-    parent = _deadline.get()
-    deadline = time.monotonic() + seconds
-    token = _deadline.set(min(parent, deadline) if parent is not None else deadline)
+    """Set one absolute deadline at entry; nested lifecycle calls inherit it."""
+    if _deadline.get() is not None:
+        yield
+        return
+    token = _deadline.set(time.monotonic() + seconds)
     try:
         yield
     finally:
@@ -67,10 +68,10 @@ def _pause(seconds: float) -> None:
     _remaining(seconds)
 
 
-def _run_command(command, **kwargs):
+def _run_command(command, *, limit: float = 5, **kwargs):
     try:
-        result = subprocess.run(command, timeout=_remaining(5), **kwargs)
-        _remaining(5)
+        result = subprocess.run(command, timeout=_remaining(limit), **kwargs)
+        _remaining(limit)
         return result
     except subprocess.TimeoutExpired:
         raise TimeoutError(
@@ -228,9 +229,10 @@ def _health_response(limit: float):
     try:
         response = asyncio.run(bounded_request())
     except TimeoutError:
-        raise TimeoutError(
-            "Health request deadline expired; lifecycle operation unverified"
-        ) from None
+        # A cancelled probe is unavailable health, not failed shutdown. Only the
+        # absolute lifecycle deadline may abort the caller's remaining work.
+        _remaining(limit)
+        raise httpx.ReadTimeout("Health probe timed out") from None
     _remaining(limit)
     return response
 
@@ -751,6 +753,7 @@ def _start_workers(num_workers: int = 1) -> None:
         )
 
 
+@bounded_lifecycle(10)
 def _stop_core_worker() -> None:
     """Bind pinned core's stop logic to bounded I/O without global monkeypatches.
 
@@ -761,9 +764,17 @@ def _stop_core_worker() -> None:
     """
     from smartmemory.pipeline.work_graph import spawn
 
+    # Core starts its grace clock AFTER the initial identity inspection. Budget
+    # that inspection, the last polling inspection and SIGKILL revalidation as
+    # well: 0.1B + 0.4B + 0.1B + 0.1B leaves at least 0.3B for verification and
+    # daemon retirement. All subprocess caps also respect the absolute deadline.
+    budget = _remaining(10)
+    inspection_cap = min(1, budget / 10)
+    grace = min(5, budget * 0.4)
+
     def inspect_worker(command, **kwargs):
         try:
-            return _run_command(command, **kwargs)
+            return _run_command(command, limit=inspection_cap, **kwargs)
         except TimeoutError as exc:
             log.warning(
                 "Core worker identity inspection timed out; shutdown unverified: %s",
@@ -777,13 +788,23 @@ def _stop_core_worker() -> None:
 
     scope = vars(spawn).copy()
     scope["subprocess"] = SimpleNamespace(run=inspect_worker)
-    scope["time"] = SimpleNamespace(monotonic=time.monotonic, sleep=_pause)
+    # Keep core's grace-bound polling sleep. Raising here at the lifecycle
+    # deadline bypasses core's identity revalidation and SIGKILL branch.
     for name in ("_is_worker_process", "worker_pid", "stop_worker"):
         original = getattr(spawn, name)
         scope[name] = FunctionType(
             original.__code__, scope, name, original.__defaults__, original.__closure__
         )
-    scope["stop_worker"](_data_dir(), timeout=_remaining(10))
+    data = _data_dir()
+    scope["stop_worker"](data, timeout=grace)
+    # Core returns immediately after SIGKILL. Observe lock release before
+    # allowing a replacement; a successor/unknown live worker also blocks it.
+    verify_until = time.monotonic() + budget * 0.2
+    while spawn.worker_is_running(data):
+        remaining = verify_until - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Core worker exit unverified; replacement blocked")
+        _pause(min(0.01, remaining))
     _remaining(10)
 
 

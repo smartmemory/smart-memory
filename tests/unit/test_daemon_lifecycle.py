@@ -202,7 +202,8 @@ def test_unmanaged_stop_is_idempotent(launchd):
 def test_stop_timeout_does_not_clear_pid_or_start_replacement(launchd):
     launchd.start()
     launchd.stuck = True
-    result = CliRunner().invoke(cli, ["restart"])
+    with daemon.lifecycle_budget(1.5):
+        result = CliRunner().invoke(cli, ["restart"])
     assert result.exit_code != 0
     assert "shutdown did not complete" in result.output
     assert daemon._pid_file().exists()

@@ -4,7 +4,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
-- On macOS, stopping SmartMemory now waits for launchd to finish removing its job before a restart can begin. Status correctly reports a deliberate stop, and stop/restart also handle an unresponsive daemon. Startup, shutdown and restart bound health requests and worker identity checks by their deadlines, tolerate workers already removed by launchd, and support unmanaged shutdown without a GUI login. Startup failures now show the underlying error and daemon log details with credential values, including provider API keys, redacted.
+- On macOS, stopping SmartMemory now waits for launchd to finish removing its job before a restart can begin. Status correctly reports a deliberate stop, and stop/restart also handle an unresponsive daemon. Startup, shutdown and restart share an absolute deadline, allow individual health probes to time out, and reserve time to force-stop resistant workers and verify their exit. They also tolerate workers already removed by launchd and support unmanaged shutdown without a GUI login. Startup failures show the underlying error and daemon log details with credential values, including provider API keys, redacted while preserving diagnostic file paths.
 
 ## [1.5.15] - 2026-10-01
 
