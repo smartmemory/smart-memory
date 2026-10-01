@@ -77,7 +77,9 @@ class TestLaunchdRecovery:
         with (
             patch("sys.platform", "darwin"),
             patch.object(daemon, "_stop_workers"),
-            patch.object(daemon, "_launchd_loaded", return_value=True),
+            patch.object(
+                daemon, "_launchd_loaded", side_effect=lambda label: label not in booted
+            ),
             patch.object(
                 daemon,
                 "_launchd_bootout",

@@ -54,15 +54,19 @@ def _launchd_loaded(label: str) -> bool:
     """True if a launchd job with this label is currently loaded (macOS only)."""
     if sys.platform != "darwin":
         return False
-    try:
-        r = subprocess.run(
-            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
-            capture_output=True,
-            text=True,
-        )
-        return r.returncode == 0
-    except Exception:
+    r = subprocess.run(
+        ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode == 0:
+        return True
+    if r.returncode == 113 and "Could not find service" in r.stderr:
         return False
+    raise RuntimeError(
+        f"Cannot inspect launchd job {label}: "
+        f"{r.stderr.strip() or r.stdout.strip() or f'exit code {r.returncode}'}"
+    )
 
 
 def _launchd_bootout(label: str) -> bool:
@@ -80,13 +84,13 @@ def _launchd_bootout(label: str) -> bool:
             if result.returncode == 0:
                 return True
             log.warning(
-                "launchd worker retirement via %s failed; restart prevention unverified: %s",
+                "launchd bootout via %s failed; restart prevention unverified: %s",
                 cmd[1],
                 result.stderr.strip(),
             )
         except OSError as exc:
             log.warning(
-                "launchd worker retirement via %s unavailable; restart prevention unverified: %s",
+                "launchd bootout via %s unavailable; restart prevention unverified: %s",
                 cmd[1],
                 exc,
             )
@@ -130,7 +134,11 @@ def _launchd_manages_daemon() -> bool:
 
 def should_be_running() -> bool:
     """Whether local lifecycle markers say a daemon is expected to exist."""
-    return _pid_file().exists() or _launchd_manages_daemon()
+    # An installed plist survives a deliberate stop. A loaded job, including a
+    # crashed KeepAlive job awaiting respawn, still represents running intent.
+    return _pid_file().exists() or (
+        _launchd_manages_daemon() and _launchd_loaded(_LAUNCHD_DAEMON_LABEL)
+    )
 
 
 def is_running(require_healthy: bool = True) -> bool:
@@ -672,17 +680,35 @@ def stop_daemon() -> None:
     _stop_workers()
 
     if sys.platform == "darwin":
-        booted = False
+        booted = []
         for label in (_LAUNCHD_WORKER_LABEL, _LAUNCHD_DAEMON_LABEL):
             if _launchd_loaded(label):
-                _launchd_bootout(label)
-                booted = True
+                if not _launchd_bootout(label):
+                    raise RuntimeError(
+                        _startup_failure_message(
+                            f"Failed to bootout launchd job {label}; stop unverified.",
+                            _data_dir() / "daemon.log",
+                            include_job_state=True,
+                        )
+                    )
+                booted.append(label)
         if booted:
             for _ in range(40):  # up to 10s for launchd to tear it down
-                if not is_running(require_healthy=False):
+                # HTTP closes before asynchronous bootout removes a SIGTERMed
+                # job. Returning then makes the next start skip bootstrap.
+                if not any(
+                    _launchd_loaded(label) for label in booted
+                ) and not is_running(require_healthy=False):
                     _pid_file().unlink(missing_ok=True)
                     return
                 time.sleep(0.25)
+            raise TimeoutError(
+                _startup_failure_message(
+                    "launchd shutdown did not complete within 10 seconds; stop unverified.",
+                    _data_dir() / "daemon.log",
+                    include_job_state=True,
+                )
+            )
 
     import httpx
 

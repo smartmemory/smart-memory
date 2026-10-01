@@ -547,6 +547,15 @@ def _start_with_progress(
         )
 
 
+def _daemon_failure(action: str, exc: Exception) -> click.ClickException:
+    from smartmemory_app.storage import _resolve_data_dir
+
+    return click.ClickException(
+        f"SmartMemory did not {action}: {type(exc).__name__}: {exc}\n"
+        f"Daemon log: {_resolve_data_dir() / 'daemon.log'}\nRun: sm doctor"
+    )
+
+
 @cli.command("start")
 @click.option(
     "--num-workers",
@@ -580,22 +589,23 @@ def start_cmd(num_workers: int, wait: bool) -> None:
         )
     except click.ClickException:
         raise
-    except Exception:
-        raise click.ClickException(
-            "SmartMemory did not start. Run: sm doctor"
-        ) from None
+    except Exception as exc:
+        raise _daemon_failure("start", exc) from None
     _report_start_status(info)
 
 
 @cli.command("stop")
 def stop_cmd() -> None:
     """Stop the SmartMemory daemon."""
-    from smartmemory_app.daemon import stop_daemon, is_running
+    from smartmemory_app.daemon import stop_daemon, is_running, should_be_running
 
-    if not is_running(require_healthy=False):
-        click.echo("Daemon is not running.")
-        return
-    stop_daemon()
+    try:
+        if not is_running(require_healthy=False) and not should_be_running():
+            click.echo("Daemon is not running.")
+            return
+        stop_daemon()
+    except Exception as exc:
+        raise _daemon_failure("stop", exc) from None
     click.echo("Daemon stopped.")
 
 
@@ -608,14 +618,17 @@ def stop_cmd() -> None:
 )
 def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and its core worker."""
-    from smartmemory_app.daemon import get_status, stop_daemon
+    from smartmemory_app.daemon import get_status, stop_daemon, should_be_running
 
-    if get_status() is not None:
-        click.echo("Stopping SmartMemory...")
-        from smartmemory_app.progress import startup_progress
+    try:
+        if get_status() is not None or should_be_running():
+            click.echo("Stopping SmartMemory...")
+            from smartmemory_app.progress import startup_progress
 
-        with startup_progress("Stopping SmartMemory", emit=click.echo):
-            stop_daemon()
+            with startup_progress("Stopping SmartMemory", emit=click.echo):
+                stop_daemon()
+    except Exception as exc:
+        raise _daemon_failure("stop", exc) from None
     click.echo("Starting SmartMemory...")
     try:
         info = _start_with_progress(
@@ -625,10 +638,8 @@ def restart_cmd(num_workers: int) -> None:
         )
     except click.ClickException:
         raise
-    except Exception:
-        raise click.ClickException(
-            "SmartMemory did not start. Run: sm doctor"
-        ) from None
+    except Exception as exc:
+        raise _daemon_failure("start", exc) from None
     _report_start_status(info)
 
 

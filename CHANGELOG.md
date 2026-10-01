@@ -2,6 +2,10 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## Unreleased
+
+- On macOS, stopping SmartMemory now waits for launchd to finish removing its job before a restart can begin. Status correctly reports a deliberate stop, and stop/restart also handle an unresponsive daemon. Startup failures now show the underlying error and daemon log details.
+
 ## [1.5.15] - 2026-10-01
 
 - Pins `smartmemory-core==1.5.15` (Lite recency recall returns the newest memories; Lite recall no longer returns raw entity nodes; a failed spaCy model download raises `MissingModelError` instead of exiting the process; OKF export/import round-trips edges; newly ingested structured documents are searchable).
