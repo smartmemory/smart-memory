@@ -30,5 +30,19 @@ def redact_credentials(message: str) -> str:
         r"\1=<redacted>",
         message,
     )
+    # Whitespace labels must be complete credential words, never suffixes such
+    # as "monkey Smith". Exclude path components just as for assignments above.
+    message = re.sub(
+        r"(?i)(?<![\w/\\-])\b(authorization)\b\s+"
+        r"(?:(?:basic|bearer|token)\s+)?\S+",
+        r"\1=<redacted>",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(?<![\w/\\-])\b(password|passwd|pwd|api[_ -]?key|"
+        r"access[_ -]?key|secret|token|key)\b\s+\S+",
+        r"\1=<redacted>",
+        message,
+    )
     message = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer <redacted>", message)
     return message

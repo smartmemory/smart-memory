@@ -636,7 +636,7 @@ def _processing_count() -> int:
         ).fetchone()[0]
 
 
-def _retire_legacy_workers() -> bool:
+def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
     """Prove legacy quiescence before recovering in-flight rows or starting core."""
     try:
         retired = _retire_legacy_agent()
@@ -686,10 +686,13 @@ def _retire_legacy_workers() -> bool:
                 log.warning("Legacy worker %s is gone; removing stale PID file", pid)
             pid_file.unlink(missing_ok=True)
     except (OSError, RuntimeError) as exc:
-        try:
-            count = str(_processing_count())
-        except sqlite3.Error as count_error:
-            count = f"unknown (queue inspection failed: {count_error})"
+        if recover_queue:
+            try:
+                count = str(_processing_count())
+            except sqlite3.Error as count_error:
+                count = f"unknown (queue inspection failed: {count_error})"
+        else:
+            count = "unknown (SQLite queue inspection deferred; shutdown budget reserved for stopping processes)"
         log.warning(
             "Legacy retirement unverified; %s processing rows remain unrecovered; replacement blocked: %s",
             count,
@@ -698,6 +701,15 @@ def _retire_legacy_workers() -> bool:
         raise
     database = _data_dir() / "memory.db"
     if database.exists():
+        if not recover_queue:
+            # Core's 30s SQLite waits and unbounded migration cannot safely fit
+            # alongside process retirement in the stop budget. Leave rows intact;
+            # startup repeats quiescence checks and recovers before replacement.
+            log.warning(
+                "SQLite legacy queue migration and processing-row recovery deferred "
+                "until startup; shutdown budget reserved for stopping processes"
+            )
+            return retired
         from smartmemory.pipeline.work_graph.sqlite_store import SQLiteWorkGraph
 
         recovered = SQLiteWorkGraph(str(database)).migrate_enrichment_queue(
@@ -812,7 +824,7 @@ def _stop_workers() -> None:
     """Stop every core launch path and any identified legacy consumer."""
 
     try:
-        _retire_legacy_workers()
+        _retire_legacy_workers(recover_queue=False)
     except (OSError, RuntimeError) as exc:
         log.warning(
             "Legacy retirement failed during stop; continuing shutdown: %s", exc
