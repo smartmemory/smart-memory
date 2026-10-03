@@ -24,6 +24,7 @@ from smartmemory_app.daemon import (
     bounded_lifecycle,
 )
 from smartmemory_app.diagnostics import redact_credentials
+from smartmemory_app.runtime_diagnostics import ConsoleFormatter, RedactingFormatter
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ def _configure_cli_logging() -> None:
     for handler in root_logger.handlers:
         if not getattr(handler, "_smartmemory_debug_file", False):
             handler.setLevel(level)
+            handler.setFormatter(ConsoleFormatter("%(levelname)s: %(message)s"))
 
     _install_cli_debug_handler(root_logger)
 
@@ -85,7 +87,10 @@ def _install_cli_debug_handler(root_logger: logging.Logger) -> None:
     """Install one rotating DEBUG handler at the configured local data path."""
     from smartmemory_app.bug_report import debug_log_path
 
-    path = debug_log_path()
+    try:
+        path = debug_log_path()
+    except Exception:
+        return
     for handler in list(root_logger.handlers):
         if not getattr(handler, "_smartmemory_debug_file", False):
             continue
@@ -103,14 +108,14 @@ def _install_cli_debug_handler(root_logger: logging.Logger) -> None:
             backupCount=2,
             encoding="utf-8",
         )
-    except OSError:
+    except Exception:
         # Diagnostics must never prevent the command being diagnosed from running.
         return
 
     file_handler._smartmemory_debug_file = True  # type: ignore[attr-defined]
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(
-        logging.Formatter(
+        RedactingFormatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S%z",
         )
@@ -332,7 +337,41 @@ def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
 
 
 class _CLIGroup(click.Group):
-    """Report a missing local model as one setup line, never a traceback."""
+    """Capture command failures while preserving Click control flow."""
+
+    def main(self, args=None, prog_name=None, **kwargs):
+        from smartmemory_app.runtime_diagnostics import CLI_COMMAND_ARGS
+
+        command_args = list(sys.argv[1:] if args is None else args)
+        token = CLI_COMMAND_ARGS.set(command_args)
+        try:
+            return super().main(args=args, prog_name=prog_name, **kwargs)
+        except (click.ClickException, click.Abort):
+            raise
+        except Exception as exc:
+            from smartmemory_app.bug_report import debug_log_path
+            from smartmemory_app.runtime_diagnostics import record_cli_crash
+
+            record_cli_crash(exc, command_args)
+            if os.environ.get("SMARTMEMORY_DEBUG") == "1":
+                raise
+            try:
+                path = str(debug_log_path())
+            except Exception:
+                path = "~/.smartmemory/cli-debug.log"
+            summary = (" ".join(str(exc).split()) or "No additional details")[:500]
+            error = click.ClickException(
+                redact_credentials(
+                    f"{type(exc).__name__}: {summary}\nLog: {path}\n"
+                    "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                )
+            )
+            if not kwargs.get("standalone_mode", True):
+                raise error from exc
+            error.show()
+            raise SystemExit(1) from None
+        finally:
+            CLI_COMMAND_ARGS.reset(token)
 
     def invoke(self, ctx):
         try:
@@ -340,8 +379,13 @@ class _CLIGroup(click.Group):
         except click.ClickException:
             raise  # already a one-line user error (it may chain a model error)
         except Exception as exc:
-            from smartmemory.errors import MissingModelError
-            from smartmemory.utils.hf_models import HFModelUnavailable
+            if os.environ.get("SMARTMEMORY_DEBUG") == "1":
+                raise
+            try:
+                from smartmemory.errors import MissingModelError
+                from smartmemory.utils.hf_models import HFModelUnavailable
+            except ImportError:
+                raise exc
 
             # Core may wrap the model error (e.g. VectorWriteError from the store stage).
             cause, seen = exc, set()
@@ -354,6 +398,25 @@ class _CLIGroup(click.Group):
                 )
             else:
                 raise
+            from smartmemory_app.runtime_diagnostics import (
+                CLI_COMMAND_ARGS,
+                record_cli_crash,
+            )
+
+            record_cli_crash(exc, CLI_COMMAND_ARGS.get() or sys.argv[1:])
+            try:
+                from smartmemory_app.bug_report import debug_log_path
+
+                summary = " ".join(str(exc).split())[:500]
+                click.echo(
+                    redact_credentials(
+                        f"{type(exc).__name__}: {summary}\nLog: {debug_log_path()}\n"
+                        "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                    ),
+                    err=True,
+                )
+            except Exception:
+                pass
             raise _model_error(
                 f"A required local model is not installed. {_SETUP_HINT}", exc
             ) from exc
@@ -363,7 +426,10 @@ class _CLIGroup(click.Group):
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
-    _configure_cli_logging()
+    try:
+        _configure_cli_logging()
+    except Exception:
+        pass  # Logging must never break the command.
 
 
 @cli.command("rebuild")
@@ -2339,16 +2405,28 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         else:
             click.echo(f"✗ {PYSOCKS_ERROR}", err=True)
 
+    from smartmemory_app.support_diagnostics import local_checks
+
+    try:
+        for row in local_checks():
+            click.echo(row)
+    except Exception as exc:
+        click.echo(
+            redact_credentials(f"Warning: local diagnostics unavailable ({exc})")
+        )
+
     if not status.doctor_ok:
         raise SystemExit(1)
-    click.echo("\nAll checks passed.")
+    click.echo(
+        "\nAll checks passed. Installation checks passed, network and state warnings are advisory."
+    )
 
 
 @cli.command("report")
 @click.argument(
     "report_args",
     nargs=-1,
-    required=True,
+    required=False,
     metavar="[TEST_ID] MESSAGE",
 )
 @click.option(
@@ -2358,14 +2436,71 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     show_default=True,
 )
 @click.option("--test-title", help="Human-readable tracked test title.")
+@click.option(
+    "--zip",
+    "zip_bundle",
+    is_flag=True,
+    help="Write one local support zip (MESSAGE optional).",
+)
+@click.option(
+    "--out",
+    "bundle_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Support zip path.",
+)
 def report_cmd(
-    report_args: tuple[str, ...], severity: str, test_title: str | None
+    report_args: tuple[str, ...],
+    severity: str,
+    test_title: str | None,
+    zip_bundle: bool = False,
+    bundle_path: Path | None = None,
 ) -> None:
     """Format a tracker bug report with local CLI diagnostics.
 
-    MESSAGE is required. TEST_ID is optional, for example TC-LITE-305. Quote a
-    multi-word message so Click receives it as one argument.
+    MESSAGE and TEST_ID are optional (for example TC-LITE-305). Quote a
+    multi-word message so Click receives it as one argument. Use --zip [PATH]
+    to write a portable support archive instead.
     """
+    if zip_bundle:
+        import contextlib
+        import io
+        from smartmemory_app.support_diagnostics import (
+            default_bundle_path,
+            write_support_bundle,
+        )
+
+        if len(report_args) > 1 or (report_args and bundle_path is not None):
+            raise click.UsageError(
+                "Use report --zip [PATH] or report --zip --out PATH."
+            )
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                doctor_cmd.callback(False, None, None)
+        except (Exception, SystemExit) as exc:
+            output.write(
+                redact_credentials(
+                    f"\nDoctor finished with {type(exc).__name__}: {exc}\n"
+                )
+            )
+        try:
+            path = bundle_path or (
+                Path(report_args[0]) if report_args else default_bundle_path()
+            )
+            path = write_support_bundle(path, output.getvalue())
+        except Exception as exc:
+            raise click.ClickException(
+                redact_credentials(f"Could not write support bundle: {exc}")
+            ) from exc
+        click.echo(str(path))
+        click.echo(
+            "Nothing was sent automatically. Email this file to support@smartmemory.ai."
+        )
+        return
+    if bundle_path is not None:
+        raise click.UsageError("--out requires --zip.")
+    if not report_args:
+        report_args = ("CLI failure diagnostics",)
     if len(report_args) == 1:
         test_id = None
         message = report_args[0]

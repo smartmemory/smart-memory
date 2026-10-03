@@ -38,6 +38,9 @@ from smartmemory_app.daemon import (
     _LAUNCHD_WORKER_LABEL,
 )
 
+from smartmemory_app.support_diagnostics import download_failure, log_download_start
+from smartmemory_app.diagnostics import redact_credentials
+
 logger = logging.getLogger(__name__)
 
 _SETUP_INSTALLATION_ERROR = """Setup stopped because your SmartMemory version is old or incomplete.
@@ -277,7 +280,10 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
         except click.ClickException:
             raise
         except Exception as e:
-            click.echo(f"TUI unavailable ({e}), using text prompts.\n")
+            logger.warning("TUI setup failed, using text prompts", exc_info=True)
+            click.echo(
+                redact_credentials(f"TUI unavailable ({e}), using text prompts.\n")
+            )
 
     # Branch 3: Click fallback
     _setup_click(None, api_key)
@@ -759,11 +765,13 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
     from smartmemory.plugins.embedding import DEFAULT_LOCAL_MODEL, EmbeddingService
     from smartmemory.utils import hf_models
 
+    model = "configured embedding model"
     previous = os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER")
     previous_download = os.environ.get(hf_models.ALLOW_DOWNLOAD_ENV)
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = provider
     try:
         model = EmbeddingService().local_model_name()
+        log_download_start(logger, model, EmbeddingService().backend_name)
         note = _download_note(model)
         if missing:
             click.echo(f"Downloading local embedding model {model!r} ({note})...")
@@ -792,8 +800,8 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
             click.echo(f"Downloaded local embedding model {model!r}.")
         else:
             click.echo(f"Local embedding model {model!r} ready.")
-    except MissingModelError as exc:
-        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(download_failure(logger, model, exc)) from exc
     finally:
         if previous_download is None:
             os.environ.pop(hf_models.ALLOW_DOWNLOAD_ENV, None)
@@ -817,13 +825,11 @@ def _ensure_lazy_models() -> None:
     )
     for model in models:
         try:
+            log_download_start(logger, model, "torch")
             hf_models.resolve_local_path(model, allow_download=True, backend="torch")
         except Exception as exc:
-            logger.warning(
-                "Could not prefetch lazy model %s; its runtime feature may be unavailable: %s",
-                model,
-                exc,
-            )
+            message = download_failure(logger, model, exc)
+            click.echo(f"{message} Its runtime feature may be unavailable.", err=True)
 
 
 # LITE-FIRSTRUN-SPACY-1: sizes for the one-line download notices (setup and sm add).
@@ -863,6 +869,7 @@ def _ensure_spacy(
 
     try:
         for required_model in dict.fromkeys((model, "en_core_web_sm")):
+            log_download_start(logger, required_model, "spacy")
             downloading = not spacy.util.is_package(required_model)
             if downloading:
                 click.echo(
@@ -878,7 +885,9 @@ def _ensure_spacy(
                 # On failure the installer's own output is the diagnosis.
                 if chatter.getvalue().strip():
                     if replay_on_failure:
-                        click.echo(chatter.getvalue().rstrip(), err=True)
+                        click.echo(
+                            redact_credentials(chatter.getvalue().rstrip()), err=True
+                        )
                     else:
                         logger.debug(
                             "spaCy installer output: %s", chatter.getvalue().strip()
@@ -895,7 +904,9 @@ def _ensure_spacy(
             if downloading:
                 click.echo(f"Downloaded spaCy language model {required_model!r}.")
     except MissingModelError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            download_failure(logger, required_model, exc)
+        ) from exc
 
 
 def _copy_hooks() -> None:

@@ -2,6 +2,15 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## [1.5.18] - 2026-10-03
+
+- CLI failures now save redacted tracebacks and command context to `cli-debug.log`
+  and show a short support instruction. `SMARTMEMORY_DEBUG=1` restores terminal tracebacks.
+- Setup logs model preparation context and gives timeout and mirror recovery guidance.
+  Daemon warm-up and uncaught process/thread failures retain redacted tracebacks in `daemon.log`.
+- `smartmemory doctor` checks network reachability, proxies, model cache, daemon health
+  and storage. `smartmemory report --zip [PATH]` creates one redacted local support file.
+
 ## [1.5.17] - 2026-10-03
 
 - Pins `smartmemory-core==1.5.17`: **Windows saves work again.** Every `sm add` on Windows failed with `OSError: [Errno 9] Bad file descriptor` while flushing the vector index (a regression from 2026-09-26).

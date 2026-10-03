@@ -418,7 +418,31 @@ class ProgressScreen(Screen):
 
             self.app.call_from_thread(self._set_final_status, status_text)
         except BaseException as e:
-            message = str(e) or e.__class__.__name__
+            import logging
+            from smartmemory_app.diagnostics import redact_credentials
+
+            from smartmemory_app.runtime_diagnostics import record_cli_crash
+            import sys
+
+            if isinstance(e, Exception):
+                record_cli_crash(e, sys.argv[1:])
+            logging.getLogger(__name__).warning(
+                "Setup TUI worker failed", exc_info=True
+            )
+            message = redact_credentials(
+                " ".join(str(e).split()) or e.__class__.__name__
+            )
+            try:
+                import click
+                from smartmemory_app.bug_report import debug_log_path
+
+                if not isinstance(e, click.ClickException):
+                    message = redact_credentials(
+                        f"{type(e).__name__}: {message[:500]}\nLog: {debug_log_path()}\n"
+                        "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                    )
+            except Exception:
+                pass
             self.app._setup_error = message
             self.app.call_from_thread(
                 self._set_final_status,

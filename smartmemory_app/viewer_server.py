@@ -294,6 +294,7 @@ def _warm_backend() -> bool:
             log.warning(
                 "Saved memories and startup model prerequisites are unavailable: %s",
                 reason,
+                exc_info=True,
             )
             failures = exc.exceptions if isinstance(exc, ExceptionGroup) else (exc,)
             if any(isinstance(failure, MissingModelError) for failure in failures):
@@ -322,7 +323,9 @@ def _warm_backend() -> bool:
             backend_ok = False
             reason = _safe_warmup_reason(exc)
             failure_reasons.append(reason)
-            log.warning("The warmed search model is unavailable: %s", reason)
+            log.warning(
+                "The warmed search model is unavailable: %s", reason, exc_info=True
+            )
             _startup_line(
                 "Warning: The search model could not start. "
                 "Run sm doctor after startup for help."
@@ -368,6 +371,7 @@ def _start_background_warmup() -> threading.Thread:
             log.warning(
                 "Background startup failed; saved memories remain unavailable: %s",
                 reason,
+                exc_info=True,
             )
             _set_startup_state("degraded", reason)
             return
@@ -417,7 +421,10 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """
     from smartmemory_app.storage import _shutdown, _resolve_data_dir
 
+    from smartmemory_app.runtime_diagnostics import install_daemon_diagnostics
+
     data_path = _resolve_data_dir()
+    install_daemon_diagnostics(data_path, redact_output=True)
     data_path.mkdir(parents=True, exist_ok=True)
     pid_file = data_path / "daemon.pid"
 
@@ -495,7 +502,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             1.0, lambda: webbrowser.open(f"http://localhost:{port}")
         ).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", log_config=None)
 
 
 if __name__ == "__main__":

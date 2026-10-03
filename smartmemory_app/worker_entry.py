@@ -9,6 +9,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir")
     args = parser.parse_args()
+    from smartmemory_app.runtime_diagnostics import install_daemon_diagnostics
+
+    install_daemon_diagnostics(_resolve_data_dir(args.data_dir), redact_output=True)
     apply_runtime_config()
     from smartmemory.pipeline.work_graph.worker import run_worker
 

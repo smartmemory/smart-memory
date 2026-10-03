@@ -644,7 +644,15 @@ def test_unrelated_error_still_raises(machine):
     machine.install_embedding()
     with patch("smartmemory_app.storage.ingest", side_effect=ValueError("boom")):
         result = _add()
-    assert isinstance(result.exception, ValueError)
+    assert result.exit_code == 1
+    assert result.stdout == "", "errors stay off stdout"
+    assert "ValueError: boom" in result.stderr
+    assert "smartmemory report --zip" in result.stderr
+    assert "Traceback" not in _text(result)
+    from smartmemory_app.bug_report import debug_log_path
+
+    crash_log = debug_log_path().read_text()
+    assert "Traceback" in crash_log and "ValueError:" in crash_log
 
 
 @pytest.mark.parametrize(
@@ -709,7 +717,16 @@ def test_suppressed_context_is_not_mislabelled(machine):
 
     with patch("smartmemory_app.storage.ingest", side_effect=ingest):
         result = _add()
-    assert isinstance(result.exception, ValueError)
+    assert result.exit_code == 1
+    assert result.stdout == "", "errors stay off stdout"
+    assert "ValueError: invalid unrelated field" in result.stderr
+    assert "smartmemory report --zip" in result.stderr
+    assert "Traceback" not in _text(result)
+    from smartmemory_app.bug_report import debug_log_path
+
+    crash_log = debug_log_path().read_text()
+    assert "Traceback" in crash_log and "ValueError:" in crash_log
+    assert "MissingModelError" not in _text(result) + crash_log
 
 
 def test_add_embedding_download_shows_no_progress_bars(machine):

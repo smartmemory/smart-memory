@@ -755,3 +755,14 @@ sm worker requeue-dead       # retry dead and skipped boxes
 Flags can be combined. Re-extraction does not require the daemon and does not wait
 for background processing. The default scope is memories marked `ruler_only` or
 `llm_failed`. Grounding and evolution are off by default in local mode.
+
+## Having trouble?
+
+Run `smartmemory doctor`, then `smartmemory report --zip`. Send the zip file at the printed
+path to support@smartmemory.ai (nothing is uploaded automatically). The archive includes
+redacted diagnostics, configuration and recent CLI and daemon logs.
+Use `smartmemory report --zip "PATH"` to choose where to save it.
+
+For slow model downloads, increase `HF_HUB_DOWNLOAD_TIMEOUT` and retry `smartmemory setup`.
+Set `HF_ENDPOINT` if you use a Hugging Face mirror. To show a full terminal traceback,
+set `SMARTMEMORY_DEBUG=1` before running the failing command.
