@@ -4,6 +4,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.5.19] - 2026-10-03
+
+- Pins smartmemory-core 1.5.19 and smartmemory-mcp 1.5.19 (MCP lists its tools without opening the local store).
+
 - Stop confirms that daemon health has disappeared before clearing its PID marker, and launchd shutdown polling leaves time for worker termination within the lifecycle deadline.
 - Windows daemon and legacy-worker liveness checks inspect processes without signalling them.
 - Stop verifies daemon and worker identity through portable process inspection and preserves markers when ownership cannot be established.

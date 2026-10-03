@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smartmemory"
-version = "1.5.18"
+version = "1.5.19"
 requires-python = ">=3.11"
 dependencies = [
-    "smartmemory-core[lite,wikipedia]==1.5.18",  # EXACT pin — wrapper and core versions move in lockstep
+    "smartmemory-core[lite,wikipedia]==1.5.19",  # EXACT pin — wrapper and core versions move in lockstep
     "openai>=1.0.0",                    # SDK transport for Groq and compatible providers
     "filelock>=3.12",                    # cross-process SQLite write locking
-    "smartmemory-mcp==1.5.11",         # EXACT pin, independent of the core release sync chain.
+    "smartmemory-mcp==1.5.19",         # EXACT pin, independent of the core release sync chain.
                                      # release.sh bumps to the latest published MCP before building
                                      # and refreshes uv.lock if tracked. Unreachable PyPI leaves the
                                      # pin unchanged (UNCHECKED), unpublished pins are FATAL.
