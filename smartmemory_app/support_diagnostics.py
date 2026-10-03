@@ -218,34 +218,58 @@ def local_checks() -> list[str]:
     return rows
 
 
-def write_support_bundle(path: Path, doctor_output: str) -> Path:
-    """Atomically write only redacted text, retaining failed checks as evidence."""
+def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
+    """Build shared, privacy-filtered archive and upload content."""
     from smartmemory_app.bug_report import (
         debug_log_path,
         gather_environment,
-        read_log_tail,
     )
-    from smartmemory_app.config import config_path, load_config
+    from smartmemory_app.config import load_config
+    from smartmemory_app.report_privacy import (
+        private_text,
+        read_private_log_tail,
+        safe_log_text,
+    )
 
     def config_text():
-        effective = json.dumps(asdict(load_config()), indent=2)
-        source = config_path()
-        return f"Effective config:\n{effective}\nConfig file:\n" + (
-            source.read_text(encoding="utf-8") if source.exists() else "not found"
-        )
+        # Effective fields only. Never upload arbitrary raw TOML or credentials.
+        config = {
+            key: value
+            for key, value in asdict(load_config()).items()
+            if not any(
+                word in key.lower() for word in ("key", "token", "password", "secret")
+            )
+        }
+        return "Effective config:\n" + json.dumps(config, indent=2)
 
     texts = {
-        "doctor.txt": doctor_output,
-        "environment.txt": _best_effort(lambda: gather_environment().browser_info),
-        "config.txt": _best_effort(config_text),
+        "doctor.txt": private_text(doctor_output),
+        "environment.txt": private_text(
+            _best_effort(lambda: gather_environment().browser_info)
+        ),
+        "config.txt": private_text(_best_effort(config_text)),
     }
+    if message:
+        texts["message.txt"] = private_text(message)
     for name in ("cli-debug.log", "daemon.log"):
-        texts[name] = (
+        texts[name] = safe_log_text(
             _best_effort(
-                lambda name=name: read_log_tail(debug_log_path().parent / name)
+                lambda name=name: read_private_log_tail(debug_log_path().parent / name)
             )
             or "Log unavailable or empty"
         )
+    return texts
+
+
+def write_support_bundle(
+    path: Path,
+    doctor_output: str,
+    *,
+    message: str = "",
+    texts: dict[str, str] | None = None,
+) -> Path:
+    """Atomically write the same privacy-filtered content used by manual sends."""
+    texts = texts if texts is not None else support_texts(doctor_output, message)
     path = path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = None

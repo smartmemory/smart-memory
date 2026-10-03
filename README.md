@@ -245,6 +245,8 @@ smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
 
+In remote mode, `sm ask`, `add`, `search`, `recall`, `get` and `status` use the hosted service without a local daemon. `sm ask` uses the service's LLM credentials, so you only need your SmartMemory API key. Property flags on `add`, property filters on `search`, and `search '*'` are currently local-only. The guided tour, store maintenance, corpus import/export, seed-pack installation and transcript capture commands require local mode. Import dry runs can still validate files in remote mode.
+
 Once a day, any `sm` command may end with one dim line telling you a newer release is on PyPI:
 
 ```
@@ -653,6 +655,10 @@ class MemoryItem:
 
 Config file: `~/.config/smartmemory/config.toml` (XDG on Linux/macOS, `%APPDATA%\smartmemory\config.toml` on Windows).
 
+On Windows, run `sm start` after login or a daemon crash. Setup currently starts the daemon for the current session and does not install a login supervisor. Provider keys saved by setup use the Windows credential store for the daemon. Setup also shows PowerShell environment instructions for other CLI sessions. Piped memory text and lifecycle JSON must use UTF-8.
+
+Diagnostic logs rotate with coordination across processes. The daemon's console output is saved separately in `daemon-output.log`.
+
 API keys are stored in the OS keychain, never in the config file. Set `SMARTMEMORY_API_KEY` as an env var on headless systems where the keychain is unavailable.
 
 ### Non-interactive / CI
@@ -758,8 +764,17 @@ for background processing. The default scope is memories marked `ruler_only` or
 
 ## Having trouble?
 
-Run `smartmemory doctor`, then `smartmemory report --zip`. Send the zip file at the printed
-path to support@smartmemory.ai (nothing is uploaded automatically). The archive includes
+Automatic anonymous crash reports are on by default. They include versions, redacted
+error frames and bounded log tails. Credentials, memory bodies and home-directory names
+are removed. Disable them with `SMARTMEMORY_CRASH_REPORTS=0` or
+`crash_reports = false` in the config file's `[smartmemory]` section.
+
+Run `smartmemory doctor`, then `smartmemory report "What went wrong" --send` to send
+support diagnostics after confirmation. Use `--yes` to skip the prompt. Quote the printed
+report ID to support@smartmemory.ai. If sending fails, the command saves a support zip.
+
+`smartmemory report --zip` creates a local support archive without uploading it.
+Email the file at the printed path to support@smartmemory.ai. The archive includes
 redacted diagnostics, configuration and recent CLI and daemon logs.
 Use `smartmemory report --zip "PATH"` to choose where to save it.
 

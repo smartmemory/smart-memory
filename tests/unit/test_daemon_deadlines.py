@@ -1,8 +1,6 @@
 """Round-three diagnostics and absolute deadline regressions."""
 
 import json
-import subprocess
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -10,7 +8,6 @@ from importlib import import_module
 
 import pytest
 from click.testing import CliRunner
-from tests.unit.test_daemon_lifecycle import _REAL_POPEN, _REAL_RUN
 from tests.unit import test_daemon_lifecycle
 
 from smartmemory_app import daemon
@@ -117,7 +114,9 @@ def test_trickling_health_is_cancelled(launchd, monkeypatch, command, slow_reque
     thread.start()
     monkeypatch.setenv("SMARTMEMORY_DAEMON_PORT", str(server.server_port))
     daemon._pid_file().write_text("424242")
-    monkeypatch.setattr(daemon.os, "kill", lambda *args: None)
+    # The process has exited, but its service port still responds. Shutdown must
+    # verify health disappearance before clearing its identity or restarting.
+    monkeypatch.setattr(daemon, "_pid_alive", lambda pid: False)
     started = time.monotonic()
     try:
         with daemon.lifecycle_budget(0.3):
@@ -138,54 +137,33 @@ def test_trickling_health_is_cancelled(launchd, monkeypatch, command, slow_reque
 
 
 @pytest.mark.parametrize("command", ["stop", "restart"])
-@pytest.mark.parametrize("blocked_inspection", [1, 2])
-def test_core_identity_wait_is_bounded(
-    launchd, monkeypatch, caplog, command, blocked_inspection
+@pytest.mark.parametrize("identity", ["gone", "denied"])
+def test_core_unavailable_identity_blocks_replacement_within_budget(
+    launchd, monkeypatch, caplog, command, identity
 ):
+    from unittest.mock import Mock
     from smartmemory.pipeline.work_graph import spawn
 
     daemon._pid_file().write_text("424242")
     (daemon._data_dir() / ".worker.pid").write_text("434343")
     monkeypatch.setattr(spawn, "worker_is_running", lambda data: True)
-    signals = []
-    original_kill = daemon.os.kill
-
-    def kill(pid, sig):
-        if pid in (424242, 434343):
-            signals.append((pid, sig))
-        else:
-            original_kill(pid, sig)  # Allow subprocess.run to kill/reap the probe.
-
-    monkeypatch.setattr(daemon.os, "kill", kill)
-    monkeypatch.setattr(subprocess, "Popen", _REAL_POPEN)
-    calls = []
-
-    def run(command, **kwargs):
-        if command[0] == "ps":
-            calls.append(kwargs)
-            if len(calls) >= blocked_inspection:
-                return _REAL_RUN(
-                    [sys.executable, "-c", "import time; time.sleep(1)"], **kwargs
-                )
-            return subprocess.CompletedProcess(
-                command, 0, "python -m smartmemory_app.worker_entry", ""
-            )
-        return launchd.run(command, **kwargs)
-
+    inspect = Mock(return_value=None)
+    terminate = Mock()
+    monkeypatch.setattr(spawn, "pid_alive", lambda pid: identity != "gone")
+    monkeypatch.setattr(spawn, "process_cmdline", inspect)
+    monkeypatch.setattr(spawn, "terminate_process", terminate)
     original_stop = spawn.stop_worker
     original_identity = spawn._is_worker_process
-    monkeypatch.setattr(subprocess, "run", run)
     started = time.monotonic()
     with daemon.lifecycle_budget(0.3):
         result = CliRunner().invoke(cli, [command])
     assert time.monotonic() - started < 0.8
     assert result.exit_code != 0
-    assert calls and all(0 < call.get("timeout", 0) <= 0.3 for call in calls)
-    assert "WARNING" in caplog.text and "identity" in caplog.text.lower()
     assert daemon._pid_file().exists()
     assert "bootstrap" not in launchd.events
-    if blocked_inspection == 1:
-        assert all(sig == 0 for _, sig in signals)
+    terminate.assert_not_called()
+    assert inspect.call_count == int(identity == "denied")
+    if identity == "denied":
+        assert "WARNING" in caplog.text and "identity" in caplog.text.lower()
     assert spawn.stop_worker is original_stop
     assert spawn._is_worker_process is original_identity
-    assert subprocess.run is run

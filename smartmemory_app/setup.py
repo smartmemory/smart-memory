@@ -18,6 +18,8 @@ DIST-SETUP-TUI-1: When running interactively with textual installed,
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -122,6 +124,48 @@ _LEGACY_HOOK_REGISTRATIONS = {
 }
 
 
+def _hook_command(filename: str) -> str:
+    """Quote the installed script path for the shell that runs Claude hooks."""
+    path = str(HOOKS_DEST / filename)
+    if sys.platform == "win32":
+        # Drive-letter paths also work outside Git Bash. Double quotes handle
+        # spaces in cmd/PowerShell as well as bash, unlike POSIX single quotes.
+        path = path.replace("\\", "/")
+        path = path.replace("$", "\\$").replace("`", "\\`").replace('"', '\\"')
+        return f'bash "{path}"'
+    return f"bash {path}"
+
+
+def _installed_hook_name(command: str) -> str | None:
+    """Recognize only bash commands targeting our known installed hook files."""
+    if not isinstance(command, str):
+        return None
+    match = re.fullmatch(r"\s*bash\s+(.+?)\s*", command)
+    if not match:
+        return None
+    path = match[1]
+    if path.startswith("'") and path.endswith("'"):
+        try:
+            (path,) = shlex.split(path)
+        except ValueError:
+            return None
+    elif path.startswith('"') and path.endswith('"'):
+        path = path[1:-1].replace("\\$", "$").replace("\\`", "`").replace('\\"', '"')
+    path = path.replace("\\", "/")
+    names = HOOK_NAMES + [
+        "session-start.sh",
+        "session-end.sh",
+        "post-tool-failure.sh",
+        "smartmemory-session-start.sh",
+        "smartmemory-session-end.sh",
+        "smartmemory-post-tool-failure.sh",
+    ]
+    for name in names:
+        if path == str(HOOKS_DEST / name).replace("\\", "/"):
+            return name
+    return None
+
+
 def _get_hook_registrations() -> dict:
     """Build hook registration entries using current Claude Code hooks format.
 
@@ -135,7 +179,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-orient.sh'}",
+                    "command": _hook_command("smartmemory-orient.sh"),
                 }
             ],
         },
@@ -144,7 +188,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-recall.sh'}",
+                    "command": _hook_command("smartmemory-recall.sh"),
                 }
             ],
         },
@@ -153,7 +197,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-observe.sh'}",
+                    "command": _hook_command("smartmemory-observe.sh"),
                 }
             ],
         },
@@ -162,7 +206,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-distill.sh'}",
+                    "command": _hook_command("smartmemory-distill.sh"),
                 }
             ],
         },
@@ -171,7 +215,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-learn.sh'}",
+                    "command": _hook_command("smartmemory-learn.sh"),
                 }
             ],
         },
@@ -180,7 +224,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-persist.sh'}",
+                    "command": _hook_command("smartmemory-persist.sh"),
                 }
             ],
         },
@@ -232,6 +276,13 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     # writes a config. The TUI branch owns its own completion screen, so the
     # first-run line is echoed here for it; the click branch echoes its own.
     first_run = not config_path().exists()
+    if first_run:
+        from smartmemory_app.crash_reporter import enabled
+
+        if enabled():
+            click.echo(
+                "Automatic anonymous crash reports are on. Disable: SMARTMEMORY_CRASH_REPORTS=0"
+            )
     # Branch 1: Flags provided — use click flow directly
     # _setup_click() already handles daemon start for local mode internally
     if mode is not None:
@@ -331,6 +382,9 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
 
 def _can_run_tui() -> bool:
     """Check if we can launch a Textual TUI."""
+    if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
+        logger.debug("Skipping setup TUI on Windows, using text prompts")
+        return False
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return False
     if os.environ.get("TERM") == "dumb":
@@ -360,6 +414,13 @@ def _start_daemon_local(
         _upgrade_worker_agent()
         _retire_legacy_workers()
         launchd_ok = _install_launchd_plist()
+        if sys.platform == "win32":
+            message = (
+                "Warning: Windows login auto-start and automatic crash recovery are unavailable. "
+                "Run sm start after login or a crash."
+            )
+            logger.warning(message)
+            (on_log or click.echo)(message)
         if on_log is None:
             action = (
                 "Waiting for SmartMemory to start..."
@@ -481,7 +542,7 @@ def _read_env_from_profile(name: str) -> str:
     else:
         profile = Path.home() / ".profile"
     try:
-        for line in profile.read_text().splitlines():
+        for line in profile.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith(f"export {name}="):
                 # Extract value — handles export KEY="value" and export KEY=value
@@ -493,11 +554,30 @@ def _read_env_from_profile(name: str) -> str:
 
 
 def _persist_env_var(name: str, value: str) -> None:
-    """Write an export line to the user's shell profile so the key persists.
+    """Persist through Windows credentials or a UTF-8 shell profile.
 
-    If the key already exists in the profile, replaces the line.
-    Also sets os.environ so the current process picks it up immediately.
+    Also sets os.environ so this process and its children pick up the key.
     """
+    os.environ[name] = value
+    if sys.platform == "win32":
+        try:
+            import keyring
+
+            keyring.set_password("smartmemory", name, value)
+            click.echo("  Stored in Windows credential store for the daemon.")
+        except Exception as exc:
+            logger.warning(
+                "Credential persistence failed; key is only available in this setup process: %s",
+                redact_credentials(str(exc)),
+            )
+            click.echo(
+                "  Warning: credential storage failed. The key is only set for this setup session."
+            )
+        click.echo(
+            f'  For PowerShell CLI sessions, set $env:{name} = "<your API key>".\n'
+            f'  To persist it for future logins: [Environment]::SetEnvironmentVariable("{name}", "<your API key>", "User")'
+        )
+        return
     shell = os.environ.get("SHELL", "/bin/zsh")
     if "zsh" in shell:
         profile = Path.home() / ".zshrc"
@@ -509,7 +589,7 @@ def _persist_env_var(name: str, value: str) -> None:
     export_line = f'export {name}="{value}"'
 
     try:
-        existing = profile.read_text() if profile.exists() else ""
+        existing = profile.read_text(encoding="utf-8") if profile.exists() else ""
         lines = existing.splitlines()
 
         # Replace existing line or append
@@ -521,9 +601,9 @@ def _persist_env_var(name: str, value: str) -> None:
                 break
 
         if replaced:
-            profile.write_text("\n".join(lines) + "\n")
+            profile.write_text("\n".join(lines) + "\n", encoding="utf-8")
         else:
-            with open(profile, "a") as f:
+            with open(profile, "a", encoding="utf-8") as f:
                 f.write(f"\n{export_line}\n")
 
         click.echo(f"  Written to {profile}")
@@ -608,14 +688,18 @@ def _setup_local() -> bool:
             )
         if api_key.strip():
             _persist_env_var(key_envvar, api_key.strip())
-            # Also store in OS keychain so daemon can load it without sourcing shell
-            try:
-                import keyring
+            # Windows persistence and shell guidance are handled above.
+            if sys.platform != "win32":
+                try:
+                    import keyring
 
-                keyring.set_password("smartmemory", key_envvar, api_key.strip())
-                click.echo("  Also stored in OS keychain.")
-            except Exception:
-                pass  # keyring optional — shell profile is the primary store
+                    keyring.set_password("smartmemory", key_envvar, api_key.strip())
+                    click.echo("  Also stored in OS keychain.")
+                except Exception as exc:
+                    logger.warning(
+                        "OS credential store unavailable; using shell profile: %s",
+                        redact_credentials(str(exc)),
+                    )
 
     embedding = click.prompt(
         "Embedding provider? (local / openai / ollama)",
@@ -929,64 +1013,72 @@ def _copy_skills() -> None:
 
 def _register_hooks() -> None:
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    cfg = json.loads(SETTINGS.read_text()) if SETTINGS.exists() else {}
+    cfg = json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
     hooks = cfg.setdefault("hooks", {})
     changed = False
 
-    # Remove legacy registrations (old format + old filenames)
-    for event, legacy_entry in _LEGACY_HOOK_REGISTRATIONS.items():
-        existing = hooks.get(event, [])
-        if not isinstance(existing, list):
-            existing = [existing]
-        filtered = [h for h in existing if h != legacy_entry]
-        # Also remove old-format entries pointing to legacy filenames
-        filtered = [
-            h
-            for h in filtered
-            if not (
-                isinstance(h, dict)
-                and "command" in h
-                and "args" in h
-                and any(
-                    "session-start.sh" in str(a)
-                    or "session-end.sh" in str(a)
-                    or "post-tool-failure.sh" in str(a)
-                    for a in h.get("args", [])
-                )
-            )
-        ]
-        # Also remove new-format entries pointing to legacy (non-namespaced) filenames
-        filtered = [
-            h
-            for h in filtered
-            if not (
-                isinstance(h, dict)
-                and "hooks" in h
-                and any(
-                    "hooks/session-start.sh" in hh.get("command", "")
-                    or "hooks/session-end.sh" in hh.get("command", "")
-                    or "hooks/post-tool-failure.sh" in hh.get("command", "")
-                    for hh in h.get("hooks", [])
-                    if isinstance(hh, dict)
-                )
-            )
-        ]
-        if len(filtered) != len(existing):
-            hooks[event] = filtered
+    # Repair our commands in place, including mixed registrations. Foreign
+    # commands, matchers, timeouts and other settings survive unchanged.
+    for event, registrations in list(hooks.items()):
+        existing = registrations if isinstance(registrations, list) else [registrations]
+        repaired = []
+        for registration in existing:
+            entry = registration
+            owned = False
+            shared = False
+            if isinstance(entry, dict):
+                if entry.get("command") == "bash" and len(entry.get("args", [])) == 1:
+                    name = _installed_hook_name("bash " + str(entry["args"][0]))
+                    if name and name not in HOOK_NAMES:
+                        continue
+                if isinstance(entry.get("hooks"), list):
+                    commands = []
+                    for hook in entry["hooks"]:
+                        name = (
+                            _installed_hook_name(hook.get("command", ""))
+                            if isinstance(hook, dict) and hook.get("type") == "command"
+                            else None
+                        )
+                        if name in HOOK_NAMES:
+                            owned = True
+                            hook = {**hook, "command": _hook_command(name)}
+                        elif name:
+                            continue  # our obsolete filenames only
+                        else:
+                            shared = True
+                        commands.append(hook)
+                    if not commands and entry["hooks"]:
+                        continue
+                    entry = {**entry, "hooks": commands}
+            if not owned or shared or entry not in repaired:
+                repaired.append(entry)
+        if repaired != existing:
+            hooks[event] = repaired
             changed = True
 
-    # Add current registrations (namespaced, new format)
+    # Add missing default registrations, without duplicating repaired entries
+    # that carry user-selected timeouts or share a registration with other tools.
     for event, entry in _get_hook_registrations().items():
         existing = hooks.get(event, [])
         if not isinstance(existing, list):
             existing = [existing]
-        if entry not in existing:
+        command = entry["hooks"][0]["command"]
+        present = any(
+            isinstance(h, dict)
+            and h.get("matcher", "") == entry["matcher"]
+            and any(
+                isinstance(hook, dict) and hook.get("command") == command
+                for hook in h.get("hooks", [])
+            )
+            for h in existing
+        )
+        if not present:
             existing.append(entry)
             hooks[event] = existing
             changed = True
 
     if changed:
-        SETTINGS.write_text(json.dumps(cfg, indent=2))
+        SETTINGS.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def _seed_data_dir(data_dir: str | None = None) -> None:
@@ -1207,7 +1299,7 @@ def _deregister_hooks() -> None:
     """Remove all SmartMemory hook entries from settings.json (current + legacy)."""
     if not SETTINGS.exists():
         return
-    cfg = json.loads(SETTINGS.read_text())
+    cfg = json.loads(SETTINGS.read_text(encoding="utf-8"))
     hooks = cfg.get("hooks", {})
     changed = False
 
@@ -1241,7 +1333,7 @@ def _deregister_hooks() -> None:
             changed = True
 
     if changed:
-        SETTINGS.write_text(json.dumps(cfg, indent=2))
+        SETTINGS.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def _remove_hooks() -> None:
@@ -1253,7 +1345,7 @@ def _remove_hooks() -> None:
     for src_name in _HOOK_FILE_MAP:
         path = HOOKS_DEST / src_name
         if path.exists():
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8")
             if "smartmemory_app" in content and content.count("\n") < 15:
                 path.unlink()
 

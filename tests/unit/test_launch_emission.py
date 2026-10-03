@@ -36,6 +36,14 @@ class _FakeResponse:
 
 
 class TestCliEmit:
+    @pytest.fixture(autouse=True)
+    def local_mode(self, tmp_path, monkeypatch):
+        from smartmemory_app.config import SmartMemoryConfig, save_config
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        monkeypatch.delenv("SMARTMEMORY_MODE", raising=False)
+        save_config(SmartMemoryConfig(mode="local"))
+
     def test_emit_posts_event_to_daemon(self, monkeypatch):
         calls = {}
 

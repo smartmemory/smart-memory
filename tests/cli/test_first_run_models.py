@@ -512,18 +512,54 @@ def test_remote_mode_skips_local_model_check(_isolated, monkeypatch):
 
 
 def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
+    import httpx
+
+    import smartmemory_app.storage as storage
+
     monkeypatch.setenv("SMARTMEMORY_MODE", "remote")
+    monkeypatch.setenv("SMARTMEMORY_API_URL", "https://test-first-run.invalid")
+    monkeypatch.setenv("SMARTMEMORY_API_KEY", "test_first_run_key")
+    monkeypatch.setenv("SMARTMEMORY_TEAM_ID", "test_first_run_team")
+    monkeypatch.setattr(storage, "_remote_memory", None)
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        assert request.headers["Authorization"] == "Bearer test_first_run_key"
+        if request.url.path == "/auth/me":
+            return httpx.Response(200, json={})
+        assert str(request.url) == "https://test-first-run.invalid/memory/remote-1"
+        assert request.method == "GET"
+        assert request.headers["X-Workspace-Id"] == "test_first_run_team"
+        return httpx.Response(
+            200, json={"item_id": "remote-1", "content": "Hosted memory"}
+        )
+
+    original_client = httpx.Client
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(
+        httpx._api, "Client", lambda **kw: original_client(transport=transport, **kw)
+    )
     with (
         patch(
             "smartmemory_app.warm.is_warm",
             side_effect=AssertionError("local warm probe"),
         ),
         patch("spacy.util.is_package", side_effect=AssertionError("local model check")),
-        patch("smartmemory_app.storage.get", return_value={"item_id": "remote-1"}),
+        patch(
+            "smartmemory_app.storage.get", side_effect=AssertionError("local fallback")
+        ),
+        patch(
+            "smartmemory_app.cli._daemon_request",
+            side_effect=AssertionError("local daemon"),
+        ),
     ):
         result = _invoke(["get", "remote-1"])
     assert result.exit_code == 0, _text(result)
     assert "loading local models" not in _text(result)
+    assert "remote-1" in result.stdout
+    assert "Hosted memory" in result.stdout
+    assert [request.url.path for request in calls] == ["/auth/me", "/memory/remote-1"]
 
 
 @pytest.mark.parametrize("error", ["missing", "hf"])

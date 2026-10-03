@@ -58,6 +58,12 @@ if [ "${DRY_RUN}" -eq 0 ] && [ "${CHECK_ONLY}" -eq 0 ]; then
   echo ">> twine: ${TWINE_BIN} ($("${TWINE_BIN}" --version 2>&1 | head -1 | cut -d, -f1))"
 fi
 
+# ---- smartmemory-mcp pin freshness ---------------------------------------------------
+# Owner decision 2026-10-03: sync the exact pin to the latest published MCP.
+# Run BEFORE building so the wheel contains the updated dependency. Unreachable
+# PyPI is UNCHECKED, an unpublished pin or failed tracked-lock refresh is fatal.
+python3 scripts/sync_mcp_pin.py
+
 if [ "${CHECK_ONLY}" -eq 0 ]; then
   rm -rf dist build
   echo ">> building py3-none-any wheel (--wheel only, never sdist)"
@@ -92,45 +98,21 @@ if not any(f"=={ver}" in p for p in pins):
     sys.exit(f"FATAL: {base} does not pin smartmemory-core[lite]=={ver} (found: {pins}). "
              "Wrapper and core versions move in lockstep.")
 
-print(f">> guards passed: {base}, no sdist, pins core =={ver}")
+# --check-only can inspect a wheel built before the source pin was bumped.
+# Refuse that stale artifact as well as a build that ignored the new exact pin.
+import tomllib
+mcp_pin = next(d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
+               if d.replace(" ", "").startswith("smartmemory-mcp=="))
+requires = [l.split(":", 1)[1].strip().replace(" ", "")
+            for l in zipfile.ZipFile(w).read(meta).decode().splitlines()
+            if l.lower().startswith("requires-dist:")]
+if mcp_pin.replace(" ", "") not in requires:
+    sys.exit(f"FATAL: {base} does not contain the current exact MCP pin {mcp_pin}. "
+             "Rebuild the wheel before releasing.")
+
+print(f">> guards passed: {base}, no sdist, pins core =={ver}, {mcp_pin}")
 PY
 
-# ---- smartmemory-mcp pin freshness (added 2026-08-26) ---------------------------------
-# The core pin above is guarded fail-closed and has never drifted. The mcp pin had NO
-# guard and rotted 16 releases (1.4.51 while 1.4.67 was published) because smartmemory-mcp
-# is NOT in the core release sync chain — nothing bumps it for you and nothing complained.
-# This cannot be a lockstep check (mcp does not track the wrapper version), so it is a
-# WARNING, not a gate: a deliberate hold-back is legitimate, a silent 16-version drift is
-# not. Fails closed only if the pinned version does not exist on PyPI at all.
-python3 - <<'PY' || exit 1
-import json, re, sys, tomllib, urllib.request
-
-deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
-pin = next((d for d in deps if d.replace(" ", "").startswith("smartmemory-mcp==")), None)
-if pin is None:
-    print(">> smartmemory-mcp: no exact pin found — skipping freshness check.")
-    sys.exit(0)
-pinned = pin.split("==", 1)[1].strip()
-
-try:
-    data = json.load(urllib.request.urlopen("https://pypi.org/pypi/smartmemory-mcp/json", timeout=15))
-except Exception as exc:
-    print(f">> smartmemory-mcp: PyPI unreachable ({exc}) — freshness UNCHECKED.")
-    sys.exit(0)
-
-released = set(data["releases"])
-if pinned not in released:
-    sys.exit(f"FATAL: pinned smartmemory-mcp=={pinned} is not published on PyPI. "
-             "The wheel would be uninstallable.")
-
-key = lambda v: [int(x) for x in re.findall(r"\d+", v)]
-latest = max(released, key=key)
-if key(latest) > key(pinned):
-    print(f">> WARNING: smartmemory-mcp pinned at {pinned}, but {latest} is published. "
-          "Bump the pin in pyproject.toml, or hold it back deliberately.")
-else:
-    print(f">> smartmemory-mcp pin {pinned} is current.")
-PY
 
 if [ "${DRY_RUN}" -eq 1 ] || [ "${CHECK_ONLY}" -eq 1 ]; then
   echo ">> dry-run/check-only — not uploading."

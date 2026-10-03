@@ -1,6 +1,11 @@
 """Pytest configuration for smartmemory tests."""
 
+import os
+
 import pytest
+
+# Never send automatic reports during tests, including import/collection failures.
+os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
 
 
 def pytest_collection_modifyitems(items):

@@ -6,6 +6,7 @@ Tests cover:
   - GET / returns 200 (serves static placeholder index.html)
   - start_background() is called (not a raw thread) inside main()
 """
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,14 +21,16 @@ from fastapi.testclient import TestClient
 class TestImportNoSideEffects:
     def test_app_importable_without_uvicorn(self):
         """Module-level app = _build_app() must not start uvicorn or the events server."""
-        # If this import triggers uvicorn.run() or start_background(), the test hangs.
+        # If this import triggers uvicorn.Server().run() or start_background(), the test hangs.
         # A clean import proves the module is side-effect-free.
         from smartmemory_app.viewer_server import app  # noqa: F401
+
         assert app is not None
 
     def test_app_is_fastapi_instance(self):
         from fastapi import FastAPI
         from smartmemory_app.viewer_server import app
+
         assert isinstance(app, FastAPI)
 
 
@@ -46,6 +49,7 @@ def viewer_client(monkeypatch):
     monkeypatch.setattr(_api_mod, "_get_backend", lambda: backend)
 
     from smartmemory_app.viewer_server import app
+
     client = TestClient(app)
     yield client
     backend.close()
@@ -80,34 +84,43 @@ class TestViewerServerRoutes:
 
 
 class TestMainCallsStartBackground:
-    def test_main_uses_start_background_not_raw_thread(self):
+    def test_main_uses_start_background_not_raw_thread(self, tmp_path, monkeypatch):
         """main() must call start_background() from events_server — never Thread() directly."""
         from smartmemory_app import viewer_server
 
-        # Patch out uvicorn.run so main() returns immediately
+        monkeypatch.setattr(
+            "smartmemory_app.storage._resolve_data_dir", lambda: tmp_path
+        )
+        monkeypatch.setattr(viewer_server, "_start_background_warmup", lambda: None)
+        # Patch out uvicorn.Server().run so main() returns immediately
         with (
             patch("smartmemory_app.viewer_server.uvicorn") as mock_uvicorn,
             patch("smartmemory_app.events_server.start_background") as mock_start_bg,
         ):
-            mock_uvicorn.run = MagicMock()
+            mock_uvicorn.Server().run = MagicMock()
             viewer_server.main(port=19005, open_browser=False)
 
         mock_start_bg.assert_called_once()
         # Confirm start_background was called from events_server, not a threading.Thread
-        assert mock_uvicorn.run.called
+        assert mock_uvicorn.Server().run.called
 
-    def test_main_does_not_open_browser_when_disabled(self):
+    def test_main_does_not_open_browser_when_disabled(self, tmp_path, monkeypatch):
         """--no-browser flag: webbrowser.open must not be called."""
         from smartmemory_app import viewer_server
 
+        monkeypatch.setattr(
+            "smartmemory_app.storage._resolve_data_dir", lambda: tmp_path
+        )
+        monkeypatch.setattr(viewer_server, "_start_background_warmup", lambda: None)
         with (
             patch("smartmemory_app.viewer_server.uvicorn") as mock_uvicorn,
             patch("smartmemory_app.events_server.start_background"),
             patch("smartmemory_app.viewer_server.webbrowser") as mock_browser,
             patch("smartmemory_app.viewer_server.threading") as mock_threading,
         ):
-            mock_uvicorn.run = MagicMock()
+            mock_uvicorn.Server().run = MagicMock()
             viewer_server.main(port=19005, open_browser=False)
 
         # Timer should not be created when open_browser=False
         mock_threading.Timer.assert_not_called()
+        mock_browser.open.assert_not_called()

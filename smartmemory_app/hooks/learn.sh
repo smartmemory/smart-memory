@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Hook JSON and memory context must survive Windows consoles and pipes.
+export PYTHONUTF8=1
 # DIST-AGENT-HOOKS-1: Learn phase — PostToolUseFailure hook (async)
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
 # Capture stdin before backgrounding: non-interactive async jobs inherit /dev/null.

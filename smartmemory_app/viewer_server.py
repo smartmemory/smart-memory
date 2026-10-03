@@ -97,6 +97,14 @@ def _capabilities(mode: str) -> dict[str, bool]:
 def _build_app() -> FastAPI:
     app = FastAPI()
 
+    @app.exception_handler(Exception)
+    async def report_asgi_failure(request, exc):
+        from starlette.responses import PlainTextResponse
+        from smartmemory_app.crash_reporter import report_in_background
+
+        report_in_background(exc, source="asgi")
+        return PlainTextResponse("Internal Server Error", status_code=500)
+
     # Capture versions at startup — used to detect pip upgrades.
     # On every request, compare against installed versions. If different,
     # exit cleanly — launchd KeepAlive restarts with new code.
@@ -288,6 +296,9 @@ def _warm_backend() -> bool:
         try:
             get_memory(on_progress=_startup_line)
         except Exception as exc:
+            from smartmemory_app.crash_reporter import report_in_background
+
+            report_in_background(exc, source="daemon", handled=True)
             backend_ok = False
             reason = _safe_warmup_reason(exc)
             failure_reasons.append(reason)
@@ -320,6 +331,9 @@ def _warm_backend() -> bool:
                 f"Search model ready ({time.perf_counter() - model_started:.1f}s)"
             )
         except Exception as exc:
+            from smartmemory_app.crash_reporter import report_in_background
+
+            report_in_background(exc, source="daemon", handled=True)
             backend_ok = False
             reason = _safe_warmup_reason(exc)
             failure_reasons.append(reason)
@@ -367,6 +381,9 @@ def _start_background_warmup() -> threading.Thread:
                 show_reextract_offer(log.info)
             _sync_hooks()
         except BaseException as exc:
+            from smartmemory_app.crash_reporter import report_in_background
+
+            report_in_background(exc, source="daemon", handled=True)
             reason = _safe_warmup_reason(exc)
             log.warning(
                 "Background startup failed; saved memories remain unavailable: %s",
@@ -466,9 +483,18 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # refer to the same process that serves the observed warming health response.
     pid_file.write_text(str(os.getpid()))
 
+    cleaned = False
+
     def _cleanup():
+        nonlocal cleaned
+        if cleaned:
+            return
         _shutdown()
-        pid_file.unlink(missing_ok=True)
+        if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+            os.getpid()
+        ):
+            pid_file.unlink(missing_ok=True)
+        cleaned = True
 
     # atexit handles cleanup on normal exit AND uvicorn's graceful SIGTERM shutdown.
     # Do NOT install a custom SIGTERM handler — uvicorn needs SIGTERM to trigger
@@ -502,7 +528,36 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             1.0, lambda: webbrowser.open(f"http://localhost:{port}")
         ).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning", log_config=None)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app, host="127.0.0.1", port=port, log_level="warning", log_config=None
+        )
+    )
+    _run_until_stopped(server, data_path, os.getpid(), _cleanup)
+
+
+def _run_until_stopped(server, data_path: Path, pid: int, cleanup) -> None:
+    """Observe PID-specific local IPC and let uvicorn drain before closing stores."""
+    request = data_path / f".daemon.stop-{pid}"
+    finished = threading.Event()
+
+    def observe_stop():
+        while not finished.wait(0.05):
+            if request.exists():
+                server.should_exit = True
+                return
+
+    watcher = threading.Thread(
+        target=observe_stop, name="smartmemory-stop", daemon=True
+    )
+    watcher.start()
+    try:
+        server.run()
+    finally:
+        finished.set()
+        watcher.join(timeout=1)
+        cleanup()
+        request.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

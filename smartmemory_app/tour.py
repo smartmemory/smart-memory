@@ -994,6 +994,16 @@ def run_tour(
     no_viewer: bool = False,
 ) -> TourRunResult | None:
     """Launch the guided tour TUI."""
+    if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
+        import click
+
+        logging.getLogger(__name__).debug("Skipping guided tour TUI on Windows")
+        click.echo(
+            "The guided tour TUI is disabled on Windows while terminal support is tested. "
+            "Try 'sm add', 'sm search' and 'sm recall'. "
+            "Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
+        )
+        return None
     runner = TourSessionRunner(
         keep=keep,
         code=code,

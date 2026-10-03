@@ -8,8 +8,10 @@ Tests cover the critical behaviors identified in the coverage sweep:
 
 All tests mock _request() to avoid network calls.
 """
+
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from smartmemory_app.remote_backend import RemoteMemory
@@ -19,8 +21,16 @@ from smartmemory_app.remote_backend import RemoteMemory
 def remote(monkeypatch):
     """RemoteMemory instance with keyring and bootstrap suppressed."""
     monkeypatch.setenv("SMARTMEMORY_API_KEY", "sk_test")
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"default_team_id": "t1"})
+    )
+
+    def bootstrap_get(url, **kwargs):
+        with httpx.Client(transport=transport) as client:
+            return client.get(url, **kwargs)
+
+    monkeypatch.setattr(httpx, "get", bootstrap_get)
     r = RemoteMemory(api_url="https://api.example.com", team_id="t1")
-    r._bootstrapped = True  # suppress _bootstrap() network call
     return r
 
 
@@ -37,6 +47,7 @@ def test_ingest_raises_on_failure(remote):
     """ingest() must RAISE RemoteBackendError when the API fails — not return a fake
     'Error: ...' id that the CLI would print as if the add succeeded."""
     from smartmemory_app.remote_backend import RemoteBackendError
+
     with patch.object(remote, "_request", return_value={"error": "upstream timeout"}):
         with pytest.raises(RemoteBackendError, match="upstream timeout"):
             remote.ingest("hello world")
@@ -46,7 +57,10 @@ def test_ingest_raises_on_failure(remote):
 
 
 def test_search_returns_list_of_dicts_on_success(remote):
-    items = [{"item_id": "x", "content": "memory"}, {"item_id": "y", "content": "other"}]
+    items = [
+        {"item_id": "x", "content": "memory"},
+        {"item_id": "y", "content": "other"},
+    ]
     with patch.object(remote, "_request", return_value=items):
         result = remote.search("query")
     assert result == items
@@ -56,6 +70,7 @@ def test_search_raises_on_failure(remote):
     """search() must RAISE RemoteBackendError when the API fails — not return an
     error-dict that the CLI renders as 'No results', hiding a 30s timeout."""
     from smartmemory_app.remote_backend import RemoteBackendError
+
     with patch.object(remote, "_request", return_value={"error": "rate limited"}):
         with pytest.raises(RemoteBackendError, match="rate limited"):
             remote.search("query")
@@ -101,7 +116,9 @@ def test_get_neighbors_injects_edges_key_when_absent(remote):
     }
     with patch.object(remote, "_request", return_value=service_response):
         result = remote.get_neighbors("parent-id")
-    assert "edges" in result, "get_neighbors() must inject empty 'edges' key when absent"
+    assert "edges" in result, (
+        "get_neighbors() must inject empty 'edges' key when absent"
+    )
     assert result["edges"] == []
     assert result["neighbors"][0]["item_id"] == "n1"
 
@@ -155,12 +172,24 @@ def test_recall_filters_zero_confidence(remote, monkeypatch):
     """Regression: confidence=0.0 must NOT be coerced to 1.0 and must be filtered."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.3")
     items = [
-        {"item_id": "zero-conf", "content": "zero confidence item", "memory_type": "semantic", "confidence": 0.0},
-        {"item_id": "high-conf", "content": "high confidence item", "memory_type": "semantic", "confidence": 0.9},
+        {
+            "item_id": "zero-conf",
+            "content": "zero confidence item",
+            "memory_type": "semantic",
+            "confidence": 0.0,
+        },
+        {
+            "item_id": "high-conf",
+            "content": "high confidence item",
+            "memory_type": "semantic",
+            "confidence": 0.9,
+        },
     ]
     with patch.object(remote, "search", return_value=items):
         result = remote.recall(cwd="/project", top_k=10)
-    assert "zero confidence item" not in result, "confidence=0.0 must be filtered by recall floor"
+    assert "zero confidence item" not in result, (
+        "confidence=0.0 must be filtered by recall floor"
+    )
     assert "high confidence item" in result
 
 
@@ -168,7 +197,12 @@ def test_recall_tilde_marker_on_low_confidence(remote, monkeypatch):
     """Items with confidence < 0.5 get a ~ prefix in remote recall output."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.1")
     items = [
-        {"item_id": "low-conf", "content": "low confidence memory", "memory_type": "episodic", "confidence": 0.4},
+        {
+            "item_id": "low-conf",
+            "content": "low confidence memory",
+            "memory_type": "episodic",
+            "confidence": 0.4,
+        },
     ]
     with patch.object(remote, "search", return_value=items):
         result = remote.recall(cwd="/project", top_k=10)
@@ -180,7 +214,13 @@ def test_recall_stale_marker(remote, monkeypatch):
     """Stale items get ⚠ prefix in remote recall output."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.1")
     items = [
-        {"item_id": "stale-1", "content": "stale remote memory", "memory_type": "semantic", "confidence": 0.8, "stale": True},
+        {
+            "item_id": "stale-1",
+            "content": "stale remote memory",
+            "memory_type": "semantic",
+            "confidence": 0.8,
+            "stale": True,
+        },
     ]
     with patch.object(remote, "search", return_value=items):
         result = remote.recall(cwd="/project", top_k=10)
@@ -192,7 +232,13 @@ def test_recall_no_stale_marker_when_fresh(remote, monkeypatch):
     """Non-stale items have no ⚠ prefix in remote recall output."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.1")
     items = [
-        {"item_id": "fresh-1", "content": "fresh remote memory", "memory_type": "semantic", "confidence": 0.8, "stale": False},
+        {
+            "item_id": "fresh-1",
+            "content": "fresh remote memory",
+            "memory_type": "semantic",
+            "confidence": 0.8,
+            "stale": False,
+        },
     ]
     with patch.object(remote, "search", return_value=items):
         result = remote.recall(cwd="/project", top_k=10)

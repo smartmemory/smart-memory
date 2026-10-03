@@ -481,13 +481,14 @@ def derive_workspace_id(cwd: str | None) -> str | None:
             ["git", "-C", canonical, "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=1,
             check=True,
         )
         toplevel = result.stdout.strip()
         if toplevel:
             canonical = os.path.realpath(toplevel)
-    except (subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
+    except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         log.warning(
             "workspace lost git-root resolution; using cwd %s: %s", canonical, exc
         )

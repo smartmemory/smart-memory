@@ -73,6 +73,7 @@ class SmartMemoryConfig:
     )
     daemon_port: int = 9014
     data_dir: str = "~/.smartmemory"
+    crash_reports: bool = True
 
 
 def config_path() -> Path:
@@ -112,6 +113,7 @@ def load_config() -> SmartMemoryConfig:
                     stacklevel=2,
                 )
                 file_mode = None
+            cfg.crash_reports = sm.get("crash_reports", True)
             cfg.mode = file_mode
             cfg.api_url = remote.get("api_url", cfg.api_url)
             cfg.api_key_set = remote.get("api_key_set", False)
@@ -157,6 +159,9 @@ def load_config() -> SmartMemoryConfig:
     if dp := os.environ.get("SMARTMEMORY_DAEMON_PORT"):
         cfg.daemon_port = int(dp)
 
+    if os.environ.get("SMARTMEMORY_CRASH_REPORTS") == "0":
+        cfg.crash_reports = False
+
     # Translate a local OpenAI-compatible provider into the env vars the core
     # extraction path already consumes. Done after file+env resolution so config
     # and env are fully merged first.
@@ -195,6 +200,7 @@ def save_config(cfg: SmartMemoryConfig) -> None:
     path = config_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     data: dict = {
+        "smartmemory": {"crash_reports": cfg.crash_reports},
         "local": {
             "coreference": cfg.coreference,
             "llm_provider": cfg.llm_provider,
@@ -211,10 +217,10 @@ def save_config(cfg: SmartMemoryConfig) -> None:
             "team_id": cfg.team_id,
         },
     }
-    # mode must be present at top level when set; omit the [smartmemory] table entirely
-    # when unconfigured so load_config() correctly returns mode=None
     if cfg.mode is not None:
-        data = {"smartmemory": {"mode": cfg.mode}, **data}
+        data["smartmemory"]["mode"] = cfg.mode
+    elif cfg.crash_reports:
+        del data["smartmemory"]
     path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 

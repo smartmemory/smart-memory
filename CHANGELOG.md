@@ -2,6 +2,38 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## [Unreleased]
+
+- Stop confirms that daemon health has disappeared before clearing its PID marker, and launchd shutdown polling leaves time for worker termination within the lifecycle deadline.
+- Windows daemon and legacy-worker liveness checks inspect processes without signalling them.
+- Stop verifies daemon and worker identity through portable process inspection and preserves markers when ownership cannot be established.
+- Daemon shutdown requests let the HTTP server drain and close storage before bounded termination, with a warning if forced shutdown cannot confirm the final flush.
+- Restart and stop retire orphan core workers even when the daemon is absent.
+- Session state updates replace existing files safely and serialize concurrent saves on Windows.
+- Codex MCP configuration escapes Windows executable paths and validates TOML before writing.
+- Clear reports retained storage files as a failure and skips reseeding and success events after a partial reset.
+- Piped memories and lifecycle JSON decode as UTF-8 independently of the Windows locale, with explicit invalid-input errors.
+- Claude settings and shell profiles use UTF-8 during setup and removal.
+- Workspace identity decodes Git repository roots as UTF-8, preserving Unicode paths.
+- Background daemon, core worker and capture launches use native Windows detachment flags and redirect stdin.
+- Diagnostic logs coordinate rotation across processes and release file handles between records. Daemon console output uses a separate file.
+- Windows setup explains that login startup and automatic crash recovery require manual `sm start`.
+- Windows API-key setup uses the credential store and provides PowerShell environment instructions, with a warning when persistence fails.
+- Doctor provides native Windows virtual-environment repair commands without shell activation.
+
+- Windows lifecycle hooks use quoted forward-slash paths and repair older registrations when setup is rerun. CLI and hook streams use UTF-8 so Unicode memory text and doctor status marks print safely.
+- Releases automatically update the exact MCP dependency pin to the latest published version before building, keeping installs reproducible and the MCP server current.
+
+- Remote `sm ask`, add, search, recall, get and status use the hosted service directly. Ask uses hosted LLM credentials, reports API and quota failures clearly, and also works through the remote viewer proxy. Local store maintenance commands explain their local-only scope.
+- Windows setup uses text prompts and the guided tour and graph explorer TUIs are skipped until fully tested. Set `SMARTMEMORY_FORCE_TUI=1` to test the TUIs.
+- Automatic anonymous crash reports cover CLI failures, daemon process and thread
+  failures, HTTP 500 errors and degraded warmup. Reports remove credentials, memory
+  bodies and home-directory names, with persistent deduplication and daily limits.
+  Disable with `SMARTMEMORY_CRASH_REPORTS=0` or config `crash_reports = false`.
+- `smartmemory report [MESSAGE] --send` previews the support upload and asks for
+  confirmation (`--yes` skips the prompt). Failed sends save a local support zip.
+  CLI crashes show the report ID, and first-run setup discloses automatic reporting.
+
 ## [1.5.18] - 2026-10-03
 
 - CLI failures now save redacted tracebacks and command context to `cli-debug.log`

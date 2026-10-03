@@ -331,7 +331,7 @@ def test_bundle_survives_unreadable_log(monkeypatch, tmp_path):
     monkeypatch.setattr(
         bug_report,
         "read_log_tail",
-        lambda path: (_ for _ in ()).throw(PermissionError("blocked")),
+        lambda path, **kwargs: (_ for _ in ()).throw(PermissionError("blocked")),
     )
     monkeypatch.setattr(
         "smartmemory_app.config.config_path", lambda: tmp_path / "absent.toml"

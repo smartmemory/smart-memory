@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from filelock import FileLock
+from smartmemory.utils.process import detached_process_options
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def spawn_worker() -> None:
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **detached_process_options(),
             close_fds=True,
         )
 

@@ -17,6 +17,7 @@ Critical invariants:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -37,6 +38,10 @@ class RemoteBackendError(RuntimeError):
     Background callers (e.g. `recall()`) catch it and degrade; explicit CLI
     commands (`sm add` / `sm search`) let it surface.
     """
+
+    def __init__(self, message: str, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class RemoteMemory:
@@ -109,9 +114,82 @@ class RemoteMemory:
                 "error": f"SmartMemory API unreachable at {self._api_url}. Check SMARTMEMORY_API_URL."
             }
         except httpx.HTTPStatusError as e:
-            return {"error": f"API error {e.response.status_code}: {e.response.text}"}
+            try:
+                body = e.response.json()
+            except ValueError:
+                body = {"detail": e.response.text}
+            return {
+                "error": f"API error {e.response.status_code}: {e.response.text}",
+                "status_code": e.response.status_code,
+                "body": body,
+            }
+        except httpx.TimeoutException:
+            return {"error": "SmartMemory service did not respond in time (timeout)."}
+        except httpx.HTTPError as e:
+            return {
+                "error": f"SmartMemory service network/proxy request failed ({type(e).__name__})."
+            }
         except Exception as e:
             return {"error": f"Request failed: {e}"}
+
+    def request(self, method: str, path: str, **kwargs):
+        """Explicit hosted operation: raise on errors, preserving quota details."""
+        if not self._access_token:
+            raise RemoteBackendError(
+                "No SmartMemory API key configured. Run: smartmemory setup --mode remote --api-key KEY",
+                401,
+            )
+        result = self._request(method, path, **kwargs)
+        if isinstance(result, dict) and result.get("error"):
+            status = result.get("status_code", 502)
+            body = result.get("body", {})
+            detail = body.get("detail", body) if isinstance(body, dict) else body
+            detail = detail if isinstance(detail, str) else json.dumps(detail)
+            if status == 401:
+                message = "SmartMemory API key is invalid or expired. Run: smartmemory setup --mode remote --api-key KEY"
+            elif status in (403, 429):
+                message = (
+                    f"SmartMemory service refused the request (HTTP {status}): {detail}"
+                )
+                if isinstance(body, dict):
+                    for field in ("limit", "current", "resets_at", "subscription_tier"):
+                        if field in body:
+                            message += f" ({field}: {body[field]})"
+            elif (
+                status in (502, 503)
+                and path == "/memory/ask"
+                and "status_code" in result
+            ):
+                message = (
+                    "SmartMemory hosted LLM is unavailable. No answer was generated."
+                )
+            else:
+                message = (
+                    f"SmartMemory service error (HTTP {status}): {detail}"
+                    if "status_code" in result
+                    else result["error"]
+                )
+            raise RemoteBackendError(message, status)
+        return result
+
+    def ask(self, question: str, limit: int = 5, *, reasoning: bool = True) -> dict:
+        """Hosted DIST-LITE-9 contract, using the platform's LLM credentials."""
+        result = self.request(
+            "POST",
+            "/memory/ask",
+            timeout=120,
+            json={"question": question, "limit": limit, "reasoning": reasoning},
+        )
+
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("answer"), str)
+            or not result["answer"].strip()
+        ):
+            raise RemoteBackendError(
+                "SmartMemory service returned an invalid ask response."
+            )
+        return result
 
     # ── Auth ────────────────────────────────────────────────────────────────
 
@@ -208,6 +286,7 @@ class RemoteMemory:
         workspace_id: str | None = None,
         strict: bool | None = None,
         exclude_ids: list[str] | None = None,
+        raise_on_error: bool = False,
     ) -> str:
         """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall (remote).
 
@@ -231,6 +310,7 @@ class RemoteMemory:
             time_ms,
         )
 
+        request = self.request if raise_on_error else self._request
         t0 = time_ms()
         workspace_id = workspace_id or derive_workspace_id(cwd)
         if strict is None:
@@ -246,7 +326,7 @@ class RemoteMemory:
         frame = ""
         if include_snapshot:
             try:
-                snaps = self._request(
+                snaps = request(
                     "POST",
                     "/memory/search",
                     workspace_id=workspace_id,
@@ -276,6 +356,8 @@ class RemoteMemory:
                             "## SmartMemory Context\n"
                         )
             except Exception as exc:
+                if raise_on_error:
+                    raise
                 record_hook_degradation("Orient lost remote snapshot context", exc)
 
         # 2. Candidates — recall runs on every prompt hook, so a remote search
@@ -296,10 +378,12 @@ class RemoteMemory:
                 )
                 results = list(recent) + list(semantic)
         except RemoteBackendError as e:
+            if raise_on_error:
+                raise
             record_hook_error("Remote recall lost search context", e)
             results = []
         try:
-            response = self._request(
+            response = request(
                 "GET",
                 "/memory/decisions",
                 workspace_id=workspace_id,
@@ -319,6 +403,8 @@ class RemoteMemory:
                 )
             results = matching_lessons(lessons, query) + list(results)
         except Exception as exc:
+            if raise_on_error:
+                raise
             record_hook_degradation("Recall lost remote decision lookup", exc)
         results = [
             _item_to_recall_dict(r)

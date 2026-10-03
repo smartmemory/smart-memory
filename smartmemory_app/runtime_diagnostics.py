@@ -9,9 +9,34 @@ import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from filelock import FileLock
+
 from smartmemory_app.diagnostics import redact_credentials
 
 CLI_COMMAND_ARGS: ContextVar[list[str]] = ContextVar("cli_command_args", default=[])
+
+
+class SharedRotatingFileHandler(RotatingFileHandler):
+    """Serialize rollover and release the file between records for Windows sharing."""
+
+    def __init__(self, filename, **kwargs):
+        super().__init__(filename, delay=True, **kwargs)
+        self.file_lock = FileLock(str(filename) + ".lock", timeout=2)
+
+    def emit(self, record):
+        # filelock's own DEBUG messages must not recursively acquire this lock.
+        if record.name == "filelock" or (record.name or "").startswith("filelock."):
+            return
+        try:
+            with self.file_lock:
+                try:
+                    super().emit(record)
+                finally:
+                    if self.stream is not None:
+                        self.stream.close()
+                        self.stream = None
+        except Exception:
+            self.handleError(record)
 
 
 class RedactingFormatter(logging.Formatter):
@@ -110,7 +135,7 @@ def install_daemon_diagnostics(data_dir: Path, *, redact_output: bool = False) -
                 root.removeHandler(handler)
                 handler.close()
         data_dir.mkdir(parents=True, exist_ok=True)
-        handler = RotatingFileHandler(
+        handler = SharedRotatingFileHandler(
             path, maxBytes=5_000_000, backupCount=2, encoding="utf-8"
         )
         handler._smartmemory_daemon_file = True
@@ -126,7 +151,7 @@ def install_daemon_diagnostics(data_dir: Path, *, redact_output: bool = False) -
                     RedactingFormatter("%(levelname)s %(name)s: %(message)s")
                 )
 
-        def capture(exc_type, exc, tb):
+        def capture(exc_type, exc, tb, source="daemon"):
             if issubclass(exc_type, (SystemExit, KeyboardInterrupt)):
                 return
             try:
@@ -135,10 +160,21 @@ def install_daemon_diagnostics(data_dir: Path, *, redact_output: bool = False) -
                 )
             except Exception:
                 pass
+            from smartmemory_app.crash_reporter import (
+                report_exception,
+                report_in_background,
+            )
+
+            if source == "daemon":
+                # The process is exiting. Wait within the send budget so a daemon
+                # reporter thread is not killed before it can deliver the event.
+                report_exception(exc, source=source, data_dir=data_dir)
+            else:
+                report_in_background(exc, source=source, data_dir=data_dir)
 
         sys.excepthook = capture
         threading.excepthook = lambda args: capture(
-            args.exc_type, args.exc_value, args.exc_traceback
+            args.exc_type, args.exc_value, args.exc_traceback, "daemon_thread"
         )
     except Exception:
         pass

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Hook JSON and memory context must survive Windows consoles and pipes.
+export PYTHONUTF8=1
 # DIST-AGENT-HOOKS-1: Distill phase — Stop hook (async)
 # Pairs last_assistant_message with stored prompt
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"

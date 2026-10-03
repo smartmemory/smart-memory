@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Hook JSON and memory context must survive Windows consoles and pipes.
+export PYTHONUTF8=1
 # DIST-AGENT-HOOKS-1: Recall phase — UserPromptSubmit hook
 # Always captures prompt for distill pairing; optionally injects context (blocking)
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"

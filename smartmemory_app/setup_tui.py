@@ -8,6 +8,7 @@ Entry point: run_setup_tui() -> SetupResult | None
 """
 
 import os
+import sys
 import time
 
 from textual import work
@@ -541,7 +542,18 @@ class SetupApp(App):
 def run_setup_tui() -> SetupResult | None:
     """Launch the Textual TUI. Returns SetupResult on success, None on cancel."""
     app = SetupApp()
-    result = app.run()
+    try:
+        result = app.run()
+    finally:
+        # Restore terminal reporting before click prompts, including on crashes.
+        try:
+            if sys.stdout.isatty():
+                sys.stdout.write(
+                    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l"
+                )
+                sys.stdout.flush()
+        except Exception:
+            pass
     if app._setup_error is not None:
         import click
 

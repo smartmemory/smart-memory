@@ -8,7 +8,6 @@ import asyncio
 import logging
 import os
 import re
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -17,8 +16,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from pathlib import Path
-from types import FunctionType, SimpleNamespace
 from typing import Callable, Optional
+
+from smartmemory.utils.process import (
+    detached_process_options,
+    pid_alive,
+    process_cmdline,
+    terminate_process,
+)
 
 from smartmemory_app.diagnostics import redact_credentials
 
@@ -345,6 +350,13 @@ def _startup_failure_message(
         details.append(f"Last {len(tail)} lines of {log_path}:\n  " + "\n  ".join(tail))
     else:
         details.append(f"No daemon log was written at {log_path}")
+    output_path = log_path.with_name("daemon-output.log")
+    output_tail = _tail_log_lines(output_path)
+    if output_tail:
+        details.append(
+            f"Last {len(output_tail)} lines of {output_path}:\n  "
+            + "\n  ".join(output_tail)
+        )
     return redact_credentials("\n".join(details))
 
 
@@ -367,7 +379,7 @@ def start_daemon(
     ``allow_warming_on_timeout=True``; that return defers worker startup.
 
     Warmup takes ~22s cold (first run), ~2s warm (model cached). When `on_log` is
-    given, the daemon's own startup progress lines (written to daemon.log) are
+    given, startup lines from daemon.log and daemon-output.log are
     streamed to it during the wait, so `sm start` shows progress instead of a
     silent hang. Idempotent — returns immediately if already running.
     """
@@ -387,11 +399,14 @@ def start_daemon(
     log_path.touch(exist_ok=True)
     # Stream only NEW startup lines — skip whatever was already in daemon.log.
     _log_pos = log_path.stat().st_size if log_path.exists() else 0
+    output_path = data / "daemon-output.log"
+    _output_pos = output_path.stat().st_size if output_path.exists() else 0
 
     def _pump() -> None:
-        nonlocal _log_pos
+        nonlocal _log_pos, _output_pos
         if on_log is not None:
             _log_pos = _stream_new_log_lines(log_path, _log_pos, on_log)
+            _output_pos = _stream_new_log_lines(output_path, _output_pos, on_log)
 
     def _returnable(status: dict | None) -> bool:
         return status is not None and (
@@ -476,17 +491,19 @@ def start_daemon(
     # (avoids recursion since CLI `viewer` calls start_daemon + open browser).
     # Inherit PYTHONPATH so editable installs work in dev.
     env = os.environ.copy()
-    proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            f"from smartmemory_app.viewer_server import main; main(port={port}, open_browser=False)",
-        ],
-        stdout=open(log_path, "a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-        env=env,
-    )
+    with (data / "daemon-output.log").open("a", encoding="utf-8") as output:
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                f"from smartmemory_app.viewer_server import main; main(port={port}, open_browser=False)",
+            ],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            **detached_process_options(),
+            env=env,
+        )
 
     # Phase 1: Wait for port to open (fast socket check, no httpx timeout)
     import socket
@@ -567,12 +584,8 @@ def start_daemon(
 
 
 def _pid_alive(pid: int) -> bool:
-    """Only ESRCH proves exit; permission/inspection failures remain errors."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    """Inspect existence without sending a signal on any platform."""
+    return pid_alive(pid)
 
 
 def _wait_legacy_exit(pid: int) -> None:
@@ -655,28 +668,19 @@ def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
             if pid <= 0:
                 raise RuntimeError(f"Invalid legacy PID in {pid_file}: {pid}")
             if _pid_alive(pid):
-                try:
-                    result = _run_command(
-                        ["ps", "-o", "command=", "-p", str(pid)],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                except OSError as exc:
+                arguments = process_cmdline(pid)
+                if not arguments:
                     raise RuntimeError(
-                        f"Cannot inspect live legacy PID {pid}: {exc}"
-                    ) from exc
-                if result.returncode != 0 or not result.stdout.strip():
-                    raise RuntimeError(
-                        f"Cannot inspect live legacy PID {pid}: "
-                        f"ps exit {result.returncode}, {result.stderr.strip() or 'empty output'}"
+                        f"Cannot inspect live legacy PID {pid}: command line unavailable"
                     )
-                if "smartmemory_app.enrichment_worker" in result.stdout:
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        log.warning(
-                            "Legacy worker %s exited before retirement signal", pid
+                if any("smartmemory_app.enrichment_worker" in arg for arg in arguments):
+                    log.warning(
+                        "Legacy worker %s has no cooperative stop protocol; terminating, final flush unverified",
+                        pid,
+                    )
+                    if not terminate_process(pid, timeout=_remaining(5)):
+                        raise RuntimeError(
+                            f"Legacy enrichment worker {pid} exit unverified"
                         )
                     _wait_legacy_exit(pid)
                     retired = True
@@ -763,59 +767,21 @@ def _start_workers(num_workers: int = 1) -> None:
             ],
             stdout=output,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            **detached_process_options(),
             env=os.environ.copy(),
         )
 
 
 @bounded_lifecycle(STOP_TIMEOUT)
 def _stop_core_worker() -> None:
-    """Bind pinned core's stop logic to bounded I/O without global monkeypatches.
-
-    Core 1.5.15 has no subprocess/deadline injection parameter. A private globals
-    dictionary keeps its identity, lock, successor and signal policy intact,
-    while binding all three functions in its identity call graph to our runner.
-    Other callers and concurrent threads keep the original core functions.
-    """
+    """Stop through core's portable cooperative protocol, then verify lock release."""
     from smartmemory.pipeline.work_graph import spawn
 
-    # Core starts its grace clock AFTER the initial identity inspection. Budget
-    # that inspection, the last polling inspection and SIGKILL revalidation as
-    # well: 0.1B + 0.4B + 0.1B + 0.1B leaves at least 0.3B for verification and
-    # daemon retirement. The default 30s window gives core its full 10s grace;
-    # shorter caller budgets retain these reserves for escalation/verification.
-    # All subprocess caps also respect the absolute deadline.
     budget = _remaining(STOP_TIMEOUT)
-    inspection_cap = min(1, budget / 10)
     grace = min(10, budget * 0.4)
-
-    def inspect_worker(command, **kwargs):
-        try:
-            return _run_command(command, limit=inspection_cap, **kwargs)
-        except TimeoutError as exc:
-            log.warning(
-                "Core worker identity inspection timed out; shutdown unverified: %s",
-                exc,
-            )
-            # Core catches OSError (including TimeoutError) as an absent identity.
-            # Keep expiry fatal so restart cannot proceed with an unknown worker.
-            raise RuntimeError(
-                "Core worker identity inspection timed out; shutdown unverified"
-            ) from None
-
-    scope = vars(spawn).copy()
-    scope["subprocess"] = SimpleNamespace(run=inspect_worker)
-    # Keep core's grace-bound polling sleep. Raising here at the lifecycle
-    # deadline bypasses core's identity revalidation and SIGKILL branch.
-    for name in ("_is_worker_process", "worker_pid", "stop_worker"):
-        original = getattr(spawn, name)
-        scope[name] = FunctionType(
-            original.__code__, scope, name, original.__defaults__, original.__closure__
-        )
     data = _data_dir()
-    scope["stop_worker"](data, timeout=grace)
-    # Core returns immediately after SIGKILL. Observe lock release before
-    # allowing a replacement; a successor/unknown live worker also blocks it.
+    spawn.stop_worker(data, timeout=grace)
     verify_until = time.monotonic() + budget * 0.2
     while spawn.worker_is_running(data):
         remaining = verify_until - time.monotonic()
@@ -843,10 +809,9 @@ def _stop_workers() -> None:
 def stop_daemon() -> None:
     """Stop the daemon and all workers. Idempotent — no-op if not running.
 
-    If launchd manages the daemon (KeepAlive=true), bootout the job FIRST —
-    otherwise the os.kill below is respawned instantly and `sm stop` is a no-op
-    (and a following mode switch never takes effect). Falls through to the
-    subprocess kill path when launchd isn't managing it.
+    If launchd manages the daemon (KeepAlive=true), bootout the job first so it
+    cannot respawn the process. Unmanaged daemons receive a cooperative stop
+    request followed by portable termination and exit verification if needed.
     """
     _stop_workers()
 
@@ -872,45 +837,79 @@ def stop_daemon() -> None:
                 ) and not is_running(require_healthy=False):
                     _pid_file().unlink(missing_ok=True)
                     return
-                _pause(0.25)
+                _pause(0.05)
 
-    # Prefer health-check-based stop — confirms we're killing SmartMemory, not a reused PID
+    # A service health reply identifies the daemon even during backend warmup.
+    pid = None
     if is_running(require_healthy=False):
         try:
-            r = _health_response(2)
-            pid = r.json().get("pid")
-            if pid:
-                os.kill(pid, signal.SIGTERM)
-                for _ in range(20):
-                    if not is_running(require_healthy=False):
-                        _pid_file().unlink(missing_ok=True)
-                        return
-                    _pause(0.25)
-                # Still running after 5s — force kill
-                os.kill(pid, signal.SIGKILL)
-                _pid_file().unlink(missing_ok=True)
-                return
+            response = _health_response(2)
+            pid = response.json().get("pid")
         except TimeoutError:
             raise
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "Daemon health identity unavailable; inspecting PID marker: %s", exc
+            )
             _remaining(2)
 
-    # Fallback: PID file (only if health unreachable but file exists)
     pf = _pid_file()
-    if pf.exists():
+    if not pid and pf.exists():
         try:
-            pid = int(pf.read_text().strip())
-            # Verify it's actually a smartmemory process before killing
-            result = _run_command(
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True,
-                text=True,
+            pid = int(pf.read_text(encoding="utf-8").strip())
+        except ValueError:
+            log.warning("Invalid daemon PID marker discarded without signalling")
+            pf.unlink(missing_ok=True)
+            return
+        if not _pid_alive(pid):
+            pf.unlink(missing_ok=True)
+            return
+        arguments = process_cmdline(pid)
+        if not arguments:
+            raise RuntimeError(
+                f"Cannot inspect daemon PID {pid}; stop withheld, marker retained"
             )
-            if "smartmemory" in result.stdout:
-                os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, ValueError):
-            pass
+        if not any("smartmemory_app.viewer_server" in arg for arg in arguments):
+            log.warning(
+                "Daemon PID %s was reused; stale marker discarded without signalling",
+                pid,
+            )
+            pf.unlink(missing_ok=True)
+            return
+    if not pid:
+        return
+    if not isinstance(pid, int) or pid <= 0:
+        raise RuntimeError("Invalid daemon health PID; stop withheld")
+
+    request = _data_dir() / f".daemon.stop-{pid}"
+    try:
+        request.write_text("stop", encoding="utf-8")
+        grace_until = time.monotonic() + _remaining(5)
+        while _pid_alive(pid) and time.monotonic() < grace_until:
+            _pause(0.05)
+        if _pid_alive(pid):
+            # Revalidate before escalation, including old daemons with no IPC listener.
+            arguments = process_cmdline(pid)
+            if not arguments or not any(
+                "smartmemory_app.viewer_server" in arg for arg in arguments
+            ):
+                raise RuntimeError(
+                    f"Daemon PID {pid} identity unavailable; escalation withheld"
+                )
+            log.warning(
+                "Daemon %s did not stop cooperatively; terminating, final flush unverified",
+                pid,
+            )
+            if not terminate_process(pid, timeout=_remaining(2)):
+                raise RuntimeError(f"Daemon {pid} exit unverified; marker retained")
+        # Process exit alone does not prove the service has stopped. Keep the
+        # marker while health still responds, sharing the same absolute deadline
+        # and cancelling even a continuously trickling response body.
+        while is_running(require_healthy=False):
+            _pause(0.05)
         pf.unlink(missing_ok=True)
+    finally:
+        request.unlink(missing_ok=True)
 
 
 def get_status() -> dict | None:

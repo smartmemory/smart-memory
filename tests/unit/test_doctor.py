@@ -205,12 +205,23 @@ def test_doctor_fails_just_below_floor(runner):
     assert "1.4.38 is too old" in result.output
 
 
-def test_doctor_fails_when_core_missing(runner):
+@pytest.mark.parametrize(
+    "platform,interpreter",
+    [("linux", ".venv/bin/python"), ("win32", ".\\.venv\\Scripts\\python.exe")],
+)
+def test_doctor_fails_when_core_missing(runner, monkeypatch, platform, interpreter):
+    monkeypatch.setattr(cli_mod.sys, "platform", platform)
     with patch("importlib.metadata.version", _fake_pkg_version(None)):
         result = runner.invoke(cli, ["doctor"])
     assert result.exit_code == 1
     assert "smartmemory-core is not installed" in result.output
-    assert "pip install smartmemory" in result.output
+    assert "Reinstall in a clean venv:\n" in result.output
+    assert (
+        "    python -m venv .venv\n"
+        f"    {interpreter} -m pip install --upgrade smartmemory\n"
+    ) in result.output
+    assert "source " not in result.output
+    assert "All checks passed." not in result.output
 
 
 def test_doctor_fails_on_old_python(runner, monkeypatch):

@@ -491,24 +491,12 @@ def clear_all() -> dict:
         _shutdown()
 
         data_path = _resolve_data_dir()
-        removed = 0
-        if data_path.exists():
-            for pattern in [
-                "*.db",
-                "*.db-shm",
-                "*.db-wal",
-                "*.db-journal",
-                "*.usearch",
-                "*.json",
-                "*.jsonl",
-                ".write.lock",
-            ]:
-                for f in data_path.glob(pattern):
-                    try:
-                        f.unlink()
-                        removed += 1
-                    except OSError:
-                        pass
+        from smartmemory_app.store_reset import remove_store_files
+
+        try:
+            removed = remove_store_files(data_path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         # Re-seed patterns
         from smartmemory_app.setup import _seed_data_dir
@@ -880,6 +868,7 @@ def search_endpoint(body: SearchRequest) -> dict:
 class AskRequest(BaseModel):
     question: str
     limit: int = 5
+    reasoning: bool = True
 
 
 _STRUCTURAL_EDGE_TYPES = frozenset(
@@ -1040,6 +1029,19 @@ def _split_answer(text: str) -> tuple[str, str]:
 @api.post("/ask")
 def ask_endpoint(body: AskRequest) -> dict:
     """Answer a question from semantic memories plus their one-hop graph relations."""
+    from smartmemory_app.config import load_config
+    from smartmemory_app.remote_backend import RemoteBackendError
+    from smartmemory_app.storage import _get_remote_memory
+
+    cfg = load_config()
+    if cfg.mode == "remote":
+        try:
+            return _get_remote_memory(cfg).ask(
+                body.question, body.limit, reasoning=body.reasoning
+            )
+        except RemoteBackendError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     if not llm_key_present():
         raise HTTPException(
             status_code=503,

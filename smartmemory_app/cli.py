@@ -1,8 +1,7 @@
 """SmartMemory CLI — daemon management + memory operations.
 
-DIST-DAEMON-1: All memory commands (add, ingest, search, recall) try the
-daemon HTTP API first (<200ms). Falls back to direct storage calls if daemon
-is not running (~22s cold start).
+Local memory commands try the daemon HTTP API first, then direct storage.
+Remote memory commands use the configured hosted service without a local daemon.
 """
 
 import json
@@ -12,17 +11,18 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import click
 
+from smartmemory_app.console import configure_console_encoding, read_utf8_stdin
 from smartmemory_app.daemon import (
     RESTART_TIMEOUT,
     START_TIMEOUT,
     STOP_TIMEOUT,
     bounded_lifecycle,
 )
+from smartmemory_app.remote_cli import require_local
 from smartmemory_app.diagnostics import redact_credentials
 from smartmemory_app.runtime_diagnostics import ConsoleFormatter, RedactingFormatter
 
@@ -86,6 +86,7 @@ def _configure_cli_logging() -> None:
 def _install_cli_debug_handler(root_logger: logging.Logger) -> None:
     """Install one rotating DEBUG handler at the configured local data path."""
     from smartmemory_app.bug_report import debug_log_path
+    from smartmemory_app.runtime_diagnostics import SharedRotatingFileHandler
 
     try:
         path = debug_log_path()
@@ -102,7 +103,7 @@ def _install_cli_debug_handler(root_logger: logging.Logger) -> None:
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
+        file_handler = SharedRotatingFileHandler(
             path,
             maxBytes=5_000_000,
             backupCount=2,
@@ -311,6 +312,19 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             )
 
 
+def _memory_request(method: str, path: str, **kwargs):
+    """Route explicit memory operations by configured mode before touching a daemon."""
+    from smartmemory_app.config import load_config
+    from smartmemory_app.remote_cli import request_memory
+
+    cfg = load_config()
+    if cfg.mode == "remote":
+        return request_memory(cfg, method, path, **kwargs)
+    if path == "/memory/ask":
+        kwargs["json"] = {k: v for k, v in kwargs["json"].items() if k != "reasoning"}
+    return _daemon_request(method, path, **kwargs)
+
+
 def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
     """POST one lifecycle phase to the warm daemon. Returns parsed JSON, or None.
 
@@ -340,6 +354,7 @@ class _CLIGroup(click.Group):
     """Capture command failures while preserving Click control flow."""
 
     def main(self, args=None, prog_name=None, **kwargs):
+        configure_console_encoding()
         from smartmemory_app.runtime_diagnostics import CLI_COMMAND_ARGS
 
         command_args = list(sys.argv[1:] if args is None else args)
@@ -353,7 +368,12 @@ class _CLIGroup(click.Group):
             from smartmemory_app.runtime_diagnostics import record_cli_crash
 
             record_cli_crash(exc, command_args)
+            from smartmemory_app.crash_reporter import crash_notice
+
+            notice = crash_notice(exc, command_args)
             if os.environ.get("SMARTMEMORY_DEBUG") == "1":
+                if notice:
+                    click.echo(notice, err=True)
                 raise
             try:
                 path = str(debug_log_path())
@@ -363,7 +383,8 @@ class _CLIGroup(click.Group):
             error = click.ClickException(
                 redact_credentials(
                     f"{type(exc).__name__}: {summary}\nLog: {path}\n"
-                    "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                    + (notice + "\n" if notice else "")
+                    + "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
                 )
             )
             if not kwargs.get("standalone_mode", True):
@@ -404,6 +425,9 @@ class _CLIGroup(click.Group):
             )
 
             record_cli_crash(exc, CLI_COMMAND_ARGS.get() or sys.argv[1:])
+            from smartmemory_app.crash_reporter import crash_notice
+
+            notice = crash_notice(exc, CLI_COMMAND_ARGS.get() or sys.argv[1:])
             try:
                 from smartmemory_app.bug_report import debug_log_path
 
@@ -411,7 +435,8 @@ class _CLIGroup(click.Group):
                 click.echo(
                     redact_credentials(
                         f"{type(exc).__name__}: {summary}\nLog: {debug_log_path()}\n"
-                        "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                        + (notice + "\n" if notice else "")
+                        + "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
                     ),
                     err=True,
                 )
@@ -426,6 +451,7 @@ class _CLIGroup(click.Group):
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
+    configure_console_encoding()
     try:
         _configure_cli_logging()
     except Exception:
@@ -453,6 +479,7 @@ def rebuild_cmd(lexical, backend, data_dir) -> None:
 
     VECTOR indexes and application data are preserved. The default target is lite.
     """
+    require_local("sm rebuild")
     from smartmemory.cli import main as core_cli
 
     args = (["--data-dir", data_dir] if data_dir else []) + [
@@ -534,6 +561,8 @@ def provenance_group() -> None:
 @click.option("--dry-run", is_flag=True, help="Parse and count, but do not persist.")
 def provenance_import_codex(codex_dir, since, dry_run) -> None:
     """Import Codex apply_patch authorship into the graph as code_provenance evidence."""
+    if not dry_run:
+        require_local("sm provenance import-codex")
     from pathlib import Path
 
     from smartmemory.provenance.extract import codex_session_edits, iter_codex_sessions
@@ -688,13 +717,13 @@ def stop_cmd() -> None:
     from smartmemory_app.daemon import stop_daemon, is_running, should_be_running
 
     try:
-        if not is_running(require_healthy=False) and not should_be_running():
-            click.echo("Daemon is not running.")
-            return
+        active = is_running(require_healthy=False) or should_be_running()
         stop_daemon()
     except Exception as exc:
         raise _daemon_failure("stop", exc) from None
-    click.echo("Daemon stopped.")
+    click.echo(
+        "Daemon stopped." if active else "Daemon is not running. Workers stopped."
+    )
 
 
 @cli.command("restart")
@@ -707,15 +736,14 @@ def stop_cmd() -> None:
 @bounded_lifecycle(RESTART_TIMEOUT)
 def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and its core worker."""
-    from smartmemory_app.daemon import get_status, stop_daemon, should_be_running
+    from smartmemory_app.daemon import stop_daemon
 
     try:
-        if get_status() is not None or should_be_running():
-            click.echo("Stopping SmartMemory...")
-            from smartmemory_app.progress import startup_progress
+        click.echo("Stopping SmartMemory...")
+        from smartmemory_app.progress import startup_progress
 
-            with startup_progress("Stopping SmartMemory", emit=click.echo):
-                stop_daemon()
+        with startup_progress("Stopping SmartMemory", emit=click.echo):
+            stop_daemon()
     except Exception as exc:
         raise _daemon_failure("stop", exc) from None
     click.echo("Starting SmartMemory...")
@@ -806,6 +834,7 @@ def warm_cmd(no_reranker: bool) -> None:
     Run this once after install — or before a demo — to move that cost off the
     user's first real call (DIST-LITE-WARMSTART-1).
     """
+    require_local("sm warm")
     import time
 
     from smartmemory_app.warm import warm_models
@@ -826,7 +855,13 @@ def status_cmd() -> None:
     from smartmemory_app.config import load_config
     from smartmemory_app.work_graph import blocked_work_warning, get_work_status
 
-    if load_config().mode != "remote":
+    cfg = load_config()
+    if cfg.mode == "remote":
+        from smartmemory_app.remote_cli import show_status
+
+        show_status(cfg)
+        return
+    if cfg.mode != "remote":
         try:
             work = get_work_status()
             click.echo(
@@ -915,6 +950,7 @@ def viewer_cmd(port: int | None) -> None:
 )
 def tour_cmd(keep: bool, code: bool, port: int | None, no_viewer: bool) -> None:
     """Run the guided SmartMemory onboarding tour."""
+    require_local("sm tour")
     from smartmemory_app import tour
 
     tour.run_tour(keep=keep, code=code, port=port, no_viewer=no_viewer)
@@ -1193,7 +1229,10 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
             raise click.ClickException(
                 'No input. Pipe text or use: smartmemory add "text"'
             )
-        raw = sys.stdin.read()
+        try:
+            raw = read_utf8_stdin()
+        except UnicodeDecodeError as exc:
+            raise click.ClickException("Piped memory input must be UTF-8.") from exc
         if not raw.strip():
             raise click.ClickException("Content cannot be empty.")
         chunks = (
@@ -1216,7 +1255,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
             }
             if props:
                 body["properties"] = props
-            result = _daemon_request("POST", "/memory/ingest", json=body)
+            result = _memory_request("POST", "/memory/ingest", json=body)
             if result:
                 ids.append(result.get("item_id", "?"))
                 warning = warning or result.get("warning")
@@ -1253,7 +1292,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
     }
     if props:
         body["properties"] = props
-    result = _daemon_request("POST", "/memory/ingest", json=body)
+    result = _memory_request("POST", "/memory/ingest", json=body)
     if result:
         click.echo(result.get("item_id", "?"))
         if result.get("warning"):
@@ -1306,7 +1345,7 @@ def recall_cmd(
         "include_snapshot": "false" if no_snapshot else "true",
         "strict": "true" if strict else "false",
     }
-    result = _daemon_request("GET", "/memory/recall", params=params)
+    result = _memory_request("GET", "/memory/recall", params=params)
     if result:
         context = result.get("context", "")
     else:
@@ -1360,6 +1399,7 @@ def retag_cmd(
     seed:* is tier 4, so retagged items disappear from recall but stay in
     storage for audit / re-classification later.
     """
+    require_local("sm retag")
     from smartmemory_app.storage import get_memory
 
     mem = get_memory()
@@ -1471,7 +1511,7 @@ def search_cmd(
         body["filters"] = props
     if include_reference:
         body["include_reference"] = True
-    results = _daemon_request("POST", "/memory/search", json=body)
+    results = _memory_request("POST", "/memory/search", json=body)
     if results is None:
         from smartmemory_app.storage import search
         from smartmemory_app.remote_backend import RemoteBackendError
@@ -1525,42 +1565,10 @@ def search_cmd(
 
 
 def _why_remote_request(cfg, method: str, path: str, **kwargs) -> dict:
-    """Send an authenticated read request to the hosted SmartMemory service."""
-    import httpx
+    """Use the same authenticated hosted client as other remote commands."""
+    from smartmemory_app.remote_cli import request_memory
 
-    from smartmemory_app.config import get_api_key
-
-    headers = {
-        "Authorization": f"Bearer {get_api_key()}",
-        "Content-Type": "application/json",
-        "X-Workspace-Id": cfg.team_id,
-    }
-    api_url = cfg.api_url.rstrip("/")
-    try:
-        with httpx.Client(trust_env=False) as client:
-            response = client.request(
-                method,
-                f"{api_url}{path}",
-                headers=headers,
-                timeout=30,
-                **kwargs,
-            )
-        response.raise_for_status()
-        return response.json()
-    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
-        raise click.ClickException(
-            f"Could not reach the SmartMemory service at {api_url}."
-        )
-    except httpx.ReadTimeout:
-        raise click.ClickException("SmartMemory service did not respond in time.")
-    except httpx.HTTPStatusError as exc:
-        try:
-            detail = exc.response.json().get("detail", exc.response.text)
-        except Exception:
-            detail = exc.response.text
-        raise click.ClickException(str(detail))
-    except httpx.HTTPError as exc:
-        raise click.ClickException(f"SmartMemory service request failed: {exc}")
+    return request_memory(cfg, method, path, **kwargs)
 
 
 def _why_title(item: dict) -> str:
@@ -1707,19 +1715,23 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
     help="Also print the reasoning, the memories used as evidence, and the graph relations.",
 )
 def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
-    """Answer QUESTION from matching memories and their graph relations (lite mode).
+    """Answer QUESTION from matching memories and their graph relations.
 
     Prints only the direct answer by default; pass --reasoning to see why.
     """
-    result = _daemon_request(
-        "POST", "/memory/ask", json={"question": question, "limit": limit}
+    result = _memory_request(
+        "POST",
+        "/memory/ask",
+        json={"question": question, "limit": limit, "reasoning": reasoning},
     )
     if result is None:
         raise click.ClickException(_DAEMON_NOT_RUNNING_MSG)
-    if not isinstance(result, dict) or not isinstance(result.get("answer"), str):
-        raise click.ClickException(
-            "SmartMemory daemon returned an invalid ask response."
-        )
+    if (
+        not isinstance(result, dict)
+        or not isinstance(result.get("answer"), str)
+        or not result["answer"].strip()
+    ):
+        raise click.ClickException("SmartMemory returned an invalid ask response.")
 
     click.echo(result["answer"])
     if not reasoning:
@@ -1766,6 +1778,13 @@ def explore_cmd(target: str | None) -> None:
     TARGET is a memory id or a search term; without it the browser opens on the
     search box. Requires the daemon — this is a live view, not a snapshot.
     """
+    if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
+        logging.getLogger(__name__).debug("Skipping graph explorer TUI on Windows")
+        click.echo(
+            "The graph explorer TUI is disabled on Windows while terminal support is tested. "
+            "Try 'sm search' and 'sm get'. Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
+        )
+        return
     try:
         from smartmemory_app.tui.app import ExploreApp
         from smartmemory_app.tui.client import ExploreClient, ExploreUnavailable
@@ -1799,7 +1818,7 @@ def explore_cmd(target: str | None) -> None:
 def get_cmd(item_id: str) -> None:
     """Fetch a single memory by item ID."""
     try:
-        result = _daemon_request("GET", f"/memory/{item_id}")
+        result = _memory_request("GET", f"/memory/{item_id}")
     except click.ClickException:
         raise  # surface daemon HTTP errors cleanly
     except Exception:
@@ -1825,6 +1844,7 @@ def get_cmd(item_id: str) -> None:
 @cli.group("lifecycle")
 def lifecycle_group() -> None:
     """Automatic memory lifecycle commands (called by hooks)."""
+    configure_console_encoding()
 
 
 def _read_lifecycle_payload(phase: str) -> dict | None:
@@ -1833,7 +1853,11 @@ def _read_lifecycle_payload(phase: str) -> dict | None:
 
     if sys.stdin.isatty():
         return {}
-    raw = sys.stdin.read()
+    try:
+        raw = read_utf8_stdin()
+    except UnicodeDecodeError:
+        log.warning("Lifecycle %s skipped: stdin is not UTF-8; hook event lost", phase)
+        return None
     if not raw.strip():
         log.warning("Lifecycle %s skipped: empty stdin; hook event lost", phase)
         return None
@@ -1987,6 +2011,7 @@ def lifecycle_learn() -> None:
 @lifecycle_group.command("persist")
 def lifecycle_persist() -> None:
     """Persist phase: durably enqueue this session transcript."""
+    require_local("sm lifecycle persist")
     body = _read_lifecycle_payload("persist")
     if body is None:
         return
@@ -2008,6 +2033,7 @@ def lifecycle_persist() -> None:
 )
 def lifecycle_drain(timeout: float) -> None:
     """Await all SessionEnd captures; exit 0 done, 1 error, 2 timeout."""
+    require_local("sm lifecycle drain")
     from smartmemory_app.capture_queue import drain
 
     result, code = drain(timeout)
@@ -2324,6 +2350,16 @@ def _download_diagnostics_bundle(url: str, output_path: Path) -> None:
     click.echo(f"Members: {', '.join(member_names)}")
 
 
+def _venv_repair_commands() -> str:
+    """Render repair commands that work without shell activation."""
+    if sys.platform == "win32":
+        return (
+            "    python -m venv .venv\n"
+            "    .\\.venv\\Scripts\\python.exe -m pip install --upgrade smartmemory"
+        )
+    return "    python -m venv .venv\n    .venv/bin/python -m pip install --upgrade smartmemory"
+
+
 @cli.command("doctor")
 @click.option(
     "--bundle", is_flag=True, help="Download the superadmin diagnostics bundle."
@@ -2368,8 +2404,7 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     if core is None:
         click.echo(
             "✗ smartmemory-core is not installed. Reinstall in a clean venv:\n"
-            "    python -m venv .venv && source .venv/bin/activate\n"
-            "    pip install smartmemory",
+            + _venv_repair_commands(),
             err=True,
         )
     else:
@@ -2382,8 +2417,7 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
                 "  401s at first use. This usually happens when installing into a polluted\n"
                 "  environment (e.g. the Anaconda base env).\n"
                 "  Fix: reinstall in a clean, isolated environment:\n"
-                "    python -m venv .venv && source .venv/bin/activate\n"
-                "    pip install --upgrade smartmemory",
+                + _venv_repair_commands(),
                 err=True,
             )
         else:
@@ -2448,10 +2482,18 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Support zip path.",
 )
+@click.option(
+    "--send", is_flag=True, help="Send anonymous diagnostics to SmartMemory support."
+)
+@click.option(
+    "--yes", is_flag=True, help="Confirm the support upload without a prompt."
+)
 def report_cmd(
     report_args: tuple[str, ...],
     severity: str,
     test_title: str | None,
+    send: bool = False,
+    yes: bool = False,
     zip_bundle: bool = False,
     bundle_path: Path | None = None,
 ) -> None:
@@ -2461,6 +2503,58 @@ def report_cmd(
     multi-word message so Click receives it as one argument. Use --zip [PATH]
     to write a portable support archive instead.
     """
+    if send:
+        import contextlib
+        import io
+        from smartmemory_app.crash_reporter import send_support_report
+        from smartmemory_app.support_diagnostics import (
+            default_bundle_path,
+            support_texts,
+            write_support_bundle,
+        )
+
+        if zip_bundle:
+            raise click.UsageError("Choose --send or --zip.")
+        if len(report_args) > 1:
+            raise click.UsageError("Expected one quoted MESSAGE for --send.")
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                doctor_cmd.callback(False, None, None)
+        except (Exception, SystemExit) as exc:
+            output.write(
+                redact_credentials(
+                    f"\nDoctor finished with {type(exc).__name__}: {exc}\n"
+                )
+            )
+        texts = support_texts(output.getvalue(), report_args[0] if report_args else "")
+        click.echo(
+            "Includes doctor checks, versions, OS, configuration and your message."
+        )
+        click.echo("Includes redacted CLI and daemon log tails (up to 30 KB each).")
+        click.echo("Credentials, memory bodies and home-directory names are removed.")
+        if not yes and not click.confirm(
+            "Send this to SmartMemory support?", default=False
+        ):
+            click.echo("Cancelled. Nothing sent.")
+            return
+        result = send_support_report(texts)
+        if result.status == "sent":
+            click.echo(
+                f"Sent. Report ID: {result.report_id}. Quote this ID to support@smartmemory.ai."
+            )
+        else:
+            try:
+                path = write_support_bundle(
+                    bundle_path or default_bundle_path(), output.getvalue(), texts=texts
+                )
+            except Exception as exc:
+                raise click.ClickException(
+                    redact_credentials(f"Could not write support bundle: {exc}")
+                ) from exc
+            click.echo(f"Could not send. Support zip: {path}")
+            click.echo("Email this file to support@smartmemory.ai.")
+        return
     if zip_bundle:
         import contextlib
         import io
@@ -2666,6 +2760,8 @@ def import_cmd(
     PATH is an OKF bundle directory by default; pass ``--legacy-jsonl`` to read
     a legacy single-file JSONL corpus.
     """
+    if not dry_run:
+        require_local("sm import")
     from smartmemory.corpus.importer import CorpusImporter
 
     if legacy_jsonl:
@@ -2774,6 +2870,7 @@ def export_cmd(
     write a legacy single-file JSONL corpus. ``--source`` and ``--domain``
     apply only to legacy JSONL output.
     """
+    require_local("sm export")
     from smartmemory.corpus.exporter import CorpusExporter
     from smartmemory_app.storage import get_memory
 
@@ -2938,6 +3035,7 @@ def install_pack_cmd(
     skip_entities: bool,
 ) -> None:
     """Install a seed pack into SmartMemory."""
+    require_local("sm admin install-pack")
     from pathlib import Path
     from smartmemory.corpus.pack import InstalledPacks, SeedPack
     from smartmemory_app.storage import get_memory, _resolve_data_dir
@@ -2992,9 +3090,12 @@ def install_pack_cmd(
 
 
 @cli.command("clear")
-@click.confirmation_option(prompt="This will delete all local memories. Are you sure?")
-def clear_cmd() -> None:
+@click.option("--yes", is_flag=True, help="Confirm deletion of all local memories.")
+def clear_cmd(yes: bool = False) -> None:
     """Delete all local memories and reset the vector index."""
+    require_local("sm clear")
+    if not yes:
+        click.confirm("This will delete all local memories. Are you sure?", abort=True)
     result = _daemon_request("POST", "/memory/clear")
     if result is not None:
         click.echo(f"Cleared {result.get('cleared', '?')} files via daemon.")
@@ -3011,23 +3112,12 @@ def clear_cmd() -> None:
         click.echo("No data directory found. Nothing to clear.")
         return
 
-    removed = 0
-    for pattern in [
-        "*.db",
-        "*.db-shm",
-        "*.db-wal",
-        "*.db-journal",
-        "*.usearch",
-        "*.json",
-        "*.jsonl",
-        ".write.lock",
-    ]:
-        for f in data_path.glob(pattern):
-            try:
-                f.unlink()
-                removed += 1
-            except OSError as e:
-                click.echo(f"Warning: could not remove {f.name}: {e}")
+    from smartmemory_app.store_reset import remove_store_files
+
+    try:
+        removed = remove_store_files(data_path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     click.echo(f"Cleared {removed} files from {data_path}")
 

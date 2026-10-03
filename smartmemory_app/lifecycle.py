@@ -19,6 +19,8 @@ from inspect import signature
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock, Timeout
+
 from smartmemory_app import recall_format
 from smartmemory_app.lifecycle_config import LifecycleConfig, RecallStrategy
 from smartmemory_app.recall_format import (
@@ -601,9 +603,13 @@ class MemoryLifecycle:
         try:
             path = self._state_path()
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data))
-            tmp.rename(path)
-        except OSError as e:
+            with FileLock(str(path.with_suffix(".lock")), timeout=2):
+                try:
+                    tmp.write_text(json.dumps(data), encoding="utf-8")
+                    tmp.replace(path)
+                finally:
+                    tmp.unlink(missing_ok=True)
+        except (OSError, Timeout) as e:
             record_hook_degradation(
                 "Failed to save session state; current session updates lost", e
             )
