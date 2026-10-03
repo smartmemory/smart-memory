@@ -203,10 +203,14 @@ def test_arc_driver_types_session_commands_before_running_them(tmp_path: Path) -
     # Typing starts before the call returns: the first session keystroke precedes
     # the "Added 1/N" step event for the first fact.
     typed_first = next(
-        i for i, e in enumerate(events) if e.kind == "session" and e.body.endswith("$ s")
+        i
+        for i, e in enumerate(events)
+        if e.kind == "session" and e.body.endswith("$ s")
     )
     added_first = next(
-        i for i, e in enumerate(events) if e.kind == "step" and e.body.startswith("Added 1/")
+        i
+        for i, e in enumerate(events)
+        if e.kind == "step" and e.body.startswith("Added 1/")
     )
     assert typed_first < added_first
 
@@ -577,7 +581,9 @@ def test_arc_driver_ask_step_shows_the_answer(tmp_path: Path) -> None:
 
     driver.run_default_arc(include_claude_import=False, emit=events.append)
 
-    assert tour.TOUR_VERSION >= 2  # bumped when the ask step landed; later steps bump it further
+    assert (
+        tour.TOUR_VERSION >= 2
+    )  # bumped when the ask step landed; later steps bump it further
     steps = {e.title: e.step for e in events}
     assert steps["Ask a question"] == 6
     assert steps["Try it on your project"] == 7
@@ -614,3 +620,50 @@ def test_arc_driver_ask_failure_is_logged_not_swallowed(
     assert result.success is True
     assert answer == "(ask unavailable: no LLM key configured)"
     assert "no LLM key configured" in caplog.text
+
+
+def test_tour_daemon_waits_out_warming_health(tmp_path: Path) -> None:
+    """/health answers 200 while warming; the store check must wait for warmup to end.
+
+    Regression: on a cold Windows machine the 5 s graph read timed out (httpx.ReadTimeout) because the
+    tour treated a warming 200 as ready.
+    """
+    responses = [
+        FakeResponse(200, {"status": "warming"}),
+        FakeResponse(200, {"status": "warming"}),
+        FakeResponse(200, {"status": "ok"}),
+        FakeResponse(200, {"nodes": [], "edges": [], "node_count": 0}),
+    ]
+    http_calls: list[str] = []
+    with (
+        patch("smartmemory_app.tour._is_port_available", return_value=True),
+        patch("smartmemory_app.tour.subprocess.Popen", return_value=FakeProcess()),
+        patch(
+            "smartmemory_app.tour.httpx.Client", httpx_client_for(responses, http_calls)
+        ),
+        patch("smartmemory_app.tour.time.sleep"),
+    ):
+        daemon = tour.TourDaemon(port=19192, data_dir=tmp_path / "tour-store").start()
+        daemon.stop()
+
+    assert [c.rsplit("/", 1)[-1] for c in http_calls] == [
+        "health",
+        "health",
+        "health",
+        "full",
+    ]
+
+
+def test_tour_daemon_reports_degraded_warmup(tmp_path: Path) -> None:
+    responses = [
+        FakeResponse(
+            200, {"status": "degraded", "degraded_reason": "spaCy model missing"}
+        )
+    ]
+    with (
+        patch("smartmemory_app.tour._is_port_available", return_value=True),
+        patch("smartmemory_app.tour.subprocess.Popen", return_value=FakeProcess()),
+        patch("smartmemory_app.tour.httpx.Client", httpx_client_for(responses, [])),
+        pytest.raises(RuntimeError, match="spaCy model missing"),
+    ):
+        tour.TourDaemon(port=19193, data_dir=tmp_path / "tour-store").start()

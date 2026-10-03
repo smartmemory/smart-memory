@@ -36,7 +36,8 @@ def _append(root: Path, record: dict) -> dict:
         handle.flush()
         os.fsync(handle.fileno())
     temporary.rename(events / f"{name}.json")
-    for directory in (events, root, root.parent):
+    # Windows cannot open or fsync a directory; the rename is already durable there.
+    for directory in () if os.name == "nt" else (events, root, root.parent):
         fd = os.open(directory, os.O_RDONLY)
         try:
             os.fsync(fd)

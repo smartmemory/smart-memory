@@ -294,6 +294,8 @@ def save_plan(path, plan):
         handle.flush()
         os.fsync(handle.fileno())
     temporary.replace(path)
+    if os.name == "nt":
+        return  # Windows cannot open or fsync a directory; replace is already durable there.
     fd = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(fd)

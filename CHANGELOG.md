@@ -2,6 +2,13 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## [1.5.17] - 2026-10-03
+
+- Pins `smartmemory-core==1.5.17`: **Windows saves work again.** Every `sm add` on Windows failed with `OSError: [Errno 9] Bad file descriptor` while flushing the vector index (a regression from 2026-09-26).
+- `sm tour` no longer crashes with `httpx.ReadTimeout` on a slow first start. It waits for the local server to finish warming up instead of treating the first health reply as ready, and reports a failed warmup in plain words.
+- Hook capture and lesson saves no longer try to fsync a directory on Windows, which Windows does not allow.
+- Model downloads during setup wait up to 300 s per read (`HF_HUB_DOWNLOAD_TIMEOUT`, was ~10 s) unless you set your own value.
+
 ## [1.5.16] - 2026-10-01
 
 - Pins `smartmemory-core==1.5.16` (first- and second-person pronouns resolve to real participants before extraction, so "I now prefer light mode" supersedes "I prefer dark mode" while stored text stays verbatim; the supersession judge no longer retires current-state notes or silently rewrites its verdicts; Lite wildcard and typed listing return stored memories again; extracted FalkorDB entities get canonical ownership; an opt-in FalkorDB duplicate-vector guard, off by default).

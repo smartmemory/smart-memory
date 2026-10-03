@@ -643,8 +643,22 @@ class TourDaemon:
                     )
                 try:
                     response = client.get(f"{self.base_url}/health")
-                    if response.status_code == 200:
+                    # /health answers 200 while still "warming"; memory routes block until
+                    # warmup ends, so only a finished warmup counts as ready.
+                    status = (
+                        response.json().get("status")
+                        if response.status_code == 200
+                        else None
+                    )
+                    if status == "degraded":
+                        raise RuntimeError(
+                            "tour daemon failed to start: "
+                            f"{response.json().get('degraded_reason') or 'warmup did not complete'}"
+                        )
+                    if response.status_code == 200 and status != "warming":
                         return
+                except RuntimeError:
+                    raise
                 except Exception as exc:
                     last_error = exc
                 time.sleep(0.25)
@@ -652,7 +666,7 @@ class TourDaemon:
         raise TimeoutError(f"tour daemon did not become healthy{detail}")
 
     def _assert_reached_empty_store(self) -> None:
-        with httpx.Client(trust_env=False, timeout=5.0) as client:
+        with httpx.Client(trust_env=False, timeout=60.0) as client:
             response = client.get(f"{self.base_url}/memory/graph/full")
             response.raise_for_status()
             payload = response.json()
