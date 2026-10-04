@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 
 from filelock import FileLock
-from smartmemory.utils.process import detached_process_options
+from smartmemory.utils.process import spawn_detached
 
 log = logging.getLogger(__name__)
 
@@ -96,12 +96,11 @@ def enqueue(
 def spawn_worker() -> None:
     root = capture_dir()
     with (root.parent / "hooks.log").open("a") as handle:
-        subprocess.Popen(
+        spawn_detached(
             [sys.executable, "-m", "smartmemory_app.capture_worker"],
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            **detached_process_options(),
             close_fds=True,
         )
 

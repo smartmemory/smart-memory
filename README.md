@@ -238,7 +238,7 @@ smartmemory worker --loop              # Run enrichment worker continuously
 ```bash
 smartmemory setup                      # Interactive first-run questionnaire
 smartmemory setup --mode local         # Skip questionnaire, set local mode
-smartmemory setup --mode remote --api-key sk_...  # Non-interactive remote setup
+smartmemory setup --mode remote --api-url https://your-service.example  # SMARTMEMORY_API_KEY in env
 smartmemory setup --for cursor         # Configure for Cursor instead of Claude Code
 smartmemory server                     # Start MCP server (called by MCP clients)
 smartmemory uninstall                  # Remove hooks, skills, plist, and data
@@ -657,9 +657,28 @@ Config file: `~/.config/smartmemory/config.toml` (XDG on Linux/macOS, `%APPDATA%
 
 On Windows, run `sm start` after login or a daemon crash. Setup currently starts the daemon for the current session and does not install a login supervisor. Provider keys saved by setup use the Windows credential store for the daemon. Setup also shows PowerShell environment instructions for other CLI sessions. Piped memory text and lifecycle JSON must use UTF-8.
 
-Diagnostic logs rotate with coordination across processes. The daemon's console output is saved separately in `daemon-output.log`.
+Diagnostic logs rotate with coordination across processes. The daemon's console output is saved separately in `daemon-output.log`. At daemon start, an output log larger than 5 MiB is moved to `daemon-output.log.1` before the child opens it. One previous output log is retained. Override this startup cap with `SMARTMEMORY_DAEMON_OUTPUT_MAX_BYTES` (1 to 104857600 bytes). Output during one continuous run can exceed the cap until the next start.
 
-API keys are stored in the OS keychain, never in the config file. Set `SMARTMEMORY_API_KEY` as an env var on headless systems where the keychain is unavailable.
+API keys are stored in the OS keychain, never in the config file. If Windows Credential Manager is unavailable, setup and MCP login share `%APPDATA%\smartmemory\credentials\api_key`. Updates serialize writers and verify a protected current-SID-only file ACL before writing the key. An ACL failure preserves the previous key. Legacy MCP credentials migrate to the shared file and are removed. Standalone MCP uses the same protected writer at its legacy path. Set `SMARTMEMORY_API_KEY` as an env var on other headless systems where the keychain is unavailable. Remote setup uses `--api-url`, then the effective `SMARTMEMORY_API_URL` or saved URL, then the hosted default. Doctor and support zip probe this URL in remote mode and skip the SmartMemory API probe in local mode.
+
+### Windows and PowerShell
+
+Windows setup validates Git Bash and installs its absolute executable path for all six Claude Code hooks. Install Git for Windows before setup. Setup refuses to install hooks if Git Bash cannot run.
+
+PowerShell 5.1 pipes default to ASCII, which can replace non-ASCII text before Python receives it. Set UTF-8 before piping memory text:
+
+```powershell
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+"Remember 中文 and café" | sm add --all -
+```
+
+For PowerShell 5.1 script files containing non-ASCII literals, save the `.ps1` file as UTF-8 with BOM. You can also pass text as a quoted argument (`sm add "Remember 中文"`) or supply a UTF-8 file through stdin from a shell that preserves its bytes.
+
+Direct writes wait up to 30 seconds for store ownership. Set `SMARTMEMORY_WRITE_LOCK_TIMEOUT` to a value greater than 0 and at most 300 seconds. For concurrent CLI use, start the daemon with `sm start`. A busy store returns a normal error without replaying a write.
+
+Before `sm clear --yes`, run `smartmemory stop` and disconnect MCP clients that hold the local store. Reset refuses active owners before deleting graph, FTS or vector files. Detached Windows daemons request breakaway from the terminal's process job. If Windows denies breakaway, startup warns that the process will not survive terminal close.
+
+SOCKS support for Requests and Wikipedia calls is included in the wrapper's `requests[socks]` dependency.
 
 ### Non-interactive / CI
 

@@ -4,6 +4,20 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Windows wrapper and standalone MCP environments now use the same canonical credential file and lock. A newer legacy credential migrates before its source is removed, so account rotations survive reads across environments.
+- Remote setup honors `--api-url` and the effective configured endpoint for validation and persistence. Unattended setup accepts `SMARTMEMORY_API_KEY`.
+- Windows setup and MCP login share one credential fallback. Credential updates lock writers and verify a protected current-SID-only temporary file before writing any key, preserving the previous key on ACL failure. Legacy MCP credentials migrate once and are removed.
+- Direct daemon startup retains its absolute lifecycle deadline. Git Bash executable and hook script paths both escape shell expansions.
+- Windows Claude hooks use a validated absolute Git Bash path and setup refuses missing or broken Git Bash.
+- Direct `get` emits ISO timestamps using the same JSON encoder as the API.
+- Direct writes wait up to 30 seconds (configurable), report busy stores clearly, and never replay a write after a dropped daemon response.
+- Store reset checks live owners and every file before mutation. Windows deletion holds exclusive handles and reports retained files as failure.
+- Windows detached launches request terminal-job breakaway and no console window, with an explicit warning if breakaway is denied.
+- Daemon startup rotates an oversized `daemon-output.log` before opening the child output handle (5 MiB default, one previous log).
+- Local diagnostics skip the SmartMemory API probe. Remote diagnostics use the effective configured API URL, including support zip.
+- Support exports redact raw, slash-separated and JSON-escaped Windows profile paths and omit absolute config paths.
+- Include lightweight Requests SOCKS support and document UTF-8 piping for PowerShell 5.1.
+
 ## [1.5.19] - 2026-10-03
 
 - Pins smartmemory-core 1.5.19 and smartmemory-mcp 1.5.19 (MCP lists its tools without opening the local store).

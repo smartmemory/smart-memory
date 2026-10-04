@@ -425,7 +425,7 @@ class TestTwoTierIngest:
 class TestClearFlushesQueue:
     """POST /clear should flush the enrichment queue."""
 
-    def test_clear_resets_queue(self):
+    def test_clear_resets_queue(self, tmp_path, monkeypatch):
         from smartmemory_app.viewer_server import app
         from fastapi.testclient import TestClient
 
@@ -433,13 +433,16 @@ class TestClearFlushesQueue:
         q.enqueue({"item_id": "stale"})
         assert q.size == 1
 
-        with patch("smartmemory_app.storage._shutdown"):
-            with patch(
-                "smartmemory_app.storage._resolve_data_dir",
-                return_value=MagicMock(exists=lambda: False),
-            ):
-                with patch("smartmemory_app.setup._seed_data_dir"):
-                    client = TestClient(app)
-                    client.post("/memory/clear")
+        import sqlite3
 
+        monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+        with sqlite3.connect(tmp_path / "memory.db") as connection:
+            connection.execute("CREATE TABLE test_b2_reset (item_id TEXT)")
+        connection.close()
+        with patch("smartmemory_app.storage._shutdown"):
+            client = TestClient(app)
+            response = client.post("/memory/clear")
+
+        assert response.status_code == 200, response.text
+        assert not (tmp_path / "memory.db").exists()
         assert q.size == 0, "Queue should be flushed after /clear"

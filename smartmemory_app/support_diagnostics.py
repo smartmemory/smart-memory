@@ -1,6 +1,7 @@
 """Bounded local support checks and a portable, redacted support archive."""
 
 import json
+import ntpath
 import os
 import tempfile
 import threading
@@ -114,24 +115,29 @@ def download_failure(logger, model: str, exc: BaseException) -> str:
     return redact_credentials(message)
 
 
-def _probe(host: str) -> str:
+def _probe(target: str) -> str:
     import httpx
 
     started = time.monotonic()
+    url = target if "://" in target else f"https://{target}"
+    parsed = urlsplit(url)
     proxies = urllib.request.getproxies()
-    proxy = proxies.get("https") or proxies.get("all")
-    if urllib.request.proxy_bypass(host):
+    proxy = proxies.get(parsed.scheme) or proxies.get("all")
+    if urllib.request.proxy_bypass(parsed.hostname or ""):
         proxy = None
     with httpx.Client(timeout=1.5, trust_env=False, proxy=proxy) as client:
-        with client.stream(
-            "HEAD", f"https://{host}", follow_redirects=False
-        ) as response:
+        with client.stream("HEAD", url, follow_redirects=False) as response:
             return f"reachable ({(time.monotonic() - started) * 1000:.0f} ms, HTTP {response.status_code})"
 
 
 def network_checks(*, budget: float = 4.0) -> list[str]:
     """Use one wall-clock deadline even if OS DNS resolution ignores timeouts."""
-    hosts = ("huggingface.co", "pypi.org", "api.smartmemory.ai")
+    from smartmemory_app.config import load_config
+
+    cfg = load_config()
+    hosts = ["huggingface.co", "pypi.org"]
+    if cfg.mode == "remote":
+        hosts.append(cfg.api_url.rstrip("/"))
     results = {}
 
     def run(host):
@@ -145,12 +151,19 @@ def network_checks(*, budget: float = 4.0) -> list[str]:
         thread.start()
     for thread in threads:
         thread.join(max(0, deadline - time.monotonic()))
-    return [
+    rows = [
         redact_credentials(
             f"Network {host}: {results.get(host, 'warning: check timed out')}"
         )
         for host in hosts
     ]
+    if cfg.mode != "remote":
+        rows.append(
+            "Network SmartMemory API: skipped: local mode"
+            if cfg.mode == "local"
+            else "Network SmartMemory API: skipped: unconfigured mode"
+        )
+    return rows
 
 
 def _cache_status() -> str:
@@ -227,6 +240,7 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
     from smartmemory_app.config import load_config
     from smartmemory_app.report_privacy import (
         private_text,
+        private_value,
         read_private_log_tail,
         safe_log_text,
     )
@@ -234,13 +248,19 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
     def config_text():
         # Effective fields only. Never upload arbitrary raw TOML or credentials.
         config = {
-            key: value
+            key: (
+                "<omitted path>"
+                if key == "data_dir"
+                or isinstance(value, str)
+                and (Path(value).is_absolute() or ntpath.isabs(value))
+                else value
+            )
             for key, value in asdict(load_config()).items()
             if not any(
                 word in key.lower() for word in ("key", "token", "password", "secret")
             )
         }
-        return "Effective config:\n" + json.dumps(config, indent=2)
+        return "Effective config:\n" + json.dumps(private_value(config), indent=2)
 
     texts = {
         "doctor.txt": private_text(doctor_output),

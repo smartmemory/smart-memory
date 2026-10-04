@@ -488,12 +488,15 @@ def clear_all() -> dict:
     with _rw_lock:
         from smartmemory_app.storage import _resolve_data_dir, _shutdown
 
-        _shutdown()
-
         data_path = _resolve_data_dir()
-        from smartmemory_app.store_reset import remove_store_files
+        from smartmemory_app.store_reset import (
+            preflight_store_reset,
+            remove_store_files,
+        )
 
         try:
+            preflight_store_reset(data_path)
+            _shutdown()
             removed = remove_store_files(data_path)
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

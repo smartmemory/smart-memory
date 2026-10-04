@@ -5,6 +5,7 @@ import json
 from pathlib import Path, PureWindowsPath
 import shlex
 import subprocess
+import shutil
 
 import pytest
 from click.testing import CliRunner
@@ -15,6 +16,14 @@ from smartmemory_app import setup
 @pytest.fixture
 def hook_home(tmp_path, monkeypatch):
     home = tmp_path / "test_hook_home"
+    bash = tmp_path / "Git for tests" / "bin" / "bash.exe"
+    bash.parent.mkdir(parents=True)
+    bash.symlink_to(shutil.which("bash"))
+    monkeypatch.setattr(
+        setup,
+        "_resolve_hook_shell",
+        lambda: str(bash) if setup.sys.platform == "win32" else "bash",
+    )
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(setup, "CLAUDE_DIR", home / ".claude")
     monkeypatch.setattr(setup, "HOOKS_DEST", home / ".claude" / "hooks")
@@ -44,10 +53,12 @@ def test_windows_commands_are_quoted_forward_slash_paths(hook_home, monkeypatch,
             check=True,
         )
         args = parsed.stdout.splitlines()
-        assert args[0] == "bash"
+        assert args[0] == setup._resolve_hook_shell()
         assert args[1].startswith(f"C:/Users/{user}/.claude/hooks/smartmemory-")
         assert "\\" not in args[1]
-        assert command.startswith('bash "') and command.endswith('"')
+        assert command.startswith(
+            '"' + setup._resolve_hook_shell() + '" "'
+        ) and command.endswith('"')
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])

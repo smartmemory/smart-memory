@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import os
 import threading
 import time
@@ -19,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 if TYPE_CHECKING:
     from smartmemory import SmartMemory
@@ -43,8 +44,22 @@ _remote_memory: "RemoteMemory | None" = None
 _remote_init_lock = threading.Lock()
 
 WRITE_LOCK_TIMEOUT = (
-    2.0  # seconds — daemon ingest only, worker uses SmartMemory.add() (no lock)
+    30.0  # seconds, override with SMARTMEMORY_WRITE_LOCK_TIMEOUT (0 < value <= 300)
 )
+
+
+class StoreBusyError(RuntimeError):
+    """Write ownership could not be acquired. No write has started."""
+
+
+class _StoreWriteLock(FileLock):
+    def acquire(self, *args, **kwargs):
+        try:
+            return super().acquire(*args, **kwargs)
+        except Timeout as exc:
+            raise StoreBusyError(
+                "Store busy. Try again after current writes finish, or start the daemon with sm start."
+            ) from exc
 
 
 # --- Directory & lock resolution -------------------------------------------------
@@ -58,7 +73,14 @@ def _resolve_data_dir(explicit: str | None = None) -> Path:
 
 
 def _get_lock_file(data_path: Path):
-    return FileLock(str(data_path / ".write.lock"), timeout=WRITE_LOCK_TIMEOUT)
+    timeout = float(
+        os.environ.get("SMARTMEMORY_WRITE_LOCK_TIMEOUT", WRITE_LOCK_TIMEOUT)
+    )
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ValueError(
+            "SMARTMEMORY_WRITE_LOCK_TIMEOUT must be greater than 0 and at most 300 seconds."
+        )
+    return _StoreWriteLock(str(data_path / ".write.lock"), timeout=timeout)
 
 
 # --- Singleton lifecycle ---------------------------------------------------------

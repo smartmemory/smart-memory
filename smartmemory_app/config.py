@@ -3,7 +3,7 @@
 Single canonical config path: ~/.config/smartmemory/config.toml (XDG on Linux/macOS,
 %APPDATA%\\smartmemory\\config.toml on Windows). Written by `smartmemory setup`.
 
-API keys are stored in the OS keychain via `keyring`, never in the config file.
+API keys use the OS keychain via `keyring`, with a user-only Windows file fallback, never the config file.
 The config only stores `api_key_set = true` as a sentinel. The SMARTMEMORY_API_KEY
 env var bypasses the keychain entirely — the correct path for CI/Docker.
 """
@@ -11,6 +11,7 @@ env var bypasses the keychain entirely — the correct path for CI/Docker.
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 import warnings
 from dataclasses import dataclass
@@ -256,6 +257,16 @@ def get_api_key() -> str:
         key = keyring.get_password("smartmemory", "api_key") or ""
     except Exception:
         key = ""
+    if not key and sys.platform == "win32":
+        from smartmemory_app.windows_credentials import read_key
+
+        try:
+            key = read_key()
+        except OSError as exc:
+            warnings.warn(
+                f"Protected credential file unavailable: {type(exc).__name__}",
+                stacklevel=2,
+            )
     if not key:
         # DIST-LITE-QUIET-1 (D1): only warn when a key is *expected* — i.e. remote mode.
         # The FREE/local default needs no key by design, so this warning was pure
@@ -287,6 +298,16 @@ def set_api_key(key: str) -> None:
 
         keyring.set_password("smartmemory", "api_key", key)
     except Exception:
+        if sys.platform == "win32":
+            from smartmemory_app.windows_credentials import store_key
+
+            # Failure to restrict the DACL is fatal. Never persist an exposed key.
+            store_key(key)
+            warnings.warn(
+                "OS keychain unavailable. API key stored in a user-only Windows credential file.",
+                stacklevel=2,
+            )
+            return
         warnings.warn(
             "OS keychain unavailable — API key not persisted. "
             "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",

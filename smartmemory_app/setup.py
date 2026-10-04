@@ -124,15 +124,62 @@ _LEGACY_HOOK_REGISTRATIONS = {
 }
 
 
-def _hook_command(filename: str) -> str:
-    """Quote the installed script path for the shell that runs Claude hooks."""
+def _resolve_hook_shell() -> str:
+    """Validate Git Bash on Windows. Never select Windows' WSL bash launcher."""
+    if sys.platform != "win32":
+        return "bash"
+    git = shutil.which("git")
+    candidates = []
+    if git:
+        git_path = Path(git)
+        candidates.extend(
+            (git_path.parent.parent / "bin/bash.exe", git_path.parent / "bash.exe")
+        )
+        # Portable Git can place git.exe deeper than cmd/ or bin/.
+        try:
+            result = subprocess.run(
+                [git, "--exec-path"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+                creationflags=0x08000000,
+            )
+            exec_path = Path(result.stdout.strip())
+            candidates.append(exec_path.parent.parent.parent / "bin/bash.exe")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            subprocess.run(
+                [str(candidate), "--noprofile", "--norc", "-c", "exit 0"],
+                capture_output=True,
+                check=True,
+                timeout=5,
+                creationflags=0x08000000,
+            )
+            return str(candidate).replace("\\", "/")
+        except (OSError, subprocess.SubprocessError):
+            continue
+    raise click.ClickException(
+        "Cannot install Windows lifecycle hooks: Git Bash is unavailable or failed validation. "
+        "Install Git for Windows, then rerun smartmemory setup."
+    )
+
+
+def _hook_command(filename: str, shell: str | None = None) -> str:
+    """Quote the installed script and select a verified Windows shell."""
     path = str(HOOKS_DEST / filename)
+    shell = shell or _resolve_hook_shell()
     if sys.platform == "win32":
-        # Drive-letter paths also work outside Git Bash. Double quotes handle
-        # spaces in cmd/PowerShell as well as bash, unlike POSIX single quotes.
         path = path.replace("\\", "/")
         path = path.replace("$", "\\$").replace("`", "\\`").replace('"', '\\"')
-        return f'bash "{path}"'
+        shell = shell.replace("\\", "/")
+        shell = shell.replace("$", "\\$").replace("`", "\\`").replace('"', '\\"')
+        executable = "bash" if shell == "bash" else '"' + shell + '"'
+        return f'{executable} "{path}"'
     return f"bash {path}"
 
 
@@ -140,7 +187,9 @@ def _installed_hook_name(command: str) -> str | None:
     """Recognize only bash commands targeting our known installed hook files."""
     if not isinstance(command, str):
         return None
-    match = re.fullmatch(r"\s*bash\s+(.+?)\s*", command)
+    match = re.fullmatch(
+        r'\s*(?:bash|"[^"\n]+[/\\]bash\.exe")\s+(.+?)\s*', command, re.IGNORECASE
+    )
     if not match:
         return None
     path = match[1]
@@ -166,20 +215,21 @@ def _installed_hook_name(command: str) -> str | None:
     return None
 
 
-def _get_hook_registrations() -> dict:
+def _get_hook_registrations(shell: str | None = None) -> dict:
     """Build hook registration entries using current Claude Code hooks format.
 
     Each event maps to a registration dict with matcher + hooks array.
     Paths point to the COPIED destination (~/.claude/hooks/), not the package
     source, so registrations are stable across package upgrades.
     """
+    shell = shell or _resolve_hook_shell()
     return {
         "SessionStart": {
             "matcher": "",
             "hooks": [
                 {
                     "type": "command",
-                    "command": _hook_command("smartmemory-orient.sh"),
+                    "command": _hook_command("smartmemory-orient.sh", shell),
                 }
             ],
         },
@@ -188,7 +238,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": _hook_command("smartmemory-recall.sh"),
+                    "command": _hook_command("smartmemory-recall.sh", shell),
                 }
             ],
         },
@@ -197,7 +247,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": _hook_command("smartmemory-observe.sh"),
+                    "command": _hook_command("smartmemory-observe.sh", shell),
                 }
             ],
         },
@@ -206,7 +256,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": _hook_command("smartmemory-distill.sh"),
+                    "command": _hook_command("smartmemory-distill.sh", shell),
                 }
             ],
         },
@@ -215,7 +265,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": _hook_command("smartmemory-learn.sh"),
+                    "command": _hook_command("smartmemory-learn.sh", shell),
                 }
             ],
         },
@@ -224,7 +274,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": _hook_command("smartmemory-persist.sh"),
+                    "command": _hook_command("smartmemory-persist.sh", shell),
                 }
             ],
         },
@@ -233,7 +283,7 @@ def _get_hook_registrations() -> dict:
 
 # Module-level alias for external callers that need the structure at import time.
 # NOTE: frozen at import — prefer _get_hook_registrations() inside functions.
-HOOK_REGISTRATIONS = _get_hook_registrations()
+HOOK_REGISTRATIONS = _get_hook_registrations(shell="bash")
 
 
 # ── Setup command ─────────────────────────────────────────────────────────────
@@ -258,7 +308,15 @@ HOOK_REGISTRATIONS = _get_hook_registrations()
     default=None,
     help="Tool config (e.g. 'cursor'). Works in both modes.",
 )
-def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
+@click.option(
+    "--api-url", help="Remote service base URL (overrides SMARTMEMORY_API_URL)."
+)
+def setup(
+    mode: str | None,
+    api_key: str | None,
+    for_tool: str | None,
+    api_url: str | None = None,
+) -> None:
     """First-run questionnaire: configure local or remote mode.
 
     Three self-contained branches — each handles config, post-config, AND daemon
@@ -286,7 +344,7 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     # Branch 1: Flags provided — use click flow directly
     # _setup_click() already handles daemon start for local mode internally
     if mode is not None:
-        _setup_click(mode, api_key)
+        _setup_click(mode, api_key, api_url)
         if for_tool:
             _setup_tool_config(for_tool)
         return
@@ -302,7 +360,7 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
                 return
             if result.mode == "remote":
                 # TUI only selected mode — hand off to click-based remote setup
-                _setup_remote(api_key)
+                _setup_remote(api_key, api_url)
                 click.echo("\nSetup complete.")
                 try:
                     from smartmemory_app.launch_metrics import emit as _lm_emit
@@ -337,12 +395,14 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
             )
 
     # Branch 3: Click fallback
-    _setup_click(None, api_key)
+    _setup_click(None, api_key, api_url)
     if for_tool:
         _setup_tool_config(for_tool)
 
 
-def _setup_click(mode: str | None, api_key: str | None) -> None:
+def _setup_click(
+    mode: str | None, api_key: str | None, api_url: str | None = None
+) -> None:
     """Click-based setup flow (non-TUI). Self-contained: config + post-config."""
     if mode is None:
         click.echo("Welcome to SmartMemory.\n")
@@ -353,7 +413,7 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
         mode = "local" if choice == "1" else "remote"
 
     if mode == "remote":
-        _setup_remote(api_key)
+        _setup_remote(api_key, api_url)
         click.echo("\nSetup complete.")
         try:
             from smartmemory_app.launch_metrics import emit as _lm_emit
@@ -753,11 +813,32 @@ def _setup_local() -> bool:
     return was_first_run
 
 
-def _setup_remote(api_key: str | None) -> None:
+def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
     """Validate API key, store in OS keychain, write remote config."""
     import httpx
-    from smartmemory_app.config import SmartMemoryConfig, save_config, set_api_key
+    from smartmemory_app.config import (
+        SmartMemoryConfig,
+        load_config,
+        save_config,
+        set_api_key,
+    )
 
+    api_url = (api_url or load_config().api_url).rstrip("/")
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(api_url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise click.ClickException(
+            "API URL must be an HTTP(S) base URL without credentials, query or fragment."
+        )
+
+    api_key = api_key or os.environ.get("SMARTMEMORY_API_KEY")
     if not api_key:
         api_key = click.prompt(
             "SmartMemory API key (stored in OS keychain, not config file)",
@@ -767,7 +848,7 @@ def _setup_remote(api_key: str | None) -> None:
     click.echo("Validating API key...")
     try:
         r = httpx.get(
-            "https://api.smartmemory.ai/auth/me",
+            f"{api_url}/auth/me",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -783,7 +864,9 @@ def _setup_remote(api_key: str | None) -> None:
         raise SystemExit(1)
 
     set_api_key(api_key)  # persist to OS keychain (warns if unavailable, never raises)
-    cfg = SmartMemoryConfig(mode="remote", api_key_set=True, team_id=team_id)
+    cfg = SmartMemoryConfig(
+        mode="remote", api_url=api_url, api_key_set=True, team_id=team_id
+    )
     save_config(cfg)
 
     # DIST-AGENT-HOOKS-1: Wire hooks for remote mode too.
@@ -1012,6 +1095,7 @@ def _copy_skills() -> None:
 
 
 def _register_hooks() -> None:
+    shell = _resolve_hook_shell()
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     cfg = json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
     hooks = cfg.setdefault("hooks", {})
@@ -1041,7 +1125,7 @@ def _register_hooks() -> None:
                         )
                         if name in HOOK_NAMES:
                             owned = True
-                            hook = {**hook, "command": _hook_command(name)}
+                            hook = {**hook, "command": _hook_command(name, shell)}
                         elif name:
                             continue  # our obsolete filenames only
                         else:
@@ -1058,7 +1142,7 @@ def _register_hooks() -> None:
 
     # Add missing default registrations, without duplicating repaired entries
     # that carry user-selected timeouts or share a registration with other tools.
-    for event, entry in _get_hook_registrations().items():
+    for event, entry in _get_hook_registrations(shell).items():
         existing = hooks.get(event, [])
         if not isinstance(existing, list):
             existing = [existing]

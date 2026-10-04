@@ -271,6 +271,15 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             httpx.RemoteProtocolError,
         ) as exc:
             latency_ms = (time.perf_counter() - started_at) * 1000
+            if isinstance(exc, httpx.RemoteProtocolError) and method.upper() not in (
+                "GET",
+                "HEAD",
+                "OPTIONS",
+            ):
+                raise click.ClickException(
+                    "Daemon connection dropped after sending the write. It may have succeeded. "
+                    "Check the store before adding it again."
+                ) from exc
             if attempt == 0:
                 log.debug(
                     "daemon connection dropped after %.1fms (%s); retrying request",
@@ -1260,7 +1269,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                 ids.append(result.get("item_id", "?"))
                 warning = warning or result.get("warning")
             else:
-                from smartmemory_app.storage import ingest
+                from smartmemory_app.storage import StoreBusyError, ingest
                 from smartmemory_app.remote_backend import RemoteBackendError
 
                 log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
@@ -1270,6 +1279,8 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
                     ids.append(
                         ingest(chunk, memory_type, properties=props, origin="cli:add")
                     )
+                except StoreBusyError as exc:
+                    raise click.ClickException(str(exc)) from exc
                 except RemoteBackendError as e:
                     raise click.ClickException(
                         f"Add failed — could not reach the SmartMemory service: {e}"
@@ -1298,7 +1309,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         if result.get("warning"):
             click.echo(f"⚠  {result['warning']}", err=True)
     else:
-        from smartmemory_app.storage import ingest
+        from smartmemory_app.storage import StoreBusyError, ingest
         from smartmemory_app.remote_backend import RemoteBackendError
 
         log.debug("daemon unreachable; using in-process fallback: %s", "ingest")
@@ -1306,6 +1317,8 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
             click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))
+        except StoreBusyError as exc:
+            raise click.ClickException(str(exc)) from exc
         except RemoteBackendError as e:
             raise click.ClickException(
                 f"Add failed — could not reach the SmartMemory service: {e}"
@@ -1835,7 +1848,10 @@ def get_cmd(item_id: str) -> None:
         click.echo("Memory not found.", err=True)
         raise SystemExit(1)
 
-    click.echo(json.dumps(result, indent=2, sort_keys=True))
+    # Match FastAPI's public JSON encoding, including ISO datetime values.
+    from fastapi.encoders import jsonable_encoder
+
+    click.echo(json.dumps(jsonable_encoder(result), indent=2, sort_keys=True))
 
 
 # ── Lifecycle (DIST-AGENT-HOOKS-1) ──────────────────────────────────────────

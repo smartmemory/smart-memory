@@ -289,7 +289,7 @@ def test_setup_proceeds_on_healthy_core(runner, tmp_path):
         result = runner.invoke(setup_cmd, ["--mode", "local"])
 
     assert result.exit_code == 0, result.output
-    setup_click.assert_called_once_with("local", None)
+    setup_click.assert_called_once_with("local", None, None)
 
 
 def test_setup_warns_but_proceeds_when_socks_proxy_support_is_missing(
@@ -319,7 +319,7 @@ def test_setup_warns_but_proceeds_when_socks_proxy_support_is_missing(
         in result.output
     )
     assert "pip install httpx[socks]" in result.output
-    setup_click.assert_called_once_with("local", None)
+    setup_click.assert_called_once_with("local", None, None)
 
 
 def test_setup_preflight_raises_click_exception(runner):

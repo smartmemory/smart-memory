@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from smartmemory.utils.process import (
-    detached_process_options,
+    spawn_detached,
     pid_alive,
     process_cmdline,
     terminate_process,
@@ -360,6 +360,21 @@ def _startup_failure_message(
     return redact_credentials("\n".join(details))
 
 
+def _prepare_output_log(data: Path) -> None:
+    """Rotate oversized inherited output before opening the child's handle."""
+    limit = int(os.environ.get("SMARTMEMORY_DAEMON_OUTPUT_MAX_BYTES", 5 * 1024 * 1024))
+    if not 0 < limit <= 100 * 1024 * 1024:
+        raise ValueError(
+            "SMARTMEMORY_DAEMON_OUTPUT_MAX_BYTES must be between 1 and 104857600."
+        )
+    output = data / "daemon-output.log"
+    if output.exists() and output.stat().st_size > limit:
+        backup = data / "daemon-output.log.1"
+        backup.unlink(missing_ok=True)
+        output.replace(backup)
+        log.info("Rotated detached daemon output before launch (limit=%s bytes)", limit)
+
+
 @bounded_lifecycle(START_TIMEOUT)
 def start_daemon(
     num_workers: int = 1,
@@ -491,8 +506,9 @@ def start_daemon(
     # (avoids recursion since CLI `viewer` calls start_daemon + open browser).
     # Inherit PYTHONPATH so editable installs work in dev.
     env = os.environ.copy()
+    _prepare_output_log(data)
     with (data / "daemon-output.log").open("a", encoding="utf-8") as output:
-        proc = subprocess.Popen(
+        proc = spawn_detached(
             [
                 sys.executable,
                 "-c",
@@ -501,7 +517,6 @@ def start_daemon(
             stdout=output,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            **detached_process_options(),
             env=env,
         )
 
@@ -757,7 +772,7 @@ def _start_workers(num_workers: int = 1) -> None:
     if worker_is_running(data):
         return
     with (data / "worker.log").open("a") as output:
-        subprocess.Popen(
+        spawn_detached(
             [
                 sys.executable,
                 "-m",
@@ -768,7 +783,6 @@ def _start_workers(num_workers: int = 1) -> None:
             stdout=output,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            **detached_process_options(),
             env=os.environ.copy(),
         )
 

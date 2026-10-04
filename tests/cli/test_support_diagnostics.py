@@ -175,7 +175,7 @@ def test_doctor_network_results_are_warnings(monkeypatch, timeout):
     )
     result = CliRunner().invoke(cli_module.cli, ["doctor"])
     assert result.exit_code == 0
-    for host in ("huggingface.co", "pypi.org", "api.smartmemory.ai"):
+    for host in ("huggingface.co", "pypi.org"):
         assert f"Network {host}:" in result.output
     assert ("ReadTimeout" if timeout else "3 ms") in result.output
     assert KEY not in result.output
@@ -193,7 +193,7 @@ def test_network_wall_deadline(monkeypatch):
         started = time.monotonic()
         rows = support.network_checks(budget=0.02)
         assert time.monotonic() - started < 0.3
-        assert all("timed out" in row for row in rows)
+        assert all("timed out" in row for row in rows if "skipped:" not in row)
     finally:
         completed.set()
 

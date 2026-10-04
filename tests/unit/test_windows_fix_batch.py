@@ -411,7 +411,7 @@ def test_windows_native_detachment_at_each_launch(tmp_path, monkeypatch, launch)
         )
         daemon.start_daemon()
     kw = popen.call_args.kwargs
-    assert kw["creationflags"] == 0x8 | 0x200
+    assert kw["creationflags"] == 0x200 | 0x08000000 | 0x01000000
     assert "start_new_session" not in kw
     assert kw["stdin"] == subprocess.DEVNULL
     assert kw["stdout"].closed
