@@ -334,6 +334,26 @@ def _memory_request(method: str, path: str, **kwargs):
     return _daemon_request(method, path, **kwargs)
 
 
+def _lifecycle_request(path: str, body: dict):
+    """Use the local daemon accelerator only for local lifecycle hooks."""
+    from smartmemory_app.config import load_config
+
+    try:
+        remote = load_config().mode == "remote"
+    except Exception as exc:
+        log.warning(
+            "Lifecycle %s lost daemon acceleration: mode resolution failed; "
+            "using in-process engine: %s",
+            path,
+            exc,
+        )
+        return None
+    if remote:
+        log.debug("Lifecycle %s using in-process engine in remote mode", path)
+        return None
+    return _lifecycle_via_daemon(path, body)
+
+
 def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
     """POST one lifecycle phase to the warm daemon. Returns parsed JSON, or None.
 
@@ -1929,7 +1949,7 @@ def lifecycle_orient() -> None:
     if body is None:
         return
 
-    out = _lifecycle_via_daemon("/lifecycle/orient", body)
+    out = _lifecycle_request("/lifecycle/orient", body)
     if out is not None:
         result = out.get("context") or ""
     else:
@@ -1965,7 +1985,7 @@ def lifecycle_recall() -> None:
     if body is None:
         return
 
-    out = _lifecycle_via_daemon("/lifecycle/recall", body)
+    out = _lifecycle_request("/lifecycle/recall", body)
     if out is not None:
         result = out.get("context") or ""
     else:
@@ -1990,7 +2010,7 @@ def lifecycle_observe() -> None:
     if body is None:
         return
 
-    if _lifecycle_via_daemon("/lifecycle/observe", body) is not None:
+    if _lifecycle_request("/lifecycle/observe", body) is not None:
         return
 
     session_id = body.get("session_id", "unknown")
@@ -2017,7 +2037,7 @@ def lifecycle_distill() -> None:
     if body is None:
         return
 
-    if _lifecycle_via_daemon("/lifecycle/distill", body) is not None:
+    if _lifecycle_request("/lifecycle/distill", body) is not None:
         return
 
     session_id = body.get("session_id", "unknown")
@@ -2038,7 +2058,7 @@ def lifecycle_learn() -> None:
     if body is None:
         return
 
-    if _lifecycle_via_daemon("/lifecycle/learn", body) is not None:
+    if _lifecycle_request("/lifecycle/learn", body) is not None:
         return
 
     session_id = body.get("session_id", "unknown")
