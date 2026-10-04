@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.5.21] - 2026-10-04
+
 - Remote lifecycle hooks run the in-process engine directly, skipping the local daemon attempt while preserving local daemon acceleration and fail-open behaviour.
 - Remote `sm add --prop key=value` delivers user properties through hosted ingest context and refuses reserved producer/scope keys. Remote `sm search '*' --prop key=value` uses one exact list filter, with filtered pagination. Semantic property search and unsupported combinations remain explicit refusals.
 - Local `sm status` explains that memories live only on this machine, outside the cloud account, and reports the saved memory count even when the daemon is stopped or warming. `sm status --json` adds explicit local-only disclosure fields while preserving backend status fields.
