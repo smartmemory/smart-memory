@@ -191,6 +191,38 @@ class RemoteMemory:
             )
         return result
 
+    def list_memories(
+        self, limit: int = 50, offset: int = 0, order: str = "asc"
+    ) -> dict:
+        """Scoped GRAPH-API-1l page, following the Python SDK list contract.
+
+        Keep the page envelope and raise RemoteBackendError on HTTP failures or
+        malformed responses so a failed listing never looks like an empty store.
+        """
+        if limit < 1 or offset < 0 or order not in ("asc", "desc"):
+            raise RemoteBackendError("Invalid memory list limit, offset or order.", 422)
+        result = self.request(
+            "GET",
+            "/memory/list",
+            params={"limit": limit, "offset": offset, "order": order},
+        )
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("items"), list)
+            or any(not isinstance(item, dict) for item in result["items"])
+            or any(
+                type(result.get(field)) is not int or result[field] < 0
+                for field in ("total", "limit", "offset")
+            )
+            or result["limit"] != limit
+            or result["offset"] != offset
+            or len(result["items"]) > limit
+        ):
+            raise RemoteBackendError(
+                "SmartMemory service returned an invalid list response."
+            )
+        return result
+
     # ── Auth ────────────────────────────────────────────────────────────────
 
     def login(self, api_key: str, team_id: str = "") -> str:

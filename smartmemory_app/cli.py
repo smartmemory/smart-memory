@@ -1475,6 +1475,12 @@ def retag_cmd(
 @click.argument("query")
 @click.option("--top-k", default=5, show_default=True)
 @click.option(
+    "--offset",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Items to skip when listing remote memories with '*'.",
+)
+@click.option(
     "--include-reference",
     is_flag=True,
     default=False,
@@ -1496,6 +1502,7 @@ def search_cmd(
     ctx,
     query: str,
     top_k: int,
+    offset: int | None,
     include_reference: bool,
     since: str | None,
     until: str | None,
@@ -1509,6 +1516,13 @@ def search_cmd(
     """
     from smartmemory.search import resolve_search_window
 
+    if offset is not None:
+        from smartmemory_app.config import load_config
+
+        if query.strip() != "*" or load_config().mode != "remote":
+            raise click.ClickException(
+                "--offset is only supported by remote sm search '*'."
+            )
     if hop_strategy is not None and not multi_hop:
         raise click.ClickException("--hop-strategy requires --multi-hop")
     hop_options = {"multi_hop": True, "max_hops": max_hops} if multi_hop else {}
@@ -1520,6 +1534,8 @@ def search_cmd(
         raise click.ClickException(str(exc)) from exc
     props = _parse_extra_props(ctx.args)
     body: dict = {"query": query, "top_k": top_k, **window, **hop_options}
+    if offset is not None:
+        body["offset"] = offset
     if props:
         body["filters"] = props
     if include_reference:
@@ -1558,8 +1574,20 @@ def search_cmd(
     # the storage fallback returns a bare list. Unwrap so we always iterate
     # result dicts (iterating the dict directly yielded its keys -> "items"
     # string -> AttributeError: 'str' object has no attribute 'get').
+    page = (
+        results
+        if query.strip() == "*"
+        and isinstance(results, dict)
+        and "total" in results
+        and "offset" in results
+        else None
+    )
     if isinstance(results, dict):
         results = results.get("items", [])
+    if page is not None:
+        click.echo(
+            f"Showing {len(results)} of {page['total']} memories (offset {page['offset']})."
+        )
     if not results:
         click.echo("No results.")
         return
@@ -1575,6 +1603,10 @@ def search_cmd(
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id[:8]}  {content}")
+    if page is not None and results and page["offset"] + len(results) < page["total"]:
+        click.echo(
+            f"Next page: sm search '*' --top-k {top_k} --offset {page['offset'] + len(results)}"
+        )
 
 
 def _why_remote_request(cfg, method: str, path: str, **kwargs) -> dict:

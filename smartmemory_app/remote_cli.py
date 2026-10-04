@@ -39,8 +39,16 @@ def request_memory(cfg, method: str, path: str, **kwargs):
                     "Property filters are not supported in remote mode."
                 )
             if body["query"].strip() == "*":
-                raise click.ClickException(
-                    "Listing all memories with sm search '*' is only available in local mode. Use the hosted viewer to browse remote memories."
+                unsupported = set(body) - {"query", "top_k", "offset"}
+                if unsupported:
+                    flags = ", ".join(
+                        "--" + name.replace("_", "-") for name in sorted(unsupported)
+                    )
+                    raise click.ClickException(
+                        f"Remote wildcard listing does not support search options: {flags}."
+                    )
+                return mem.list_memories(
+                    limit=body["top_k"], offset=body.get("offset", 0)
                 )
         if path == "/memory/recall":
             # Hosted recall already composes search + formatting in RemoteMemory.

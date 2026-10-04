@@ -275,7 +275,6 @@ def test_remote_search_renders_service_envelope(hosted):
 @pytest.mark.parametrize(
     "args,message",
     [
-        (["search", "*"], "Listing all memories"),
         (["search", "note", "--project", "test"], "Property filters"),
         (["add", "note", "--project", "test"], "Property flags"),
     ],

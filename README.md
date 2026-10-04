@@ -191,6 +191,11 @@ sm config                      # View settings
 sm clear                       # Start over (deletes all memories)
 ```
 
+In remote mode, `sm search '*' --top-k 20` lists a page of memories in your
+configured workspace. The output shows the scoped total and a next-page command
+using `--offset`. The default page size is 5. Local wildcard listing continues to
+list all local memories.
+
 <details>
 <summary><strong>Full command reference</strong></summary>
 

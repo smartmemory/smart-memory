@@ -5,6 +5,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ## [Unreleased]
 
 - Remote lifecycle observe, distill and learn now deliver producer origin, requested memory type and properties through hosted ingest. Reserved property keys cannot override producer fields, and the service retains authority over workspace scope.
+- Remote `sm search '*'` lists scoped memories with `--top-k` page limits, `--offset` continuation and surfaced service errors.
 
 ## [1.5.20] - 2026-10-04
 
