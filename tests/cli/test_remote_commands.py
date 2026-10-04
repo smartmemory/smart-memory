@@ -331,17 +331,41 @@ def test_remote_recall_uses_existing_search_path(hosted):
     assert any(r.url.path.endswith("/memory/search") for r in calls)
 
 
-def test_remote_status_uses_scoped_summary(hosted, monkeypatch):
+@pytest.mark.parametrize("as_json", [False, True])
+def test_remote_status_uses_scoped_summary(hosted, monkeypatch, as_json):
     monkeypatch.setattr(
         "smartmemory_app.daemon.get_status", lambda: pytest.fail("local status touched")
     )
-    hosted[1]["body"] = {"total_items": 42}
-    result = invoke(["status"])
+    monkeypatch.setattr(
+        "smartmemory_app.local_status.local_memory_count",
+        lambda: pytest.fail("local count touched"),
+    )
+    summary = {"total_items": 42, "by_type": {"semantic": 42}, "future_field": [1, 2]}
+    hosted[1]["body"] = summary
+    result = invoke(["status"] + (["--json"] if as_json else []))
     assert result.exit_code == 0, result.output
-    assert "Mode:       remote" in result.output
-    assert "Memories:   42" in result.output
+    if as_json:
+        payload = json.loads(result.stdout)
+        assert payload == {**summary, "mode": "remote", "local_only": False}
+        assert list(payload)[: len(summary)] == list(summary)
+    else:
+        assert "Mode:       remote" in result.output
+        assert "Memories:   42" in result.output
+    assert "local-only" not in result.output
+    assert "not in your cloud account" not in result.output
+    assert "local_memory_count" not in result.output
     assert "LLM:" not in result.output
     assert hosted[0][-1].url.path.endswith("/memory/summary")
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_remote_status_still_verifies_hosted_access(hosted, as_json):
+    hosted[1].update(status=401, body={"detail": "invalid key"})
+    result = invoke(["status"] + (["--json"] if as_json else []))
+    assert result.exit_code == 1
+    assert "API key is invalid" in result.output
+    assert "local-only" not in result.output
+    assert "connected" not in result.output
 
 
 def test_remote_why_reuses_hosted_client(hosted):

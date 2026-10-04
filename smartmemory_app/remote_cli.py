@@ -1,5 +1,6 @@
 """Remote CLI routing through the existing hosted backend and credential resolver."""
 
+import json
 import re
 
 import click
@@ -145,9 +146,14 @@ def request_memory(cfg, method: str, path: str, **kwargs):
         raise click.ClickException(str(exc)) from exc
 
 
-def show_status(cfg) -> None:
+def show_status(cfg, *, as_json: bool = False) -> None:
     """Verify hosted access and show scoped counts, without probing a local daemon."""
     summary = request_memory(cfg, "GET", "/memory/summary")
+    if as_json:
+        payload = dict(summary)
+        payload.update(mode="remote", local_only=False)
+        click.echo(json.dumps(payload))
+        return
     click.echo("SmartMemory service: connected")
     click.echo("  Mode:       remote")
     click.echo(f"  API:        {cfg.api_url}")

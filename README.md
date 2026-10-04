@@ -92,6 +92,8 @@ sm status     # daemon health, memory count, enrichment queue
 sm restart    # if you ever need a fresh start
 ```
 
+In local mode, `sm status` shows how many memories are saved on this machine and explains that they are outside your cloud account, even when the daemon is stopped or warming. Use `sm status --json` for machine-readable status. Local output includes `local_only` and `local_memory_count` alongside the daemon health fields. Remote output retains the hosted summary fields and reports `local_only: false`.
+
 The daemon is also where the quality comes from. `sm add` returns instantly because fast entity extraction runs in about 4ms. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You never wait for it, and `sm status` shows the queue draining.
 
 ### 5. Explore your knowledge graph

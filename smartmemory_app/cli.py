@@ -891,8 +891,9 @@ def warm_cmd(no_reranker: bool) -> None:
 
 
 @cli.command("status")
-def status_cmd() -> None:
-    """Show SmartMemory daemon status."""
+@click.option("--json", "as_json", is_flag=True, help="Print status as JSON.")
+def status_cmd(as_json: bool) -> None:
+    """Show backend status and memory count."""
     from smartmemory_app.daemon import get_status, should_be_running
 
     from smartmemory_app.config import load_config
@@ -902,8 +903,35 @@ def status_cmd() -> None:
     if cfg.mode == "remote":
         from smartmemory_app.remote_cli import show_status
 
-        show_status(cfg)
+        if as_json:
+            show_status(cfg, as_json=True)
+        else:
+            show_status(cfg)
         return
+    from smartmemory_app.local_status import local_memory_count
+
+    info = get_status()
+    count = local_memory_count()
+    if as_json:
+        # Preserve every existing daemon health field and append disclosure fields.
+        payload = (
+            dict(info)
+            if info is not None
+            else {
+                "service": "smartmemory",
+                "status": "not_responding" if should_be_running() else "stopped",
+                "memories": count,
+                "mode": "lite",
+            }
+        )
+        payload.update(local_only=True, local_memory_count=count)
+        click.echo(json.dumps(payload))
+        return
+    click.echo("  Mode:       lite (local-only)")
+    click.echo(f"  Memories:   {count if count is not None else 'unavailable'}")
+    click.echo(
+        "These memories are stored only on this machine, not in your cloud account."
+    )
     if cfg.mode != "remote":
         try:
             work = get_work_status()
@@ -915,7 +943,6 @@ def status_cmd() -> None:
                 click.echo(warning, err=True)
         except Exception as exc:
             click.echo(f"Work counts unavailable: {exc}", err=True)
-    info = get_status()
     if info is None:
         if should_be_running():
             click.echo("SmartMemory should be running, but it is not responding.")
@@ -937,15 +964,6 @@ def status_cmd() -> None:
             f"  Problem:    SmartMemory could not open your saved memories: {reason}"
         )
         click.echo("  Next step:  Run: sm doctor")
-    # DIST-LOCAL-REMOTE-AWARENESS-1: surface lite-vs-cloud detachment. The daemon
-    # /health response reports mode ("lite" | "remote"); in lite mode the store is
-    # a local SQLite graph on THIS machine, not the cloud account — so a cloud
-    # dashboard showing "0 memories" is expected, not a sync failure.
-    _mode = info.get("mode")
-    if _mode:
-        _mode_label = "lite (local-only)" if _mode == "lite" else _mode
-        click.echo(f"  Mode:       {_mode_label}")
-    click.echo(f"  Memories:   {info.get('memories', '?')}")
     _llm = info.get("llm_provider", "?")
     # Flag the silent-failure case: a provider is configured but no key is present,
     # so extraction is actually disabled despite the config saying otherwise.
@@ -955,17 +973,6 @@ def status_cmd() -> None:
         click.echo(f"  LLM:        {_llm}")
     click.echo(f"  Embeddings: {info.get('embedding_provider', '?')}")
     click.echo(f"  PID:        {info.get('pid', '?')}")
-    # DIST-LOCAL-REMOTE-AWARENESS-1: in lite mode, explain the local↔cloud
-    # boundary so an empty cloud dashboard isn't read as data loss. The cloud
-    # web dashboard reads the remote account; these memories live on this
-    # machine and were never pushed to the cloud.
-    if _mode == "lite":
-        click.echo(
-            "\nNote: lite (local-only) mode — these memories are stored on THIS "
-            "machine (local SQLite graph), not in your cloud account. A cloud "
-            "dashboard at smartmemory.ai showing 0 memories is expected, not a "
-            "sync failure."
-        )
 
 
 @cli.command("viewer")
