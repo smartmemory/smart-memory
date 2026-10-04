@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.5.20] - 2026-10-04
+
 - Windows wrapper and standalone MCP environments now use the same canonical credential file and lock. A newer legacy credential migrates before its source is removed, so account rotations survive reads across environments.
 - Remote setup honors `--api-url` and the effective configured endpoint for validation and persistence. Unattended setup accepts `SMARTMEMORY_API_KEY`.
 - Windows setup and MCP login share one credential fallback. Credential updates lock writers and verify a protected current-SID-only temporary file before writing any key, preserving the previous key on ACL failure. Legacy MCP credentials migrate once and are removed.
