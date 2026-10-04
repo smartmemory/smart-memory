@@ -1,8 +1,8 @@
 """`sm code` subgroup — code repository indexing.
 
-Wraps :func:`smartmemory.SmartMemory.ingest_code`, which writes ``code:index``
-origin-tagged nodes into the local knowledge graph and emits structured
-progress to stdout.
+Wraps local or remote ``ingest_code`` and emits structured progress to stdout.
+Remote mode parses the checkout locally and uploads entities and relations to
+the configured hosted workspace without opening a local memory store.
 
 Progress streaming
 ------------------
@@ -136,13 +136,13 @@ def code_index_cmd(
 
     try:
         from smartmemory_app.launch_metrics import emit as _lm_emit
+
         _lm_emit("index.start", {"repo": repo_id, "languages": lang_list})
     except Exception:
         pass
 
-    # We index against the local lite memory directly. Going through the daemon
-    # HTTP API would require a new route; the indexer is heavy and runs in the
-    # caller's process anyway, so direct is the simpler path.
+    # Storage selects local Lite or the hosted adapter. Both parse in this
+    # process, and the remote adapter uploads only the parsed contract fields.
     try:
         from smartmemory_app.storage import get_memory
     except Exception as exc:  # pragma: no cover — import failure is environmental
@@ -156,10 +156,8 @@ def code_index_cmd(
         )
 
     if not hasattr(memory, "ingest_code"):
-        raise click.ClickException(
-            "Active backend does not support code indexing "
-            "(remote mode is not yet supported). Switch to local mode: sm config mode local"
-        )
+        log.warning("Code indexing refused: active backend lacks ingest_code")
+        raise click.ClickException("Active backend does not support code indexing.")
 
     started = time.time()
     try:
@@ -186,6 +184,7 @@ def code_index_cmd(
 
     try:
         from smartmemory_app.launch_metrics import emit as _lm_emit
+
         _lm_emit(
             "index.complete",
             {

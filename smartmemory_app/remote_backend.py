@@ -19,13 +19,17 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Optional
 
 import httpx
 
 from smartmemory_app.config import get_api_key, set_api_key
 
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from smartmemory.code.models import IndexResult
 
 
 class RemoteBackendError(RuntimeError):
@@ -269,6 +273,79 @@ class RemoteMemory:
         return f"Switched to team: {team_id}"
 
     # ── MCP tool interface (same signatures as local storage.py) ────────────
+
+    def ingest_code(
+        self,
+        directory: str,
+        repo: str,
+        commit_hash: str | None = None,
+        exclude_dirs: list[str] | None = None,
+        languages: list[str] | None = None,
+    ) -> IndexResult:
+        """Parse locally, then replace one repo in the configured hosted workspace.
+
+        Use the existing authenticated HTTP client. Never issue DELETE or send
+        a local directory for the server to read. Replacement and rollback are
+        owned by the scoped service endpoint, so do not chunk or retry writes.
+        """
+        from smartmemory_app.hosted_code import prepare_code_index
+
+        if not self._team_id:
+            raise RemoteBackendError(
+                "Hosted code index requires a configured workspace (team_id).", 400
+            )
+        if not self._access_token:
+            raise RemoteBackendError(
+                "Hosted code index requires a SmartMemory API key.", 401
+            )
+        started = time.monotonic()
+        body, result = prepare_code_index(
+            directory, repo, commit_hash, exclude_dirs, languages
+        )
+        try:
+            response = self.request(
+                "POST", "/memory/code/index", timeout=120, json=body
+            )
+        except RemoteBackendError as exc:
+            if exc.status_code == 402:
+                message = f"Hosted code index refused by max_repos cap: {exc}"
+            elif exc.status_code == 413:
+                message = (
+                    f"Hosted code index refused by MAX_REQUEST_BODY_BYTES cap: {exc}"
+                )
+            else:
+                message = (
+                    f"Hosted code replacement failed: {exc}. "
+                    "Replacement was not confirmed, partial server changes may exist. No retry was attempted."
+                )
+            log.warning("%s", message)
+            raise RemoteBackendError(message, exc.status_code) from exc
+        counts = ("entities_created", "edges_created")
+        expected = (len(body["entities"]), len(body["relations"]))
+        if (
+            not isinstance(response, dict)
+            or response.get("replaced") is not True
+            or response.get("errors")
+            or any(
+                type(response.get(key)) is not int or response[key] != n
+                for key, n in zip(counts, expected)
+            )
+        ):
+            message = (
+                "Hosted code replacement incomplete or unconfirmed: "
+                f"expected entities={expected[0]} edges={expected[1]}, received {response!r}. "
+                "Partial server changes may exist. No retry was attempted."
+            )
+            log.warning("%s", message)
+            raise RemoteBackendError(message)
+        result.entities_created, result.edges_created = expected
+        result.replaced = True
+        result.elapsed_seconds = round(time.monotonic() - started, 2)
+        log.warning(
+            "Hosted code index stores graph entities and relations only: "
+            "the hosted endpoint does not generate vector embeddings (embeddings=0)."
+        )
+        return result
 
     def ingest(
         self,
