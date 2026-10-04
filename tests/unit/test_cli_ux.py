@@ -16,6 +16,7 @@ from click.testing import CliRunner
 @pytest.fixture
 def runner(tmp_path, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SMARTMEMORY_MODE", "local")
     return CliRunner()
 
 

@@ -153,6 +153,41 @@ def _build_app() -> FastAPI:
 
         cfg = load_config()
         startup_status, startup_reason = _get_startup_state()
+        if cfg.mode == "remote":
+            # A local health probe proves only this proxy can answer. Opening
+            # RemoteMemory here can bootstrap hosted auth, including during stop.
+            status = startup_status or "ok"
+            response = {
+                "service": "smartmemory",
+                "status": status,
+                "pid": os.getpid(),
+                "mode": "remote",
+                "host_role": "local_proxy_viewer",
+                "local_proxy_status": status,
+                "api_url": cfg.api_url,
+                "workspace_id": cfg.team_id or None,
+                "workspace_selection": "configured"
+                if cfg.team_id
+                else "hosted_default",
+                "hosted_connectivity": "not_checked",
+                "hosted_connectivity_hint": "Run: sm status",
+                "extraction_location": "hosted",
+                "hosted_extraction": "not_checked",
+                "memories": -1,
+                "work_graph": None,
+                "reextract_offer": None,
+                "llm_provider": "hosted",
+                "llm_key_present": None,
+                "embedding_provider": "hosted",
+                "async_enrichment": {"enabled": False},
+                "capabilities": _capabilities("remote"),
+            }
+            if status == "degraded":
+                response["degraded_reason"] = (
+                    startup_reason
+                    or "Local proxy/viewer startup did not complete. Run sm doctor."
+                )
+            return response
         if startup_status in {"warming", "degraded"}:
             from smartmemory_app.config import llm_key_present
 
@@ -420,6 +455,15 @@ def _start_background_warmup() -> threading.Thread:
 
 def _print_llm_extraction_status() -> None:
     """Disclose the effective LLM route without hiding local extraction/enrichment."""
+    from smartmemory_app.config import load_config
+
+    if load_config().mode == "remote":
+        print(
+            "  LLM extraction: runs on the hosted service (capability not checked here).",
+            flush=True,
+        )
+        print("  Hosted connectivity: not checked here. Run: sm status", flush=True)
+        return
     from smartmemory_app.storage import apply_runtime_config, llm_extraction_warning
 
     apply_runtime_config()
@@ -428,6 +472,21 @@ def _print_llm_extraction_status() -> None:
         print(f"  {warning}", flush=True)
     else:
         print("  LLM extraction: enabled (deferred)", flush=True)
+
+
+def _print_enrichment_status() -> None:
+    """Name the active enrichment host without probing either backend."""
+    from smartmemory_app.config import load_config
+
+    if load_config().mode == "remote":
+        print(
+            "Enrichment: runs on the hosted service, not in a local worker.", flush=True
+        )
+    else:
+        print(
+            "Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)",
+            flush=True,
+        )
 
 
 def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
@@ -513,10 +572,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # The ingest endpoint enqueues to a SQLite table; the worker drains it.
     # No in-process threading — avoids the _drain_running import bug and
     # keeps the daemon process stable.
-    print(
-        "Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)",
-        flush=True,
-    )
+    _print_enrichment_status()
 
     # Warm only after all process-level lifecycle pieces are installed. The health
     # route sees the state set immediately before the thread starts; it never guesses

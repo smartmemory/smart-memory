@@ -160,7 +160,6 @@ def test_restart_stops_orphan_even_when_daemon_absent(monkeypatch):
         "_start_with_progress",
         lambda **kw: events.append("replacement started") or {"status": "ok"},
     )
-    monkeypatch.setattr(cli, "_report_start_status", lambda info: None)
     result = CliRunner().invoke(cli.cli, ["restart"])
     assert result.exit_code == 0, result.output
     assert events == ["orphan stopped", "replacement started"]

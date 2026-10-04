@@ -644,8 +644,55 @@ def provenance_import_codex(codex_dir, since, dry_run) -> None:
 # ── Daemon lifecycle ────────────────────────────────────────────────────────
 
 
-def _report_start_status(info: dict | None, *, just_started: bool = True) -> None:
+def _disclose_remote_proxy(action: str) -> bool:
+    """Explain local lifecycle scope without resolving credentials or calling hosted APIs."""
+    from smartmemory_app.config import load_config
+
+    cfg = load_config()
+    if cfg.mode != "remote":
+        return False
+    click.echo(f"Remote mode: {action} manages the LOCAL proxy/viewer host.")
+    click.echo(f"  API:       {redact_credentials(cfg.api_url)}")
+    click.echo(
+        f"  Workspace: {cfg.team_id or 'default (selected by hosted authentication)'}"
+    )
+    click.echo("Hosted deployment is not controlled by this command.")
+    click.echo("Hosted connectivity: not checked here. Run: sm status")
+    click.echo(
+        "Extraction runs on the hosted service. Its capability is not checked here."
+    )
+    return True
+
+
+def _report_start_status(
+    info: dict | None, *, just_started: bool = True, remote: bool = False
+) -> None:
     """Print a truthful startup outcome or fail when no daemon answered."""
+    if remote:
+        if info is None:
+            raise click.ClickException(
+                "Local proxy/viewer host did not respond after startup. Run: sm doctor"
+            )
+        status = info.get("status")
+        if status == "ok":
+            click.echo("Local proxy/viewer host is ready.")
+        elif status == "warming":
+            click.echo(
+                "Local proxy/viewer host is warming up. Readiness is not confirmed."
+            )
+            click.echo("Check local readiness with: sm start --wait")
+        elif status == "degraded":
+            click.echo(
+                "Local proxy/viewer host needs attention. Readiness is not confirmed."
+            )
+            reason = info.get("degraded_reason") or "No reason was reported."
+            click.echo(f"Problem: {redact_credentials(reason)}")
+            click.echo("Next step: Run: sm doctor")
+        else:
+            raise click.ClickException(
+                "Local proxy/viewer host gave an unexpected health response. Run: sm doctor"
+            )
+        return
     if info is None:
         raise click.ClickException(
             "SmartMemory did not respond after startup. Run: sm doctor"
@@ -728,29 +775,37 @@ def start_cmd(num_workers: int, wait: bool) -> None:
     """Start the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import get_status
 
+    remote = _disclose_remote_proxy("start")
     try:
         current = get_status()
     except Exception as exc:
         raise _daemon_failure("start", exc) from None
     if current is not None:
         if current.get("status") == "ok":
-            click.echo("SmartMemory is already running.")
+            if remote:
+                click.echo("Local proxy/viewer host is already running.")
+                _report_start_status(current, just_started=False, remote=True)
+            else:
+                click.echo("SmartMemory is already running.")
             return
         if current.get("status") != "warming" or not wait:
-            _report_start_status(current, just_started=False)
+            _report_start_status(current, just_started=False, remote=remote)
             return
-    click.echo("Starting SmartMemory (loading models)...")
+    message = "Starting local proxy/viewer host" if remote else "Starting SmartMemory"
+    click.echo(
+        f"{message}..." if remote else "Starting SmartMemory (loading models)..."
+    )
     try:
         info = _start_with_progress(
             num_workers=num_workers,
-            message="Starting SmartMemory",
+            message=message,
             wait_until_ready=wait,
         )
     except click.ClickException:
         raise
     except Exception as exc:
         raise _daemon_failure("start", exc) from None
-    _report_start_status(info)
+    _report_start_status(info, remote=remote)
 
 
 @cli.command("stop")
@@ -759,14 +814,22 @@ def stop_cmd() -> None:
     """Stop the SmartMemory daemon."""
     from smartmemory_app.daemon import stop_daemon, is_running, should_be_running
 
+    remote = _disclose_remote_proxy("stop")
     try:
         active = is_running(require_healthy=False) or should_be_running()
         stop_daemon()
     except Exception as exc:
         raise _daemon_failure("stop", exc) from None
-    click.echo(
-        "Daemon stopped." if active else "Daemon is not running. Workers stopped."
-    )
+    if remote:
+        click.echo(
+            "Local proxy/viewer host stopped."
+            if active
+            else "Local proxy/viewer host is not running. Local workers stopped."
+        )
+    else:
+        click.echo(
+            "Daemon stopped." if active else "Daemon is not running. Workers stopped."
+        )
 
 
 @cli.command("restart")
@@ -781,26 +844,33 @@ def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and its core worker."""
     from smartmemory_app.daemon import stop_daemon
 
+    remote = _disclose_remote_proxy("restart")
+    stop_message = (
+        "Stopping local proxy/viewer host" if remote else "Stopping SmartMemory"
+    )
+    start_message = (
+        "Starting local proxy/viewer host" if remote else "Starting SmartMemory"
+    )
     try:
-        click.echo("Stopping SmartMemory...")
+        click.echo(f"{stop_message}...")
         from smartmemory_app.progress import startup_progress
 
-        with startup_progress("Stopping SmartMemory", emit=click.echo):
+        with startup_progress(stop_message, emit=click.echo):
             stop_daemon()
     except Exception as exc:
         raise _daemon_failure("stop", exc) from None
-    click.echo("Starting SmartMemory...")
+    click.echo(f"{start_message}...")
     try:
         info = _start_with_progress(
             num_workers=num_workers,
-            message="Starting SmartMemory",
+            message=start_message,
             wait_until_ready=True,
         )
     except click.ClickException:
         raise
     except Exception as exc:
         raise _daemon_failure("start", exc) from None
-    _report_start_status(info)
+    _report_start_status(info, remote=remote)
 
 
 def _installed_version_from_subprocess() -> str | None:
