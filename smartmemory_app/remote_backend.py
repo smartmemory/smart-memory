@@ -196,7 +196,14 @@ class RemoteMemory:
         return result
 
     def list_memories(
-        self, limit: int = 50, offset: int = 0, order: str = "asc"
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        order: str = "asc",
+        *,
+        metadata_key: str | None = None,
+        metadata_value: str | None = None,
+        memory_type: str | None = None,
     ) -> dict:
         """Scoped GRAPH-API-1l page, following the Python SDK list contract.
 
@@ -205,10 +212,19 @@ class RemoteMemory:
         """
         if limit < 1 or offset < 0 or order not in ("asc", "desc"):
             raise RemoteBackendError("Invalid memory list limit, offset or order.", 422)
+        if (metadata_key is None) != (metadata_value is None):
+            raise RemoteBackendError(
+                "metadata_key and metadata_value must be supplied together.", 422
+            )
+        params = {"limit": limit, "offset": offset, "order": order}
+        if metadata_key is not None:
+            params.update(metadata_key=metadata_key, metadata_value=metadata_value)
+        if memory_type is not None:
+            params["memory_type"] = memory_type
         result = self.request(
             "GET",
             "/memory/list",
-            params={"limit": limit, "offset": offset, "order": order},
+            params=params,
         )
         if (
             not isinstance(result, dict)

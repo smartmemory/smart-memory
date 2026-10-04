@@ -276,7 +276,7 @@ def test_remote_search_renders_service_envelope(hosted):
     "args,message",
     [
         (["search", "note", "--project", "test"], "Property filters"),
-        (["add", "note", "--project", "test"], "Property flags"),
+        (["add", "note", "--prop", "origin=forged"], "Reserved remote add properties"),
     ],
 )
 def test_remote_unsupported_options_are_explicit(hosted, args, message):

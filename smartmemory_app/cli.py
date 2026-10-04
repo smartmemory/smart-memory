@@ -132,9 +132,18 @@ from smartmemory_app.install_check import (  # noqa: E402
 )
 
 
-def _parse_extra_props(args: list[str]) -> dict[str, str]:
+def _parse_extra_props(
+    args: list[str], explicit: tuple[str, ...] = ()
+) -> dict[str, str]:
     """Parse Click extra args (--key value pairs) into a property dict."""
     props = {}
+    for prop in explicit:
+        key, separator, value = prop.partition("=")
+        if not separator or not key or not value:
+            raise click.ClickException("--prop requires a non-empty key=value pair.")
+        if key in props:
+            raise click.ClickException(f"Duplicate property: {key}.")
+        props[key] = value
     i = 0
     while i < len(args):
         if (
@@ -142,10 +151,15 @@ def _parse_extra_props(args: list[str]) -> dict[str, str]:
             and i + 1 < len(args)
             and not args[i + 1].startswith("--")
         ):
-            props[args[i][2:]] = args[i + 1]
+            key = args[i][2:]
+            if not key or key in props:
+                raise click.ClickException(f"Invalid or duplicate property: {key}.")
+            props[key] = args[i + 1]
             i += 2
         else:
-            i += 1
+            raise click.ClickException(
+                f"Unsupported property option or missing value: {args[i]}."
+            )
     return props
 
 
@@ -1236,8 +1250,16 @@ def _prepare_direct_access(*, download: bool = False) -> None:
     is_flag=True,
     help="Add stdin as one memory instead of line-by-line.",
 )
+@click.option(
+    "--prop",
+    "explicit_props",
+    multiple=True,
+    help="Set a property as key=value. Repeat for multiple properties.",
+)
 @click.pass_context
-def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
+def add_cmd(
+    ctx, text: str, memory_type: str, as_whole: bool, explicit_props: tuple[str, ...]
+) -> None:
     """Add text as a memory. Use - or pipe stdin to read from a file.
 
     When reading from stdin, each non-empty line becomes a separate memory.
@@ -1271,7 +1293,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         )
         if not chunks:
             raise click.ClickException("Content cannot be empty.")
-        props = _parse_extra_props(ctx.args)
+        props = _parse_extra_props(ctx.args, explicit_props)
         ids = []
         warning = None
         for chunk in chunks:
@@ -1314,7 +1336,7 @@ def add_cmd(ctx, text: str, memory_type: str, as_whole: bool) -> None:
         return
     if not text.strip():
         raise click.ClickException("Content cannot be empty.")
-    props = _parse_extra_props(ctx.args)
+    props = _parse_extra_props(ctx.args, explicit_props)
     # DIST-LITE-QUIET-1: declare the CLI producer to the producer-neutral daemon.
     body: dict = {
         "content": text,
@@ -1517,6 +1539,12 @@ def retag_cmd(
     type=click.Choice(["consensus", "relevance", "semantic"]),
     help="consensus: shared entities; relevance: best-result bridges; semantic: asks an LLM",
 )
+@click.option(
+    "--prop",
+    "explicit_props",
+    multiple=True,
+    help="Filter by key=value. Remote '*' supports one exact filter.",
+)
 @click.pass_context
 def search_cmd(
     ctx,
@@ -1529,6 +1557,7 @@ def search_cmd(
     multi_hop: bool,
     max_hops: int,
     hop_strategy: str | None,
+    explicit_props: tuple[str, ...],
 ) -> None:
     """Search memories by semantic similarity. Use '*' to list all.
 
@@ -1545,6 +1574,12 @@ def search_cmd(
             )
     if hop_strategy is not None and not multi_hop:
         raise click.ClickException("--hop-strategy requires --multi-hop")
+    if (
+        not multi_hop
+        and ctx.get_parameter_source("max_hops")
+        == click.core.ParameterSource.COMMANDLINE
+    ):
+        raise click.ClickException("--max-hops requires --multi-hop")
     hop_options = {"multi_hop": True, "max_hops": max_hops} if multi_hop else {}
     if hop_strategy is not None:
         hop_options["hop_strategy"] = hop_strategy
@@ -1552,7 +1587,7 @@ def search_cmd(
         window = resolve_search_window(since, until, relative=True)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    props = _parse_extra_props(ctx.args)
+    props = _parse_extra_props(ctx.args, explicit_props)
     body: dict = {"query": query, "top_k": top_k, **window, **hop_options}
     if offset is not None:
         body["offset"] = offset
@@ -1624,8 +1659,13 @@ def search_cmd(
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id[:8]}  {content}")
     if page is not None and results and page["offset"] + len(results) < page["total"]:
+        import shlex
+
+        continuation_filters = "".join(
+            f" --prop {shlex.quote(f'{key}={value}')}" for key, value in props.items()
+        )
         click.echo(
-            f"Next page: sm search '*' --top-k {top_k} --offset {page['offset'] + len(results)}"
+            f"Next page: sm search '*' --top-k {top_k} --offset {page['offset'] + len(results)}{continuation_filters}"
         )
 
 

@@ -36,6 +36,22 @@ from smartmemory_app.config import (
 
 log = logging.getLogger(__name__)
 
+# Producer-owned fields. Shared with CLI validation so hosted writes cannot
+# bypass the property protection used by storage.ingest().
+RESERVED_INGEST_PROPERTIES = frozenset(
+    {
+        "memory_type",
+        "node_category",
+        "item_id",
+        "content",
+        "embedding",
+        "created_at",
+        "valid_from",
+        "valid_to",
+        "origin",
+    }
+)
+
 _memory: "SmartMemory | None" = None
 _data_path: Path | None = None  # resolved once on first init; reused by ingest()
 _init_lock = threading.Lock()
@@ -424,24 +440,11 @@ def ingest(
     # AND precedence guards, so it must be set only by the producer (the explicit `origin`
     # param), never via user-supplied properties (which would let a caller claim a
     # privileged origin, e.g. import:vault, and bypass attribution/tiering).
-    _RESERVED = frozenset(
-        {
-            "memory_type",
-            "node_category",
-            "item_id",
-            "content",
-            "embedding",
-            "created_at",
-            "valid_from",
-            "valid_to",
-            "origin",
-        }
-    )
     ctx: dict = {"memory_type": memory_type}
     if origin:
         ctx["origin"] = origin
     if properties:
-        dropped = _RESERVED.intersection(properties)
+        dropped = RESERVED_INGEST_PROPERTIES.intersection(properties)
         if dropped:
             log.warning(
                 "Dropped reserved ingest properties: %s", ", ".join(sorted(dropped))
@@ -449,7 +452,7 @@ def ingest(
         # Flatten user properties into context so they become top-level node
         # properties (metadata keys merge into graph node properties dict).
         for k, v in properties.items():
-            if k not in _RESERVED:
+            if k not in RESERVED_INGEST_PROPERTIES:
                 ctx[k] = v
     if isinstance(mem, RemoteMemory):
         return mem.ingest(content, memory_type, context=ctx)

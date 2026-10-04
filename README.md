@@ -196,6 +196,18 @@ configured workspace. The output shows the scoped total and a next-page command
 using `--offset`. The default page size is 5. Local wildcard listing continues to
 list all local memories.
 
+Remote `sm add "note" --prop project=atlas` stores the property in hosted ingest
+context. Repeat `--prop key=value` for more properties, or use `--project atlas`.
+Producer fields such as `origin` and `memory_type`, and hosted scope fields such
+as `workspace_id`, are reserved. Write keys must be simple identifiers without
+`__`. Use `--type` to choose the memory type.
+
+Remote `sm search '*' --prop project=atlas` lists exact matches without semantic
+ranking. One property filter is supported per request. `--prop memory_type=decision`
+uses the list route's type filter. Pagination retains the filter in the next-page
+command. Property filters with a text query, multiple filters, and semantic or
+time-window options on wildcard listing are explicitly refused.
+
 <details>
 <summary><strong>Full command reference</strong></summary>
 
@@ -250,7 +262,7 @@ smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
 
-In remote mode, `sm ask`, `add`, `search`, `recall`, `get` and `status` use the hosted service without a local daemon. `sm ask` uses the service's LLM credentials, so you only need your SmartMemory API key. Property flags on `add`, property filters on `search`, and `search '*'` are currently local-only. The guided tour, store maintenance, corpus import/export, seed-pack installation and transcript capture commands require local mode. Import dry runs can still validate files in remote mode.
+In remote mode, `sm ask`, `add`, `search`, `recall`, `get` and `status` use the hosted service without a local daemon. `sm ask` uses the service's LLM credentials, so you only need your SmartMemory API key. `add` accepts user properties, and `search '*'` supports paginated listing with one exact property filter. Property filters on semantic text searches are explicitly refused. The guided tour, store maintenance, corpus import/export, seed-pack installation and transcript capture commands require local mode. Import dry runs can still validate files in remote mode.
 
 Once a day, any `sm` command may end with one dim line telling you a newer release is on PyPI:
 
