@@ -214,7 +214,9 @@ def test_ingest_remote_branch_skips_lock(tmp_path):
     ):
         result = storage.ingest("remote content")
 
-    mock_mem.ingest.assert_called_once_with("remote content", "episodic")
+    mock_mem.ingest.assert_called_once_with(
+        "remote content", "episodic", context={"memory_type": "episodic"}
+    )
     mock_lock.assert_not_called()
     assert result == "remote-item-id"
 
@@ -235,9 +237,11 @@ def test_ingest_warns_when_reserved_properties_are_dropped(
             "content",
             origin="cli:add",
             properties={
+                "memory_type": "procedural",
                 "origin": "import:vault",
                 "item_id": "forged",
                 "source": "user",
+                "workspace_id": "test_p1_local_workspace",
             },
         )
 
@@ -246,6 +250,7 @@ def test_ingest_warns_when_reserved_properties_are_dropped(
         "memory_type": "episodic",
         "origin": "cli:add",
         "source": "user",
+        "workspace_id": "test_p1_local_workspace",
     }
     warnings = [
         record.getMessage()
@@ -255,6 +260,7 @@ def test_ingest_warns_when_reserved_properties_are_dropped(
     assert len(warnings) == 1
     assert "origin" in warnings[0]
     assert "item_id" in warnings[0]
+    assert "memory_type" in warnings[0]
 
 
 def test_get_remote_memory_singleton(tmp_path):

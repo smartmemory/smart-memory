@@ -238,13 +238,23 @@ class RemoteMemory:
 
     # ── MCP tool interface (same signatures as local storage.py) ────────────
 
-    def ingest(self, content: str, memory_type: str = "semantic") -> str:
+    def ingest(
+        self,
+        content: str,
+        memory_type: str = "semantic",
+        *,
+        context: dict | None = None,
+    ) -> str:
         """POST /memory/ingest (full pipeline). Returns item_id string.
 
         Uses /memory/ingest (not /memory/add) — ingest runs entity extraction,
         enrichment, linking, grounding. Returns {"item_id": ...} (not {"id": ...}).
+        Context carries producer origin and sanitized properties from storage.
+        The service overwrites workspace/scope metadata with authenticated scope.
         """
-        body = {"content": content, "context": {"memory_type": memory_type}}
+        ingest_context = dict(context or {})
+        ingest_context["memory_type"] = memory_type
+        body = {"content": content, "context": ingest_context}
         result = self._request("POST", "/memory/ingest", timeout=120, json=body)
         if err := (result or {}).get("error"):
             # Surface the failure — do NOT return "Error: ..." as the item_id, which

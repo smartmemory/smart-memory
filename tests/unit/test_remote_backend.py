@@ -6,9 +6,12 @@ Tests cover the critical behaviors identified in the coverage sweep:
   - get_neighbors() normalizes response to always include "edges" key
   - recall() deduplication handles both "item_id" and "id" field names
 
-All tests mock _request() to avoid network calls.
+Request-envelope tests exercise serialization through httpx.MockTransport.
+Other tests isolate _request() to avoid network calls.
 """
 
+import json
+import logging
 from unittest.mock import patch
 
 import httpx
@@ -51,6 +54,165 @@ def test_ingest_raises_on_failure(remote):
     with patch.object(remote, "_request", return_value={"error": "upstream timeout"}):
         with pytest.raises(RemoteBackendError, match="upstream timeout"):
             remote.ingest("hello world")
+
+
+@pytest.fixture
+def ingest_requests(monkeypatch):
+    """Capture serialized HTTP requests without using credentials or a live service."""
+    requests = []
+
+    def receive(request):
+        requests.append(request)
+        return httpx.Response(200, json={"item_id": "test_p1_remote_item"})
+
+    transport = httpx.MockTransport(receive)
+
+    def request(method, url, **kwargs):
+        with httpx.Client(transport=transport) as client:
+            return client.request(method, url, **kwargs)
+
+    monkeypatch.setattr(httpx, "request", request)
+    return requests
+
+
+@pytest.mark.parametrize(
+    "phase,memory_type,origin,content",
+    [
+        (
+            "observe",
+            "episodic",
+            "hook:observe",
+            'Tool `Bash` called. Input: {"command": "pwd"}. Result: test_p1_result',
+        ),
+        (
+            "distill",
+            "pending",
+            "lifecycle:distill",
+            "User: test_p1_prompt\nAssistant: test_p1_response",
+        ),
+        (
+            "learn",
+            "episodic",
+            "hook:learn",
+            "Error in `Bash`: test_p1_error",
+        ),
+    ],
+)
+def test_lifecycle_ingest_delivers_producer_fields(
+    remote, ingest_requests, monkeypatch, tmp_path, phase, memory_type, origin, content
+):
+    """Real lifecycle -> storage -> RemoteMemory -> serialized request for each phase."""
+    from smartmemory_app import storage
+    from smartmemory_app.lifecycle import MemoryLifecycle
+    from smartmemory_app.lifecycle_config import LifecycleConfig
+
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "test_p1_cwd_workspace")
+    monkeypatch.setattr(storage, "get_memory", lambda: remote)
+    lifecycle = MemoryLifecycle(f"test_p1_{phase}", LifecycleConfig())
+    if phase == "observe":
+        lifecycle.observe(
+            "Bash", {"command": "pwd"}, "test_p1_result", cwd=str(tmp_path)
+        )
+    elif phase == "distill":
+        lifecycle._current_user_turn = "test_p1_prompt"
+        lifecycle.distill("test_p1_response", cwd=str(tmp_path))
+    else:
+        lifecycle.learn("Bash", "test_p1_error", cwd=str(tmp_path))
+
+    assert len(ingest_requests) == 1
+    request = ingest_requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == "https://api.example.com/memory/ingest"
+    assert json.loads(request.content) == {
+        "content": content,
+        "context": {
+            "memory_type": memory_type,
+            "origin": origin,
+            "workspace_id": "test_p1_cwd_workspace",
+        },
+    }
+    # Cwd metadata is forwarded, but cannot select the hosted request scope.
+    assert request.headers["X-Workspace-Id"] == "t1"
+    assert request.headers["Authorization"] == "Bearer sk_test"
+
+
+def test_ingest_reserved_properties_cannot_override_producer_or_request_scope(
+    remote, ingest_requests, monkeypatch, caplog
+):
+    from smartmemory_app import storage
+
+    reserved = {
+        "memory_type",
+        "node_category",
+        "item_id",
+        "content",
+        "embedding",
+        "created_at",
+        "valid_from",
+        "valid_to",
+        "origin",
+    }
+    properties = {key: "forged" for key in reserved}
+    properties.update(
+        workspace_id="test_p1_untrusted_workspace",
+        tenant_id="test_p1_untrusted_tenant",
+        user_id="test_p1_untrusted_user",
+        source="test_p1_source",
+    )
+    before = dict(properties)
+    monkeypatch.setattr(storage, "get_memory", lambda: remote)
+
+    with caplog.at_level(logging.WARNING, logger="smartmemory_app.storage"):
+        result = storage.ingest(
+            "test_p1_content",
+            memory_type="pending",
+            origin="lifecycle:distill",
+            properties=properties,
+        )
+
+    assert result == "test_p1_remote_item"
+    assert properties == before
+    assert len(ingest_requests) == 1
+    request = ingest_requests[0]
+    assert json.loads(request.content) == {
+        "content": "test_p1_content",
+        "context": {
+            "memory_type": "pending",
+            "origin": "lifecycle:distill",
+            "workspace_id": "test_p1_untrusted_workspace",
+            "tenant_id": "test_p1_untrusted_tenant",
+            "user_id": "test_p1_untrusted_user",
+            "source": "test_p1_source",
+        },
+    }
+    assert request.headers["X-Workspace-Id"] == "t1"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert warnings == [
+        f"Dropped reserved ingest properties: {', '.join(sorted(reserved))}"
+    ]
+
+
+def test_ingest_context_is_copied_and_requested_type_wins(remote, ingest_requests):
+    context = {
+        "memory_type": "procedural",
+        "origin": "hook:learn",
+        "source": "test_p1_source",
+    }
+    before = dict(context)
+    assert (
+        remote.ingest("test_p1_content", "episodic", context=context)
+        == "test_p1_remote_item"
+    )
+    assert context == before
+    assert json.loads(ingest_requests[0].content)["context"] == {
+        **before,
+        "memory_type": "episodic",
+    }
 
 
 # ── search ────────────────────────────────────────────────────────────────

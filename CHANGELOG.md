@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Remote lifecycle observe, distill and learn now deliver producer origin, requested memory type and properties through hosted ingest. Reserved property keys cannot override producer fields, and the service retains authority over workspace scope.
+
 ## [1.5.20] - 2026-10-04
 
 - Windows wrapper and standalone MCP environments now use the same canonical credential file and lock. A newer legacy credential migrates before its source is removed, so account rotations survive reads across environments.

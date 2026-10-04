@@ -407,7 +407,7 @@ def ingest(
               including item_id, entity_ids, queued and run_id, plus an optional
               warning when core cannot route LLM extraction.
         properties: Optional user-supplied key-value properties stored in metadata.
-        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by local write
+        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by write
             surfaces (CLI sm add → "cli:add"). Threaded into core ingest via context
             so the stored item is attributed instead of falling to origin='unknown'.
 
@@ -419,8 +419,6 @@ def ingest(
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
 
-    if isinstance(mem, RemoteMemory):
-        return mem.ingest(content, memory_type)  # TODO: pass properties to remote API
     # Reserved keys that user properties must not overwrite.
     # DIST-LITE-QUIET-1 (Codex review): "origin" is reserved — it drives tier visibility
     # AND precedence guards, so it must be set only by the producer (the explicit `origin`
@@ -453,6 +451,8 @@ def ingest(
         for k, v in properties.items():
             if k not in _RESERVED:
                 ctx[k] = v
+    if isinstance(mem, RemoteMemory):
+        return mem.ingest(content, memory_type, context=ctx)
     # Local path — acquire write lock for cross-process coordination
     data_path = _data_path if _data_path is not None else _resolve_data_dir()
     lock = _get_lock_file(data_path)
