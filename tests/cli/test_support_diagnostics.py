@@ -150,7 +150,8 @@ def test_bundle_contains_redacted_evidence(monkeypatch, tmp_path):
     all_text = "\n".join(texts.values())
     assert KEY not in all_text
     assert "user:password" not in all_text and "signed=value" not in all_text
-    assert "<redacted>" in texts["config.txt"]
+    assert "https://<custom-host>" in texts["config.txt"]
+    assert "example.test" not in texts["config.txt"]
 
 
 @pytest.mark.parametrize("timeout", [False, True])

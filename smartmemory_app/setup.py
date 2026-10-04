@@ -860,8 +860,9 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         team_id = user.get("default_team_id") or ""
         click.echo(f"Authenticated as {user.get('email')}. Team: {team_id}")
     except Exception as e:
-        click.echo(f"ERROR: API key validation failed: {e}", err=True)
-        raise SystemExit(1)
+        raise click.ClickException(
+            redact_credentials(f"Remote authentication failed: {e}")
+        ) from e
 
     set_api_key(api_key)  # persist to OS keychain (warns if unavailable, never raises)
     cfg = SmartMemoryConfig(
@@ -963,6 +964,9 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
                 raise MissingModelError(
                     f"Embedding model {model!r} could not be prepared. Run sm setup. Details: {exc}"
                 ) from exc
+        from smartmemory_app.warm import warm_models
+
+        warm_models(reranker=False, strict=True)
         if missing:
             click.echo(f"Downloaded local embedding model {model!r}.")
         else:

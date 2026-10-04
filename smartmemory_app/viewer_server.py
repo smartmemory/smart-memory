@@ -501,6 +501,11 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
 
     data_path = _resolve_data_dir()
     install_daemon_diagnostics(data_path, redact_output=True)
+    from smartmemory_app.crash_reporter import flush_in_background
+    from smartmemory_app.hook_failures import consume_in_background, marker_directory
+
+    flush_in_background()
+    consume_in_background(marker_directory())
     data_path.mkdir(parents=True, exist_ok=True)
     pid_file = data_path / "daemon.pid"
 

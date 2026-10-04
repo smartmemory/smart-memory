@@ -3,6 +3,8 @@
 export PYTHONUTF8=1
 # DIST-AGENT-HOOKS-1: Observe phase — PostToolUse hook (async)
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
+HOOK_MARKER_DIR="$HOME/.smartmemory"
+mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR"
 # Capture stdin before backgrounding: non-interactive async jobs inherit /dev/null.
 if ! mkdir -p "$HOOK_DATA_DIR/tmp"; then
     echo "WARNING: lifecycle observe payload lost: cannot create hook temp directory" >&2
@@ -26,6 +28,10 @@ if ! cat >"$PAYLOAD_FILE" 2>>"$HOOK_DATA_DIR/hooks.log"; then
 fi
 {
     smartmemory lifecycle observe <"$PAYLOAD_FILE"
+    HOOK_EXIT=$?
+    if [ "$HOOK_EXIT" -ne 0 ]; then
+        printf '%s\t%s\t%s\n' 'observe' "$HOOK_EXIT" "${EPOCHSECONDS:-0}" >>"$HOOK_MARKER_DIR/hook-failures.tsv"
+    fi
     rm -f "$PAYLOAD_FILE"
 } >/dev/null 2>>"$HOOK_DATA_DIR/hooks.log" &
 disown

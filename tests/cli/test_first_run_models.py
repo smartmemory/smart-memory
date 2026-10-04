@@ -133,6 +133,12 @@ def machine(_isolated):
     with (
         patch("spacy.util.is_package", side_effect=m.is_package),
         patch("huggingface_hub.snapshot_download", side_effect=m.snapshot_download),
+        # The simulated installation supplies an inference-capable local model.
+        # Keep core's warm() real so setup also validates the loader result.
+        patch(
+            "smartmemory.plugins.embedding.shared_onnx_minilm",
+            return_value=MagicMock(encode_one=lambda text: [0.1] * 384),
+        ),
         patch(
             "smartmemory.tools.factory.create_lite_memory",
             side_effect=m.create_lite_memory,

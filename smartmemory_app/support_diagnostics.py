@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from smartmemory_app.diagnostics import redact_credentials
 from smartmemory_app.install_check import PROXY_ENV_VARS
+from smartmemory_app.report_privacy import endpoint_inventory
 
 DEFAULT_MODELS = (
     "sentence-transformers/all-MiniLM-L6-v2",
@@ -44,7 +45,7 @@ def proxy_summary() -> str:
         for name in PROXY_ENV_VARS
         if os.environ.get(name)
     ]
-    system = _best_effort(urllib.request.getproxies)
+    system = _best_effort(lambda: endpoint_inventory().proxies)
     if isinstance(system, dict):
         entries += [
             f"system {name}={proxy_host(value)}"
@@ -121,7 +122,7 @@ def _probe(target: str) -> str:
     started = time.monotonic()
     url = target if "://" in target else f"https://{target}"
     parsed = urlsplit(url)
-    proxies = urllib.request.getproxies()
+    proxies = endpoint_inventory().proxies
     proxy = proxies.get(parsed.scheme) or proxies.get("all")
     if urllib.request.proxy_bypass(parsed.hostname or ""):
         proxy = None
@@ -217,10 +218,11 @@ def _writable(data_dir: Path) -> str:
     return f"Data directory: {data_dir}, writable"
 
 
-def local_checks() -> list[str]:
+def local_checks(*, budget: float | None = None) -> list[str]:
     from smartmemory_app.bug_report import debug_log_path
 
-    rows = network_checks()
+    deadline = time.monotonic() + budget if budget is not None else None
+    rows = network_checks(budget=min(2.0, budget) if budget is not None else 4.0)
     for name, call in (
         ("Proxy", proxy_summary),
         ("Models", _cache_status),
@@ -228,6 +230,15 @@ def local_checks() -> list[str]:
         ("Storage", lambda: _writable(debug_log_path().parent)),
     ):
         rows.append(redact_credentials(f"{name}: {_best_effort(call)}"))
+    from smartmemory_app.diagnostic_process import offline_checks
+    from smartmemory_app.hook_failures import recent_failures, marker_directory
+
+    rows.extend(recent_failures(marker_directory()))
+    from smartmemory_app.report_outbox import queued_count
+
+    rows.append(f"Queued reports: {queued_count()}")
+    remaining = max(0.05, deadline - time.monotonic()) if deadline is not None else 6.0
+    rows.extend(offline_checks("doctor", budget=remaining))
     return rows
 
 

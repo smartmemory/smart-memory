@@ -76,12 +76,17 @@ def test_setup_local_uses_real_core_prerequisite(local_config):
     with (
         patch("huggingface_hub.snapshot_download", side_effect=resolve) as snapshot,
         patch("smartmemory.utils.hf_models.load_sentence_transformer") as construct,
+        patch(
+            "smartmemory.plugins.embedding.shared_onnx_minilm",
+            return_value=Mock(encode_one=lambda text: [0.1] * 384),
+        ) as model,
     ):
         setup._ensure_embedding_model("local")
     assert snapshot.call_count == 2
     assert snapshot.call_args_list[0].kwargs["local_files_only"] is True
     assert snapshot.call_args_list[1].kwargs["local_files_only"] is False
     construct.assert_not_called()
+    model.assert_called_once()
 
 
 @pytest.mark.parametrize("previous", [None, "false", "true"])
@@ -94,6 +99,12 @@ def test_setup_pinned_embedder_fetches_transitive_code(
     monkeypatch.setenv(hf_models.TRUST_REMOTE_CODE_ENV, "true")
     monkeypatch.setenv("SMARTMEMORY_EMBEDDING_LOCAL_MODEL", model_id)
     monkeypatch.setenv("SMARTMEMORY_EMBEDDING_BACKEND", "torch")
+    monkeypatch.setattr(
+        "smartmemory.plugins.embedding.EmbeddingService._pinned_local_model", None
+    )
+    monkeypatch.setattr(
+        "smartmemory.plugins.embedding.EmbeddingService._pinned_local_model_name", None
+    )
     if previous is not None:
         monkeypatch.setenv(hf_models.ALLOW_DOWNLOAD_ENV, previous)
     fetched = local_config / "snapshot"
@@ -111,6 +122,7 @@ def test_setup_pinned_embedder_fetches_transitive_code(
         assert path == str(fetched)
         assert kwargs["trust_remote_code"] is True
         assert hf_models.downloads_allowed() is True
+        return Mock(encode=lambda text: [0.1] * 768)
 
     with (
         patch("huggingface_hub.snapshot_download", side_effect=resolve),
@@ -119,8 +131,8 @@ def test_setup_pinned_embedder_fetches_transitive_code(
         ) as loader,
     ):
         setup._ensure_embedding_model("local")
-    loader.assert_called_once()
-    assert events == ["snapshot", "snapshot", "construct"]
+    assert loader.call_count == 2
+    assert events == ["snapshot", "snapshot", "construct", "snapshot", "construct"]
     assert os.environ.get(hf_models.ALLOW_DOWNLOAD_ENV) == previous
 
 

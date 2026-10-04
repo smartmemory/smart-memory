@@ -141,12 +141,14 @@ def test_body_filter_and_home_paths():
 
 
 def test_dedupe_persistence_expiry_and_daily_cap(capture, tmp_path, monkeypatch):
-    now = [1_800_000_000.0]
-    monkeypatch.setattr(reporter.time, "time", lambda: now[0])
+    now = [time.time()]
+    from smartmemory_app import report_outbox
+
+    monkeypatch.setattr(report_outbox.time, "time", lambda: now[0])
     error = chained_error()
     assert reporter.report_exception(error, source="cli").status == "sent"
     assert reporter.report_exception(error, source="daemon").status == "suppressed"
-    state = json.loads((tmp_path / ".crash-report-state.json").read_text())
+    state = json.loads((report_outbox.directory() / ".reservations").read_text())
     assert state["count"] == 1 and len(state["recent"]) == 1
     now[0] += 601
     assert reporter.report_exception(error, source="cli").status == "sent"
@@ -163,7 +165,10 @@ def test_dedupe_persistence_expiry_and_daily_cap(capture, tmp_path, monkeypatch)
         reporter.report_exception(LookupError("new day"), source="daemon").status
         == "sent"
     )
-    assert json.loads((tmp_path / ".crash-report-state.json").read_text())["count"] == 1
+    assert (
+        json.loads((report_outbox.directory() / ".reservations").read_text())["count"]
+        == 1
+    )
 
 
 @pytest.mark.parametrize("kind", ["env", "config"])
@@ -208,7 +213,8 @@ def test_failed_cli_send_discloses_recovery(capture, monkeypatch):
     result = CliRunner().invoke(cli_module.cli, ["start"])
     assert result.exit_code == 1
     assert (
-        "Crash report could not be sent; run smartmemory report --zip" in result.output
+        "Crash report queued for the next CLI or daemon start. Run smartmemory report --zip"
+        in result.output
     )
 
 
@@ -324,31 +330,32 @@ def test_transport_failure_never_raises(capture, monkeypatch, caplog):
     # Replace only the real client's send method, retaining the mocked transport boundary.
     monkeypatch.setattr(httpx._client.Client, "post", failing_post)
     result = reporter.report_exception(RuntimeError("failure"), source="daemon")
-    assert result.status == "failed" and "could not be sent" in caplog.text
+    assert result.status == "queued" and "could not be sent" in caplog.text
     assert KEY not in caplog.text
 
 
-def test_wall_clock_send_budget(capture, monkeypatch, caplog):
+def test_wall_clock_send_budget(capture, monkeypatch):
+    from smartmemory_app.report_outbox import queued_count
+
     release = threading.Event()
-    original_join = threading.Thread.join
+    finished = threading.Event()
 
     def slow_post(self, *args, **kwargs):
-        release.wait(2)
-        raise httpx.ConnectError("test released")
-
-    def short_join(self, timeout=None):
-        assert timeout == 5
-        original_join(self, 0.02)
+        try:
+            release.wait(2)
+            raise httpx.ConnectError("test released")
+        finally:
+            finished.set()
 
     monkeypatch.setattr(httpx._client.Client, "post", slow_post)
-    monkeypatch.setattr(threading.Thread, "join", short_join)
     try:
         start = time.monotonic()
         result = reporter.report_exception(RuntimeError("slow failure"), source="cli")
-        assert result.status == "failed" and time.monotonic() - start < 0.5
-        assert "five-second send budget" in caplog.text
+        assert result.status == "queued" and time.monotonic() - start < 0.5
+        assert queued_count() == 1
     finally:
         release.set()
+        assert finished.wait(2)
 
 
 def test_first_run_discloses_automatic_reporting(capture, monkeypatch):
@@ -374,16 +381,14 @@ def test_first_run_discloses_automatic_reporting(capture, monkeypatch):
     assert not capture["rows"]
 
 
-def test_manual_send_is_explicitly_available_when_auto_is_disabled(
-    capture, monkeypatch
-):
+def test_manual_send_respects_optout_and_saves_bundle(capture, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_CRASH_REPORTS", "0")
     monkeypatch.setattr(
         cli_module.doctor_cmd, "callback", lambda *args: print("Doctor")
     )
     result = CliRunner().invoke(cli_module.cli, ["report", "--send", "--yes"])
-    assert result.exit_code == 0 and "Sent. Report ID:" in result.output
-    assert capture["rows"][0]["event"] == "smartmemory_support_report"
+    assert result.exit_code == 0 and "Support zip:" in result.output
+    assert not capture["rows"]
 
 
 def test_personal_key_is_rejected_without_capture(capture, monkeypatch):

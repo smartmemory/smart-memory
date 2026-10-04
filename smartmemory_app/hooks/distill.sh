@@ -4,6 +4,8 @@ export PYTHONUTF8=1
 # DIST-AGENT-HOOKS-1: Distill phase — Stop hook (async)
 # Pairs last_assistant_message with stored prompt
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
+HOOK_MARKER_DIR="$HOME/.smartmemory"
+mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR"
 # Capture stdin before backgrounding: non-interactive async jobs inherit /dev/null.
 if ! mkdir -p "$HOOK_DATA_DIR/tmp"; then
     echo "WARNING: lifecycle distill payload lost: cannot create hook temp directory" >&2
@@ -27,6 +29,10 @@ if ! cat >"$PAYLOAD_FILE" 2>>"$HOOK_DATA_DIR/hooks.log"; then
 fi
 {
     smartmemory lifecycle distill <"$PAYLOAD_FILE"
+    HOOK_EXIT=$?
+    if [ "$HOOK_EXIT" -ne 0 ]; then
+        printf '%s\t%s\t%s\n' 'distill' "$HOOK_EXIT" "${EPOCHSECONDS:-0}" >>"$HOOK_MARKER_DIR/hook-failures.tsv"
+    fi
     rm -f "$PAYLOAD_FILE"
 } >/dev/null 2>>"$HOOK_DATA_DIR/hooks.log" &
 disown

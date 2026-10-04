@@ -12,6 +12,19 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Remote `sm search '*'` lists scoped memories with `--top-k` page limits, `--offset` continuation and surfaced service errors.
 - Remote `sm code index` parses the checkout locally and uploads code entities and relations to the configured hosted workspace. Repo and request-size caps are explicit, failed replacements report uncertainty, and uploads never delete the previous index first. Incomplete directory traversal refuses replacement and reports failed paths, preserving the prior index. Hosted indexing reports that vector embeddings are unavailable.
 
+### Install troubleshooting
+
+- Handled setup, model warmup, store busy and reset failures use the anonymous crash reporter, shared opt-out and privacy filtering. User cancellations and ordinary usage errors are excluded. Failed setup prints bounded doctor guidance and a report ID or reporting status.
+- Hook shells record failed lifecycle commands without launching a reporter. The next CLI consumes each hook and exit code once per install per day. Doctor shows recent hook failures and repair guidance.
+- First-run checks validate the package's Python requirement and native vector/embedding imports, then cache successful checks per installed version. Failed native checks retry and report once.
+- Doctor inspects SQLite and vector snapshots without repairing them, checks dimensions/counts, detects active or stale locks, tests cached embeddings offline, and checks keyring, Git Bash, disk space and daemon port owners. Expensive probes run in a bounded child process.
+- Explicit `smartmemory warm` now returns an actionable failure when a loader fails instead of announcing successful warmup.
+- Reports go through a durable outbox: written (already privacy-filtered) before sending, removed only after confirmed delivery, retried at the next interactive command or daemon start, capped in size, with corrupt files quarantined. Opting out deletes queued reports unsent.
+- Redaction now also covers private API/proxy hosts (config, environment, OS proxy settings, URLs passed to setup), any user's profile path, and the current username, without altering report field names.
+- Lifecycle hooks never run diagnostics, flush the outbox or send reports. All six hooks write failure markers to `~/.smartmemory`, including installs with a custom data directory.
+- Doctor never sends, never consumes hook markers, never takes the store write lock, and shows pending hook failures and queued reports read-only.
+- Model warmup and setup report a real failure when the embedding or reranker loader fails.
+
 ## [1.5.20] - 2026-10-04
 
 - Windows wrapper and standalone MCP environments now use the same canonical credential file and lock. A newer legacy credential migrates before its source is removed, so account rotations survive reads across environments.

@@ -803,15 +803,45 @@ for background processing. The default scope is memories marked `ruler_only` or
 ## Having trouble?
 
 Automatic anonymous crash reports are on by default. They include versions, redacted
-error frames and bounded log tails. Credentials, memory bodies and home-directory names
-are removed. Disable them with `SMARTMEMORY_CRASH_REPORTS=0` or
+error frames and bounded log tails. Credentials, memory bodies, private API/proxy hosts and home-directory names
+are removed, including OS proxy identities and unsaved setup endpoints. Disable them with `SMARTMEMORY_CRASH_REPORTS=0` or
 `crash_reports = false` in the config file's `[smartmemory]` section.
+
+Handled installation failures also send anonymous reports and print a relevant doctor fix
+plus the report ID when sending finishes promptly. Reports are saved after privacy filtering in a durable outbox at
+`~/.smartmemory/report-outbox` before sending. Interactive commands wait at most
+400 ms for transport. Queued reports retry on non-lifecycle CLI and daemon starts. Cancelling a prompt or entering an invalid flag does not send a report.
+A passing first-run native check is cached for the installed version. Hook shell failures
+are recorded under `~/.smartmemory` even with a custom store directory. A non-lifecycle CLI invocation other than doctor reports them, at most once per hook and exit code each day. Lifecycle
+hooks do not consume markers, run installation probes, auto-diagnose or send reports.
+Markers are consumed only after their report is durably queued. The outbox retains
+up to 50 reports for 14 days. A delivery receipt prevents a recovered report from
+being sent again, and its original hook signature remains deduplicated. Malformed
+queue files are quarantined with a warning, keeping at most 10 copies, while healthy
+reports continue. Opting out deletes queued reports without sending them.
+
+`smartmemory doctor` reads the local SQLite and vector stores, checks vector dimensions
+and item counts, inspects owner metadata without acquiring the write lock, and tests one embedding using cached
+files with networking disabled. It also checks keyring, Git Bash on Windows, free disk
+space, and the configured daemon port. Expensive checks time out instead of hanging.
+An existing lock file without verified owner metadata shows "ownership unverified".
+It shows pending hook failures, the queued report count and repair commands. It
+does not consume markers, flush reports, acquire the store write lock, reindex or
+reset your store. Its writability check creates and removes a temporary file in the
+data directory. `smartmemory clear --yes` is a last resort that deletes all local memories. Back up your data first.
+
+For isolated reporter tests, `SMARTMEMORY_CRASH_REPORT_HOST=http://127.0.0.1:<port>`
+redirects the existing reporter to a local capture server. Its default is PostHog.
+Keep `SMARTMEMORY_CRASH_REPORTS=0` for tests that do not explicitly exercise reporting.
 
 Run `smartmemory doctor`, then `smartmemory report "What went wrong" --send` to send
 support diagnostics after confirmation. Use `--yes` to skip the prompt. Quote the printed
-report ID to support@smartmemory.ai. If sending fails, the command saves a support zip.
+report ID to support@smartmemory.ai. If delivery cannot be confirmed within the wait budget, the command reports that
+the upload is queued and saves a local support zip. With reporting disabled, it
+only saves the local zip.
 
-`smartmemory report --zip` creates a local support archive without uploading it.
+`smartmemory report --zip` creates a local support archive. Existing queued reports
+may retry on CLI startup, unless reporting is disabled.
 Email the file at the printed path to support@smartmemory.ai. The archive includes
 redacted diagnostics, configuration and recent CLI and daemon logs.
 Use `smartmemory report --zip "PATH"` to choose where to save it.

@@ -33,33 +33,55 @@ def is_warm() -> bool:
     try:
         from smartmemory.plugins.embedding import EmbeddingService
 
-        return EmbeddingService._st_model is not None or EmbeddingService._pinned_local_model is not None
+        return (
+            EmbeddingService._st_model is not None
+            or EmbeddingService._pinned_local_model is not None
+        )
     except Exception:
         return False
 
 
-def warm_models(*, reranker: bool = True) -> None:
+def warm_models(*, reranker: bool = True, strict: bool = False) -> None:
     """Synchronously load the local embedder (and optionally the reranker).
 
-    Never raises — a warm failure must not break the caller; the model will simply
-    load lazily on first use as before.
+    Background callers retain lazy loading. The explicit CLI uses strict mode
+    so a failed loader cannot announce successful model warmup.
     """
+    failures = []
     try:
         from smartmemory.plugins.embedding import EmbeddingService
 
-        if EmbeddingService().warm():
+        service = EmbeddingService()
+        needs_local = service.provider in {"local", "huggingface"} or (
+            service.provider == "openai" and not service.api_key
+        )
+        if service.warm():
             logger.debug("Embedder warmed")
+        elif needs_local:
+            raise RuntimeError(
+                "Embedding model could not be loaded. Run smartmemory setup to repair the local runtime/model cache."
+            )
     except Exception as e:
-        logger.debug("Embedder warm skipped: %s", e)
+        logger.warning("Embedder warm failed: %s", e)
+        failures.append(e)
 
     if reranker:
         try:
             from smartmemory.search.rerank import CrossEncoderReranker
 
             # block=True here is intentional: the CLI/prefetch path WANTS to wait.
-            CrossEncoderReranker.get_model(block=True)
+            if CrossEncoderReranker.get_model(block=True) is None:
+                raise RuntimeError(
+                    "Reranker model could not be loaded. Run smartmemory setup to repair the local runtime/model cache."
+                )
         except Exception as e:
-            logger.debug("Reranker warm skipped: %s", e)
+            logger.warning("Reranker warm failed: %s", e)
+            failures.append(e)
+
+    if strict and failures:
+        raise failures[
+            0
+        ]  # Preserve the real loader class and message for the handled report.
 
 
 def warm_models_background(*, reranker: bool = False) -> None:

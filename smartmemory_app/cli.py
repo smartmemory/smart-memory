@@ -413,7 +413,11 @@ class _CLIGroup(click.Group):
             record_cli_crash(exc, command_args)
             from smartmemory_app.crash_reporter import crash_notice
 
-            notice = crash_notice(exc, command_args)
+            notice = (
+                ""
+                if command_args[:1] in (["lifecycle"], ["doctor"])
+                else crash_notice(exc, command_args)
+            )
             if os.environ.get("SMARTMEMORY_DEBUG") == "1":
                 if notice:
                     click.echo(notice, err=True)
@@ -440,8 +444,19 @@ class _CLIGroup(click.Group):
     def invoke(self, ctx):
         try:
             return super().invoke(ctx)
-        except click.ClickException:
-            raise  # already a one-line user error (it may chain a model error)
+        except click.ClickException as exc:
+            from smartmemory_app.install_troubleshooting import (
+                handled_install_failure,
+                is_install_failure,
+            )
+            from smartmemory_app.runtime_diagnostics import CLI_COMMAND_ARGS
+
+            args = CLI_COMMAND_ARGS.get() or sys.argv[1:]
+            if args[:1] not in (["lifecycle"], ["doctor"]) and is_install_failure(
+                exc, args
+            ):
+                handled_install_failure(exc, args)
+            raise  # Click.main owns display and standalone/non-standalone exit semantics.
         except Exception as exc:
             if os.environ.get("SMARTMEMORY_DEBUG") == "1":
                 raise
@@ -468,9 +483,11 @@ class _CLIGroup(click.Group):
             )
 
             record_cli_crash(exc, CLI_COMMAND_ARGS.get() or sys.argv[1:])
-            from smartmemory_app.crash_reporter import crash_notice
+            from smartmemory_app.install_troubleshooting import handled_install_failure
 
-            notice = crash_notice(exc, CLI_COMMAND_ARGS.get() or sys.argv[1:])
+            args = CLI_COMMAND_ARGS.get() or sys.argv[1:]
+            if args[:1] not in (["lifecycle"], ["doctor"]):
+                handled_install_failure(exc, args)
             try:
                 from smartmemory_app.bug_report import debug_log_path
 
@@ -478,8 +495,7 @@ class _CLIGroup(click.Group):
                 click.echo(
                     redact_credentials(
                         f"{type(exc).__name__}: {summary}\nLog: {debug_log_path()}\n"
-                        + (notice + "\n" if notice else "")
-                        + "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                        "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
                     ),
                     err=True,
                 )
@@ -495,6 +511,24 @@ class _CLIGroup(click.Group):
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
     configure_console_encoding()
+    from smartmemory_app.bug_report import debug_log_path
+    from smartmemory_app.hook_failures import consume_in_background, marker_directory
+
+    try:
+        from smartmemory_app.install_check import first_run_check
+
+        command = click.get_current_context().invoked_subcommand
+        if command not in {"lifecycle", "doctor"}:
+            from smartmemory_app.crash_reporter import flush_in_background
+
+            flush_in_background()
+            consume_in_background(marker_directory())
+            if command not in {"doctor", "report"}:
+                first_run_check(debug_log_path().parent)
+    except Exception as exc:
+        log.warning(
+            "Startup installation diagnostics unavailable (%s)", type(exc).__name__
+        )
     try:
         _configure_cli_logging()
     except Exception:
@@ -954,7 +988,12 @@ def warm_cmd(no_reranker: bool) -> None:
 
     click.echo("Warming local models (one-time; subsequent runs are cached)...")
     t0 = time.perf_counter()
-    warm_models(reranker=not no_reranker)
+    try:
+        warm_models(reranker=not no_reranker, strict=True)
+    except Exception as exc:
+        raise click.ClickException(
+            redact_credentials(f"Model warmup failed: {exc}")
+        ) from exc
     click.echo(
         f"Models warm in {time.perf_counter() - t0:.1f}s. First add/search will now be fast."
     )
@@ -2626,8 +2665,10 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
 
     from smartmemory_app.support_diagnostics import local_checks
 
+    rows = []
     try:
-        for row in local_checks():
+        rows = local_checks()
+        for row in rows:
             click.echo(row)
     except Exception as exc:
         click.echo(
@@ -2636,8 +2677,27 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
 
     if not status.doctor_ok:
         raise SystemExit(1)
+    state_warnings = any(
+        row.startswith(
+            (
+                "Vector",
+                "SQLite",
+                "Embedding",
+                "Native",
+                "Write lock",
+                "Git Bash",
+                "Keyring",
+                "Free disk",
+                "Daemon port",
+            )
+        )
+        and ("warning:" in row or "FAIL:" in row)
+        for row in rows
+    )
     click.echo(
-        "\nAll checks passed. Installation checks passed, network and state warnings are advisory."
+        "\nInstallation checks passed. Local state warnings above need attention."
+        if state_warnings
+        else "\nAll checks passed. Installation checks passed, network and state warnings are advisory."
     )
 
 
@@ -2723,7 +2783,9 @@ def report_cmd(
         ):
             click.echo("Cancelled. Nothing sent.")
             return
-        result = send_support_report(texts)
+        from smartmemory_app.crash_reporter import bounded_report
+
+        result = bounded_report(send_support_report, texts)
         if result.status == "sent":
             click.echo(
                 f"Sent. Report ID: {result.report_id}. Quote this ID to support@smartmemory.ai."
@@ -2737,7 +2799,12 @@ def report_cmd(
                 raise click.ClickException(
                     redact_credentials(f"Could not write support bundle: {exc}")
                 ) from exc
-            click.echo(f"Could not send. Support zip: {path}")
+            if result.status == "queued":
+                click.echo(
+                    f"Support report queued for the next CLI or daemon start. Support zip: {path}"
+                )
+            else:
+                click.echo(f"Could not send. Support zip: {path}")
             click.echo("Email this file to support@smartmemory.ai.")
         return
     if zip_bundle:
