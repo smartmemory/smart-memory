@@ -1001,3 +1001,19 @@ def get(item_id: str) -> dict:
         return mem.get(item_id) or {}  # already a dict
     item = mem.get(resolve_readonly_item_id(mem._graph.backend, item_id))
     return item.to_dict() if item else {}
+
+
+def get_mirror_state(data_dir: str | None = None):
+    """Resolve the actual Lite root without opening memory or creating config.
+
+    A running local singleton's explicit data root wins unless a caller supplies
+    another explicit root. Config/namespace may live elsewhere.
+    """
+    from smartmemory_app.mirror_state import MirrorState
+
+    path = (
+        _resolve_data_dir(data_dir)
+        if data_dir is not None or _data_path is None
+        else _data_path
+    )
+    return MirrorState(path)
