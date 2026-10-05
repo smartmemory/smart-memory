@@ -342,9 +342,10 @@ def configured_dimension(service) -> int | None:
 
         return OnnxMiniLMEmbedder.dimension
     try:
-        snapshot = Path(
-            resolve_local_path(service.local_model_name(), backend=service.backend_name)
-        )
+        backend = (service.backend_name or "").split("/", 1)[0]
+        if backend == "onnxruntime":
+            backend = "onnx"
+        snapshot = Path(resolve_local_path(service.local_model_name(), backend=backend))
         config = json.loads((snapshot / "config.json").read_text())
         return config.get("hidden_size") or config.get("d_model")
     except (OSError, ValueError, RuntimeError):

@@ -714,3 +714,77 @@ def test_backend_startup_lines_are_emitted_in_order(monkeypatch, capsys):
     ]
     positions = [output.index(text) for text in expected]
     assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    "backend,expected,vector_size,healthy",
+    [
+        ("torch/cpu", 768, 768, True),
+        ("torch/cuda:0", 768, 768, True),
+        ("onnx/cpu", 768, 768, True),
+        ("onnxruntime/cpu", 768, 768, True),
+        ("torch/cpu", None, 768, True),
+        ("torch/cpu", 768, 384, False),
+        ("torch/cpu", None, 0, False),
+    ],
+)
+def test_custom_model_warmup_dimension(
+    monkeypatch, tmp_path, caplog, backend, expected, vector_size, healthy
+):
+    """Real cached model metadata gates size checks, never unknown dimensions."""
+    import json
+    import logging
+
+    from smartmemory_app import viewer_server
+    from smartmemory_app.store_diagnostics import configured_dimension
+
+    cache = tmp_path / "test_F1b_hf_cache"
+    model = cache / "models--sentence-transformers--all-mpnet-base-v2"
+    revision = "a" * 40
+    snapshot = model / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (model / "refs").mkdir()
+    (model / "refs" / "main").write_text(revision)
+    (snapshot / "config.json").write_text(
+        json.dumps({"hidden_size": expected} if expected else {})
+    )
+    # The resolver checks file presence. Inference is injected separately below.
+    (snapshot / "model.safetensors").write_bytes(b"test_F1b_weights")
+    (snapshot / "onnx").mkdir()
+    (snapshot / "onnx" / "model.onnx").write_bytes(b"test_F1b_onnx")
+    (snapshot / "tokenizer.json").write_text("{}")
+    monkeypatch.setenv("HF_HUB_CACHE", str(cache))
+    from huggingface_hub import constants
+
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache))
+    monkeypatch.setenv("SMARTMEMORY_HF_ALLOW_DOWNLOAD", "false")
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_PROVIDER", "local")
+
+    class Service:
+        backend_name = backend
+
+        def local_model_name(self):
+            return "sentence-transformers/all-mpnet-base-v2"
+
+        def embed(self, text):
+            assert text == "warmup"
+            return [0.0] * vector_size
+
+    monkeypatch.setattr("smartmemory_app.storage.get_memory", lambda **kw: object())
+    monkeypatch.setattr("smartmemory.plugins.embedding.EmbeddingService", Service)
+    monkeypatch.setattr(viewer_server, "_embedding_check", None)
+    monkeypatch.setattr(viewer_server, "_last_warmup_failure", None)
+    assert configured_dimension(Service()) == expected
+    with caplog.at_level(logging.WARNING):
+        assert viewer_server._warm_backend() is healthy
+    if healthy:
+        assert viewer_server._embedding_check is not None
+        if expected is None:
+            assert "dimension unverified" in viewer_server._embedding_check
+            assert "dimension could not be verified" in caplog.text
+        else:
+            assert "768 dimensions" in viewer_server._embedding_check
+            assert "dimension unverified" not in viewer_server._embedding_check
+    else:
+        assert viewer_server._embedding_check is None
+        assert "empty or incorrectly sized vector" in caplog.text
