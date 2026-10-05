@@ -5,6 +5,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 ## [Unreleased]
 
 - Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
+- Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).
 
 - Hosted code upload bundles preserve lexical identity, source spans and call confidence, including unresolved source references (CODE-EDGE-CONFIDENCE-1).
 

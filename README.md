@@ -308,6 +308,7 @@ Code indexing reports clean, partial and failed file counts plus acceptance, sta
 
 ```bash
 smartmemory code index <path>          # Index a code repo (AST entities + call graph) into memory
+smartmemory code effects <path>        # Print source-qualified Python effects without a store
 smartmemory mcp install claude-code    # Write MCP server config for a client (claude-code, cursor, codex)
 ```
 
