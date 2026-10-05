@@ -340,7 +340,7 @@ class RemoteMemory:
                 message = (
                     f"Hosted code index refused by MAX_REQUEST_BODY_BYTES cap: {exc}"
                 )
-            elif server_summary.get("publication"):
+            elif server_summary.get("publication") not in (None, "unknown"):
                 message = f"Hosted code replacement {server_summary['publication']}: {exc}. No retry was attempted."
             else:
                 message = (
@@ -348,8 +348,11 @@ class RemoteMemory:
                     "Replacement was not confirmed, partial server changes may exist. No retry was attempted."
                 )
             for key in result.parse_summary():
-                if key in server_summary:
-                    setattr(result, key, server_summary[key])
+                setattr(
+                    result,
+                    key,
+                    server_summary.get(key, [] if key == "diagnostics" else "unknown"),
+                )
             result.replaced = False
             result.g16_complete = False
             result.errors.append(message)
@@ -374,17 +377,34 @@ class RemoteMemory:
                 "Partial server changes may exist. No retry was attempted."
             )
             log.warning("%s", message)
-            raise RemoteBackendError(message)
+            for key in result.parse_summary():
+                setattr(
+                    result,
+                    key,
+                    response.get(key, [] if key == "diagnostics" else "unknown")
+                    if isinstance(response, dict)
+                    else []
+                    if key == "diagnostics"
+                    else "unknown",
+                )
+            result.g16_complete = False
+            raise RemoteBackendError(
+                message,
+                body=response if isinstance(response, dict) else None,
+                result=result,
+            )
+        if any(key not in response for key in result.parse_summary()):
+            log.warning(
+                "Server omitted code diagnostic evidence; missing counts/outcomes reported as unknown"
+            )
         result.entities_created, result.edges_created = expected
         result.replaced = True
         for key in result.parse_summary():
-            if key in response:
-                setattr(result, key, response[key])
-        result.acceptance = "accepted"
-        result.staging = "written"
-        result.publication = response.get(
-            "publication", "published_partial" if result.files_partial else "published"
-        )
+            setattr(
+                result,
+                key,
+                response.get(key, [] if key == "diagnostics" else "unknown"),
+            )
         result.g16_complete = False
         result.elapsed_seconds = round(time.monotonic() - started, 2)
         log.warning(
