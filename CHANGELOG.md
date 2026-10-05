@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.5.23] - 2026-10-05
+
 - On Windows, `*` and `?` in arguments such as `sm search "*"` are passed through literally instead of being expanded to file names.
 
 ## [1.5.22] - 2026-10-05
