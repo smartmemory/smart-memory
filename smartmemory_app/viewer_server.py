@@ -373,11 +373,23 @@ def _warm_backend() -> bool:
 
             if load_config().embedding_provider == "local":
                 expected = configured_dimension(service)
-                if vector is None or not len(vector) or len(vector) != expected:
+                if (
+                    vector is None
+                    or not len(vector)
+                    or expected is not None
+                    and len(vector) != expected
+                ):
                     raise ValueError(
                         "Embedding warmup returned an empty or incorrectly sized vector"
                     )
-                _embedding_check = f"Embedding runtime: OK ({service.backend_name}, cached startup warmup, {len(vector)} dimensions)"
+                if expected is None:
+                    log.warning("Embedding warmup dimension could not be verified")
+                    _embedding_check = (
+                        f"Embedding runtime: warning: {service.backend_name}, "
+                        "cached startup warmup, dimension unverified"
+                    )
+                else:
+                    _embedding_check = f"Embedding runtime: OK ({service.backend_name}, cached startup warmup, {len(vector)} dimensions)"
             _startup_line(
                 f"Search model ready ({time.perf_counter() - model_started:.1f}s)"
             )

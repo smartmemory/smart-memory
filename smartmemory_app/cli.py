@@ -1767,15 +1767,6 @@ def search_cmd(
     hop_options = {"multi_hop": True, "max_hops": max_hops} if multi_hop else {}
     if hop_strategy is not None:
         hop_options["hop_strategy"] = hop_strategy
-    if multi_hop and hop_strategy == "semantic":
-        from smartmemory_app.config import llm_key_present, load_config
-
-        if load_config().mode != "remote" and not llm_key_present():
-            notice = (
-                "semantic hop planning needs an LLM key. Used the heuristic planner."
-            )
-            log.warning(notice)
-            click.echo(f"Note: {notice}", err=True)
     try:
         window = resolve_search_window(since, until, relative=True)
     except ValueError as exc:
@@ -1789,6 +1780,7 @@ def search_cmd(
     if include_reference:
         body["include_reference"] = True
     results = _memory_request("POST", "/memory/search", json=body)
+    used_daemon = results is not None
     if results is None:
         from smartmemory_app.storage import search
         from smartmemory_app.remote_backend import RemoteBackendError
@@ -1818,6 +1810,28 @@ def search_cmd(
             raise click.ClickException(
                 f"Search failed — could not reach the SmartMemory service: {e}"
             )
+    if multi_hop and hop_strategy == "semantic":
+        from smartmemory_app.config import llm_key_present, load_config
+
+        if load_config().mode != "remote":
+            if used_daemon:
+                from smartmemory_app.daemon import get_status
+
+                health = get_status()
+                key_present = health.get("llm_key_present") if health else None
+            else:
+                key_present = llm_key_present()
+            if key_present is False:
+                notice = (
+                    "semantic hop planning needs an LLM key; "
+                    "this search used the heuristic planner."
+                )
+                log.warning(notice)
+                click.echo(f"Note: {notice}", err=True)
+            elif key_present is None:
+                notice = "Semantic hop planner could not be verified because daemon LLM availability is unknown."
+                log.warning(notice)
+                click.echo(f"Note: {notice}", err=True)
     # The daemon returns the CORE-CRUD-LIST contract shape {"items": [...]};
     # the storage fallback returns a bare list. Unwrap so we always iterate
     # result dicts (iterating the dict directly yielded its keys -> "items"
