@@ -611,6 +611,11 @@ def search(
                  callers/contract drift never raise TypeError here.
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
+    if search_kwargs.get("origin") is not None and load_config().mode == "remote":
+        raise NotImplementedError(
+            "--origin is not supported in remote mode: the hosted search API "
+            "does not accept origin filters. Use local mode or remove --origin."
+        )
     mem = get_memory()
     # Forward documented core options. Unknown extension keys still drop, while
     # the enumerating contract test prevents known facade parameters being lost.
@@ -640,11 +645,6 @@ def search(
     from smartmemory_app.remote_backend import RemoteMemory
 
     if isinstance(mem, RemoteMemory):
-        if "origin" in core_kwargs:
-            raise NotImplementedError(
-                "--origin is not supported in remote mode: the hosted search API "
-                "does not accept origin filters. Use local mode or remove --origin."
-            )
         if filters:
             raise NotImplementedError(
                 "Property filters are not supported in remote mode. Use local mode or remove --<property> flags."

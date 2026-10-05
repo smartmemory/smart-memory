@@ -3,6 +3,7 @@
 import json
 import shutil
 
+import httpx
 import pytest
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
@@ -117,6 +118,46 @@ def test_remote_origin_refuses_before_connecting(monkeypatch, query):
         )
         assert response.status_code == 501, response.text
         assert "--origin is not supported in remote mode" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("query", ["*", "test_F3 auth.py"])
+def test_cold_remote_origin_refuses_before_connecting(tmp_path, monkeypatch, query):
+    root = tmp_path / "test_F3b_isolated"
+    root.mkdir()
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setenv("USERPROFILE", str(root))
+    monkeypatch.setenv("APPDATA", str(root / "test_F3b_appdata"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "test_F3b_config"))
+    monkeypatch.setenv("SMARTMEMORY_MODE", "remote")
+    monkeypatch.setenv("SMARTMEMORY_API_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("SMARTMEMORY_API_KEY", "test_F3b_fake_key")
+    monkeypatch.setenv("SMARTMEMORY_CRASH_REPORTS", "0")
+    monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
+    monkeypatch.setattr(storage, "_remote_memory", None)
+    http_calls = []
+
+    def forbidden_request(*args, **kwargs):
+        http_calls.append(args)
+        raise AssertionError(f"cold remote origin must refuse before HTTP: {args!r}")
+
+    monkeypatch.setattr(httpx, "get", forbidden_request)
+    monkeypatch.setattr(httpx, "request", forbidden_request)
+    try:
+        with TestClient(local_api.api) as client:
+            response = client.post(
+                "/search", json={"query": query, "origin": "hook:observe"}
+            )
+        # Bootstrap catches ordinary exceptions, so assert the trap outside it too.
+        assert not http_calls, f"cold remote origin attempted HTTP: {http_calls!r}"
+        assert response.status_code == 501, response.text
+        assert response.json()["detail"] == (
+            "--origin is not supported in remote mode: the hosted search API "
+            "does not accept origin filters. Use local mode or remove --origin."
+        )
+        assert storage._remote_memory is None
+    finally:
+        shutil.rmtree(root)
+        assert not root.exists()
 
 
 def test_origin_help():
