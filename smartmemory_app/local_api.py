@@ -1046,11 +1046,22 @@ def ask_endpoint(body: AskRequest) -> dict:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     if not llm_key_present():
-        raise HTTPException(
-            status_code=503,
-            detail="`sm ask` requires a configured LLM key (for example GROQ_API_KEY). "
-            "Run `smartmemory setup` or set a supported provider key.",
+        log.warning(
+            "No LLM configured. Returning extractive memories without a written answer."
         )
+        with _rw_lock:
+            try:
+                return _get_mem().ask(
+                    body.question,
+                    body.limit,
+                    reasoning=body.reasoning,
+                    mode="extractive",
+                    search_fn=lambda question, limit: _search_items(
+                        SearchRequest(query=question, top_k=limit)
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
     evidence = [

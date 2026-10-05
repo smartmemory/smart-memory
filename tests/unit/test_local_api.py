@@ -275,16 +275,7 @@ class TestRecallRoute:
 
 
 class TestAsk:
-    def test_requires_llm_key_without_generating_a_fallback(self, client, monkeypatch):
-        """Question answering is unavailable, rather than invented, without a provider key."""
-        import smartmemory_app.local_api as local_api
-
-        monkeypatch.setattr(local_api, "llm_key_present", lambda: False)
-
-        response = client.post("/ask", json={"question": "What did we decide?"})
-
-        assert response.status_code == 503
-        assert "requires a configured LLM key" in response.json()["detail"]
+    # Keyless extractive responses now exercise real storage in tests/cli/test_ask_extractive.py.
 
     @pytest.mark.parametrize(
         "error",
