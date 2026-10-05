@@ -78,6 +78,48 @@ def test_no_key_route_and_cli_return_real_evidence(local_ask, caplog):
         assert "add --reasoning" not in result.output
 
 
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_no_key_cli_shows_graph_relations_only_with_reasoning(local_ask, reasoning):
+    from smartmemory.models.memory_item import MemoryItem
+
+    memory, client = local_ask
+    item = MemoryItem(
+        item_id="test_F2_relations_memory",
+        content="F2 MochiOS boot cache avoids reloading the operating system image.",
+        memory_type="semantic",
+    )
+    memory.add(item)
+    backend = memory._graph.backend
+    for item_id, label in (
+        ("test_F2_boot_cache", "Boot cache"),
+        ("test_F2_os_image", "OS image"),
+    ):
+        backend.add_node(
+            item_id, {"label": label, "content": label}, memory_type="entity"
+        )
+    memory.add_edge(item.item_id, "test_F2_boot_cache", "CONTAINS_ENTITY")
+    memory.add_edge("test_F2_boot_cache", "test_F2_os_image", "caches")
+    response = client.post("/ask", json={"question": "MochiOS boot cache", "limit": 1})
+    assert response.status_code == 200, response.text
+    assert response.json()["relations"] == [
+        {
+            "source": "Boot cache",
+            "type": "caches",
+            "target": "OS image",
+            "source_id": "test_F2_boot_cache",
+            "target_id": "test_F2_os_image",
+        }
+    ]
+    flags = ["--reasoning"] if reasoning else []
+    result = CliRunner().invoke(
+        cli_module.cli, ["ask", "MochiOS boot cache", "--limit", "1", *flags]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Extractive" in result.output
+    assert ("  Relations:" in result.output) is reasoning
+    assert ("    - Boot cache --caches--> OS image" in result.output) is reasoning
+
+
 def test_no_key_empty_store_exits_zero(local_ask):
     _, client = local_ask
     response = client.post("/ask", json={"question": "MochiOS boot timing"})

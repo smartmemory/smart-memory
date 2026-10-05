@@ -4,6 +4,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Extractive `sm ask --reasoning` displays the returned graph relations using the same format as synthesized answers.
 - Local `sm ask` without an LLM key returns clearly labelled extractive memory excerpts with full IDs, types and dates. Empty results exit successfully. Configured LLM failures keep their existing errors.
 
 ## [1.5.21] - 2026-10-04
