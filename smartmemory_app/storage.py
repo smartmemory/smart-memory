@@ -640,6 +640,11 @@ def search(
     from smartmemory_app.remote_backend import RemoteMemory
 
     if isinstance(mem, RemoteMemory):
+        if "origin" in core_kwargs:
+            raise NotImplementedError(
+                "--origin is not supported in remote mode: the hosted search API "
+                "does not accept origin filters. Use local mode or remove --origin."
+            )
         if filters:
             raise NotImplementedError(
                 "Property filters are not supported in remote mode. Use local mode or remove --<property> flags."
@@ -653,6 +658,14 @@ def search(
         "include_retracted",
     }:
         all_items = _list_all_memories(mem)
+        # F3: this wildcard shortcut bypasses core search visibility. Hide raw hooks here too.
+        all_items = [
+            r
+            for r in all_items
+            if not (
+                r.get("origin") or r.get("metadata", {}).get("origin") or ""
+            ).startswith(("hook:observe", "hook:learn"))
+        ]
         if filters:
             all_items = [
                 r

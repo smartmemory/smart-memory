@@ -793,6 +793,7 @@ def ingest_endpoint(body: IngestRequest) -> dict:
 
 
 class SearchRequest(BaseModel):
+    origin: str | None = None
     multi_hop: bool = False
     max_hops: int = 3
     hop_strategy: str | None = None
@@ -830,6 +831,7 @@ def _search_items(body: SearchRequest) -> list[dict]:
                 **{
                     k: v
                     for k, v in {
+                        "origin": body.origin,
                         "since": body.since,
                         "until": body.until,
                         "multi_hop": True if body.multi_hop else None,

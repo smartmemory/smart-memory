@@ -1688,6 +1688,11 @@ def retag_cmd(
 @click.argument("query")
 @click.option("--top-k", default=5, show_default=True)
 @click.option(
+    "--origin",
+    metavar="PREFIX",
+    help="show only memories whose origin starts with PREFIX (e.g. hook:observe)",
+)
+@click.option(
     "--offset",
     type=click.IntRange(min=0),
     default=None,
@@ -1733,6 +1738,7 @@ def search_cmd(
     query: str,
     top_k: int,
     offset: int | None,
+    origin: str | None,
     include_reference: bool,
     since: str | None,
     until: str | None,
@@ -1749,6 +1755,14 @@ def search_cmd(
     """
     from smartmemory.search import resolve_search_window
 
+    if origin is not None:
+        from smartmemory_app.config import load_config
+
+        if load_config().mode == "remote":
+            raise click.ClickException(
+                "--origin is not supported in remote mode: the hosted search API "
+                "does not accept origin filters. Use local mode or remove --origin."
+            )
     if offset is not None:
         from smartmemory_app.config import load_config
 
@@ -1773,6 +1787,8 @@ def search_cmd(
         raise click.ClickException(str(exc)) from exc
     props = _parse_extra_props(ctx.args, explicit_props)
     body: dict = {"query": query, "top_k": top_k, **window, **hop_options}
+    if origin is not None:
+        body["origin"] = origin
     if offset is not None:
         body["offset"] = offset
     if props:
@@ -1801,6 +1817,7 @@ def search_cmd(
                 top_k,
                 filters=props,
                 include_reference=include_reference,
+                **({"origin": origin} if origin is not None else {}),
                 **window,
                 **hop_options,
             )
