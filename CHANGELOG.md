@@ -158,6 +158,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## Unreleased
 
+- Retain hosted code-index failure bodies and print clean, partial and failed counts with the server publication outcome on CLI failures (CODE-PARSE-DIAGNOSTICS-1).
+
 ### Fixed
 
 - `sm setup` also installs `en_core_web_sm` alongside the selected spaCy model so background workers can drain deferred work.
