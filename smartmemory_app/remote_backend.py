@@ -356,6 +356,15 @@ class RemoteMemory:
             raise RemoteBackendError(message)
         result.entities_created, result.edges_created = expected
         result.replaced = True
+        for key in result.parse_summary():
+            if key in response:
+                setattr(result, key, response[key])
+        result.acceptance = "accepted"
+        result.staging = "written"
+        result.publication = response.get(
+            "publication", "published_partial" if result.files_partial else "published"
+        )
+        result.g16_complete = False
         result.elapsed_seconds = round(time.monotonic() - started, 2)
         log.warning(
             "Hosted code index stores graph entities and relations only: "

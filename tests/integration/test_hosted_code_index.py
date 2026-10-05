@@ -65,7 +65,21 @@ def hosted(tmp_path, monkeypatch):
         assert request.headers["authorization"] == "Bearer test_p6_key"
         workspace = request.headers["x-workspace-id"]
         assert workspace == "test_p6_workspace"
-        assert set(body) == {"repo", "entities", "relations", "commit_hash"}
+        assert set(body) == {
+            "repo",
+            "entities",
+            "relations",
+            "commit_hash",
+            "parse_summary",
+        }
+        summary = body["parse_summary"]
+        assert summary["files_failed"] == 0
+        assert summary["files_partial"] == 0
+        assert summary["files_clean"] == len(
+            {entity["file_path"] for entity in body["entities"]}
+        )
+        assert summary["publication"] == "not_attempted"
+        assert summary["g16_complete"] is False
         failure = state["failure"]
         if isinstance(failure, tuple):
             return JSONResponse(status_code=failure[0], content=failure[1])

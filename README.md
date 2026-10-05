@@ -304,6 +304,8 @@ smartmemory admin convert-rebel        # Convert REBEL dataset to corpus JSONL
 
 ### Code indexing and MCP
 
+Code indexing reports clean, partial and failed file counts plus acceptance, staging and publication outcomes. Localized grammar partials with usable extraction can publish with visible spans and byte coverage. Hard collection or parse failures retain the prior index. Partial 1.x acceptance does not prove G16 complete-generation publication. Successful file extraction checkpoints are stored under `SMARTMEMORY_CODE_CHECKPOINT_DIR` (default `~/.cache/smartmemory/code-parse`) and reused when source, configuration and parser versions match.
+
 ```bash
 smartmemory code index <path>          # Index a code repo (AST entities + call graph) into memory
 smartmemory mcp install claude-code    # Write MCP server config for a client (claude-code, cursor, codex)

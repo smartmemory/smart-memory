@@ -26,9 +26,10 @@ def prepare_code_index(
     exclude_dirs: list[str] | None,
     languages: list[str] | None,
 ) -> tuple[dict, IndexResult]:
-    """Return a complete wire body and IndexResult without opening a local store.
+    """Return a diagnostic wire body and IndexResult without opening a local store.
 
-    Traversal and parse failures refuse replacement of an incomplete checkout.
+    Traversal and hard parse failures refuse replacement. Recoverable grammar partials
+    travel with contracted diagnostics, without satisfying G16 publication.
     Reuse core's parsers and cross-file resolver, with parser-local relation IDs:
     the hosted route remaps those IDs into its authenticated workspace.
     """
