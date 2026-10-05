@@ -11,7 +11,7 @@ REPO = Path(__file__).resolve().parents[2]
 SCHEMA = REPO / "smartmemory_app/mirror_schema.json"
 # Reviewed together against the authoritative contract, never generated in test.
 CONTRACT_VERSION = "1.2.0"
-SCHEMA_SHA256 = "316e51b5498c80799488fbc699a940067ba5151640987748a6e3ecf1d6f45e3e"
+SCHEMA_SHA256 = "ba6791d7a4732ffd11c0bb45986ab683546ced4967cad7c4f97641f056444c3a"
 
 
 def test_packaged_mirror_schema_version_and_hash():

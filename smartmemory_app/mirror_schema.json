@@ -2326,8 +2326,10 @@
           "type": "string",
           "enum": [
             "verified",
+            "bounded_window",
             "unavailable"
-          ]
+          ],
+          "description": "bounded_window admits declared records with uncached STRICT pre-write validation and post-commit change reporting. verified may use an existing same-file boundary. A cross-store fence is not required."
         },
         "max_units_per_batch": {
           "const": 100
@@ -3147,6 +3149,23 @@
       ],
       "additionalProperties": false
     },
+    "MemberOutcomeFlags": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "schema_changed_during_write": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "artifact",
+        "schema_changed_during_write"
+      ],
+      "additionalProperties": false,
+      "description": "Per-item post-commit observation, separate from the immutable receipt and its outcome. True when a declaration identity/lifecycle/schema version changed between uncached pre-write resolution and post-commit resolution. The write stands."
+    },
     "UnitResult": {
       "type": "object",
       "properties": {
@@ -3215,6 +3234,14 @@
         "quota_observation": {
           "$ref": "#/$defs/QuotaObservation"
         },
+        "member_outcome_flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemberOutcomeFlags"
+          },
+          "maxItems": 100,
+          "description": "One observation per affected artifact. Empty before commit, including dry-run and schema_deferred. Flags do not alter receipt outcomes, baseline eligibility or committed/replayed state."
+        },
         "disposition": {
           "anyOf": [
             {
@@ -3248,6 +3275,7 @@
         "collisions",
         "errors",
         "quota_observation",
+        "member_outcome_flags",
         "disposition",
         "chosen_action"
       ],
@@ -3419,6 +3447,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "schema_changed_during_write_items": {
+          "type": "integer",
+          "minimum": 0
+        },
         "planned_units": {
           "type": "integer",
           "minimum": 0
@@ -3471,6 +3503,7 @@
         "verified_units",
         "prompt_needed_units",
         "schema_deferred_units",
+        "schema_changed_during_write_items",
         "planned_units",
         "held_delete_units",
         "excluded_artifacts",
