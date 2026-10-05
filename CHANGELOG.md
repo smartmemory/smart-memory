@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).
+
 - Hosted code upload bundles preserve lexical identity, source spans and call confidence, including unresolved source references (CODE-EDGE-CONFIDENCE-1).
 
 - CODE-INGEST-SURFACES-1: hosted code indexing uses core bundle preparation and complete dataclass serialization while preserving language selection and client-side parsing.

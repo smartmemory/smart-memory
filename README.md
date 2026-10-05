@@ -306,6 +306,7 @@ smartmemory admin convert-rebel        # Convert REBEL dataset to corpus JSONL
 
 ```bash
 smartmemory code index <path>          # Index a code repo (AST entities + call graph) into memory
+smartmemory code effects <path>        # Print source-qualified Python effects without a store
 smartmemory mcp install claude-code    # Write MCP server config for a client (claude-code, cursor, codex)
 ```
 

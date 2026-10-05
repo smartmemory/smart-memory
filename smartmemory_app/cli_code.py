@@ -209,3 +209,28 @@ def code_index_cmd(
         )
         for line in result.errors[:cap]:
             click.echo(f"  - {line}", err=True)
+
+
+@code_group.command("effects")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--repo", default=None, help="Repository identifier.")
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Caller-owned per-source parse cache.",
+)
+def code_effects_cmd(path: str, repo: str | None, checkpoint_dir: str | None) -> None:
+    """Print deterministic Python effects JSON without opening a memory store."""
+    import json
+
+    from smartmemory.code.effects import scan_effects
+
+    root = Path(path).resolve()
+    try:
+        result = scan_effects(root, repo or root.name, checkpoint_dir=checkpoint_dir)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    )
