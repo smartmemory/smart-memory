@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Groundwork for Lite → hosted mirroring (DIST-LITE-SYNC-1 U2, no user command yet): a local mirror state store (`mirror.sqlite3`) holds the pairing, frozen pending snapshots, receipts and per-key baselines, refuses deletes after a database replacement or restore until an explicit re-pair, and lets only one mirror apply run at a time. `sm reset` now keeps `okf_namespace.json` and any mirror state.
+
 ## [1.5.21] - 2026-10-04
 
 - Remote lifecycle hooks run the in-process engine directly, skipping the local daemon attempt while preserving local daemon acceleration and fail-open behaviour.

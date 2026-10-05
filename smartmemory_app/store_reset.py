@@ -21,7 +21,15 @@ _PATTERNS = (
 
 
 def _store_files(data_path: Path) -> list[Path]:
-    return sorted({path for pattern in _PATTERNS for path in data_path.glob(pattern)})
+    return sorted(
+        {
+            path
+            for pattern in _PATTERNS
+            for path in data_path.glob(pattern)
+            if path.name != "okf_namespace.json"
+            and not path.name.startswith("mirror.sqlite3")
+        }
+    )
 
 
 def _refusal(detail: str) -> RuntimeError:
@@ -160,12 +168,18 @@ def preflight_store_reset(data_path: Path) -> None:
 
 def remove_store_files(data_path: Path) -> int:
     """Acquire maintenance ownership, preflight all files, then remove them."""
+    from smartmemory_app.mirror_state import MirrorState
+
+    data_path = data_path.expanduser().resolve()
+    mirror = MirrorState(data_path, timeout=0)
     _check_owners(data_path, _store_files(data_path))
     try:
         with (
+            mirror.apply(),
             FileLock(data_path / ".write.lock", timeout=0),
             FileLock(data_path / ".worker.lock", timeout=0),
         ):
+            mirror.mark_recovery_required()
             files = _store_files(data_path)
             _check_owners(data_path, files)
             try:
@@ -194,3 +208,62 @@ def remove_store_files(data_path: Path) -> int:
             return len(files)
     except Timeout as exc:
         raise _refusal("live daemon or worker holds maintenance ownership") from exc
+
+
+def restore_store_database(data_path: Path, backup: Path) -> None:
+    """Supported offline restore using the reset lock/identity boundary.
+
+    Preserve sidecar/namespace and mark recovery before replacing memory.db.
+    The restored identity is intentionally NOT trusted or automatically paired.
+    Explicit rebind rotates incarnation after hosted partition fences succeed.
+    """
+    import sqlite3
+    import tempfile
+    from smartmemory_app.mirror_state import MirrorState
+
+    data_path = data_path.expanduser().resolve()
+    backup = backup.expanduser().resolve(strict=True)
+    destination = data_path / "memory.db"
+    if backup == destination:
+        raise ValueError("Restore requires an independent SQLite backup")
+    mirror = MirrorState(data_path, timeout=0)
+    with (
+        mirror.apply(),
+        FileLock(data_path / ".write.lock", timeout=0),
+        FileLock(data_path / ".worker.lock", timeout=0),
+    ):
+        files = _store_files(data_path)
+        _check_owners(data_path, files)
+        mirror.mark_recovery_required()
+        with _exclusive_files(files):
+            pass
+        fd, temporary = tempfile.mkstemp(
+            prefix="mirror-restore-", suffix=".db", dir=data_path
+        )
+        os.close(fd)
+        try:
+            source = sqlite3.connect(backup.as_uri() + "?mode=ro", uri=True)
+            restored = sqlite3.connect(temporary)
+            try:
+                if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise ValueError("Invalid SQLite backup")
+                source.backup(restored)
+                restored.execute("PRAGMA synchronous=FULL")
+                restored.commit()
+            finally:
+                restored.close()
+                source.close()
+            with open(temporary, "rb") as stream:
+                os.fsync(stream.fileno())
+            # Closed handles, same-volume replacement. Recovery already durable.
+            for suffix in ("-wal", "-shm", "-journal"):
+                Path(str(destination) + suffix).unlink(missing_ok=True)
+            os.replace(temporary, destination)
+            if os.name != "nt":
+                fd = os.open(data_path, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        finally:
+            Path(temporary).unlink(missing_ok=True)

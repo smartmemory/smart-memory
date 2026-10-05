@@ -1,0 +1,5713 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "Hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "Resource": {
+      "type": "string",
+      "pattern": "^smartmemory://[^/]+/[^/]+$",
+      "maxLength": 4096
+    },
+    "Key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "Kind": {
+      "type": "string",
+      "enum": [
+        "memory",
+        "decision",
+        "record",
+        "edge",
+        "type_declaration",
+        "relation_declaration"
+      ]
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        }
+      ]
+    },
+    "JsonObject": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      }
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "PAIR_REQUIRED",
+        "PAIR_MISMATCH",
+        "STORE_REPLACED",
+        "AUTH_REQUIRED",
+        "FORBIDDEN",
+        "UNSUPPORTED_SCOPE",
+        "MANIFEST_INCOMPLETE",
+        "MANIFEST_TOO_LARGE",
+        "INVALID_REQUEST",
+        "INVALID_PAYLOAD",
+        "HASH_MISMATCH",
+        "IDEMPOTENCY_MISMATCH",
+        "DESTINATION_ID_OCCUPIED",
+        "BASE_RECEIPT_MISMATCH",
+        "STALE_PLAN",
+        "COLLISION",
+        "DEPENDENCY_BLOCKED",
+        "REFERENCE_OUT_OF_SCOPE",
+        "UNSUPPORTED_REFERENCE",
+        "FIELD_CLASSIFICATION_REQUIRED",
+        "ORIGIN_NOT_ALLOWED",
+        "DECLARATION_CONFLICT",
+        "SCHEMA_MIGRATION_REQUIRED",
+        "DOMAIN_CONSTRAINT",
+        "EXTERNAL_REFERENCE_IN_USE",
+        "NO_DELETE_DEPENDENCY",
+        "QUALIFIED_EDGE_UNSUPPORTED",
+        "UNIT_TOO_LARGE",
+        "QUOTA_EXCEEDED",
+        "DURABILITY_UNAVAILABLE",
+        "RECEIPT_CAPACITY",
+        "RATE_LIMITED",
+        "STORE_BUSY",
+        "UNCERTAIN",
+        "INTERNAL_ERROR",
+        "SOURCE_IDENTITY_UNVERIFIED",
+        "RECOVERY_REQUIRED",
+        "SNAPSHOT_CONTEXT_MISSING",
+        "INTERACTION_REQUIRED",
+        "SCHEMA_CHANGED_DURING_PUSH",
+        "RESTORE_INCOMPLETE",
+        "QUOTA_REPLAN_REQUIRED",
+        "QUOTA_ACCOUNTING_UNAVAILABLE",
+        "QUOTA_ACCOUNTING_UNCERTAIN",
+        "DELETE_APPROVAL_REQUIRED",
+        "DELETE_COUNT_CONFIRMATION_REQUIRED",
+        "DELETE_PLAN_TOO_LARGE",
+        "INCIDENT_SET_TOO_LARGE"
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "source_keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Key"
+          }
+        },
+        "field_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retry_after_ms": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuotaExceededBody"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "source_keys",
+        "field_paths",
+        "retry_after_ms",
+        "quota"
+      ],
+      "additionalProperties": false
+    },
+    "ArtifactRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "source_key": {
+          "$ref": "#/$defs/Key"
+        }
+      },
+      "required": [
+        "kind",
+        "source_key"
+      ],
+      "additionalProperties": false
+    },
+    "Dependency": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "expected_source_hash": {
+          "$ref": "#/$defs/Hash",
+          "description": "Target intrinsic hash, never recursively dependency-bound. Restore stages carry separate effective/preparation hashes."
+        },
+        "required": {
+          "const": true
+        }
+      },
+      "required": [
+        "artifact",
+        "expected_source_hash",
+        "required"
+      ],
+      "additionalProperties": false
+    },
+    "TypedReference": {
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "target": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "evidence",
+            "contradiction",
+            "trace",
+            "session",
+            "context",
+            "resolved_by",
+            "derived_from",
+            "superseded_by",
+            "record_field",
+            "declaration_parent",
+            "declaration_domain",
+            "declaration_range",
+            "declaration_inverse",
+            "declaration_successor"
+          ]
+        }
+      },
+      "required": [
+        "pointer",
+        "target",
+        "role"
+      ],
+      "additionalProperties": false
+    },
+    "Temporal": {
+      "type": "object",
+      "properties": {
+        "valid_start": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valid_end": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "transaction_time": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "valid_start",
+        "valid_end",
+        "transaction_time"
+      ],
+      "additionalProperties": false
+    },
+    "PendingRequirement": {
+      "type": "object",
+      "properties": {
+        "requirement_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "description": {
+          "type": "string"
+        },
+        "requirement_type": {
+          "type": "string"
+        },
+        "query_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "resolved_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "requirement_id",
+        "description",
+        "requirement_type",
+        "query_hint",
+        "resolved",
+        "resolved_by",
+        "resolved_at"
+      ],
+      "additionalProperties": false
+    },
+    "DecisionBody": {
+      "type": "object",
+      "properties": {
+        "decision_type": {
+          "type": "string",
+          "enum": [
+            "inference",
+            "preference",
+            "classification",
+            "choice",
+            "belief",
+            "policy"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "superseded",
+            "retracted",
+            "pending",
+            "completed",
+            "failed",
+            "abandoned"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "source_type": {
+          "type": "string",
+          "enum": [
+            "reasoning",
+            "explicit",
+            "imported",
+            "inferred"
+          ]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Resource"
+          },
+          "uniqueItems": true
+        },
+        "contradicting_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Resource"
+          },
+          "uniqueItems": true
+        },
+        "source_trace_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retrieved_context_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Resource"
+          }
+        },
+        "pending_requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PendingRequirement"
+          }
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "superseded_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "superseded_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retraction_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reinforcement_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "contradiction_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_reinforced_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_contradicted_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "context_snapshot": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/JsonObject"
+            },
+            {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "superseded_reason"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "superseded_at"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "retraction_reason"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "rejected_alternatives": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rationale": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "success",
+                "failure",
+                "partial",
+                "abandoned"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome_metric": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonObject"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "decision_type",
+        "status",
+        "confidence",
+        "source_type",
+        "evidence_ids",
+        "contradicting_ids",
+        "source_trace_id",
+        "source_session_id",
+        "retrieved_context_ids",
+        "pending_requirements",
+        "superseded_by",
+        "superseded_reason",
+        "superseded_at",
+        "retraction_reason",
+        "reinforcement_count",
+        "contradiction_count",
+        "last_reinforced_at",
+        "last_contradicted_at",
+        "domain",
+        "tags",
+        "context_snapshot",
+        "rejected_alternatives",
+        "rationale",
+        "constraints",
+        "agent_id",
+        "outcome",
+        "outcome_metric",
+        "outcome_at"
+      ],
+      "additionalProperties": false
+    },
+    "AuthoredMetadata": {
+      "type": "object",
+      "properties": {
+        "source_path": {
+          "type": "string"
+        },
+        "source_url": {
+          "type": "string"
+        },
+        "user_metadata": {
+          "$ref": "#/$defs/JsonObject"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "MemoryExtension": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "pattern": "^(user|cli|api|import|capture|zero_schema):.+$"
+        },
+        "temporal": {
+          "$ref": "#/$defs/Temporal"
+        },
+        "reference": {
+          "type": "boolean"
+        },
+        "preserved": {
+          "$ref": "#/$defs/AuthoredMetadata"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "temporal",
+        "reference",
+        "preserved",
+        "derived_from",
+        "superseded_by"
+      ],
+      "additionalProperties": false
+    },
+    "DecisionExtension": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "pattern": "^(user|cli|api|import|capture|zero_schema):.+$"
+        },
+        "temporal": {
+          "$ref": "#/$defs/Temporal"
+        },
+        "reference": {
+          "type": "boolean"
+        },
+        "preserved": {
+          "$ref": "#/$defs/AuthoredMetadata"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision": {
+          "$ref": "#/$defs/DecisionBody"
+        }
+      },
+      "required": [
+        "origin",
+        "temporal",
+        "reference",
+        "preserved",
+        "derived_from",
+        "superseded_by",
+        "decision"
+      ],
+      "additionalProperties": false
+    },
+    "RecordExtension": {
+      "type": "object",
+      "properties": {
+        "origin": {
+          "type": "string",
+          "pattern": "^(user|cli|api|import|capture|zero_schema):.+$"
+        },
+        "temporal": {
+          "$ref": "#/$defs/Temporal"
+        },
+        "reference": {
+          "type": "boolean"
+        },
+        "preserved": {
+          "$ref": "#/$defs/AuthoredMetadata"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Resource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "record_fields": {
+          "$ref": "#/$defs/JsonObject"
+        }
+      },
+      "required": [
+        "origin",
+        "temporal",
+        "reference",
+        "preserved",
+        "derived_from",
+        "superseded_by",
+        "record_fields"
+      ],
+      "additionalProperties": false
+    },
+    "MemoryPayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "memory"
+        },
+        "document": {
+          "type": "object",
+          "properties": {
+            "okf_version": {
+              "const": "0.2"
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resource": {
+              "$ref": "#/$defs/Resource"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timestamp": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "smartmemory": {
+              "$ref": "#/$defs/MemoryExtension"
+            }
+          },
+          "required": [
+            "okf_version",
+            "type",
+            "title",
+            "description",
+            "resource",
+            "tags",
+            "timestamp",
+            "body",
+            "smartmemory"
+          ],
+          "additionalProperties": false
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypedReference"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "document",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "DecisionPayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "decision"
+        },
+        "document": {
+          "type": "object",
+          "properties": {
+            "okf_version": {
+              "const": "0.2"
+            },
+            "type": {
+              "const": "decision"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resource": {
+              "$ref": "#/$defs/Resource"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timestamp": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "smartmemory": {
+              "$ref": "#/$defs/DecisionExtension"
+            }
+          },
+          "required": [
+            "okf_version",
+            "type",
+            "title",
+            "description",
+            "resource",
+            "tags",
+            "timestamp",
+            "body",
+            "smartmemory"
+          ],
+          "additionalProperties": false
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypedReference"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "document",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "RecordPayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "record"
+        },
+        "document": {
+          "type": "object",
+          "properties": {
+            "okf_version": {
+              "const": "0.2"
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resource": {
+              "$ref": "#/$defs/Resource"
+            },
+            "tags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "timestamp": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "body": {
+              "type": "string"
+            },
+            "smartmemory": {
+              "$ref": "#/$defs/RecordExtension"
+            }
+          },
+          "required": [
+            "okf_version",
+            "type",
+            "title",
+            "description",
+            "resource",
+            "tags",
+            "timestamp",
+            "body",
+            "smartmemory"
+          ],
+          "additionalProperties": false
+        },
+        "declaration": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypedReference"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "document",
+        "declaration",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "EdgePayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "edge"
+        },
+        "source": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "target": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "relation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "valid_from": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valid_to": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "properties": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/AuthoredEdgeProperties"
+            },
+            {
+              "$ref": "#/$defs/SupersedesEdgeProperties"
+            },
+            {
+              "$ref": "#/$defs/ContradictsEdgeProperties"
+            },
+            {
+              "$ref": "#/$defs/ProducedEdgeProperties"
+            }
+          ]
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypedReference"
+          }
+        },
+        "semantic_class": {
+          "type": "string",
+          "enum": [
+            "authored",
+            "decision_domain"
+          ]
+        },
+        "source_origin_claim": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "source",
+        "target",
+        "relation",
+        "valid_from",
+        "valid_to",
+        "properties",
+        "references",
+        "semantic_class",
+        "source_origin_claim"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "semantic_class": {
+                "const": "authored"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "$ref": "#/$defs/AuthoredEdgeProperties"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantic_class": {
+                "const": "decision_domain"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "relation": {
+                "type": "string",
+                "enum": [
+                  "derived_from",
+                  "supersedes",
+                  "contradicts",
+                  "produced"
+                ]
+              },
+              "source_origin_claim": {
+                "const": "evolver:decision"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantic_class": {
+                "const": "decision_domain"
+              },
+              "relation": {
+                "const": "derived_from"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "$ref": "#/$defs/EvidenceEdgeProperties"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantic_class": {
+                "const": "decision_domain"
+              },
+              "relation": {
+                "const": "supersedes"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "$ref": "#/$defs/SupersedesEdgeProperties"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantic_class": {
+                "const": "decision_domain"
+              },
+              "relation": {
+                "const": "contradicts"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "$ref": "#/$defs/ContradictsEdgeProperties"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "semantic_class": {
+                "const": "decision_domain"
+              },
+              "relation": {
+                "const": "produced"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "properties": {
+                "$ref": "#/$defs/ProducedEdgeProperties"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TypeDeclaration": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "iri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "working",
+            "proposed",
+            "confirmed",
+            "retired"
+          ]
+        },
+        "properties_schema": {
+          "$ref": "#/$defs/JsonObject"
+        },
+        "kind": {
+          "const": "record"
+        },
+        "wikidata_qid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_properties": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "storage_strategy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storage_searchable": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parent_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "iri",
+        "display_name",
+        "definition",
+        "description",
+        "aliases",
+        "examples",
+        "tier",
+        "properties_schema",
+        "kind",
+        "wikidata_qid",
+        "required_properties",
+        "storage_strategy",
+        "storage_searchable",
+        "parent_types",
+        "superseded_by"
+      ],
+      "additionalProperties": false
+    },
+    "RelationDeclaration": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "iri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "definition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        },
+        "tier": {
+          "type": "string",
+          "enum": [
+            "working",
+            "proposed",
+            "confirmed",
+            "retired"
+          ]
+        },
+        "properties_schema": {
+          "$ref": "#/$defs/JsonObject"
+        },
+        "wikidata_pid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "domain": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "inverse_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cardinality": {
+          "type": "string",
+          "enum": [
+            "1:1",
+            "1:N",
+            "N:N"
+          ]
+        },
+        "temporal": {
+          "type": "boolean"
+        },
+        "transitive": {
+          "type": "boolean"
+        },
+        "symmetric": {
+          "type": "boolean"
+        },
+        "reflexive": {
+          "type": "boolean"
+        },
+        "parent_relations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "equivalent_relations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "equivalent_iris": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "iri",
+        "display_name",
+        "definition",
+        "description",
+        "aliases",
+        "examples",
+        "tier",
+        "properties_schema",
+        "wikidata_pid",
+        "domain",
+        "range",
+        "inverse_of",
+        "cardinality",
+        "temporal",
+        "transitive",
+        "symmetric",
+        "reflexive",
+        "parent_relations",
+        "equivalent_relations",
+        "equivalent_iris"
+      ],
+      "additionalProperties": false
+    },
+    "TypeDeclarationPayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "type_declaration"
+        },
+        "layer": {
+          "const": "private"
+        },
+        "declaration": {
+          "$ref": "#/$defs/TypeDeclaration"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypedReference"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "layer",
+        "declaration",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "RelationDeclarationPayload": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "relation_declaration"
+        },
+        "layer": {
+          "const": "private"
+        },
+        "declaration": {
+          "$ref": "#/$defs/RelationDeclaration"
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TypedReference"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "layer",
+        "declaration",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "Payload": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/MemoryPayload"
+        },
+        {
+          "$ref": "#/$defs/DecisionPayload"
+        },
+        {
+          "$ref": "#/$defs/RecordPayload"
+        },
+        {
+          "$ref": "#/$defs/EdgePayload"
+        },
+        {
+          "$ref": "#/$defs/TypeDeclarationPayload"
+        },
+        {
+          "$ref": "#/$defs/RelationDeclarationPayload"
+        }
+      ]
+    },
+    "SelectionReason": {
+      "type": "string",
+      "enum": [
+        "selected_authored",
+        "machine_derived",
+        "internal_entity",
+        "infrastructure",
+        "vector_or_runtime",
+        "unknown_origin",
+        "unsupported_scope",
+        "field_classification",
+        "read_error",
+        "unsupported_type"
+      ]
+    },
+    "ManifestEntry": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "membership": {
+          "type": "string",
+          "enum": [
+            "selected",
+            "excluded",
+            "blocked"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/SelectionReason"
+        },
+        "source_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "artifact",
+        "membership",
+        "reason",
+        "source_hash",
+        "dependencies",
+        "error"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "membership": {
+                "const": "selected"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "source_hash": {
+                "$ref": "#/$defs/Hash"
+              },
+              "reason": {
+                "const": "selected_authored"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "membership": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/Error"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SnapshotHeader": {
+      "type": "object",
+      "properties": {
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "projection": {
+          "const": "authored-v1"
+        },
+        "manifest_root": {
+          "$ref": "#/$defs/Hash"
+        },
+        "presence_complete": {
+          "const": true
+        },
+        "artifact_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50000
+        },
+        "captured_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_checkpoint": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "pair_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "absence_delete_authority": {
+          "type": "string",
+          "enum": [
+            "verified_continuity",
+            "disabled_recovery"
+          ],
+          "description": "Continuity only, never deletion consent. deletion_policy is an additional mandatory gate."
+        }
+      },
+      "required": [
+        "manifest_id",
+        "projection",
+        "manifest_root",
+        "presence_complete",
+        "artifact_count",
+        "captured_at",
+        "source_checkpoint",
+        "pair_generation",
+        "absence_delete_authority"
+      ],
+      "additionalProperties": false
+    },
+    "Manifest": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": "1"
+        },
+        "header": {
+          "$ref": "#/$defs/SnapshotHeader"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ManifestEntry"
+          },
+          "maxItems": 50000
+        },
+        "previous_complete_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "header",
+        "entries",
+        "previous_complete_root"
+      ],
+      "additionalProperties": false
+    },
+    "Base": {
+      "type": "object",
+      "properties": {
+        "receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hosted_presence": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent",
+            "unbound"
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "owned",
+            "borrowed",
+            "unbound"
+          ]
+        }
+      },
+      "required": [
+        "receipt_id",
+        "source_hash",
+        "hosted_hash",
+        "hosted_presence",
+        "ownership"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "hosted_presence": {
+                "const": "unbound"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt_id": {
+                "type": "null"
+              },
+              "source_hash": {
+                "type": "null"
+              },
+              "hosted_hash": {
+                "type": "null"
+              },
+              "ownership": {
+                "const": "unbound"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hosted_presence": {
+                "const": "present"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted_hash": {
+                "$ref": "#/$defs/Hash"
+              },
+              "receipt_id": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hosted_presence": {
+                "const": "absent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted_hash": {
+                "type": "null"
+              },
+              "receipt_id": {
+                "$ref": "#/$defs/Id"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "OperationOptions": {
+      "type": "object",
+      "properties": {
+        "overwrite": {
+          "type": "boolean"
+        },
+        "no_delete": {
+          "type": "boolean"
+        },
+        "chosen_action": {
+          "type": "string",
+          "enum": [
+            "none",
+            "skip",
+            "overwrite",
+            "prompt_needed",
+            "retain_no_delete",
+            "held_delete"
+          ]
+        }
+      },
+      "required": [
+        "overwrite",
+        "no_delete",
+        "chosen_action"
+      ],
+      "additionalProperties": false
+    },
+    "Put": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "put"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "source_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "payload": {
+          "$ref": "#/$defs/Payload"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        }
+      },
+      "required": [
+        "action",
+        "artifact",
+        "base",
+        "source_hash",
+        "payload",
+        "dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "Delete": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "delete"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "source_absent",
+            "left_selection"
+          ]
+        },
+        "source_hash": {
+          "type": "null"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        }
+      },
+      "required": [
+        "action",
+        "artifact",
+        "base",
+        "reason",
+        "source_hash",
+        "dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "Check": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "check"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "source_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        }
+      },
+      "required": [
+        "action",
+        "artifact",
+        "base",
+        "source_hash",
+        "dependencies"
+      ],
+      "additionalProperties": false
+    },
+    "Member": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Put"
+        },
+        {
+          "$ref": "#/$defs/Delete"
+        },
+        {
+          "$ref": "#/$defs/Check"
+        }
+      ]
+    },
+    "ApplyUnit": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "options": {
+          "$ref": "#/$defs/OperationOptions"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Member"
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "depends_on_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "uniqueItems": true
+        },
+        "target_partition": {
+          "type": "string",
+          "enum": [
+            "data",
+            "ontology"
+          ]
+        },
+        "group_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "reviewed_state": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewedMemberState"
+          }
+        },
+        "restore_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RestoreContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delete_approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeleteApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_hash",
+        "options",
+        "members",
+        "depends_on_operations",
+        "target_partition",
+        "group_hash",
+        "reviewed_state",
+        "restore_context",
+        "delete_approval"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "options": {
+                "properties": {
+                  "overwrite": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reviewed_state": {
+                "minItems": 1
+              },
+              "options": {
+                "properties": {
+                  "chosen_action": {
+                    "const": "overwrite"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PairRequest": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "pair_request"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "projection": {
+          "const": "authored-v1"
+        },
+        "accept_publication_as": {
+          "const": "user:sync"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_checkpoint": {
+          "$ref": "#/$defs/SourceIdentity"
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "request_id",
+        "projection",
+        "accept_publication_as",
+        "recovery",
+        "source_checkpoint"
+      ],
+      "additionalProperties": false
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "receipt_atomicity": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "unavailable"
+          ]
+        },
+        "schema_fence": {
+          "type": "string",
+          "enum": [
+            "verified",
+            "unavailable"
+          ]
+        },
+        "max_units_per_batch": {
+          "const": 100
+        },
+        "max_batch_bytes": {
+          "const": 4194304
+        },
+        "max_members_per_unit": {
+          "const": 100
+        },
+        "max_unit_bytes": {
+          "const": 1048576
+        },
+        "max_manifest_artifacts": {
+          "const": 50000
+        },
+        "max_manifest_bytes": {
+          "const": 52428800
+        },
+        "max_receipt_bytes_per_pair": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "can_create": {
+          "type": "boolean"
+        },
+        "quota_accounting": {
+          "type": "string",
+          "enum": [
+            "bounded_preflight",
+            "unavailable"
+          ]
+        },
+        "max_chargeable_memories_per_batch": {
+          "const": 100
+        },
+        "max_deletion_plan_removals": {
+          "const": 5000
+        },
+        "max_deletion_plan_bytes": {
+          "const": 1048576
+        }
+      },
+      "required": [
+        "receipt_atomicity",
+        "quota_accounting",
+        "schema_fence",
+        "max_units_per_batch",
+        "max_batch_bytes",
+        "max_members_per_unit",
+        "max_unit_bytes",
+        "max_manifest_artifacts",
+        "max_manifest_bytes",
+        "max_receipt_bytes_per_pair",
+        "can_create",
+        "max_chargeable_memories_per_batch",
+        "max_deletion_plan_removals",
+        "max_deletion_plan_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "PairBinding": {
+      "type": "object",
+      "properties": {
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "tenant_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "workspace_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_epoch": {
+          "$ref": "#/$defs/Id"
+        },
+        "projection": {
+          "const": "authored-v1"
+        },
+        "publication_origin": {
+          "const": "user:sync"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "revoked"
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "pair_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_checkpoint": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "recovery_mode": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "retain_absent_keys"
+          ]
+        }
+      },
+      "required": [
+        "pair_id",
+        "tenant_id",
+        "workspace_id",
+        "server_id",
+        "server_epoch",
+        "projection",
+        "publication_origin",
+        "state",
+        "created_at",
+        "pair_generation",
+        "source_checkpoint",
+        "recovery_mode"
+      ],
+      "additionalProperties": false
+    },
+    "PairResponse": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "pair_response"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "binding": {
+          "$ref": "#/$defs/PairBinding"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "binding",
+        "capabilities"
+      ],
+      "additionalProperties": false
+    },
+    "PushRequest": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "push_request"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_epoch": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/SnapshotHeader"
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ApplyUnit"
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "deletion_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeletionContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "pair_id",
+        "server_epoch",
+        "request_id",
+        "dry_run",
+        "snapshot",
+        "units",
+        "deletion_context"
+      ],
+      "additionalProperties": false
+    },
+    "Collision": {
+      "type": "object",
+      "properties": {
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "destination_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base_receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "baseline_hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proposed_source_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intent": {
+          "type": "string",
+          "enum": [
+            "put",
+            "delete",
+            "check"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "hosted_modified",
+            "hosted_deleted",
+            "hosted_recreated",
+            "authored_incident_link",
+            "unverified_incident_link"
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "apply"
+          ]
+        },
+        "resolution": {
+          "type": "string",
+          "enum": [
+            "skip",
+            "overwrite",
+            "retain_no_delete",
+            "blocked",
+            "prompt_needed",
+            "held_delete"
+          ]
+        },
+        "changed_field_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_dependents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          }
+        },
+        "reviewed_state_digest": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "pair_id",
+        "artifact",
+        "destination_id",
+        "base_receipt_id",
+        "baseline_hosted_hash",
+        "current_hosted_hash",
+        "proposed_source_hash",
+        "intent",
+        "reason",
+        "phase",
+        "resolution",
+        "changed_field_paths",
+        "blocked_dependents",
+        "reviewed_state_digest"
+      ],
+      "additionalProperties": false
+    },
+    "Readiness": {
+      "type": "object",
+      "properties": {
+        "embedding": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "ready",
+            "skipped",
+            "failed",
+            "obsolete",
+            "not_applicable"
+          ]
+        },
+        "derivation": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "ready",
+            "disabled",
+            "failed",
+            "obsolete",
+            "not_applicable"
+          ]
+        },
+        "input_hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warning": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "embedding",
+        "derivation",
+        "input_hosted_hash",
+        "warning"
+      ],
+      "additionalProperties": false
+    },
+    "MemberReceipt": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "destination_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "owned",
+            "borrowed"
+          ]
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "new",
+            "updated",
+            "unchanged",
+            "deleted",
+            "retired",
+            "already_absent",
+            "borrowed",
+            "created_dependency",
+            "recreated",
+            "prepared"
+          ]
+        },
+        "source_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hosted_presence": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "creation_proven": {
+          "type": "boolean"
+        },
+        "readiness": {
+          "$ref": "#/$defs/Readiness"
+        },
+        "quota_units_assessed": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "applied_source_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline_eligible": {
+          "type": "boolean"
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "prepare",
+                "records",
+                "finalize"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "association_cleanup": {
+          "$ref": "#/$defs/AssociationCleanupReceipt"
+        }
+      },
+      "required": [
+        "artifact",
+        "destination_id",
+        "ownership",
+        "outcome",
+        "source_hash",
+        "hosted_hash",
+        "hosted_presence",
+        "quota_units_assessed",
+        "creation_proven",
+        "readiness",
+        "applied_source_hash",
+        "baseline_eligible",
+        "stage",
+        "association_cleanup"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "new",
+                  "recreated"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "creation_proven": {
+                "const": true
+              },
+              "hosted_presence": {
+                "const": "present"
+              },
+              "hosted_hash": {
+                "$ref": "#/$defs/Hash"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "creation_proven": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "quota_units_assessed": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hosted_presence": {
+                "const": "absent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted_hash": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "hosted_presence": {
+                "const": "present"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "hosted_hash": {
+                "$ref": "#/$defs/Hash"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "quota_units_assessed": {
+                "const": 1
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "creation_proven": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "recreated"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "quota_units_assessed": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "prepared"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseline_eligible": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "records",
+                  null
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseline_eligible": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "properties": {
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_epoch": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "predecessor_receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "uniqueItems": true
+        },
+        "state": {
+          "const": "committed"
+        },
+        "committed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MemberReceipt"
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "options": {
+          "$ref": "#/$defs/OperationOptions"
+        },
+        "reviewed_state_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restore_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RestoreContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delete_approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeleteApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "receipt_id",
+        "pair_id",
+        "server_epoch",
+        "operation_id",
+        "operation_hash",
+        "predecessor_receipts",
+        "state",
+        "committed_at",
+        "members",
+        "options",
+        "reviewed_state_digest",
+        "restore_context",
+        "delete_approval"
+      ],
+      "additionalProperties": false
+    },
+    "PlanMember": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "destination_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "planned_outcome": {
+          "type": "string",
+          "enum": [
+            "new",
+            "updated",
+            "unchanged",
+            "deleted",
+            "retired",
+            "already_absent",
+            "borrowed",
+            "collision_skipped",
+            "retained_no_delete",
+            "blocked",
+            "prompt_needed",
+            "prepared",
+            "schema_deferred",
+            "held_delete"
+          ]
+        },
+        "estimated_new_charge": {
+          "type": "integer",
+          "enum": [
+            0,
+            1
+          ]
+        },
+        "current_hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewed_state": {
+          "$ref": "#/$defs/ReviewedMemberState"
+        },
+        "incident_blockers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IncidentBlocker"
+          },
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "artifact",
+        "destination_id",
+        "planned_outcome",
+        "estimated_new_charge",
+        "current_hosted_hash",
+        "reviewed_state",
+        "incident_blockers"
+      ],
+      "additionalProperties": false
+    },
+    "UnitResult": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "planned",
+            "committed",
+            "replayed",
+            "collision_skipped",
+            "retained_no_delete",
+            "blocked",
+            "failed",
+            "uncertain",
+            "verified",
+            "prompt_needed",
+            "schema_deferred",
+            "held_delete"
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanMember"
+          }
+        },
+        "new_charge": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "collisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Collision"
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Error"
+          }
+        },
+        "quota_observation": {
+          "$ref": "#/$defs/QuotaObservation"
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chosen_action": {
+          "type": "string",
+          "enum": [
+            "none",
+            "skip",
+            "overwrite",
+            "prompt_needed",
+            "retain_no_delete",
+            "held_delete",
+            "blocked"
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_hash",
+        "state",
+        "receipt",
+        "plan",
+        "new_charge",
+        "collisions",
+        "errors",
+        "quota_observation",
+        "disposition",
+        "chosen_action"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "committed",
+                  "replayed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/Receipt"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "not": {
+                  "type": "string",
+                  "enum": [
+                    "committed",
+                    "replayed"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "replayed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "new_charge": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "planned",
+                  "collision_skipped",
+                  "retained_no_delete",
+                  "blocked",
+                  "failed",
+                  "verified",
+                  "prompt_needed",
+                  "schema_deferred",
+                  "held_delete"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "new_charge": {
+                "const": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "uncertain"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "new_charge": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Summary": {
+      "type": "object",
+      "properties": {
+        "committed_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "replayed_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "collision_skipped_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retained_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocked_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uncertain_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "new_charge": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "this_batch",
+            "this_run"
+          ]
+        },
+        "complete_manifest_acknowledged": {
+          "type": "boolean"
+        },
+        "verified_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prompt_needed_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schema_deferred_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "planned_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "held_delete_units": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "excluded_artifacts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_blocked_artifacts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "member_outcomes": {
+          "type": "object",
+          "propertyNames": {
+            "enum": [
+              "new",
+              "updated",
+              "unchanged",
+              "deleted",
+              "retired",
+              "already_absent",
+              "borrowed",
+              "created_dependency",
+              "recreated",
+              "prepared"
+            ]
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "committed_units",
+        "replayed_units",
+        "collision_skipped_units",
+        "retained_units",
+        "blocked_units",
+        "failed_units",
+        "uncertain_units",
+        "new_charge",
+        "scope",
+        "complete_manifest_acknowledged",
+        "verified_units",
+        "prompt_needed_units",
+        "schema_deferred_units",
+        "planned_units",
+        "held_delete_units",
+        "excluded_artifacts",
+        "local_blocked_artifacts",
+        "member_outcomes"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "this_batch"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "complete_manifest_acknowledged": {
+                "const": false
+              },
+              "excluded_artifacts": {
+                "const": 0
+              },
+              "local_blocked_artifacts": {
+                "const": 0
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PushResponse": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "push_response"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnitResult"
+          },
+          "maxItems": 100
+        },
+        "summary": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/Summary"
+            },
+            {
+              "properties": {
+                "scope": {
+                  "const": "this_batch"
+                }
+              }
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "current_readiness": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessObservation"
+          }
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "pair_id",
+        "request_id",
+        "dry_run",
+        "manifest_id",
+        "results",
+        "summary",
+        "warnings",
+        "current_readiness"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dry_run": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "results": {
+                "items": {
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "planned",
+                        "collision_skipped",
+                        "retained_no_delete",
+                        "blocked",
+                        "failed",
+                        "prompt_needed",
+                        "schema_deferred",
+                        "held_delete"
+                      ]
+                    },
+                    "receipt": {
+                      "type": "null"
+                    },
+                    "new_charge": {
+                      "const": 0
+                    },
+                    "disposition": {
+                      "type": "null"
+                    }
+                  }
+                }
+              },
+              "summary": {
+                "properties": {
+                  "new_charge": {
+                    "const": 0
+                  },
+                  "committed_units": {
+                    "const": 0
+                  },
+                  "replayed_units": {
+                    "const": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ReceiptQuery": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "receipt_query"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_epoch": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "maxItems": 100
+        },
+        "after_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "pair_id",
+        "server_epoch",
+        "operation_ids",
+        "after_receipt_id"
+      ],
+      "additionalProperties": false
+    },
+    "ReceiptQueryEntry": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "committed",
+            "not_observed",
+            "terminal_without_apply"
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Receipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "disposition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TerminalDisposition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "state",
+        "receipt",
+        "disposition"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "committed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/Receipt"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "not_observed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "terminal_without_apply"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "receipt": {
+                "type": "null"
+              },
+              "disposition": {
+                "$ref": "#/$defs/TerminalDisposition"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ReceiptResponse": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "receipt_response"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReceiptQueryEntry"
+          },
+          "maxItems": 100
+        },
+        "next_after_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_readiness": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessObservation"
+          }
+        },
+        "pair_checkpoint": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "pair_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quota_observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuotaObservation"
+          }
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "pair_id",
+        "entries",
+        "next_after_receipt_id",
+        "current_readiness",
+        "pair_checkpoint",
+        "pair_generation",
+        "quota_observations"
+      ],
+      "additionalProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "error_response"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "request_id",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "BaselineRow": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "source_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hosted_presence": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "owned",
+            "borrowed"
+          ]
+        },
+        "destination_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acknowledged_manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "deletion_eligible_incarnation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "artifact",
+        "receipt_id",
+        "source_hash",
+        "hosted_hash",
+        "hosted_presence",
+        "ownership",
+        "destination_id",
+        "acknowledged_manifest_id",
+        "deletion_eligible_incarnation"
+      ],
+      "additionalProperties": false
+    },
+    "PendingRow": {
+      "type": "object",
+      "properties": {
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "unit": {
+          "$ref": "#/$defs/StoredApplyUnit"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "staged",
+            "sent_uncertain",
+            "blocked",
+            "terminal"
+          ]
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot_root": {
+          "$ref": "#/$defs/Hash"
+        },
+        "terminal_state": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "committed",
+                "verified",
+                "collision_skipped",
+                "retained_no_delete",
+                "rejected",
+                "cancelled_unsent",
+                "cancelled_by_rebind",
+                "schema_deferred",
+                "held_delete"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "manifest_id",
+        "unit",
+        "state",
+        "last_error",
+        "snapshot_root",
+        "terminal_state"
+      ],
+      "additionalProperties": false
+    },
+    "MappingRow": {
+      "type": "object",
+      "properties": {
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "destination_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "physical_key": {
+          "$ref": "#/$defs/JsonObject"
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "owned",
+            "borrowed"
+          ]
+        },
+        "head_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "reserved",
+            "present",
+            "deleted",
+            "retired"
+          ]
+        },
+        "source_origin_claim": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mirror_instance_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deletion_eligible_incarnation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "charge_eligibility_consumed": {
+          "type": "boolean"
+        },
+        "first_assessment_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "latest_stage_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "pair_id",
+        "artifact",
+        "destination_id",
+        "physical_key",
+        "ownership",
+        "head_receipt_id",
+        "state",
+        "source_origin_claim",
+        "mirror_instance_id",
+        "deletion_eligible_incarnation",
+        "charge_eligibility_consumed",
+        "first_assessment_receipt_id",
+        "latest_stage_receipt_id"
+      ],
+      "additionalProperties": false
+    },
+    "LocalReceiptStore": {
+      "type": "object",
+      "properties": {
+        "store_schema_version": {
+          "const": "1"
+        },
+        "pair": {
+          "$ref": "#/$defs/PairBinding"
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri"
+        },
+        "credential_reference": {
+          "type": "string"
+        },
+        "last_complete_manifest_root": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baselines": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BaselineRow"
+          }
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PendingRow"
+          }
+        },
+        "source_witness": {
+          "$ref": "#/$defs/SourceWitness"
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PendingSnapshot"
+          }
+        },
+        "restore_workflows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RestoreWorkflow"
+          }
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationOutcome"
+          }
+        }
+      },
+      "required": [
+        "store_schema_version",
+        "pair",
+        "endpoint",
+        "credential_reference",
+        "last_complete_manifest_root",
+        "baselines",
+        "pending",
+        "source_witness",
+        "snapshots",
+        "restore_workflows",
+        "outcomes"
+      ],
+      "additionalProperties": false
+    },
+    "HostedReceiptStore": {
+      "type": "object",
+      "properties": {
+        "store_schema_version": {
+          "const": "1"
+        },
+        "pair": {
+          "$ref": "#/$defs/PairBinding"
+        },
+        "mappings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MappingRow"
+          }
+        },
+        "revocation_epoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "restore_workflows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RestoreWorkflow"
+          }
+        },
+        "projection_work": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectionWork"
+          }
+        },
+        "outcomes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OperationOutcome"
+          }
+        },
+        "deletion_plans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeletionPlan"
+          }
+        }
+      },
+      "required": [
+        "store_schema_version",
+        "pair",
+        "mappings",
+        "revocation_epoch",
+        "restore_workflows",
+        "projection_work",
+        "outcomes",
+        "deletion_plans"
+      ],
+      "additionalProperties": false
+    },
+    "ReadinessObservation": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "readiness": {
+          "$ref": "#/$defs/Readiness"
+        }
+      },
+      "required": [
+        "artifact",
+        "receipt_id",
+        "readiness"
+      ],
+      "additionalProperties": false
+    },
+    "QuotaExceededBody": {
+      "type": "object",
+      "properties": {
+        "detail": {
+          "const": "Memory quota exceeded"
+        },
+        "current": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "subscription_tier": {
+          "type": "string"
+        },
+        "upgrade_url": {
+          "const": "/api/upgrade"
+        }
+      },
+      "required": [
+        "detail",
+        "current",
+        "limit",
+        "subscription_tier",
+        "upgrade_url"
+      ],
+      "additionalProperties": false
+    },
+    "CollisionPolicy": {
+      "type": "string",
+      "enum": [
+        "ask",
+        "skip",
+        "overwrite"
+      ]
+    },
+    "PolicyResolution": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CollisionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective": {
+          "$ref": "#/$defs/CollisionPolicy"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "cli",
+            "config",
+            "interactive_default",
+            "noninteractive_default"
+          ]
+        },
+        "interactive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "requested",
+        "effective",
+        "source",
+        "interactive"
+      ],
+      "additionalProperties": false
+    },
+    "SourceIdentity": {
+      "type": "object",
+      "properties": {
+        "store_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "incarnation": {
+          "$ref": "#/$defs/Id"
+        },
+        "namespace": {
+          "$ref": "#/$defs/Id"
+        },
+        "checkpoint_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checkpoint_nonce": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "store_id",
+        "incarnation",
+        "namespace",
+        "checkpoint_generation",
+        "checkpoint_nonce"
+      ],
+      "additionalProperties": false
+    },
+    "SourceWitness": {
+      "type": "object",
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "resolved_database_path": {
+          "type": "string"
+        },
+        "os_file_identity": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "checkpoint_pending",
+            "recovery_required"
+          ]
+        },
+        "pending_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pair_generation": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "identity",
+        "resolved_database_path",
+        "os_file_identity",
+        "state",
+        "pending_identity",
+        "pair_generation"
+      ],
+      "additionalProperties": false
+    },
+    "RecoveryBinding": {
+      "type": "object",
+      "properties": {
+        "previous_pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "expected_pair_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "reset",
+            "restore",
+            "replacement",
+            "path_change",
+            "identity_loss"
+          ]
+        },
+        "retain_absent_keys": {
+          "const": true
+        }
+      },
+      "required": [
+        "previous_pair_id",
+        "expected_pair_generation",
+        "reason",
+        "retain_absent_keys"
+      ],
+      "additionalProperties": false
+    },
+    "AuthoredEdgeProperties": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "source_url": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "user_metadata": {
+          "$ref": "#/$defs/JsonObject"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "EvidenceEdgeProperties": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "const": "evidence"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "role",
+        "confidence"
+      ],
+      "additionalProperties": false
+    },
+    "SupersedesEdgeProperties": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "reason",
+        "timestamp",
+        "confidence"
+      ],
+      "additionalProperties": false
+    },
+    "ContradictsEdgeProperties": {
+      "type": "object",
+      "properties": {
+        "detected_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "detected_at",
+        "confidence"
+      ],
+      "additionalProperties": false
+    },
+    "ProducedEdgeProperties": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "timestamp",
+        "confidence"
+      ],
+      "additionalProperties": false
+    },
+    "ReviewedMemberState": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "current_hosted_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_presence": {
+          "type": "string",
+          "enum": [
+            "present",
+            "absent"
+          ]
+        },
+        "mirror_instance_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "incident_reference_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "base_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "artifact",
+        "current_hosted_hash",
+        "current_presence",
+        "mirror_instance_id",
+        "incident_reference_hash",
+        "base_receipt_id"
+      ],
+      "additionalProperties": false
+    },
+    "AssociationProvenance": {
+      "type": "object",
+      "properties": {
+        "association_class": {
+          "const": "machine"
+        },
+        "producer": {
+          "type": "string",
+          "enum": [
+            "enrichment",
+            "enrichment_relations",
+            "actor_skill",
+            "actor_decision",
+            "actor_context",
+            "llm_extract",
+            "grounding"
+          ]
+        },
+        "source_item_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "source_instance_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "input_hosted_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "work_id": {
+          "$ref": "#/$defs/Id"
+        }
+      },
+      "required": [
+        "association_class",
+        "producer",
+        "source_item_id",
+        "source_instance_id",
+        "input_hosted_hash",
+        "work_id"
+      ],
+      "additionalProperties": false
+    },
+    "RemovedAssociation": {
+      "type": "object",
+      "properties": {
+        "physical_key": {
+          "$ref": "#/$defs/JsonObject"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "authored_overwrite",
+            "unverified_overwrite"
+          ]
+        },
+        "before_hash": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "physical_key",
+        "classification",
+        "before_hash"
+      ],
+      "additionalProperties": false
+    },
+    "IncidentBlocker": {
+      "type": "object",
+      "properties": {
+        "physical_key": {
+          "$ref": "#/$defs/JsonObject"
+        },
+        "classification": {
+          "type": "string",
+          "enum": [
+            "authored_link",
+            "unverified_link",
+            "native_semantic_reference",
+            "other_pair_edge"
+          ]
+        },
+        "before_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "overwrite_available": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "physical_key",
+        "classification",
+        "before_hash",
+        "overwrite_available"
+      ],
+      "additionalProperties": false
+    },
+    "RestoreContext": {
+      "type": "object",
+      "properties": {
+        "workflow_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "prepare",
+            "records",
+            "finalize"
+          ]
+        },
+        "declaration": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "final_declaration_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "effective_schema_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "preparation_receipt_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependent_set_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "record_storage_receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        }
+      },
+      "required": [
+        "workflow_id",
+        "phase",
+        "declaration",
+        "final_declaration_hash",
+        "effective_schema_hash",
+        "preparation_receipt_id",
+        "dependent_set_hash",
+        "record_storage_receipts"
+      ],
+      "additionalProperties": false
+    },
+    "RestoreWorkflow": {
+      "type": "object",
+      "properties": {
+        "workflow_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "declaration": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "final_source_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "effective_schema_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "dependents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        },
+        "dependent_set_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "phase_operation_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "stage_receipt_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "planned",
+            "prepared",
+            "restoring",
+            "ready_to_finalize",
+            "complete",
+            "suspended_no_delete",
+            "schema_deferred",
+            "blocked"
+          ]
+        },
+        "destination_initial_tier": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workflow_id",
+        "manifest_id",
+        "declaration",
+        "final_source_hash",
+        "effective_schema_hash",
+        "dependents",
+        "dependent_set_hash",
+        "phase_operation_ids",
+        "stage_receipt_ids",
+        "state",
+        "destination_initial_tier"
+      ],
+      "additionalProperties": false,
+      "description": "Retired-declaration restoration only. Final payload is reconstructed from the frozen blob at final_source_hash. Record receipts are ordinary commit receipts. No general second ACK."
+    },
+    "QuotaObservation": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "assessed_units": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "counter_increment_state": {
+          "type": "string",
+          "enum": [
+            "applied",
+            "not_attempted",
+            "uncertain",
+            "not_applicable",
+            "unverified_replay"
+          ]
+        },
+        "new_charge": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warning": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "assessed_units",
+        "counter_increment_state",
+        "new_charge",
+        "warning"
+      ],
+      "additionalProperties": false,
+      "description": "assessed_units null until a receipt establishes assessment; it is not counter settlement."
+    },
+    "TerminalDisposition": {
+      "type": "object",
+      "properties": {
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "collision_skipped",
+            "retained_no_delete",
+            "blocked",
+            "failed",
+            "cancelled_by_rebind",
+            "schema_deferred",
+            "held_delete"
+          ]
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "pair_id",
+        "operation_id",
+        "operation_hash",
+        "state",
+        "recorded_at",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "FrozenPayload": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "source_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "payload": {
+          "$ref": "#/$defs/Payload"
+        }
+      },
+      "required": [
+        "artifact",
+        "source_hash",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "PendingSnapshot": {
+      "type": "object",
+      "properties": {
+        "manifest": {
+          "$ref": "#/$defs/Manifest"
+        },
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_epoch": {
+          "$ref": "#/$defs/Id"
+        },
+        "source_witness": {
+          "$ref": "#/$defs/SourceWitness"
+        },
+        "policy": {
+          "$ref": "#/$defs/PolicyResolution"
+        },
+        "frozen_payloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FrozenPayload"
+          }
+        },
+        "operation_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "terminal_operation_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          }
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "all_units_terminal",
+            "retained_for_restore"
+          ]
+        },
+        "deletion_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeletionContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "manifest",
+        "pair_id",
+        "server_epoch",
+        "source_witness",
+        "policy",
+        "frozen_payloads",
+        "operation_ids",
+        "terminal_operation_ids",
+        "state",
+        "deletion_context"
+      ],
+      "additionalProperties": false
+    },
+    "ProjectionWork": {
+      "type": "object",
+      "properties": {
+        "work_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "source_instance_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "input_hosted_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "stages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "work_id",
+        "receipt_id",
+        "artifact",
+        "source_instance_id",
+        "input_hosted_hash",
+        "stages"
+      ],
+      "additionalProperties": false,
+      "description": "Immutable receipt-linked dispatch descriptor, work_id is deterministic from receipt/artifact/input and is the existing transport run_id. No mutable mirror job status."
+    },
+    "SyncConfig": {
+      "type": "object",
+      "properties": {
+        "on_collision": {
+          "$ref": "#/$defs/CollisionPolicy"
+        }
+      },
+      "additionalProperties": false
+    },
+    "StoredPut": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "const": "put"
+        },
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "source_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          }
+        },
+        "payload_ref": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "action",
+        "artifact",
+        "base",
+        "source_hash",
+        "dependencies",
+        "payload_ref"
+      ],
+      "additionalProperties": false
+    },
+    "StoredApplyUnit": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "operation_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "options": {
+          "$ref": "#/$defs/OperationOptions"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/StoredPut"
+              },
+              {
+                "$ref": "#/$defs/Delete"
+              },
+              {
+                "$ref": "#/$defs/Check"
+              }
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "depends_on_operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Id"
+          },
+          "uniqueItems": true
+        },
+        "target_partition": {
+          "type": "string",
+          "enum": [
+            "data",
+            "ontology"
+          ]
+        },
+        "group_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "reviewed_state": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReviewedMemberState"
+          }
+        },
+        "restore_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RestoreContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delete_approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeleteApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "operation_hash",
+        "options",
+        "members",
+        "depends_on_operations",
+        "target_partition",
+        "group_hash",
+        "reviewed_state",
+        "restore_context",
+        "delete_approval"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "options": {
+                "properties": {
+                  "overwrite": {
+                    "const": true
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "reviewed_state": {
+                "minItems": 1
+              },
+              "options": {
+                "properties": {
+                  "chosen_action": {
+                    "const": "overwrite"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Local representation only. Expand each StoredPut.payload_ref from frozen_payloads before hashing or sending. Wire Put still requires payload."
+    },
+    "OperationOutcome": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Receipt"
+        },
+        {
+          "$ref": "#/$defs/TerminalDisposition"
+        }
+      ]
+    },
+    "AssociationCleanupReceipt": {
+      "type": "object",
+      "properties": {
+        "machine_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "machine_set_hash": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Hash"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "overwritten_links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RemovedAssociation"
+          },
+          "maxItems": 1000
+        }
+      },
+      "required": [
+        "machine_count",
+        "machine_set_hash",
+        "overwritten_links"
+      ],
+      "additionalProperties": false
+    },
+    "Removal": {
+      "type": "object",
+      "properties": {
+        "artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "source_absent",
+            "left_selection",
+            "coupled"
+          ]
+        },
+        "effect": {
+          "type": "string",
+          "enum": [
+            "delete",
+            "retire",
+            "unlink"
+          ]
+        },
+        "base": {
+          "$ref": "#/$defs/Base"
+        },
+        "group_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "reviewed_state": {
+          "$ref": "#/$defs/ReviewedMemberState"
+        }
+      },
+      "required": [
+        "artifact",
+        "reason",
+        "effect",
+        "base",
+        "group_hash",
+        "reviewed_state"
+      ],
+      "additionalProperties": false
+    },
+    "DeletionPlan": {
+      "type": "object",
+      "properties": {
+        "pair_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "server_epoch": {
+          "$ref": "#/$defs/Id"
+        },
+        "pair_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_checkpoint": {
+          "$ref": "#/$defs/SourceIdentity"
+        },
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "manifest_root": {
+          "$ref": "#/$defs/Hash"
+        },
+        "owned_item_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "owned_membership_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "removals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Removal"
+          },
+          "maxItems": 5000
+        },
+        "item_delete_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletion_set_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "plan_hash": {
+          "$ref": "#/$defs/Hash"
+        }
+      },
+      "required": [
+        "pair_id",
+        "server_epoch",
+        "pair_generation",
+        "source_checkpoint",
+        "manifest_id",
+        "manifest_root",
+        "owned_item_count",
+        "owned_membership_hash",
+        "removals",
+        "item_delete_count",
+        "deletion_set_hash",
+        "plan_hash"
+      ],
+      "additionalProperties": false
+    },
+    "DeleteApproval": {
+      "type": "object",
+      "properties": {
+        "plan_hash": {
+          "$ref": "#/$defs/Hash"
+        },
+        "inferred": {
+          "type": "string",
+          "enum": [
+            "not_required",
+            "held",
+            "interactive_yes",
+            "allow_deletes"
+          ]
+        },
+        "confirmed_delete_count": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "plan_hash",
+        "inferred",
+        "confirmed_delete_count"
+      ],
+      "additionalProperties": false,
+      "description": "not_required only if this plan has no inferred removals. held never authorizes a destructive unit. Count is exact D or null. No-delete overrides every value."
+    },
+    "DeletionContext": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "$ref": "#/$defs/DeletionPlan"
+        },
+        "approval": {
+          "$ref": "#/$defs/DeleteApproval"
+        }
+      },
+      "required": [
+        "plan",
+        "approval"
+      ],
+      "additionalProperties": false
+    },
+    "RunResult": {
+      "type": "object",
+      "properties": {
+        "manifest_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/UnitResult"
+        }
+      },
+      "required": [
+        "manifest_id",
+        "request_id",
+        "result"
+      ],
+      "additionalProperties": false
+    },
+    "RunReport": {
+      "type": "object",
+      "properties": {
+        "message_type": {
+          "const": "run_report"
+        },
+        "schema_version": {
+          "const": "1"
+        },
+        "run_id": {
+          "$ref": "#/$defs/Id"
+        },
+        "pair_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "policy": {
+          "$ref": "#/$defs/PolicyResolution"
+        },
+        "snapshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SnapshotHeader"
+          }
+        },
+        "deletion_contexts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DeletionContext"
+          }
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RunResult"
+          }
+        },
+        "excluded": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/ManifestEntry"
+              },
+              {
+                "properties": {
+                  "membership": {
+                    "const": "excluded"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "blocked_entries": {
+          "type": "array",
+          "items": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/ManifestEntry"
+              },
+              {
+                "properties": {
+                  "membership": {
+                    "const": "blocked"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "held_deletes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "manifest_id": {
+                "$ref": "#/$defs/Id"
+              },
+              "artifact": {
+                "$ref": "#/$defs/ArtifactRef"
+              },
+              "reason": {
+                "$ref": "#/$defs/Error"
+              },
+              "operation_id": {
+                "$ref": "#/$defs/Id"
+              }
+            },
+            "required": [
+              "manifest_id",
+              "artifact",
+              "reason",
+              "operation_id"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Error"
+          }
+        },
+        "current_readiness": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessObservation"
+          }
+        },
+        "summary": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/Summary"
+            },
+            {
+              "properties": {
+                "scope": {
+                  "const": "this_run"
+                }
+              }
+            }
+          ]
+        },
+        "mirror_equal": {
+          "type": "boolean"
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "message_type",
+        "schema_version",
+        "run_id",
+        "pair_id",
+        "source_checkpoint",
+        "dry_run",
+        "policy",
+        "snapshots",
+        "deletion_contexts",
+        "results",
+        "excluded",
+        "blocked_entries",
+        "held_deletes",
+        "errors",
+        "current_readiness",
+        "summary",
+        "mirror_equal",
+        "exit_code",
+        "warnings"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "dry_run": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "results": {
+                "items": {
+                  "properties": {
+                    "result": {
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "planned",
+                            "collision_skipped",
+                            "retained_no_delete",
+                            "blocked",
+                            "failed",
+                            "prompt_needed",
+                            "schema_deferred",
+                            "held_delete"
+                          ]
+                        },
+                        "receipt": {
+                          "type": "null"
+                        },
+                        "disposition": {
+                          "type": "null"
+                        },
+                        "new_charge": {
+                          "const": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "summary": {
+                "properties": {
+                  "new_charge": {
+                    "const": 0
+                  },
+                  "committed_units": {
+                    "const": 0
+                  },
+                  "replayed_units": {
+                    "const": 0
+                  },
+                  "complete_manifest_acknowledged": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
