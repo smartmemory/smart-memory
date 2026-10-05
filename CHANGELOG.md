@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- On Windows, `*` and `?` in arguments such as `sm search "*"` are passed through literally instead of being expanded to file names.
+
 ## [1.5.22] - 2026-10-05
 
 - Default local search hides raw hook transcripts. Use --origin PREFIX to inspect a producer in direct or daemon mode. Hosted mode clearly refuses this unsupported filter before connecting.

@@ -1,4 +1,4 @@
-from smartmemory_app.cli import cli
+from smartmemory_app.cli import main
 
 if __name__ == "__main__":
-    cli()
+    main()

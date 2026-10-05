@@ -40,8 +40,8 @@ dev = ["pytest>=8", "ruff==0.11.4"]
 tui = ["textual>=8.0"]         # kept for backward compat (now included by default)
 
 [project.scripts]
-smartmemory = "smartmemory_app.cli:cli"
-sm = "smartmemory_app.cli:cli"
+smartmemory = "smartmemory_app.cli:main"
+sm = "smartmemory_app.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["smartmemory_app"]

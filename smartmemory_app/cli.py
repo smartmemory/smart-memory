@@ -3607,5 +3607,10 @@ def server_cmd() -> None:
     click.echo("Run: smartmemory-mcp")
 
 
+def main() -> None:
+    """Run the CLI with literal arguments on Windows."""
+    cli(windows_expand_args=False)
+
+
 if __name__ == "__main__":
-    cli()
+    main()
