@@ -238,7 +238,14 @@ def test_local_startup_wording_is_unchanged(proxy, monkeypatch, command):
         if command == "start"
         else "Stopping SmartMemory...\nStarting SmartMemory...\nSmartMemory is ready.\n"
     )
-    assert result.output == expected
+    if command == "restart":
+        assert result.output.startswith(expected)
+        assert result.output[len(expected) :].startswith(
+            "Restart timings: stop worker=not reached, stop daemon="
+        )
+        assert result.output.count("Restart timings:") == 1
+    else:
+        assert result.output == expected
 
 
 def test_local_existing_daemon_wording_is_unchanged(proxy, monkeypatch):

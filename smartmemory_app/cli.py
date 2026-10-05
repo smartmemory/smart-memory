@@ -894,7 +894,8 @@ def stop_cmd() -> None:
 @bounded_lifecycle(RESTART_TIMEOUT)
 def restart_cmd(num_workers: int) -> None:
     """Restart the SmartMemory daemon and its core worker."""
-    from smartmemory_app.daemon import stop_daemon
+    import time
+    from smartmemory_app.daemon import stop_daemon, record_lifecycle_timings
 
     remote = _disclose_remote_proxy("restart")
     stop_message = (
@@ -903,26 +904,50 @@ def restart_cmd(num_workers: int) -> None:
     start_message = (
         "Starting local proxy/viewer host" if remote else "Starting SmartMemory"
     )
-    try:
-        click.echo(f"{stop_message}...")
-        from smartmemory_app.progress import startup_progress
+    with record_lifecycle_timings() as timings:
+        try:
+            try:
+                click.echo(f"{stop_message}...")
+                from smartmemory_app.progress import startup_progress
 
-        with startup_progress(stop_message, emit=click.echo):
-            stop_daemon()
-    except Exception as exc:
-        raise _daemon_failure("stop", exc) from None
-    click.echo(f"{start_message}...")
-    try:
-        info = _start_with_progress(
-            num_workers=num_workers,
-            message=start_message,
-            wait_until_ready=True,
-        )
-    except click.ClickException:
-        raise
-    except Exception as exc:
-        raise _daemon_failure("start", exc) from None
-    _report_start_status(info, remote=remote)
+                stop_started = time.monotonic()
+                try:
+                    with startup_progress(stop_message, emit=click.echo):
+                        stop_daemon()
+                finally:
+                    timings["stop daemon"] = max(
+                        0,
+                        time.monotonic() - stop_started - timings.get("stop worker", 0),
+                    )
+            except Exception as exc:
+                raise _daemon_failure("stop", exc) from None
+            click.echo(f"{start_message}...")
+            start_started = time.monotonic()
+            try:
+                info = _start_with_progress(
+                    num_workers=num_workers,
+                    message=start_message,
+                    wait_until_ready=True,
+                )
+            except click.ClickException:
+                raise
+            except Exception as exc:
+                raise _daemon_failure("start", exc) from None
+            finally:
+                elapsed = time.monotonic() - start_started
+                timings.setdefault("start/spawn", elapsed)
+                timings["ready"] = max(0, elapsed - timings["start/spawn"])
+            _report_start_status(info, remote=remote)
+        finally:
+            click.echo(
+                "Restart timings: "
+                + ", ".join(
+                    f"{phase}={timings[phase]:.2f}s"
+                    if phase in timings
+                    else f"{phase}=not reached"
+                    for phase in ("stop worker", "stop daemon", "start/spawn", "ready")
+                )
+            )
 
 
 def _installed_version_from_subprocess() -> str | None:

@@ -34,6 +34,34 @@ START_TIMEOUT = 75
 RESTART_TIMEOUT = STOP_TIMEOUT + START_TIMEOUT
 
 
+_phase_times: ContextVar[dict | None] = ContextVar("daemon_phase_times", default=None)
+
+
+@contextmanager
+def record_lifecycle_timings():
+    """Collect timings for one CLI restart without changing lifecycle budgets."""
+    timings = {}
+    token = _phase_times.set(timings)
+    try:
+        yield timings
+    finally:
+        _phase_times.reset(token)
+
+
+def _timed_worker_stop(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            return function(*args, **kwargs)
+        finally:
+            timings = _phase_times.get()
+            if timings is not None:
+                timings["stop worker"] = time.monotonic() - started
+
+    return wrapped
+
+
 @contextmanager
 def lifecycle_budget(seconds: float):
     """Set one absolute deadline at entry; nested lifecycle calls inherit it."""
@@ -398,6 +426,7 @@ def start_daemon(
     streamed to it during the wait, so `sm start` shows progress instead of a
     silent hang. Idempotent — returns immediately if already running.
     """
+    start_started = time.monotonic()
     _upgrade_worker_agent()
     legacy_retired = _retire_legacy_workers()
     existing = get_status()
@@ -424,6 +453,9 @@ def start_daemon(
             _output_pos = _stream_new_log_lines(output_path, _output_pos, on_log)
 
     def _returnable(status: dict | None) -> bool:
+        timings = _phase_times.get()
+        if timings is not None and status is not None:
+            timings.setdefault("start/spawn", time.monotonic() - start_started)
         return status is not None and (
             not wait_until_ready or status.get("status") != "warming"
         )
@@ -506,6 +538,7 @@ def start_daemon(
     # (avoids recursion since CLI `viewer` calls start_daemon + open browser).
     # Inherit PYTHONPATH so editable installs work in dev.
     env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     _prepare_output_log(data)
     with (data / "daemon-output.log").open("a", encoding="utf-8") as output:
         proc = spawn_detached(
@@ -805,6 +838,7 @@ def _stop_core_worker() -> None:
     _remaining(STOP_TIMEOUT)
 
 
+@_timed_worker_stop
 def _stop_workers() -> None:
     """Stop every core launch path and any identified legacy consumer."""
 

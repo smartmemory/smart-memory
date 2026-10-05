@@ -251,7 +251,7 @@ smartmemory clear                      # Delete all memories and reset vectors
 ```bash
 smartmemory start                      # Start daemon + enrichment workers
 smartmemory stop                       # Stop daemon
-smartmemory restart                    # Restart daemon
+smartmemory restart                    # Restart daemon and print phase timings
 smartmemory status                     # Daemon health + enrichment stats
 smartmemory worker                     # Run enrichment worker (drain and exit)
 smartmemory worker --loop              # Run enrichment worker continuously

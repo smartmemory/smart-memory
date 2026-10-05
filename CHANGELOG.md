@@ -10,6 +10,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Inline add accepts arbitrary property options before or after quoted text, including --key=value, while retaining reserved, duplicate and missing-value validation. Split text prompts users to quote it or use --all - stdin.
 - Search prints full IDs, offers --json with complete fields, marks truncated previews, and supports --full bodies. Local read-only get resolves unique ID prefixes of at least six hex characters and lists candidates on ambiguity. Remote get asks for the full ID.
 - sm help and sm help COMMAND forward to Click help. Keyless local semantic-hop searches show and log their heuristic-planner fallback.
+- Restart prints worker-stop, daemon-stop, start/spawn and ready timings, including partial failures. Detached daemon stdio defaults to UTF-8 while preserving a user-selected encoding.
 
 ## [1.5.21] - 2026-10-04
 
