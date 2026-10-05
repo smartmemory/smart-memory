@@ -2015,6 +2015,23 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
         )
 
 
+def _render_ask_relations(result: dict) -> None:
+    relations = result.get("relations") or []
+    if relations:
+        click.echo(click.style("  Relations:", dim=True))
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            click.echo(
+                click.style(
+                    "    - "
+                    f"{relation.get('source', '?')} --{relation.get('type', '?')}--> "
+                    f"{relation.get('target', '?')}",
+                    dim=True,
+                )
+            )
+
+
 @cli.command("ask")
 @click.argument("question")
 @click.option("--limit", default=5, show_default=True, type=click.IntRange(min=1))
@@ -2026,7 +2043,8 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
 def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
     """Answer QUESTION from matching memories and their graph relations.
 
-    Prints only the direct answer by default; pass --reasoning to see why.
+    Prints the direct answer by default, with --reasoning to see why.
+    Without an LLM key in local mode, prints labelled memory excerpts.
     """
     result = _memory_request(
         "POST",
@@ -2041,6 +2059,25 @@ def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
         or not result["answer"].strip()
     ):
         raise click.ClickException("SmartMemory returned an invalid ask response.")
+
+    if result.get("mode") == "extractive" and result.get("synthesized") is False:
+        click.echo("Extractive: No LLM configured, so this is not a written answer.")
+        evidence = result.get("evidence") or []
+        if evidence:
+            click.echo("Most relevant memories for your question:")
+            for number, item in enumerate(evidence, 1):
+                click.echo(
+                    f"{number}. [{item.get('memory_type', 'unknown')}] {item.get('item_id', '?')} "
+                    f"({item.get('created_at') or 'date unknown'})\n   {item.get('content', '')}"
+                )
+        else:
+            click.echo("Nothing relevant found.")
+        click.echo(
+            "Enable synthesized answers with smartmemory setup or a supported provider key (e.g. GROQ_API_KEY)."
+        )
+        if reasoning:
+            _render_ask_relations(result)
+        return
 
     click.echo(result["answer"])
     if not reasoning:
@@ -2063,20 +2100,7 @@ def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
                     dim=True,
                 )
             )
-    relations = result.get("relations") or []
-    if relations:
-        click.echo(click.style("  Relations:", dim=True))
-        for relation in relations:
-            if not isinstance(relation, dict):
-                continue
-            click.echo(
-                click.style(
-                    "    - "
-                    f"{relation.get('source', '?')} --{relation.get('type', '?')}--> "
-                    f"{relation.get('target', '?')}",
-                    dim=True,
-                )
-            )
+    _render_ask_relations(result)
 
 
 @cli.command("explore")

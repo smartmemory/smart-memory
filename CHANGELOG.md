@@ -11,6 +11,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Search prints full IDs, offers --json with complete fields, marks truncated previews, and supports --full bodies. Local read-only get resolves unique ID prefixes of at least six hex characters and lists candidates on ambiguity. Remote get asks for the full ID.
 - sm help and sm help COMMAND forward to Click help. Keyless local semantic-hop searches show and log their heuristic-planner fallback.
 - Restart prints worker-stop, daemon-stop, start/spawn and ready timings, including partial failures. Detached daemon stdio defaults to UTF-8 while preserving a user-selected encoding.
+- Extractive `sm ask --reasoning` displays the returned graph relations using the same format as synthesized answers.
+- Local `sm ask` without an LLM key returns clearly labelled extractive memory excerpts with full IDs, types and dates. Empty results exit successfully. Configured LLM failures keep their existing errors.
 
 ## [1.5.21] - 2026-10-04
 

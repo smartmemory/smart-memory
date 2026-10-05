@@ -185,7 +185,7 @@ memory = create_lite_memory(pipeline_profile=PipelineConfig.lite(llm_enabled=Fal
 sm add "text"                  # Remember something
 sm search "query"              # Find memories by meaning
 sm search "*"                  # List everything
-sm ask "what did we decide?"   # Direct answer; add --reasoning for why + evidence
+sm ask "what did we decide?"   # Answer, or labelled excerpts locally without an LLM key
 sm viewer                      # Open the knowledge graph in your browser
 sm explore                     # Walk the knowledge graph in the terminal
 sm status                      # Daemon health and memory count
@@ -231,7 +231,7 @@ smartmemory help search                # Show command help
 smartmemory search "*"                 # List all memories
 smartmemory search --top-k 20 "query"  # Control result count (default: 5)
 smartmemory search --project atlas "q" # Filter by property
-smartmemory ask "what did we decide?"  # Direct answer; --reasoning shows evidence + relations
+smartmemory ask "what did we decide?"  # Answer, or labelled excerpts locally without an LLM key
 
 smartmemory get <item_id>              # Fetch a single memory by ID
 smartmemory retag --content "x" --origin seed:demo --dry-run  # Re-tag matched items' origin
@@ -274,6 +274,8 @@ smartmemory server                     # Start MCP server (called by MCP clients
 smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
+
+In local mode without an LLM key, `sm ask` shows the most relevant stored excerpts with full IDs, types and dates. The output is labelled extractive and contains no AI-written answer. Run `smartmemory setup` or set a supported provider key to enable synthesized answers.
 
 In remote mode, `sm ask`, `add`, `search`, `recall`, `get` and `status` use the hosted service without a local daemon. `sm ask` uses the service's LLM credentials, so you only need your SmartMemory API key. `add` accepts user properties, and `search '*'` supports paginated listing with one exact property filter. Property filters on semantic text searches are explicitly refused. The guided tour, store maintenance, corpus import/export, seed-pack installation and transcript capture commands require local mode. Import dry runs can still validate files in remote mode.
 
