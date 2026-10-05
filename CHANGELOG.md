@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
+
 - Hosted code upload bundles preserve lexical identity, source spans and call confidence, including unresolved source references (CODE-EDGE-CONFIDENCE-1).
 
 - CODE-INGEST-SURFACES-1: hosted code indexing uses core bundle preparation and complete dataclass serialization while preserving language selection and client-side parsing.
@@ -155,6 +157,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Pins `smartmemory-core==1.4.116` (decision listings keep `context_snapshot`: supersede/retract reason).
 
 ## Unreleased
+
+- Show unknown for hosted code counts and outcomes absent from the server response, including transport failures (CODE-PARSE-DIAGNOSTICS-1).
+
+- Retain hosted code-index failure bodies and print clean, partial and failed counts with the server publication outcome on CLI failures (CODE-PARSE-DIAGNOSTICS-1).
 
 ### Fixed
 

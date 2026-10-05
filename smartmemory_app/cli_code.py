@@ -169,10 +169,13 @@ def code_index_cmd(
             languages=lang_list,
         )
     except Exception as exc:
+        if hasattr(exc, "result"):
+            _report_diagnostics(exc.result)
         click.echo(f"[code:index] error: {exc}", err=True)
         log.exception("code index failed")
         raise SystemExit(1)
     elapsed = time.time() - started
+    _report_diagnostics(result)
 
     click.echo(
         f"[code:index] phase=done repo={repo_id} "
@@ -209,3 +212,24 @@ def code_index_cmd(
         )
         for line in result.errors[:cap]:
             click.echo(f"  - {line}", err=True)
+    if not result.replaced:
+        raise SystemExit(1)
+
+
+def _report_diagnostics(result) -> None:
+    """Report contracted counts and publication separately from transport acceptance."""
+    click.echo(
+        f"[code:index] clean={result.files_clean} partial={result.files_partial} failed={result.files_failed} "
+        f"acceptance={result.acceptance} staging={result.staging} publication={result.publication}"
+    )
+    click.echo(
+        "[code:index] G16 complete-generation publication is not proven by 1.x acceptance."
+    )
+    for diagnostic in result.diagnostics:
+        if diagnostic["status"] != "clean":
+            click.echo(
+                f"  {diagnostic['file_path']}: {diagnostic['status']} coverage={diagnostic['coverage']}",
+                err=True,
+            )
+            for span in diagnostic.get("spans", [])[:20]:
+                click.echo(f"    {span}", err=True)

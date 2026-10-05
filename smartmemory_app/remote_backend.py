@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
@@ -43,9 +43,19 @@ class RemoteBackendError(RuntimeError):
     commands (`sm add` / `sm search`) let it surface.
     """
 
-    def __init__(self, message: str, status_code: int = 502) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        *,
+        body: Any = None,
+        result: IndexResult | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.body = body
+        if result is not None:
+            self.result = result
 
 
 class RemoteMemory:
@@ -173,7 +183,7 @@ class RemoteMemory:
                     if "status_code" in result
                     else result["error"]
                 )
-            raise RemoteBackendError(message, status)
+            raise RemoteBackendError(message, status, body=body)
         return result
 
     def ask(self, question: str, limit: int = 5, *, reasoning: bool = True) -> dict:
@@ -323,19 +333,33 @@ class RemoteMemory:
                 "POST", "/memory/code/index", timeout=120, json=body
             )
         except RemoteBackendError as exc:
+            server_summary = exc.body if isinstance(exc.body, dict) else {}
             if exc.status_code == 402:
                 message = f"Hosted code index refused by max_repos cap: {exc}"
             elif exc.status_code == 413:
                 message = (
                     f"Hosted code index refused by MAX_REQUEST_BODY_BYTES cap: {exc}"
                 )
+            elif server_summary.get("publication") not in (None, "unknown"):
+                message = f"Hosted code replacement {server_summary['publication']}: {exc}. No retry was attempted."
             else:
                 message = (
                     f"Hosted code replacement failed: {exc}. "
                     "Replacement was not confirmed, partial server changes may exist. No retry was attempted."
                 )
+            for key in result.parse_summary():
+                setattr(
+                    result,
+                    key,
+                    server_summary.get(key, [] if key == "diagnostics" else "unknown"),
+                )
+            result.replaced = False
+            result.g16_complete = False
+            result.errors.append(message)
             log.warning("%s", message)
-            raise RemoteBackendError(message, exc.status_code) from exc
+            raise RemoteBackendError(
+                message, exc.status_code, body=exc.body, result=result
+            ) from exc
         counts = ("entities_created", "edges_created")
         expected = (len(body["entities"]), len(body["relations"]))
         if (
@@ -353,9 +377,35 @@ class RemoteMemory:
                 "Partial server changes may exist. No retry was attempted."
             )
             log.warning("%s", message)
-            raise RemoteBackendError(message)
+            for key in result.parse_summary():
+                setattr(
+                    result,
+                    key,
+                    response.get(key, [] if key == "diagnostics" else "unknown")
+                    if isinstance(response, dict)
+                    else []
+                    if key == "diagnostics"
+                    else "unknown",
+                )
+            result.g16_complete = False
+            raise RemoteBackendError(
+                message,
+                body=response if isinstance(response, dict) else None,
+                result=result,
+            )
+        if any(key not in response for key in result.parse_summary()):
+            log.warning(
+                "Server omitted code diagnostic evidence; missing counts/outcomes reported as unknown"
+            )
         result.entities_created, result.edges_created = expected
         result.replaced = True
+        for key in result.parse_summary():
+            setattr(
+                result,
+                key,
+                response.get(key, [] if key == "diagnostics" else "unknown"),
+            )
+        result.g16_complete = False
         result.elapsed_seconds = round(time.monotonic() - started, 2)
         log.warning(
             "Hosted code index stores graph entities and relations only: "
