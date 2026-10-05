@@ -4,6 +4,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Hosted code upload bundles preserve lexical identity, source spans and call confidence, including unresolved source references (CODE-EDGE-CONFIDENCE-1).
+
 - Mirror groundwork (DIST-LITE-SYNC-1): the packaged mirror contract schema now matches the current contract, including the per-item `schema_changed_during_write` report flag.
 
 ## [1.5.23] - 2026-10-05

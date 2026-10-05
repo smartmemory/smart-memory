@@ -161,6 +161,13 @@ def prepare_code_index(
         "bases",
         "http_method",
         "http_path",
+        "qualified_name",
+        "end_line_number",
+        "byte_start",
+        "byte_end",
+        "content_hash",
+        "source_snapshot",
+        "call_evidence",
     )
     body = {
         "repo": repo,
