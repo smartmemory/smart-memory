@@ -13,7 +13,7 @@ def main() -> None:
     else:
         from smartmemory_app.store_diagnostics import diagnostic_rows
 
-        rows = diagnostic_rows()
+        rows = diagnostic_rows(task)
     for row in rows:
         print(json.dumps(row), flush=True)
 

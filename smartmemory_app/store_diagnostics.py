@@ -152,30 +152,105 @@ def vector_rows(data_dir: Path, expected_dimension: int | None) -> list[str]:
 
 
 def lock_row(data_dir: Path) -> str:
-    """Reuse reset's owner validation and inspect existing locks without creating them."""
-    from smartmemory_app.store_reset import _check_owners, _store_files
+    """Classify healthy configured owners separately from reset's strict preflight."""
+    import psutil
+    from smartmemory_app.daemon import _health_response, _data_dir
+    from smartmemory_app.store_reset import _store_files
+    from smartmemory.pipeline.work_graph.spawn import _is_worker_process
 
-    owners = ""
+    verified = {}
+    problems = []
+    health = {}
     try:
-        _check_owners(data_dir, _store_files(data_dir))
-    except RuntimeError as exc:
-        owners = f" ({exc})"
-    path = data_dir / ".write.lock"
-    if not path.exists():
-        if owners:
-            return (
-                f"Write lock: warning: live store owner{owners}. "
-                f"Fix: smartmemory stop and disconnect MCP clients, then retry"
-            )
-        return "Write lock: OK (absent)"
-    if owners:
+        health = _health_response(2).json()
+    except Exception:
+        pass  # Ownership remains unverified and is reported below.
+    for marker in [
+        data_dir / "daemon.pid",
+        data_dir / ".worker.pid",
+        *data_dir.glob("worker.*.pid"),
+    ]:
+        if not marker.exists():
+            continue
+        try:
+            pid = int(marker.read_text().strip())
+            process = psutil.Process(pid)
+            if (
+                process.create_time() > marker.stat().st_mtime + 1
+                or process.status() == psutil.STATUS_ZOMBIE
+            ):
+                problems.append(f"stale {marker.name} PID {pid}")
+                continue
+            arguments = process.cmdline()
+            if marker.name == "daemon.pid":
+                ours = (
+                    "smartmemory_app.viewer_server" in " ".join(arguments)
+                    and health.get("service") == "smartmemory"
+                    and health.get("status") == "ok"
+                    and health.get("pid") == pid
+                    and health.get("mode") != "remote"
+                    and _data_dir().resolve() == data_dir.resolve()
+                    and Path(
+                        process.environ().get(
+                            "SMARTMEMORY_DATA_DIR", health.get("data_dir", "")
+                        )
+                    )
+                    .expanduser()
+                    .resolve()
+                    == data_dir.resolve()
+                )
+                role = "daemon"
+            else:
+                environment = process.environ()
+                configured = environment.get("SMARTMEMORY_DATA_DIR")
+                if "--data-dir" in arguments:
+                    configured = arguments[arguments.index("--data-dir") + 1]
+                ours = (
+                    _is_worker_process(pid, arguments)
+                    and configured is not None
+                    and (Path(configured).expanduser().resolve() == data_dir.resolve())
+                )
+                role = "worker"
+            if ours:
+                verified[pid] = role
+            else:
+                problems.append(
+                    f"live store owner {marker.name} PID {pid} (not verified as our healthy {role})"
+                )
+        except (ValueError, psutil.NoSuchProcess):
+            problems.append(f"stale or invalid {marker.name}")
+        except (OSError, psutil.AccessDenied, IndexError):
+            problems.append(f"unverified owner in {marker.name}")
+    if os.name == "nt":
+        targets = {
+            os.path.normcase(str(path.resolve())) for path in _store_files(data_dir)
+        }
+        for process in psutil.process_iter(["pid", "name"]):
+            if process.pid in verified or process.pid == os.getpid():
+                continue
+            try:
+                if any(
+                    os.path.normcase(file.path) in targets
+                    for file in process.open_files()
+                ):
+                    problems.append(
+                        f"foreign process {process.info['name']} PID {process.pid} (open store file)"
+                    )
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    if problems:
         return (
-            f"Write lock: warning: live store owner{owners}. "
-            f"Fix: smartmemory stop and disconnect MCP clients, then retry"
+            f"Write lock: warning: {', '.join(problems)}. "
+            "Fix: inspect stale markers and stop conflicting owners, then retry"
         )
-    # Windows byte-range locks and POSIX flock have no portable non-acquiring
-    # ownership query. F_GETLK queries POSIX record locks, not filelock's flock.
-    # An existing file alone cannot establish either liveness or staleness.
+    if verified:
+        owners = ", ".join(
+            f"running SmartMemory {role}, PID {pid}"
+            for pid, role in sorted(verified.items())
+        )
+        return f"Write lock: OK (held by the {owners})"
+    if not (data_dir / ".write.lock").exists():
+        return "Write lock: OK (absent)"
     return (
         "Write lock: warning: ownership unverified (lock file exists, no verified owner metadata). "
         "Fix: smartmemory stop and disconnect MCP clients before writing; no lock was acquired or deleted."
@@ -204,9 +279,8 @@ def dependency_rows(data_dir: Path):
         if backend.priority > 0 or os.name == "nt"
         else "warning: no usable backend"
     )
-    yield (
-        f"Keyring: {status} ({name}{fallback}). Fix: smartmemory setup --mode remote"
-    )
+    hint = ". Fix: smartmemory setup --mode remote" if status != "OK" else ""
+    yield f"Keyring: {status} ({name}{fallback}){hint}"
     if os.name == "nt":
         from smartmemory_app.setup import _resolve_hook_shell
 
@@ -223,10 +297,10 @@ def dependency_rows(data_dir: Path):
         ("HF cache", Path(constants.HF_HUB_CACHE)),
     ):
         free = shutil.disk_usage(_existing_parent(directory)).free
-        yield (
-            f"Free disk {name}: {'warning: <1 GB' if free < 1024**3 else 'OK'} ({free // (1024**2)} MiB). "
-            f"Fix: free disk space, then smartmemory setup"
+        hint = (
+            ". Fix: free disk space, then smartmemory setup" if free < 1024**3 else ""
         )
+        yield f"Free disk {name}: {'warning: <1 GB' if free < 1024**3 else 'OK'} ({free // (1024**2)} MiB){hint}"
     import psutil
 
     port = load_config().daemon_port
@@ -297,26 +371,30 @@ def embedding_row(service, dimension: int | None) -> str:
         )
 
 
-def diagnostic_rows():
+def diagnostic_rows(task="doctor"):
     from smartmemory_app.config import load_config
     from smartmemory_app.install_check import native_library_checks
 
     cfg = load_config()
     data_dir = Path(cfg.data_dir).expanduser()
-    for name, call in (
-        ("Write lock", lambda: [lock_row(data_dir)]),
-        ("SQLite", lambda: sqlite_rows(data_dir)),
-        ("Dependencies", lambda: dependency_rows(data_dir)),
+    for phase, name, call in (
+        ("owners", "Write lock", lambda: [lock_row(data_dir)]),
+        ("sqlite", "SQLite", lambda: sqlite_rows(data_dir)),
+        ("dependencies", "Dependencies", lambda: dependency_rows(data_dir)),
     ):
+        if task not in ("doctor", phase):
+            continue
         try:
             yield from call()
         except Exception as exc:
             yield f"{name}: warning: {type(exc).__name__}: {exc}. Fix: smartmemory doctor"
-    yield from native_library_checks()
+    if task in ("doctor", "native"):
+        yield from native_library_checks()
+    if task not in ("doctor", "vectors", "embedding"):
+        return
     if cfg.embedding_provider != "local":
         yield (
-            "Embedding runtime: skipped: configured non-local provider (no network or billable embedding sent). "
-            "Fix: smartmemory setup"
+            "Embedding runtime: skipped: configured non-local provider (no network or billable embedding sent)."
         )
         dimension = None
         service = None
@@ -330,9 +408,10 @@ def diagnostic_rows():
         except Exception as exc:
             service, dimension = None, None
             yield f"Embedding runtime: warning: {type(exc).__name__}: {exc}. Fix: smartmemory setup"
-    try:
-        yield from vector_rows(data_dir, dimension)
-    except Exception as exc:
-        yield f"Vector load: warning: {type(exc).__name__}: {exc}. {REINDEX}"
-    if service is not None:
+    if task in ("doctor", "vectors"):
+        try:
+            yield from vector_rows(data_dir, dimension)
+        except Exception as exc:
+            yield f"Vector load: warning: {type(exc).__name__}: {exc}. {REINDEX}"
+    if service is not None and task in ("doctor", "embedding"):
         yield embedding_row(service, dimension)

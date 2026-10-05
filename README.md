@@ -821,9 +821,13 @@ queue files are quarantined with a warning, keeping at most 10 copies, while hea
 reports continue. Opting out deletes queued reports without sending them.
 
 `smartmemory doctor` reads the local SQLite and vector stores, checks vector dimensions
-and item counts, inspects owner metadata without acquiring the write lock, and tests one embedding using cached
-files with networking disabled. It also checks keyring, Git Bash on Windows, free disk
-space, and the configured daemon port. Expensive checks time out instead of hanging.
+and item counts, and inspects owner metadata without acquiring the write lock. A verified healthy
+SmartMemory daemon or worker owning its configured store is OK. Stale markers and foreign owners
+remain warnings. Doctor reuses a healthy daemon's successful embedding warmup. Without that result,
+it tests one embedding using cached files with networking disabled and a 20-second budget.
+Each diagnostic phase records its own time and budget. A probe timeout means "not checked",
+including slow embedding cold starts, and does not establish a broken runtime.
+It also checks keyring, Git Bash on Windows, free disk space, and the configured daemon port.
 An existing lock file without verified owner metadata shows "ownership unverified".
 It shows pending hook failures, the queued report count and repair commands. It
 does not consume markers, flush reports, acquire the store write lock, reindex or

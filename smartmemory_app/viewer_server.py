@@ -33,6 +33,7 @@ _startup_state_lock = threading.Lock()
 _startup_status: str | None = None
 _startup_reason: str | None = None
 _last_warmup_failure: str | None = None
+_embedding_check: str | None = None
 
 
 def _set_startup_state(status: str | None, reason: str | None = None) -> None:
@@ -274,6 +275,7 @@ def _build_app() -> FastAPI:
         capabilities = _capabilities(mode)
 
         from smartmemory_app.config import llm_key_present
+        from smartmemory_app.storage import _resolve_data_dir
 
         response = {
             "service": "smartmemory",
@@ -283,6 +285,8 @@ def _build_app() -> FastAPI:
             "llm_key_present": llm_key_present(),
             "embedding_provider": cfg.embedding_provider,
             "pid": os.getpid(),
+            "embedding_check": _embedding_check,
+            "data_dir": str(_resolve_data_dir().resolve()),
             "work_graph": work_info,
             "reextract_offer": offer,
             "async_enrichment": {
@@ -318,6 +322,8 @@ def _startup_line(message: str) -> None:
 
 def _warm_backend() -> bool:
     """Warm the local backend with timed, newline-only progress reporting."""
+    global _embedding_check
+    _embedding_check = None
     from smartmemory.errors import MissingModelError
     from smartmemory_app.hf_progress import discrete_huggingface_progress
     from smartmemory_app.storage import get_memory
@@ -361,7 +367,17 @@ def _warm_backend() -> bool:
             from smartmemory.plugins.embedding import EmbeddingService
 
             service = EmbeddingService()
-            service.embed("warmup")
+            vector = service.embed("warmup")
+            from smartmemory_app.config import load_config
+            from smartmemory_app.store_diagnostics import configured_dimension
+
+            if load_config().embedding_provider == "local":
+                expected = configured_dimension(service)
+                if vector is None or not len(vector) or len(vector) != expected:
+                    raise ValueError(
+                        "Embedding warmup returned an empty or incorrectly sized vector"
+                    )
+                _embedding_check = f"Embedding runtime: OK ({service.backend_name}, cached startup warmup, {len(vector)} dimensions)"
             _startup_line(
                 f"Search model ready ({time.perf_counter() - model_started:.1f}s)"
             )

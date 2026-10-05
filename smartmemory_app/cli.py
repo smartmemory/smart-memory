@@ -2697,6 +2697,8 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     click.echo(
         "\nInstallation checks passed. Local state warnings above need attention."
         if state_warnings
+        else "\nInstallation checks passed. Some local checks were not completed."
+        if any(": not checked" in row for row in rows)
         else "\nAll checks passed. Installation checks passed, network and state warnings are advisory."
     )
 

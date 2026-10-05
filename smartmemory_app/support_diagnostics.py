@@ -237,7 +237,7 @@ def local_checks(*, budget: float | None = None) -> list[str]:
     from smartmemory_app.report_outbox import queued_count
 
     rows.append(f"Queued reports: {queued_count()}")
-    remaining = max(0.05, deadline - time.monotonic()) if deadline is not None else 6.0
+    remaining = max(0.05, deadline - time.monotonic()) if deadline is not None else None
     rows.extend(offline_checks("doctor", budget=remaining))
     return rows
 

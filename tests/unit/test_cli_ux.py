@@ -673,9 +673,14 @@ def test_backend_startup_lines_are_emitted_in_order(monkeypatch, capsys):
 
     class FakeService:
         provider = "local"
+        backend_name = "onnxruntime/cpu"
+
+        def local_model_name(self):
+            return "sentence-transformers/all-MiniLM-L6-v2"
 
         def embed(self, text):
             assert text == "warmup"
+            return [0.0] * 384
 
     def fake_get_memory(on_progress=None):
         assert on_progress is not None
