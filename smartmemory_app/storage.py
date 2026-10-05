@@ -955,6 +955,27 @@ def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:
         return True
 
 
+def resolve_readonly_item_id(backend, item_id: str) -> str:
+    """Resolve only read-only get prefixes by exact persisted item_id comparison."""
+    import re
+
+    if backend.get_node(item_id) is not None:
+        return item_id
+    if not re.fullmatch(r"[0-9a-fA-F]{6,}", item_id):
+        return item_id
+    with backend._lock:
+        rows = backend._conn.execute(
+            "SELECT item_id FROM nodes WHERE substr(item_id, 1, ?) = ? COLLATE NOCASE ORDER BY item_id",
+            (len(item_id), item_id),
+        ).fetchall()
+    if len(rows) > 1:
+        raise ValueError(
+            "Ambiguous item ID prefix. Use a full ID: "
+            + ", ".join(row[0] for row in rows)
+        )
+    return rows[0][0] if rows else item_id
+
+
 def get(item_id: str) -> dict:
     """Get a single memory by item_id. Returns dict in both modes.
 
@@ -965,5 +986,5 @@ def get(item_id: str) -> dict:
 
     if isinstance(mem, RemoteMemory):
         return mem.get(item_id) or {}  # already a dict
-    item = mem.get(item_id)
+    item = mem.get(resolve_readonly_item_id(mem._graph.backend, item_id))
     return item.to_dict() if item else {}

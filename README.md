@@ -221,8 +221,13 @@ smartmemory add --type semantic "..."  # Add with specific memory type
 smartmemory add - < notes.txt          # Add from stdin, one memory per line
 smartmemory add --all - < doc.txt      # Add entire stdin as one memory
 smartmemory add --project atlas "..."  # Add with arbitrary property flags
+smartmemory add "..." --project=atlas  # Equal-form properties also work
 
-smartmemory search "query"             # Semantic search
+smartmemory search "query"             # Semantic search (full item IDs)
+smartmemory search "query" --json      # Full IDs, bodies and returned fields as JSON
+smartmemory search "query" --full      # Whole bodies instead of 200-character previews
+smartmemory get abcdef                 # Local read-only lookup by unique ID prefix (6+ hex chars)
+smartmemory help search                # Show command help
 smartmemory search "*"                 # List all memories
 smartmemory search --top-k 20 "query"  # Control result count (default: 5)
 smartmemory search --project atlas "q" # Filter by property
@@ -251,6 +256,12 @@ smartmemory status                     # Daemon health + enrichment stats
 smartmemory worker                     # Run enrichment worker (drain and exit)
 smartmemory worker --loop              # Run enrichment worker continuously
 ```
+
+Search previews mark truncated bodies with `…`. Copy the full ID into `sm get`, or use a unique
+prefix of at least six hexadecimal characters in local mode. Ambiguous prefixes list the full
+candidate IDs and fail. Remote get requires a full ID. Prefix resolution applies only to read-only get.
+Quote inline text containing multiple words, or pipe it with `sm add --all -`.
+Keyless local semantic hop searches print a notice when the heuristic planner is used.
 
 ### Setup and lifecycle
 

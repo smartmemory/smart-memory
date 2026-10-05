@@ -472,7 +472,12 @@ def get_memory_item(memory_id: str) -> dict[str, Any]:
         return node
     with _rw_lock:
         backend = _get_backend()
-        node = backend.get_node(memory_id)
+        from smartmemory_app.storage import resolve_readonly_item_id
+
+        try:
+            node = backend.get_node(resolve_readonly_item_id(backend, memory_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     if node is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return node

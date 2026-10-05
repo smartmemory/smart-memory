@@ -7,6 +7,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Doctor treats verified healthy daemon and worker store owners as OK, retains contention and stale-owner warnings, and omits repair hints on healthy keyring and disk checks.
 - Doctor records separate probe timings and budgets, reuses a healthy daemon's verified embedding warmup for the configured store, and reports slow cold-start timeouts as incomplete checks.
 
+- Inline add accepts arbitrary property options before or after quoted text, including --key=value, while retaining reserved, duplicate and missing-value validation. Split text prompts users to quote it or use --all - stdin.
+- Search prints full IDs, offers --json with complete fields, marks truncated previews, and supports --full bodies. Local read-only get resolves unique ID prefixes of at least six hex characters and lists candidates on ambiguity. Remote get asks for the full ID.
+- sm help and sm help COMMAND forward to Click help. Keyless local semantic-hop searches show and log their heuristic-planner fallback.
+
 ## [1.5.21] - 2026-10-04
 
 - Remote lifecycle hooks run the in-process engine directly, skipping the local daemon attempt while preserving local daemon acceleration and fail-open behaviour.

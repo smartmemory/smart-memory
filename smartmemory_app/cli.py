@@ -15,6 +15,7 @@ from pathlib import Path
 
 import click
 
+from smartmemory_app.add_options import AddCommand
 from smartmemory_app.console import configure_console_encoding, read_utf8_stdin
 from smartmemory_app.daemon import (
     RESTART_TIMEOUT,
@@ -142,7 +143,7 @@ def _parse_extra_props(
         if not separator or not key or not value:
             raise click.ClickException("--prop requires a non-empty key=value pair.")
         if key in props:
-            raise click.ClickException(f"Duplicate property: {key}.")
+            raise click.ClickException(f"Invalid or duplicate property: {key}.")
         props[key] = value
     i = 0
     while i < len(args):
@@ -533,6 +534,23 @@ def cli() -> None:
         _configure_cli_logging()
     except Exception:
         pass  # Logging must never break the command.
+
+
+@cli.command("help")
+@click.argument("command", required=False)
+@click.pass_context
+def help_cmd(ctx, command: str | None) -> None:
+    """Show Click help for SmartMemory or a command."""
+    parent = ctx.parent
+    target = cli if command is None else cli.get_command(parent, command)
+    if target is None:
+        raise click.UsageError(f"No such command {command!r}.", ctx)
+    context = (
+        parent
+        if command is None
+        else click.Context(target, info_name=command, parent=parent)
+    )
+    click.echo(target.get_help(context))
 
 
 @cli.command("rebuild")
@@ -1347,6 +1365,7 @@ def _prepare_direct_access(*, download: bool = False) -> None:
 
 @cli.command(
     "add",
+    cls=AddCommand,
     context_settings=dict(
         ignore_unknown_options=True,
         allow_extra_args=True,
@@ -1390,6 +1409,19 @@ def add_cmd(
     Supports arbitrary property flags: --project atlas --domain legal
     """
     import sys
+    from smartmemory_app.storage import RESERVED_INGEST_PROPERTIES
+
+    props = _parse_extra_props(ctx.args, explicit_props)
+    reserved = RESERVED_INGEST_PROPERTIES.intersection(props)
+    if reserved:
+        from smartmemory_app.config import load_config
+
+        label = (
+            "Reserved remote add properties"
+            if load_config().mode == "remote"
+            else "Reserved properties"
+        )
+        raise click.ClickException(f"{label}: {', '.join(sorted(reserved))}.")
 
     if text == "-":
         if sys.stdin.isatty():
@@ -1409,7 +1441,6 @@ def add_cmd(
         )
         if not chunks:
             raise click.ClickException("Content cannot be empty.")
-        props = _parse_extra_props(ctx.args, explicit_props)
         ids = []
         warning = None
         for chunk in chunks:
@@ -1452,7 +1483,6 @@ def add_cmd(
         return
     if not text.strip():
         raise click.ClickException("Content cannot be empty.")
-    props = _parse_extra_props(ctx.args, explicit_props)
     # DIST-LITE-QUIET-1: declare the CLI producer to the producer-neutral daemon.
     body: dict = {
         "content": text,
@@ -1661,6 +1691,17 @@ def retag_cmd(
     multiple=True,
     help="Filter by key=value. Remote '*' supports one exact filter.",
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Print full IDs, content and returned fields as JSON.",
+)
+@click.option(
+    "--full",
+    is_flag=True,
+    help="Print whole memory bodies instead of 200-character previews.",
+)
 @click.pass_context
 def search_cmd(
     ctx,
@@ -1674,6 +1715,8 @@ def search_cmd(
     max_hops: int,
     hop_strategy: str | None,
     explicit_props: tuple[str, ...],
+    as_json: bool,
+    full: bool,
 ) -> None:
     """Search memories by semantic similarity. Use '*' to list all.
 
@@ -1699,6 +1742,15 @@ def search_cmd(
     hop_options = {"multi_hop": True, "max_hops": max_hops} if multi_hop else {}
     if hop_strategy is not None:
         hop_options["hop_strategy"] = hop_strategy
+    if multi_hop and hop_strategy == "semantic":
+        from smartmemory_app.config import llm_key_present, load_config
+
+        if load_config().mode != "remote" and not llm_key_present():
+            notice = (
+                "semantic hop planning needs an LLM key. Used the heuristic planner."
+            )
+            log.warning(notice)
+            click.echo(f"Note: {notice}", err=True)
     try:
         window = resolve_search_window(since, until, relative=True)
     except ValueError as exc:
@@ -1755,6 +1807,15 @@ def search_cmd(
     )
     if isinstance(results, dict):
         results = results.get("items", [])
+    if as_json:
+        from fastapi.encoders import jsonable_encoder
+
+        click.echo(
+            json.dumps(
+                jsonable_encoder(page if page is not None else results), indent=2
+            )
+        )
+        return
     if page is not None:
         click.echo(
             f"Showing {len(results)} of {page['total']} memories (offset {page['offset']})."
@@ -1765,7 +1826,9 @@ def search_cmd(
     for r in results:
         if not isinstance(r, dict):
             continue
-        content = r.get("content", "")[:200]
+        content = r.get("content", "")
+        if not full and len(content) > 200:
+            content = content[:200] + "…"
         mem_type = r.get("memory_type", "?")
         item_id = r.get("item_id", "?")
         # CORE-PROPS-1: Tilde marker for low-confidence memories
@@ -1773,7 +1836,7 @@ def search_cmd(
         conf_marker = "~" if isinstance(conf, (int, float)) and conf < 0.5 else ""
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
-        click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id[:8]}  {content}")
+        click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id}  {content}")
     if page is not None and results and page["offset"] + len(results) < page["total"]:
         import shlex
 
@@ -2038,6 +2101,13 @@ def explore_cmd(target: str | None) -> None:
 @click.argument("item_id")
 def get_cmd(item_id: str) -> None:
     """Fetch a single memory by item ID."""
+    import re
+    from smartmemory_app.config import load_config
+
+    if load_config().mode == "remote" and re.fullmatch(r"[0-9a-fA-F]{6,}", item_id):
+        raise click.ClickException(
+            "Remote get requires the full item ID. Copy it from sm search."
+        )
     try:
         result = _memory_request("GET", f"/memory/{item_id}")
     except click.ClickException:
@@ -2050,7 +2120,10 @@ def get_cmd(item_id: str) -> None:
 
         log.debug("daemon unreachable; using in-process fallback: %s", "get")
         _prepare_direct_access(download=True)
-        result = get(item_id)
+        try:
+            result = get(item_id)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
 
     if not result:
         click.echo("Memory not found.", err=True)
