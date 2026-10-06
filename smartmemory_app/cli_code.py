@@ -218,6 +218,19 @@ def code_index_cmd(
 
 def _report_diagnostics(result) -> None:
     """Report contracted counts and publication separately from transport acceptance."""
+    sites = getattr(result, "call_sites", "unknown")
+    site_summary = (
+        " ".join(
+            f"{key}={sites[key]}"
+            for key in ("extracted", "unresolved", "name_only", "exact")
+        )
+        if isinstance(sites, dict)
+        else "unknown"
+    )
+    click.echo(f"[code:index] source_call_sites {site_summary}")
+    click.echo(
+        f"[code:index] resolved_call_edges={getattr(result, 'resolved_call_edges', 'unknown')} (not recall)"
+    )
     click.echo(
         f"[code:index] clean={result.files_clean} partial={result.files_partial} failed={result.files_failed} "
         f"acceptance={result.acceptance} staging={result.staging} publication={result.publication}"

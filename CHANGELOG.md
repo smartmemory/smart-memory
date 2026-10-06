@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## Unreleased - CODE-CALLSITE-COVERAGE-1 build
+
+- Show shared source call-site extraction status and resolved CALLS edges separately in local and hosted code-index summaries.
+
 - Integrated FRAMEWORK with Wave B, preserving scoped liveness and diagnostic evidence.
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
