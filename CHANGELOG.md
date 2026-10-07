@@ -12,6 +12,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Add a real SQLite lifecycle golden through the local API, verifying persisted rows, search, recall, clear and empty storage, with no network allowed. The four lite-mode Redis probes it catches are declared as a strict known gap (CORE-LITE-REDIS-PROBE-1).
 - Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
 - Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).
 - Verify hosted CLI bundles preserve framework kinds, export evidence and TS TESTS relations through the shared core parser (CODE-FRAMEWORK-SEMANTICS-1).
