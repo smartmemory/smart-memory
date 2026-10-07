@@ -1479,6 +1479,9 @@ def add_cmd(
             if props:
                 body["properties"] = props
             result = _memory_request("POST", "/memory/ingest", json=body)
+            if isinstance(result, dict) and result.get("status") == "held":
+                click.echo(f"Held: {result.get('reason')}")
+                continue
             if result:
                 ids.append(result.get("item_id", "?"))
                 warning = warning or result.get("warning")
@@ -1490,9 +1493,13 @@ def add_cmd(
                 _prepare_direct_access(download=True)
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
-                    ids.append(
-                        ingest(chunk, memory_type, properties=props, origin="cli:add")
+                    receipt = ingest(
+                        chunk, memory_type, properties=props, origin="cli:add"
                     )
+                    if isinstance(receipt, dict) and receipt.get("status") == "held":
+                        click.echo(f"Held: {receipt.get('reason')}")
+                    else:
+                        ids.append(receipt)
                 except StoreBusyError as exc:
                     raise click.ClickException(str(exc)) from exc
                 except RemoteBackendError as e:
@@ -1517,6 +1524,9 @@ def add_cmd(
     if props:
         body["properties"] = props
     result = _memory_request("POST", "/memory/ingest", json=body)
+    if isinstance(result, dict) and result.get("status") == "held":
+        click.echo(f"Held: {result.get('reason')}")
+        return
     if result:
         click.echo(result.get("item_id", "?"))
         if result.get("warning"):
@@ -1529,7 +1539,11 @@ def add_cmd(
         _prepare_direct_access(download=True)
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
-            click.echo(ingest(text, memory_type, properties=props, origin="cli:add"))
+            receipt = ingest(text, memory_type, properties=props, origin="cli:add")
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                click.echo(f"Held: {receipt.get('reason')}")
+            else:
+                click.echo(receipt)
         except StoreBusyError as exc:
             raise click.ClickException(str(exc)) from exc
         except RemoteBackendError as e:

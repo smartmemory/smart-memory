@@ -306,14 +306,17 @@ class MemoryLifecycle:
             # origin MUST be the explicit kwarg — it is a reserved key stripped from
             # `properties` (DIST-LITE-QUIET-1), so the old properties= form silently
             # stored origin="unknown". (CORE-CODE-PROVENANCE-1 Phase 2a fix.)
-            ingest(
+            receipt = ingest(
                 text,
                 memory_type="episodic",
                 origin="hook:observe",
                 properties={"workspace_id": derive_workspace_id(cwd)},
             )
-            self._observation_count += 1
-            self._save_state()
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                log.warning("Observation held: %s", receipt.get("reason"))
+            else:
+                self._observation_count += 1
+                self._save_state()
         except Exception as e:
             log.warning("Observe ingest failed; tool observation lost: %s", e)
 
@@ -359,7 +362,7 @@ class MemoryLifecycle:
                 "Provenance persist failed; code-authorship evidence lost: %s", e
             )
 
-    def distill(self, response: str, cwd: str | None = None) -> None:
+    def distill(self, response: str, cwd: str | None = None) -> dict | None:
         """Phase 4: Pair assistant response with stored prompt, save turn pair.
 
         Called by Stop hook with last_assistant_message.
@@ -380,12 +383,15 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(
+            receipt = ingest(
                 pair,
                 memory_type="pending",
                 origin="lifecycle:distill",
                 properties={"workspace_id": derive_workspace_id(cwd)},
             )
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                log.warning("Turn pair held: %s", receipt.get("reason"))
+                return receipt
         except Exception as e:
             log.warning("Distill ingest failed; turn pair lost: %s", e)
 
@@ -393,7 +399,7 @@ class MemoryLifecycle:
         self._current_user_turn = None
         self._save_state()
 
-    def learn(self, tool_name: str, error: str, cwd: str | None = None) -> None:
+    def learn(self, tool_name: str, error: str, cwd: str | None = None) -> dict | None:
         """Phase 5: Capture tool failure as episodic memory."""
         if not self._config.enabled or not self._config.learn_from_errors:
             return
@@ -403,12 +409,15 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(
+            receipt = ingest(
                 text,
                 memory_type="episodic",
                 origin="hook:learn",
                 properties={"workspace_id": derive_workspace_id(cwd)},
             )
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                log.warning("Error memory held: %s", receipt.get("reason"))
+                return receipt
         except Exception as e:
             log.warning("Learn ingest failed; error memory lost: %s", e)
 

@@ -276,6 +276,9 @@ class TourArcDriver:
             # Type first, then run: the graph reacts while the command is on screen.
             self._session_type(emit, f'sm add "{fact}"')
             result = self.client.ingest(fact, memory_type="semantic")
+            if result.get("status") == "held":
+                self._session_print(emit, f"Held: {result.get('reason')}")
+                continue
             seeded_ids.append(str(result.get("item_id", "?")))
             self._session_print(emit, seeded_ids[-1])
             self._emit(
@@ -292,7 +295,11 @@ class TourArcDriver:
             emit,
             2,
             "Semantic search",
-            "A question in plain language, answered from the facts just stored.",
+            (
+                "A question in plain language, answered from the facts just stored."
+                if seeded_ids
+                else "A question in plain language, searching the existing memory."
+            ),
         )
         self._session_type(emit, f'sm search "{SEARCH_QUERY}"')
         search_response = self.client.search(SEARCH_QUERY, top_k=5)
@@ -362,6 +369,7 @@ class TourArcDriver:
         self._session_print(emit, recall_text or "(recall returned no context)")
 
         imported_claude = False
+        claude_hold = None
         imported_search_text = ""
         claude_path = self.cwd / "CLAUDE.md"
         if include_claude_import and claude_path.exists() and claude_path.is_file():
@@ -375,8 +383,11 @@ class TourArcDriver:
                     "Already keeping a CLAUDE.md? One command imports it, searchable like everything else.",
                 )
                 self._session_type(emit, "sm add --all - < ./CLAUDE.md")
-                self.client.ingest(content, memory_type="semantic")
-                imported_claude = True
+                receipt = self.client.ingest(content, memory_type="semantic")
+                if receipt.get("status") == "held":
+                    claude_hold = receipt
+                    self._session_print(emit, f"Held: {receipt.get('reason')}")
+                imported_claude = receipt.get("status") != "held"
                 imported_search_text = _format_search_response(
                     self.client.search("project instructions", top_k=3)
                 )
@@ -387,7 +398,9 @@ class TourArcDriver:
                 emit,
                 5,
                 "Import your CLAUDE.md",
-                "No ./CLAUDE.md found in this directory, so the import step was skipped.",
+                f"CLAUDE.md held: {claude_hold.get('reason')}"
+                if claude_hold
+                else "No ./CLAUDE.md found in this directory, so the import step was skipped.",
                 "sm add --all - < ./CLAUDE.md",
             )
 

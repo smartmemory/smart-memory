@@ -357,8 +357,8 @@ def _shutdown() -> None:
 # --- Helpers -------------------------------------------------------------------
 
 
-def _normalize_ingest_result(result) -> str:
-    """Normalize SmartMemory.ingest() return value to a plain item_id string.
+def _normalize_ingest_result(result) -> str | dict:
+    """Preserve terminal holds, otherwise normalize to an item_id string.
 
     SmartMemory.ingest() returns Union[str, Dict[str, Any]]:
       str  — when sync=True (default in Lite mode): item_id directly
@@ -368,6 +368,8 @@ def _normalize_ingest_result(result) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, dict):
+        if result.get("status") == "held":
+            return result
         return result.get("item_id") or str(result)
     return str(result)
 
@@ -461,6 +463,8 @@ def ingest(
     lock = _get_lock_file(data_path)
     with lock:
         result = mem.ingest(content, context=ctx, sync=sync)
+        if isinstance(result, dict) and result.get("status") == "held":
+            return result
         if not sync and isinstance(result, dict):
             # Initialization has applied the effective provider/model settings.
             # Use core's placement resolver, not the foreground extraction status:

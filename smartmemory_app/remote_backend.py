@@ -419,8 +419,8 @@ class RemoteMemory:
         memory_type: str = "semantic",
         *,
         context: dict | None = None,
-    ) -> str:
-        """POST /memory/ingest (full pipeline). Returns item_id string.
+    ) -> str | dict:
+        """POST /memory/ingest (full pipeline). Returns item_id or a terminal held receipt.
 
         Uses /memory/ingest (not /memory/add) — ingest runs entity extraction,
         enrichment, linking, grounding. Returns {"item_id": ...} (not {"id": ...}).
@@ -435,6 +435,8 @@ class RemoteMemory:
             # Surface the failure — do NOT return "Error: ..." as the item_id, which
             # the CLI would print as if the add succeeded.
             raise RemoteBackendError(err)
+        if result.get("status") == "held":
+            return result
         return result.get("item_id", "unknown")
 
     def search(self, query: str, top_k: int = 5, **kwargs) -> list[dict]:
