@@ -153,7 +153,7 @@ Using Cursor as your editor? `smartmemory setup --for cursor` configures it in o
 
 The SmartMemory Obsidian plugin brings the same memory to your vault: every note becomes a structured memory with extracted entities, entity chips link every note that mentions the same person or project, a graph pane shows the neighborhood around the active note, and `Cmd+Shift+R` runs multi-hop semantic search across the whole vault. It can also propose `[[wikilinks]]` for entity mentions and warn you inline when a note contradicts something newer.
 
-The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). For access, write to support@smartmemory.ai, then paste your API key from [app.smartmemory.ai](https://app.smartmemory.ai) into Settings → SmartMemory.
+The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). For access, write to support@smartmemory.ai, then paste your API key from [www.smartmemory.ai](https://www.smartmemory.ai) into Settings → SmartMemory.
 
 ## What happens when you add a memory
 
@@ -348,7 +348,7 @@ model, so vectors and existing stores are interchangeable.
 ## Lite or Service
 
 - **Lite** (the default): everything runs on your machine. SQLite graph plus usearch vectors, no Docker, no external services, no account. `pip install smartmemory` and go.
-- **Service**: connect to the managed SmartMemory backend instead of running storage locally. Run `smartmemory setup --mode remote` and paste an API key from [app.smartmemory.ai](https://app.smartmemory.ai). Nothing to install or operate, and there is a free tier to start on.
+- **Service**: connect to the managed SmartMemory backend instead of running storage locally. Run `smartmemory setup --mode remote` and paste an API key from [www.smartmemory.ai](https://www.smartmemory.ai). Nothing to install or operate, and there is a free tier to start on.
 
 You choose Lite or Service at `smartmemory setup` time, not at install time, and you can switch later by re-running setup.
 

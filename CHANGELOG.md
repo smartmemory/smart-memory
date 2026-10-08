@@ -2,6 +2,7 @@
 
 ## Unreleased - CODE-CALLSITE-COVERAGE-1 build
 
+- Point user-facing links at https://www.smartmemory.ai (the web app has no app.smartmemory.ai DNS yet); filed as PLAT-APP-SUBDOMAIN-1.
 - CORE-HOLD-RECEIPT-1 round 2: Preserve held receipts through local and hosted storage, daemon, CLI, lifecycle and tour consumers. Describe searches against existing memory when no tour seed was stored.
 
 - Show shared source call-site extraction status and resolved CALLS edges separately in local and hosted code-index summaries.
