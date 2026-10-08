@@ -26,8 +26,11 @@ explicitly.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -251,6 +254,152 @@ def _report_diagnostics(result) -> None:
             )
             for span in diagnostic.get("spans", [])[:20]:
                 click.echo(f"    {span}", err=True)
+
+
+def _is_git_ignored(root: Path, target: Path) -> bool:
+    """True when git reports ``target`` as ignored in the checkout at ``root`` (False when git is unavailable)."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "-q", "--no-index", str(target)],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return done.returncode == 0
+
+
+def _write_atomic(out: Path, snapshot: dict) -> int:
+    """Write ``snapshot`` to ``out`` through a temp file in the same directory, then ``os.replace``."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent)
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(
+                snapshot, stream, sort_keys=True, ensure_ascii=False, allow_nan=False
+            )
+            stream.write("\n")
+        os.replace(temp_name, out)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+    return out.stat().st_size
+
+
+@code_group.command("bundle")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--repo", required=True, help="Repo identifier stamped on the snapshot.")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Snapshot file to write.",
+)
+@click.option(
+    "--language",
+    "--languages",
+    "languages",
+    multiple=True,
+    type=click.Choice(["python", "typescript"]),
+    help="Narrow to these languages. Repeatable. Defaults to every supported language present.",
+)
+@click.option(
+    "--exclude",
+    "extra_excludes",
+    multiple=True,
+    help="Additional directory names to exclude (repeatable).",
+)
+@click.option(
+    "--allow-partial",
+    is_flag=True,
+    default=False,
+    help="Write a snapshot even when some files failed to parse (complete=false, failed_paths lists them).",
+)
+@click.option(
+    "--fields",
+    type=click.Choice(["full", "minimal"]),
+    default="full",
+    show_default=True,
+    help=(
+        "minimal drops framework_evidence and clean per-entity parse diagnostics. "
+        "The forge/stratum code-graph consumer (STRAT-CODEGRAPH-1) reads minimal by default and full is opt-in for it."
+    ),
+)
+def code_bundle_cmd(
+    path: str,
+    repo: str,
+    out_path: str,
+    languages: tuple[str, ...],
+    extra_excludes: tuple[str, ...],
+    allow_partial: bool,
+    fields: str,
+) -> None:
+    """Write a store-free local snapshot of a checkout (no backend, no upload, no embeddings).
+
+    \b
+    Examples:
+        smartmemory code bundle . --repo myapp --out myapp.snapshot.json
+        smartmemory code bundle . --repo myapp --out snap.json --allow-partial
+    """
+    from smartmemory.code.indexer import CodeIndexer
+    from smartmemory.code.models import CodePreparationError
+
+    root = Path(path).resolve()
+    out = Path(out_path).resolve()
+    excludes = sorted(_DEFAULT_EXCLUDES | set(extra_excludes))
+    started = time.time()
+    indexer = CodeIndexer(
+        graph=None, repo=repo, repo_root=str(root), exclude_dirs=set(excludes)
+    )
+    try:
+        snapshot, _result = indexer.prepare_snapshot(
+            list(languages) if languages else None,
+            allow_partial=allow_partial,
+            fields=fields,
+        )
+    except (CodePreparationError, ValueError) as exc:
+        click.echo(f"[code:bundle] error: {exc}", err=True)
+        log.warning("code bundle refused for %s: %s", root, exc)
+        raise SystemExit(1)
+
+    try:
+        out.relative_to(root)
+    except ValueError:
+        inside = False
+    else:
+        inside = True
+    if inside and not _is_git_ignored(root, out):
+        log.warning(
+            "code bundle --out %s is inside the checkout and not git-ignored", out
+        )
+        click.echo(
+            f"[code:bundle] warning: --out is inside the checkout and not git-ignored: {out}. "
+            "The next snapshot will see it as an uncommitted change.",
+            err=True,
+        )
+
+    try:
+        size = _write_atomic(out, snapshot)
+    except OSError as exc:
+        click.echo(f"[code:bundle] error: could not write {out}: {exc}", err=True)
+        raise SystemExit(1)
+    click.echo(
+        f"[code:bundle] repo={repo} entities={len(snapshot['entities'])} relations={len(snapshot['relations'])} "
+        f"complete={str(snapshot['complete']).lower()} commit_hash={snapshot['commit_hash']} "
+        f"bytes={size} elapsed_s={round(time.time() - started, 2)} out={out}"
+    )
+    if not snapshot["complete"]:
+        failed = ", ".join(item["path"] for item in snapshot["failed_paths"])
+        click.echo(
+            f"[code:bundle] warning: incomplete snapshot, failed paths: {failed}",
+            err=True,
+        )
 
 
 @code_group.command("effects")

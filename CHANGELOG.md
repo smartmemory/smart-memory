@@ -1,5 +1,12 @@
 # Changelog — smartmemory
 
+## Unreleased - CODE-BUNDLE-CLI-1 (2026-10-08)
+
+- Final bundle fixes: partial snapshots preserve collection failure paths with colon characters, Unicode names and filename-less errors. CLI regression coverage uses real audit-hook traversal failures. Core validates every declared nested record and reports unavailable membership inputs explicitly.
+- `smartmemory code bundle <path> --repo <id> --out <file> [--language ...] [--exclude ...] [--allow-partial] [--fields full|minimal]`: writes a store-free local snapshot of a checkout (entities with `item_id`, relations with `edge_state`, source identity, `resolution_dependencies`, completeness). It never calls `get_memory`, opens no graph, vector store or embedder, and uploads nothing. The file is written atomically (temp file in the `--out` directory, then `os.replace`); a refusal creates no file and leaves an existing `--out` untouched. `--allow-partial` keeps good files when others fail to parse (exit 0, `complete=false`, a `[code:bundle] warning: incomplete` line naming the failed paths). `--out` inside the checkout and not git-ignored prints a warning. There is no `--commit-hash` flag.
+- Fix round 1: the snapshot write refuses NaN/Infinity (`allow_nan=False`, prior file kept, no temp left), and `--fields` help names the forge/stratum code-graph consumer (STRAT-CODEGRAPH-1: minimal by default there, full opt-in). The CLI default stays `full`.
+- The wrapper now depends on `smartmemory-core[typescript]` (tree-sitter TS/JS grammars moved to that extra).
+
 ## Unreleased - CODE-INDEXER-HARDEN-1 U5 (2026-10-08)
 
 - CODE-INDEXER-HARDEN-1 (F25, F28, F29): hosted `prepare_code_index` stamps dirty-aware provenance (`<HEAD>-dirty-<fingerprint>` for uncommitted or untracked changes, with a WARNING) and sends `repo_identity` so the service refuses a repo name owned by a different checkout. The hosted CLI reports the server's `embeddings_generated` instead of always warning that hosted indexes have no embeddings (the warning stays for older services).
