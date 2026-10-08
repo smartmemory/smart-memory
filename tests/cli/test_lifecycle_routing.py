@@ -1,6 +1,7 @@
 """Lifecycle dispatch regressions and offline flows through the real engine."""
 
 import json
+import os
 
 import httpx
 import pytest
@@ -325,10 +326,14 @@ def test_remote_failures_stay_fail_open_with_diagnostics(hosted, phase, caplog):
 
 
 @pytest.mark.parametrize("failure", ["connect", "timeout", "http", "json"])
-def test_local_daemon_failures_keep_five_second_fail_open_budget(
+def test_local_daemon_failures_fail_open_with_short_connect_budget(
     isolated, monkeypatch, failure
 ):
+    """HOOK-DEADLINE: live marker -> 1.5 s connect, 5 s read; failures fall back."""
     monkeypatch.setenv("SMARTMEMORY_MODE", "local")
+    data = isolated / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "daemon.pid").write_text(str(os.getpid()))
     requests = []
 
     def handle(request):
@@ -348,6 +353,9 @@ def test_local_daemon_failures_keep_five_second_fail_open_budget(
     monkeypatch.setattr(httpx, "Client", client)
     assert cli_module._lifecycle_request("/lifecycle/orient", payload(isolated)) is None
     assert len(requests) == 1
-    assert requests[0].extensions["timeout"] == dict.fromkeys(
-        ("connect", "read", "write", "pool"), 5.0
-    )
+    assert requests[0].extensions["timeout"] == {
+        "connect": 1.5,
+        "read": 5.0,
+        "write": 5.0,
+        "pool": 5.0,
+    }

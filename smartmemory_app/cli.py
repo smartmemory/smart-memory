@@ -369,6 +369,47 @@ def _lifecycle_request(path: str, body: dict):
     return _lifecycle_via_daemon(path, body)
 
 
+_DAEMON_CONNECT_TIMEOUT = 1.5
+
+
+def _daemon_marker_live() -> bool:
+    """Whether the daemon's own PID marker names a live process.
+
+    The daemon publishes ``daemon.pid`` in the data dir before warmup
+    (viewer_server.main), under launchd, Windows and plain subprocess starts
+    alike. Without a live marker there is nothing to connect to, so the hook
+    must not spend a TCP connect timeout finding that out — on Windows a
+    refused localhost connect can itself take seconds.
+    """
+    from smartmemory_app.daemon import _pid_alive, _pid_file
+
+    try:
+        marker = _pid_file()
+        raw = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        log.debug("Lifecycle daemon probe skipped: no daemon.pid marker")
+        return False
+    except OSError as exc:
+        log.warning(
+            "Lifecycle daemon probe skipped: daemon.pid unreadable (%s); "
+            "using in-process engine",
+            type(exc).__name__,
+        )
+        return False
+    try:
+        pid = int(raw)
+    except ValueError:
+        log.warning(
+            "Lifecycle daemon probe skipped: daemon.pid is not a PID; "
+            "using in-process engine"
+        )
+        return False
+    if not _pid_alive(pid):
+        log.debug("Lifecycle daemon probe skipped: daemon.pid %s is not running", pid)
+        return False
+    return True
+
+
 def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
     """POST one lifecycle phase to the warm daemon. Returns parsed JSON, or None.
 
@@ -382,12 +423,22 @@ def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
     fail-fast rather than resilient — no 2s retry sleep, short timeout, and silent
     on stderr. Any failure returns None and the caller runs the phase in-process,
     exactly as before. The daemon is an accelerator here, never a dependency.
+
+    HOOK-DEADLINE: no connect at all without a live daemon.pid marker, and a
+    1.5 s connect timeout when there is one. The read budget stays ``timeout``
+    because a warm daemon's recall legitimately takes longer than a connect.
     """
     try:
+        if not _daemon_marker_live():
+            return None
         import httpx
 
         with httpx.Client(trust_env=False) as client:
-            r = client.post(f"{_daemon_url()}{path}", json=body, timeout=timeout)
+            r = client.post(
+                f"{_daemon_url()}{path}",
+                json=body,
+                timeout=httpx.Timeout(timeout, connect=_DAEMON_CONNECT_TIMEOUT),
+            )
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -2265,29 +2316,232 @@ def _read_lifecycle_payload(phase: str) -> dict | None:
     return body
 
 
+# ── Hook deadline (HOOK-DEADLINE) ────────────────────────────────────────────
+# UserPromptSubmit and SessionStart block the user's prompt until the hook
+# returns. A cold engine start (or, on Windows, a stalled local probe) used to
+# run into Claude Code's own kill line, which surfaces as a hook error on every
+# prompt. The CLI now enforces its own, shorter deadline: on overrun it injects
+# nothing, says so in the hooks log, reports one anonymous event and exits 0.
+
+_HOOK_DEADLINE_ENV = "SMARTMEMORY_HOOK_DEADLINE"
+_HOOK_DEADLINE_DEFAULT = 8.0
+_HOOK_REPORT_CAP = 0.9  # seconds the overrun report may add before exit
+_HOOK_REPORT_FLUSH_WAIT = 0.6
+_hard_exit = os._exit  # replaced in tests; threads must not block the exit
+
+
+def _hook_deadline() -> float:
+    """Seconds a blocking lifecycle hook may run; SMARTMEMORY_HOOK_DEADLINE overrides."""
+    import math
+
+    raw = os.environ.get(_HOOK_DEADLINE_ENV, "").strip()
+    if not raw:
+        return _HOOK_DEADLINE_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        log.warning(
+            "%s=%r is not a positive number of seconds; using %.0fs",
+            _HOOK_DEADLINE_ENV,
+            raw,
+            _HOOK_DEADLINE_DEFAULT,
+        )
+        return _HOOK_DEADLINE_DEFAULT
+    return value
+
+
+class _HookPhases:
+    """Thread-safe phase clock: which step a hook is in and how long each took."""
+
+    def __init__(self) -> None:
+        import threading
+        import time
+
+        self._time = time.monotonic
+        self._lock = threading.Lock()
+        self.started = self._time()
+        self._mark = self.started
+        self.current = "start"
+        self._timings: dict[str, float] = {}
+
+    def enter(self, name: str) -> None:
+        with self._lock:
+            now = self._time()
+            self._timings[self.current] = round(
+                self._timings.get(self.current, 0.0) + now - self._mark, 3
+            )
+            self.current, self._mark = name, now
+
+    def elapsed(self) -> float:
+        return self._time() - self.started
+
+    def snapshot(self) -> tuple[str, dict[str, float]]:
+        with self._lock:
+            timings = dict(self._timings)
+            timings[self.current] = round(
+                timings.get(self.current, 0.0) + self._time() - self._mark, 3
+            )
+            return self.current, timings
+
+
+def _report_hook_deadline(properties: dict) -> None:
+    """One bounded anonymous event; never delays the exit by more than the cap."""
+    import threading
+
+    from smartmemory_app import crash_reporter
+
+    def send() -> None:
+        try:
+            crash_reporter.report_event(
+                "hook_deadline_exceeded",
+                properties,
+                dedupe_key="hook_deadline_exceeded",
+                dedupe_seconds=86400,
+                wait=_HOOK_REPORT_FLUSH_WAIT,
+            )
+        except Exception as exc:
+            log.warning("Hook deadline report unavailable (%s)", type(exc).__name__)
+
+    thread = threading.Thread(target=send, name="smartmemory-hook-report", daemon=True)
+    thread.start()
+    thread.join(_HOOK_REPORT_CAP)
+
+
+def _hook_deadline_exceeded(command: str, deadline: float, phases: _HookPhases):
+    """Overrun: inject nothing, log the timings, report once, exit 0 now."""
+    import platform
+
+    elapsed = phases.elapsed()
+    phase, timings = phases.snapshot()
+    log.warning(
+        "%s exceeded its %.1fs hook deadline after %.2fs (stuck in phase %r); "
+        "no memory context injected for this event. Phase timings (s): %s. "
+        "Keep the engine warm with `smartmemory start`, or raise %s.",
+        command,
+        deadline,
+        elapsed,
+        phase,
+        json.dumps(timings, sort_keys=True),
+        _HOOK_DEADLINE_ENV,
+    )
+    _report_hook_deadline(
+        {
+            "command": command,
+            "phase": phase,
+            "elapsed_s": round(elapsed, 3),
+            "deadline_s": deadline,
+            "phase_timings": timings,
+            "platform_system": platform.system(),
+        }
+    )
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    # The worker thread may be deep in an engine cold start; interpreter
+    # shutdown would join executor threads and run storage atexit hooks that
+    # wait on it. Nothing is buffered that matters: the prompt was persisted
+    # before any recall work started.
+    _hard_exit(0)
+
+
+def _run_hook_with_deadline(command: str, work) -> None:
+    """Run ``work(phases) -> str`` in a worker thread under the hook deadline.
+
+    The result is echoed only when it arrives in time; worker exceptions are
+    re-raised on the main thread so the CLI's crash handling is unchanged.
+    """
+    import contextvars
+    import threading
+
+    deadline = _hook_deadline()
+    phases = _HookPhases()
+    outcome: dict = {}
+    context = contextvars.copy_context()
+
+    def target() -> None:
+        try:
+            outcome["result"] = context.run(work, phases)
+        except BaseException as exc:  # re-raised on the main thread
+            outcome["error"] = exc
+
+    worker = threading.Thread(
+        target=target, name=f"smartmemory-{command.replace(' ', '-')}", daemon=True
+    )
+    worker.start()
+    worker.join(deadline)
+    if worker.is_alive():
+        _hook_deadline_exceeded(command, deadline, phases)
+        return
+    if "error" in outcome:
+        raise outcome["error"]
+    result = outcome.get("result")
+    if result:
+        click.echo(result)
+
+
+def _orient_work(phases: _HookPhases) -> str:
+    phases.enter("payload")
+    body = _read_lifecycle_payload("orient")
+    if body is None:
+        return ""
+
+    phases.enter("daemon")
+    out = _lifecycle_request("/lifecycle/orient", body)
+    if out is not None:
+        return out.get("context") or ""
+
+    phases.enter("engine")
+    session_id = body.get("session_id", "unknown")
+    from smartmemory_app.lifecycle import MemoryLifecycle
+    from smartmemory_app.lifecycle_config import LifecycleConfig
+
+    lc = MemoryLifecycle(
+        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
+    )
+    return lc.orient(cwd=body.get("cwd"))
+
+
+def _recall_work(phases: _HookPhases) -> str:
+    phases.enter("payload")
+    body = _read_lifecycle_payload("recall")
+    if body is None:
+        return ""
+
+    # Persist the prompt BEFORE any recall work: distill (Stop hook) pairs the
+    # response with it, and an overrun exits hard without saving anything else.
+    phases.enter("persist_prompt")
+    session_id = body.get("session_id", "unknown")
+    prompt = body.get("prompt", "")
+    from smartmemory_app.lifecycle import MemoryLifecycle
+    from smartmemory_app.lifecycle_config import LifecycleConfig
+
+    lc = MemoryLifecycle(
+        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
+    )
+    lc.capture_prompt(prompt)
+
+    phases.enter("daemon")
+    out = _lifecycle_request("/lifecycle/recall", body)
+    if out is not None:
+        return out.get("context") or ""
+
+    phases.enter("engine")
+    return lc.recall(prompt, cwd=body.get("cwd"))
+
+
 @lifecycle_group.command("orient")
 def lifecycle_orient() -> None:
     """Orient phase: recall context at session start."""
-    body = _read_lifecycle_payload("orient")
-    if body is None:
-        return
-
-    out = _lifecycle_request("/lifecycle/orient", body)
-    if out is not None:
-        result = out.get("context") or ""
-    else:
-        session_id = body.get("session_id", "unknown")
-        cwd = body.get("cwd")
-
-        from smartmemory_app.lifecycle import MemoryLifecycle
-        from smartmemory_app.lifecycle_config import LifecycleConfig
-
-        lc = MemoryLifecycle(
-            session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-        )
-        result = lc.orient(cwd=cwd)
-    if result:
-        click.echo(result)
+    _run_hook_with_deadline("lifecycle orient", _orient_work)
 
 
 def _as_text(value) -> str:
@@ -2304,26 +2558,7 @@ def _as_text(value) -> str:
 @lifecycle_group.command("recall")
 def lifecycle_recall() -> None:
     """Recall phase: inject prompt-relevant context."""
-    body = _read_lifecycle_payload("recall")
-    if body is None:
-        return
-
-    out = _lifecycle_request("/lifecycle/recall", body)
-    if out is not None:
-        result = out.get("context") or ""
-    else:
-        session_id = body.get("session_id", "unknown")
-        prompt = body.get("prompt", "")
-
-        from smartmemory_app.lifecycle import MemoryLifecycle
-        from smartmemory_app.lifecycle_config import LifecycleConfig
-
-        lc = MemoryLifecycle(
-            session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-        )
-        result = lc.recall(prompt, cwd=body.get("cwd"))
-    if result:
-        click.echo(result)
+    _run_hook_with_deadline("lifecycle recall", _recall_work)
 
 
 @lifecycle_group.command("observe")

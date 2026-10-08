@@ -184,3 +184,56 @@ def test_duplicate_mixed_entries_keep_foreign_commands(hook_home, monkeypatch):
     setup._register_hooks()
     settings = json.loads(setup.SETTINGS.read_text(encoding="utf-8"))
     assert settings["hooks"]["SessionStart"] == [entry, entry]
+
+
+BLOCKING_TIMEOUTS = {"SessionStart": 15, "UserPromptSubmit": 15}
+
+
+def test_fresh_install_writes_blocking_hook_timeouts_only(hook_home):
+    """HOOK-DEADLINE: the two hooks that block the user get a 15 s kill line."""
+    setup._register_hooks()
+    settings = json.loads(setup.SETTINGS.read_text())
+    for event, entries in settings["hooks"].items():
+        hook = entries[0]["hooks"][0]
+        if event in BLOCKING_TIMEOUTS:
+            assert hook["timeout"] == BLOCKING_TIMEOUTS[event]
+        else:
+            assert "timeout" not in hook
+
+
+def test_upgrade_adds_timeout_when_absent_and_keeps_user_values(hook_home):
+    """An entry from an older install gains 15; a user-chosen timeout survives."""
+    old = copy.deepcopy(setup._get_hook_registrations())
+    for entry in old.values():
+        entry["hooks"][0].pop("timeout", None)
+    old["SessionStart"]["hooks"][0]["timeout"] = 45  # user-set, must survive
+    old["Stop"]["hooks"][0]["timeout"] = 7  # non-blocking hook, untouched
+    setup.SETTINGS.parent.mkdir(parents=True)
+    setup.SETTINGS.write_text(json.dumps({"hooks": {k: [v] for k, v in old.items()}}))
+
+    setup._register_hooks()
+    settings = json.loads(setup.SETTINGS.read_text())
+    hooks = {event: entries for event, entries in settings["hooks"].items()}
+    assert len(hooks["UserPromptSubmit"]) == 1
+    assert hooks["UserPromptSubmit"][0]["hooks"][0]["timeout"] == 15
+    assert hooks["SessionStart"][0]["hooks"][0]["timeout"] == 45
+    assert hooks["Stop"][0]["hooks"][0]["timeout"] == 7
+    assert "timeout" not in hooks["PostToolUse"][0]["hooks"][0]
+
+    first = setup.SETTINGS.read_bytes()
+    setup._register_hooks()
+    assert setup.SETTINGS.read_bytes() == first  # idempotent
+
+
+def test_timeout_is_not_added_to_foreign_hook_in_shared_entry(hook_home):
+    entry = copy.deepcopy(setup._get_hook_registrations()["UserPromptSubmit"])
+    entry["hooks"][0].pop("timeout")
+    foreign = {"type": "command", "command": "bash /other/tool/prompt.sh"}
+    entry["hooks"].append(foreign)
+    setup.SETTINGS.parent.mkdir(parents=True)
+    setup.SETTINGS.write_text(json.dumps({"hooks": {"UserPromptSubmit": [entry]}}))
+    setup._register_hooks()
+    settings = json.loads(setup.SETTINGS.read_text())
+    shared = settings["hooks"]["UserPromptSubmit"][0]["hooks"]
+    assert shared[0]["timeout"] == 15
+    assert shared[1] == foreign

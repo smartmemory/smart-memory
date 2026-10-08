@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smartmemory"
-version = "1.5.23"
+version = "1.5.24"
 requires-python = ">=3.11"
 dependencies = [
     "jsonschema>=4.23",         # validate pinned mirror persistence shapes
     "rfc8785>=0.1.4",           # mirror frozen-context integrity
 
-    "smartmemory-core[lite,wikipedia]==1.5.23",  # EXACT pin — wrapper and core versions move in lockstep
+    "smartmemory-core[lite,wikipedia]==1.5.24",  # EXACT pin — wrapper and core versions move in lockstep
     "openai>=1.0.0",                    # SDK transport for Groq and compatible providers
     "filelock>=3.12",                    # cross-process SQLite write locking
     "smartmemory-mcp==1.5.20",         # EXACT pin, independent of the core release sync chain.

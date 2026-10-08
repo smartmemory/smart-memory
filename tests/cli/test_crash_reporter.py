@@ -425,3 +425,40 @@ def test_byte_truncated_memory_body_is_not_uploaded(capture, tmp_path):
     assert props["log_tail_cli"] == "INFO recovered"
     assert props["log_tail_daemon"] == "INFO recovered"
     assert MEMORY not in json.dumps(capture["rows"][0])
+
+
+def test_report_event_is_minimal_bounded_and_once_per_day(capture, tmp_path):
+    """HOOK-DEADLINE: non-exception events carry no log tails and dedupe per install."""
+    (tmp_path / "cli-debug.log").write_text(MEMORY, encoding="utf-8")
+    props = {
+        "command": "lifecycle recall",
+        "phase": "engine",
+        "elapsed_s": 8.01,
+        "deadline_s": 8.0,
+        "phase_timings": {"payload": 0.01, "engine": 8.0},
+    }
+    first = reporter.report_event(
+        "hook_deadline_exceeded", props, dedupe_key="hook_deadline_exceeded", wait=2
+    )
+    assert first.status == "sent"
+    second = reporter.report_event(
+        "hook_deadline_exceeded", props, dedupe_key="hook_deadline_exceeded", wait=2
+    )
+    assert second.status == "suppressed"
+    assert len(capture["rows"]) == 1
+    row = capture["rows"][0]
+    assert row["event"] == "hook_deadline_exceeded"
+    sent = row["properties"]
+    assert sent["command"] == "lifecycle recall"
+    assert sent["phase_timings"] == {"payload": 0.01, "engine": 8.0}
+    assert sent["$process_person_profile"] is False
+    assert {"os", "smartmemory_version", "python_version"} <= set(sent)
+    assert not {"log_tail_cli", "log_tail_daemon", "$exception_list"} & set(sent)
+    assert MEMORY not in json.dumps(row)
+
+
+def test_report_event_respects_opt_out(capture, monkeypatch):
+    monkeypatch.setenv("SMARTMEMORY_CRASH_REPORTS", "0")
+    result = reporter.report_event("hook_deadline_exceeded", {}, dedupe_key="x")
+    assert result.status == "disabled"
+    assert capture["rows"] == []
