@@ -12,6 +12,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- `sm code index` now indexes every supported language present (Python and TypeScript/JavaScript, including `.mjs/.cjs/.mts/.cts`) by default instead of Python only; `--language` (alias `--languages`) narrows it (CODE-INDEXER-HARDEN-1 F32). Under the default, a TS/JS file that fails to extract is skipped with a warning instead of refusing the whole index; passing `--language typescript` makes such a failure refuse.
 - Add a real SQLite lifecycle golden through the local API, verifying persisted rows, search, recall, clear and empty storage, with no network allowed. The four lite-mode Redis probes it catches are declared as a strict known gap (CORE-LITE-REDIS-PROBE-1).
 - Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
 - Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).

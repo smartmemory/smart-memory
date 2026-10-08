@@ -88,10 +88,12 @@ def code_group() -> None:
 @click.option("--repo", default=None, help="Repo identifier (defaults to folder name).")
 @click.option(
     "--language",
+    "--languages",
     "languages",
     multiple=True,
     type=click.Choice(["python", "typescript"]),
-    help="Languages to index. Repeatable. Defaults to python.",
+    help="Narrow indexing to these languages. Repeatable. Defaults to every supported "
+    "language present (python, typescript/javascript).",
 )
 @click.option(
     "--exclude",
@@ -115,29 +117,32 @@ def code_index_cmd(
 ) -> None:
     """Index a code repository into the knowledge graph.
 
-    Parses Python (and optionally TypeScript/JavaScript) files, writes code
-    entities + relationships as graph nodes/edges, and generates vector
-    embeddings. Every node is tagged with origin=code:index (Tier 1).
+    Parses every supported language present (Python and TypeScript/JavaScript,
+    including .mjs/.cjs/.mts/.cts), writes code entities + relationships as graph
+    nodes/edges, and generates vector embeddings. Every node is tagged with
+    origin=code:index (Tier 1). --language narrows the set.
 
     \b
     Examples:
         sm code index .
-        sm code index ~/repos/myapp --repo myapp --language python --language typescript
+        sm code index ~/repos/myapp --repo myapp --language python
     """
     repo_path = Path(path).resolve()
     repo_id = repo or _detect_repo_name(repo_path)
-    lang_list = list(languages) if languages else ["python"]
+    # None = core's default: every supported language present (CODE-INDEXER-HARDEN-1 F32).
+    lang_list = list(languages) if languages else None
+    lang_label = ",".join(lang_list) if lang_list else "all"
     excludes = sorted(_DEFAULT_EXCLUDES | set(extra_excludes))
 
     click.echo(
         f"[code:index] phase=start repo={repo_id} path={repo_path} "
-        f"langs={','.join(lang_list)} excludes={len(excludes)}"
+        f"langs={lang_label} excludes={len(excludes)}"
     )
 
     try:
         from smartmemory_app.launch_metrics import emit as _lm_emit
 
-        _lm_emit("index.start", {"repo": repo_id, "languages": lang_list})
+        _lm_emit("index.start", {"repo": repo_id, "languages": lang_list or ["all"]})
     except Exception:
         pass
 
