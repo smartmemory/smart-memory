@@ -407,10 +407,21 @@ class RemoteMemory:
             )
         result.g16_complete = False
         result.elapsed_seconds = round(time.monotonic() - started, 2)
-        log.warning(
-            "Hosted code index stores graph entities and relations only: "
-            "the hosted endpoint does not generate vector embeddings (embeddings=0)."
-        )
+        # CODE-INDEXER-HARDEN-1 F25: current services embed REST bundles and report the count.
+        embedded = response.get("embeddings_generated")
+        if type(embedded) is int:
+            result.embeddings_generated = embedded
+            if embedded < result.entities_created:
+                log.warning(
+                    "Hosted code index embedded %d of %d entities; semantic code search coverage is partial.",
+                    embedded,
+                    result.entities_created,
+                )
+        else:
+            log.warning(
+                "Hosted code index stores graph entities and relations only: "
+                "the hosted endpoint does not generate vector embeddings (embeddings=0)."
+            )
         return result
 
     def ingest(

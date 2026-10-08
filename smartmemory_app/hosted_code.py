@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,24 +33,25 @@ def prepare_code_index(
     the hosted route remaps those IDs into its authenticated workspace.
     """
     from smartmemory.code.indexer import CodeIndexer
+    from smartmemory.code.repo_key import derive_repo_identity
+    from smartmemory.code.source_revision import detect_source_revision
 
     root = Path(directory).resolve()
     if commit_hash is None:
-        try:
-            git = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+        # CODE-INDEXER-HARDEN-1 F29: HEAD plus the working-tree state, so uncommitted
+        # code is stamped "<HEAD>-dirty-<fingerprint>" instead of passing as HEAD.
+        revision = detect_source_revision(str(root))
+        commit_hash = revision.commit_hash
+        if not revision.head:
+            log.warning(
+                "Hosted code index has no commit hash: git rev-parse HEAD failed"
             )
-            commit_hash = git.stdout.strip() if git.returncode == 0 else ""
-            if not commit_hash:
-                log.warning(
-                    "Hosted code index has no commit hash: git rev-parse HEAD failed"
-                )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            log.warning("Hosted code index has no commit hash: %s", exc)
-            commit_hash = ""
+        if revision.dirty:
+            log.warning(
+                "Hosted code index of %s includes uncommitted changes; stamped %s",
+                root,
+                commit_hash,
+            )
 
     # CODE-INGEST-SURFACES-1/code-contract.json: dataclass serialization carries
     # every core model field instead of a surface-specific field whitelist.
@@ -63,6 +63,9 @@ def prepare_code_index(
         commit_hash=commit_hash or "",
     )
     body, result = indexer.prepare_bundle(languages)
+    # CODE-INDEXER-HARDEN-1 F28: the service refuses this repo name if it already
+    # belongs to a different checkout identity in the workspace.
+    body["repo_identity"] = derive_repo_identity(str(root)).identity
     encoded = httpx.Request("POST", "https://unused.invalid", json=body).content
     if len(encoded) > MAX_REQUEST_BODY_BYTES:
         raise ValueError(

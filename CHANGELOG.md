@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## Unreleased - CODE-INDEXER-HARDEN-1 U5 (2026-10-08)
+
+- CODE-INDEXER-HARDEN-1 (F25, F28, F29): hosted `prepare_code_index` stamps dirty-aware provenance (`<HEAD>-dirty-<fingerprint>` for uncommitted or untracked changes, with a WARNING) and sends `repo_identity` so the service refuses a repo name owned by a different checkout. The hosted CLI reports the server's `embeddings_generated` instead of always warning that hosted indexes have no embeddings (the warning stays for older services).
+
 ## Unreleased - CODE-CALLSITE-COVERAGE-1 build
 
 - Point user-facing links at https://www.smartmemory.ai (the web app had no app.smartmemory.ai DNS until 2026-10-08, and it now only redirects to www). Filed as PLAT-APP-SUBDOMAIN-1.
