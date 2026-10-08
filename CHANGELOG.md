@@ -12,6 +12,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- Prompt and session-start hooks no longer time out in Claude Code. `smartmemory lifecycle recall` and `lifecycle orient` now stop after 8 seconds (set `SMARTMEMORY_HOOK_DEADLINE` to change it). On overrun they add no context for that prompt, write a warning with per-phase timings to `hooks.log`, send at most one anonymous `hook_deadline_exceeded` event a day (no prompt text, no paths, honours `SMARTMEMORY_CRASH_REPORTS=0`) and exit cleanly. The prompt is still saved first, so the turn is remembered. The hooks also skip the daemon connection when no daemon is running, and wait at most 1.5 s to connect when one is. `smartmemory setup` now gives the SessionStart and UserPromptSubmit hooks a 15 s timeout when none is set, and keeps any timeout you chose.
 - Add a real SQLite lifecycle golden through the local API, verifying persisted rows, search, recall, clear and empty storage, with no network allowed. The four lite-mode Redis probes it catches are declared as a strict known gap (CORE-LITE-REDIS-PROBE-1).
 - Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
 - Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).

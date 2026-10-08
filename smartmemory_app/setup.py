@@ -215,6 +215,16 @@ def _installed_hook_name(command: str) -> str | None:
     return None
 
 
+# HOOK-DEADLINE: Claude Code kill line (seconds) for the two hooks that block
+# the user. The CLI's own deadline (SMARTMEMORY_HOOK_DEADLINE, default 8 s)
+# fires first and exits cleanly; this only bounds interpreter start-up on top.
+# Written only when absent, so a user-chosen timeout always survives setup.
+HOOK_TIMEOUTS = {
+    "SessionStart": ("smartmemory-orient.sh", 15),
+    "UserPromptSubmit": ("smartmemory-recall.sh", 15),
+}
+
+
 def _get_hook_registrations(shell: str | None = None) -> dict:
     """Build hook registration entries using current Claude Code hooks format.
 
@@ -230,6 +240,7 @@ def _get_hook_registrations(shell: str | None = None) -> dict:
                 {
                     "type": "command",
                     "command": _hook_command("smartmemory-orient.sh", shell),
+                    "timeout": HOOK_TIMEOUTS["SessionStart"][1],
                 }
             ],
         },
@@ -239,6 +250,7 @@ def _get_hook_registrations(shell: str | None = None) -> dict:
                 {
                     "type": "command",
                     "command": _hook_command("smartmemory-recall.sh", shell),
+                    "timeout": HOOK_TIMEOUTS["UserPromptSubmit"][1],
                 }
             ],
         },
@@ -1130,6 +1142,9 @@ def _register_hooks() -> None:
                         if name in HOOK_NAMES:
                             owned = True
                             hook = {**hook, "command": _hook_command(name, shell)}
+                            default = HOOK_TIMEOUTS.get(event)
+                            if default and default[0] == name and "timeout" not in hook:
+                                hook["timeout"] = default[1]
                         elif name:
                             continue  # our obsolete filenames only
                         else:

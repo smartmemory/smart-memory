@@ -181,12 +181,15 @@ def _capture(
     fingerprint: str | None = None,
     dedupe_seconds: int = 600,
     hosts: tuple[str, ...] | None = None,
+    wait: float = 0.4,
 ) -> ReportResult:
     key = os.environ.get("SMARTMEMORY_CRASH_REPORT_KEY", PUBLIC_PROJECT_KEY)
     if not key.startswith("phc_"):
         raise ValueError("Crash reporting requires a public project key")
     properties = private_value(properties, omitted, hosts=hosts)
     for name in ("log_tail_cli", "log_tail_daemon"):
+        if name not in properties:
+            continue  # Non-exception events carry no log tails at all.
         properties[name] = (
             properties[name].encode("utf-8")[-30_000:].decode("utf-8", errors="ignore")
         )
@@ -203,7 +206,7 @@ def _capture(
     )
     if not accepted:
         return ReportResult("suppressed")
-    return flush_in_background(payload["properties"]["report_id"], wait=0.4)
+    return flush_in_background(payload["properties"]["report_id"], wait=wait)
 
 
 def report_exception(
@@ -259,6 +262,55 @@ def report_exception(
         )
     except Exception as error:
         log.warning("Crash report unavailable (%s)", type(error).__name__)
+        return ReportResult("failed")
+
+
+def report_event(
+    event: str,
+    properties: dict,
+    *,
+    dedupe_key: str,
+    dedupe_seconds: int = 86400,
+    wait: float = 0.4,
+) -> ReportResult:
+    """Send one anonymous, non-exception event (e.g. a hook deadline overrun).
+
+    Unlike ``report_exception`` this carries no log tails, no traceback and no
+    command arguments: only versions, OS and the caller's bounded properties,
+    which still pass the ``private_value`` text boundary. ``dedupe_key`` limits
+    it to one event per install per ``dedupe_seconds``. The event is queued in
+    the outbox first, then flushed for at most ``wait`` seconds; anything left
+    is delivered by the next CLI or daemon start.
+    """
+    try:
+        if not enabled():
+            return ReportResult("disabled")
+        data_dir = debug_log_path().parent
+        env = gather_environment()
+        payload = {
+            "$process_person_profile": False,
+            "$geoip_disable": True,
+            "report_id": uuid.uuid4().hex[:12],
+            "smartmemory_version": env.wrapper_version,
+            "smartmemory_core_version": env.core_version,
+            "python_version": env.python_version,
+            "os": env.os_version,
+            "source": "event",
+            **properties,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(["event", event, dedupe_key]).encode()
+        ).hexdigest()
+        return _capture(
+            event,
+            payload,
+            data_dir,
+            fingerprint=fingerprint,
+            dedupe_seconds=dedupe_seconds,
+            wait=wait,
+        )
+    except Exception as error:
+        log.warning("Event report unavailable (%s)", type(error).__name__)
         return ReportResult("failed")
 
 

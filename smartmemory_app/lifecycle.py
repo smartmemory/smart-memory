@@ -220,6 +220,19 @@ class MemoryLifecycle:
         self._save_state()
         return output
 
+    def capture_prompt(self, prompt: str) -> None:
+        """Persist the prompt for distill pairing before any recall work starts.
+
+        The recall hook runs under a deadline (HOOK-DEADLINE) and exits hard on
+        overrun, so the one thing distill needs from this turn is saved first.
+        ``recall`` still captures it too, for callers that skip this step (the
+        daemon's lifecycle API).
+        """
+        if not self._config.enabled:
+            return
+        self._current_user_turn = prompt
+        self._save_state()
+
     @_traced_injection
     def recall(self, prompt: str, cwd: str | None = None) -> str:
         """Phase 2: Per-prompt recall — always captures prompt, optionally injects context.
