@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## 1.5.26 — 2026-10-09
+
+- Hotfix: pins `smartmemory-core==1.5.26`, which bounds `tree-sitter<0.26`. With tree-sitter 0.26.0, `smartmemory code bundle` on a real TypeScript tree crashed with a segfault (exit 139).
+
 ## Unreleased - CODE-BUNDLE-CLI-1 (2026-10-08)
 
 - Final bundle fixes: partial snapshots preserve collection failure paths with colon characters, Unicode names and filename-less errors. CLI regression coverage uses real audit-hook traversal failures. Core validates every declared nested record and reports unavailable membership inputs explicitly.
