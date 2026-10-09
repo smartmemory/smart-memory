@@ -1,3 +1,4 @@
+# Manual only (workflow_dispatch). Prod deploys and releases use the scripts in the repo/runbook. Owner decision 2026-10-09.
 name: Sync to core release
 
 # Chain A (wrapper): smartmemory-core publishes a new version -> repository_dispatch
@@ -6,8 +7,6 @@ name: Sync to core release
 # release. The existing publish.yml (on release: published) then ships the new
 # wrapper to PyPI.
 on:
-  repository_dispatch:
-    types: [core-released]
   workflow_dispatch:
     inputs:
       version:
