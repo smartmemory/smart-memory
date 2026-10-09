@@ -24,6 +24,13 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+## [1.5.25] - 2026-10-09
+
+- Pins `smartmemory-core==1.5.25` (now with the `[typescript]` extra, which carries the tree-sitter TS/JS grammars).
+- New `smartmemory code bundle <path> --repo <id> --out <file>` writes a store-free local snapshot of a checkout (entities, relations, source identity, `resolution_dependencies`, completeness) without opening a memory store or uploading anything. `--fields minimal` gives the lean form, `--allow-partial` keeps good files when others fail to parse (CODE-BUNDLE-CLI-1).
+- Pins `smartmemory-mcp==1.5.21` (latest published MCP).
+- Core mirror rework (DIST-LITE-SYNC-1) ships closed by default: nothing changes for ordinary add, ingest or export.
+
 ## [1.5.24] - 2026-10-08
 
 - Pins `smartmemory-core==1.5.24`: Lite (SQLite) memory never opens a Redis socket unless one is configured (CORE-LITE-REDIS-PROBE-1), plus the 2026-10-08 core security hotfixes.
