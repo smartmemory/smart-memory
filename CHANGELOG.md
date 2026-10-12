@@ -4,7 +4,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
-- U5.22: local `sm search "*"` (wildcard) now lists intake-only items and every wildcard row carries the extraction `read_status` when `sm2_search_visibility_gate` is ON (the snapshot scan could not see receipts), with a WARNING when the 200-hit merge window is full. Recall lines add an `[extraction_pending]`-style tag only when a status is present. Gate OFF is unchanged.
+- U5.22: local `sm search "*"` (wildcard) now lists intake-only items and every wildcard row carries the extraction `read_status` when `sm2_search_visibility_gate` is ON (the snapshot scan could not see receipts), with a WARNING when the 200-hit merge window is full. Recall lines add an `[extraction_pending]`-style tag only when a status is present. Gate OFF is unchanged. On the gate-ON arm the wildcard now returns core's own merged enumeration (membership, edit and tombstone precedence, origin filters, status on every row) instead of merging onto the graph snapshot; a full window at the cap raises `WildcardEnumerationOverflowError` with one WARNING. A malformed `read_status` is a typed `MalformedReadStatusError`.
 
 ## [1.5.16] - 2026-10-01
 

@@ -98,12 +98,46 @@ def _item_to_recall_dict(item: Any) -> dict:
     return out
 
 
+class MalformedReadStatusError(ValueError):
+    """A result carries a ``read_status`` that is present but unreadable (U5.22, C1/C8)."""
+
+
+def validated_carrier(status: Any, item_id: Any) -> dict | None:
+    """``status`` as a carrier copy: None when absent, a typed refusal (one WARNING) when present but unreadable.
+
+    Absent (None) is the legacy gate-OFF shape and stays unchanged. A present carrier must be a dict holding a
+    non-empty string ``extraction_state``. Anything else is never read as absent, because that would show a
+    legacy-looking row for an item whose extraction status was lost.
+    """
+    if status is None:
+        return None
+    if not isinstance(status, dict):
+        reason = f"a {type(status).__name__}, not a dict"
+    elif not (
+        isinstance(status.get("extraction_state"), str) and status["extraction_state"]
+    ):
+        reason = "a dict without a string extraction_state"
+    else:
+        return dict(status)
+    log.warning(
+        "read_status carrier on %s is %s: refusing to normalize the row without its extraction status",
+        item_id,
+        reason,
+    )
+    raise MalformedReadStatusError(f"read_status on {item_id} is {reason}")
+
+
 def _carrier_of(item: Any, raw: dict) -> dict | None:
     """The response-only read_status carrier (gate-ON arm), or None when absent."""
     status = raw.get(READ_STATUS_KEY) if isinstance(raw, dict) else None
     if status is None and not isinstance(item, dict):
         status = read_status_of(item)
-    return dict(status) if isinstance(status, dict) else None
+    item_id = (
+        raw.get("item_id") or raw.get("id") or raw.get("decision_id")
+        if isinstance(raw, dict)
+        else None
+    )
+    return validated_carrier(status, item_id)
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -325,8 +359,8 @@ def format_recall_lines(
                 )
             date_tag = f"[{date or 'date?'}] "
         body = body.replace("\n", "\n  ")
-        state = (it.get(READ_STATUS_KEY) or {}).get("extraction_state")
-        state_tag = f"[{state}] " if state else ""
+        carrier = validated_carrier(it.get(READ_STATUS_KEY), it.get("item_id"))
+        state_tag = f"[{carrier['extraction_state']}] " if carrier else ""
         lines.append(
             f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}{state_tag}"
             f"[mem:{recall_item_label(it)}] {body}"

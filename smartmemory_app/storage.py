@@ -33,7 +33,6 @@ from smartmemory_app.config import (
     load_config,
 )
 
-from smartmemory.models.read_status import READ_STATUS_KEY
 
 log = logging.getLogger(__name__)
 
@@ -475,39 +474,42 @@ def persist_provenance(edits) -> dict:
 
 
 _WILDCARD_PENDING_WINDOW = 200
+_WILDCARD_CORE_CAP = 102_400
 
 
-def _merge_pending_wildcard(mem, rows: list[dict]) -> list[dict]:
-    """Gate-ON wildcard: carry read_status onto snapshot rows and add pending-only hits.
+class WildcardEnumerationOverflowError(RuntimeError):
+    """Core's wildcard enumeration still returned a full window at the cap (U5.22, C1/C4)."""
 
-    The snapshot scan reads the graph only, so a receipt-only (intake) item is
-    invisible to it and no row carries an extraction status. Core ``search("*")``
-    is the one reader that sees both, so its hits supply the carrier. Gate OFF
-    returns the rows untouched.
+
+def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
+    """Gate-ON wildcard: core's merged enumeration is the one authority for membership, payload and read_status.
+
+    The wrapper's own snapshot scan reads the graph only. It cannot see a receipt-only (intake) item, a newer
+    admission revision of a graph row, an admission tombstone or core's origin/lifecycle exclusions, so it is not
+    merged with core's answer: core's answer is used whole. Exhaustion is decided from core's own page: a window that
+    comes back full is doubled until it comes back short, so no returned row is left without its carrier. A full
+    window at the cap is refused (one WARNING, typed error), never truncated. Gate OFF never calls this.
     """
-    from smartmemory.search.visibility_gate import search_visibility_gate_on
-
-    if not search_visibility_gate_on():
-        return rows
-    hits = mem.search("*", top_k=_WILDCARD_PENDING_WINDOW)
-    if len(hits) >= _WILDCARD_PENDING_WINDOW:
-        log.warning(
-            "wildcard search merged only the first %d pending/status hits; later pending items are not listed",
-            _WILDCARD_PENDING_WINDOW,
-        )
-    by_id = {r.get("item_id"): r for r in rows}
-    merged = list(rows)
+    window = _WILDCARD_PENDING_WINDOW
+    while True:
+        hits = mem.search("*", top_k=window, **core_kwargs)
+        if len(hits) < window:
+            break
+        if window >= _WILDCARD_CORE_CAP:
+            log.warning(
+                "wildcard search refused: core still returned a full window of %d hits at the cap, "
+                "so the listing would be incomplete",
+                window,
+            )
+            raise WildcardEnumerationOverflowError(
+                f"wildcard enumeration exceeds {_WILDCARD_CORE_CAP} hits"
+            )
+        window = min(window * 2, _WILDCARD_CORE_CAP)
+    rows = []
     for hit in hits:
         payload = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
-        status = payload.get(READ_STATUS_KEY)
-        if status is None:
-            continue
-        existing = by_id.get(payload.get("item_id"))
-        if existing is not None:
-            existing[READ_STATUS_KEY] = status
-        else:
-            merged.append(payload)
-    return merged
+        rows.append({"confidence": 1.0, "stale": False, "reference": False, **payload})
+    return rows
 
 
 def _list_all_memories(mem) -> list[dict]:
@@ -665,8 +667,12 @@ def search(
         "include_superseded",
         "include_retracted",
     }:
-        all_items = _list_all_memories(mem)
-        all_items = _merge_pending_wildcard(mem, all_items)
+        from smartmemory.search.visibility_gate import search_visibility_gate_on
+
+        if search_visibility_gate_on():
+            all_items = _core_wildcard_rows(mem, **core_kwargs)
+        else:
+            all_items = _list_all_memories(mem)
         if filters:
             all_items = [
                 r
