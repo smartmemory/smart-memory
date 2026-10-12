@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from smartmemory.models.read_status import READ_STATUS_KEY, read_status_of
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TRACE_PATH = Path(
@@ -75,7 +77,8 @@ def _item_to_recall_dict(item: Any) -> dict:
     ):
         if raw.get(key) is not None:
             metadata[key] = raw[key]
-    return {
+    status = _carrier_of(item, raw)
+    out = {
         "item_id": raw.get("item_id") or raw.get("id") or raw.get("decision_id"),
         "memory_type": raw.get("memory_type")
         or ("decision" if raw.get("decision_id") else "?"),
@@ -90,6 +93,17 @@ def _item_to_recall_dict(item: Any) -> dict:
         "transaction_time": raw.get("transaction_time"),
         "metadata": metadata,
     }
+    if status is not None:
+        out[READ_STATUS_KEY] = status
+    return out
+
+
+def _carrier_of(item: Any, raw: dict) -> dict | None:
+    """The response-only read_status carrier (gate-ON arm), or None when absent."""
+    status = raw.get(READ_STATUS_KEY) if isinstance(raw, dict) else None
+    if status is None and not isinstance(item, dict):
+        status = read_status_of(item)
+    return dict(status) if isinstance(status, dict) else None
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -311,8 +325,10 @@ def format_recall_lines(
                 )
             date_tag = f"[{date or 'date?'}] "
         body = body.replace("\n", "\n  ")
+        state = (it.get(READ_STATUS_KEY) or {}).get("extraction_state")
+        state_tag = f"[{state}] " if state else ""
         lines.append(
-            f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}"
+            f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}{state_tag}"
             f"[mem:{recall_item_label(it)}] {body}"
         )
 

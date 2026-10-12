@@ -2,6 +2,10 @@
 
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
+## [Unreleased]
+
+- U5.22: local `sm search "*"` (wildcard) now lists intake-only items and every wildcard row carries the extraction `read_status` when `sm2_search_visibility_gate` is ON (the snapshot scan could not see receipts), with a WARNING when the 200-hit merge window is full. Recall lines add an `[extraction_pending]`-style tag only when a status is present. Gate OFF is unchanged.
+
 ## [1.5.16] - 2026-10-01
 
 - Pins `smartmemory-core==1.5.16` (first- and second-person pronouns resolve to real participants before extraction, so "I now prefer light mode" supersedes "I prefer dark mode" while stored text stays verbatim; the supersession judge no longer retires current-state notes or silently rewrites its verdicts; Lite wildcard and typed listing return stored memories again; extracted FalkorDB entities get canonical ownership; an opt-in FalkorDB duplicate-vector guard, off by default).

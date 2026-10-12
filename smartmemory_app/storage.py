@@ -33,6 +33,8 @@ from smartmemory_app.config import (
     load_config,
 )
 
+from smartmemory.models.read_status import READ_STATUS_KEY
+
 log = logging.getLogger(__name__)
 
 _memory: "SmartMemory | None" = None
@@ -472,6 +474,42 @@ def persist_provenance(edits) -> dict:
         return ProvenancePersister(mem).persist(edits)
 
 
+_WILDCARD_PENDING_WINDOW = 200
+
+
+def _merge_pending_wildcard(mem, rows: list[dict]) -> list[dict]:
+    """Gate-ON wildcard: carry read_status onto snapshot rows and add pending-only hits.
+
+    The snapshot scan reads the graph only, so a receipt-only (intake) item is
+    invisible to it and no row carries an extraction status. Core ``search("*")``
+    is the one reader that sees both, so its hits supply the carrier. Gate OFF
+    returns the rows untouched.
+    """
+    from smartmemory.search.visibility_gate import search_visibility_gate_on
+
+    if not search_visibility_gate_on():
+        return rows
+    hits = mem.search("*", top_k=_WILDCARD_PENDING_WINDOW)
+    if len(hits) >= _WILDCARD_PENDING_WINDOW:
+        log.warning(
+            "wildcard search merged only the first %d pending/status hits; later pending items are not listed",
+            _WILDCARD_PENDING_WINDOW,
+        )
+    by_id = {r.get("item_id"): r for r in rows}
+    merged = list(rows)
+    for hit in hits:
+        payload = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+        status = payload.get(READ_STATUS_KEY)
+        if status is None:
+            continue
+        existing = by_id.get(payload.get("item_id"))
+        if existing is not None:
+            existing[READ_STATUS_KEY] = status
+        else:
+            merged.append(payload)
+    return merged
+
+
 def _list_all_memories(mem) -> list[dict]:
     """Return all memory nodes (excluding entity/relation/Version nodes).
 
@@ -628,6 +666,7 @@ def search(
         "include_retracted",
     }:
         all_items = _list_all_memories(mem)
+        all_items = _merge_pending_wildcard(mem, all_items)
         if filters:
             all_items = [
                 r
