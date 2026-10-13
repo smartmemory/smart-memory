@@ -342,12 +342,28 @@ def test_core_without_the_adapter_is_unavailable_not_empty(lite, monkeypatch, ca
     one_warning(caplog, expected)
 
 
-# -- C1/C8: every core module the adapter opens with is one typed, logged boundary ---------------------------------
-# One row per dependency in ``work_graph.OPEN_DEPENDENCIES`` (the table must cover the whole tuple). Each is removed
-# with the adapter module still present, the case review r1 F1 found escaping as a raw ModuleNotFoundError.
-def test_dependency_table_covers_every_open_dependency():
-    assert sorted(DEPENDENCY_ROWS) == sorted(work_graph.OPEN_DEPENDENCIES)
-
+# -- C1/C8: every name the status path takes from another package is one typed, logged boundary -------------------
+# review r2 F1: a module that imports but lacks a required symbol escaped as a raw ImportError with no WARNING. The
+# rows below cover every (module, symbol) in ``work_graph.STATUS_IMPORTS`` (a missing symbol), every module in it
+# (a module that does not import), and an ImportError raised inside a dependency's own import.
+SYMBOL_ROWS = [
+    ("smartmemory.save.local_status", "LocalStatusAdapter"),
+    ("smartmemory.save.local_status", "InvalidArgument"),
+    ("smartmemory.save.local_status", "LocalStatusRefused"),
+    ("smartmemory.save.local_status", "LegacyRunProjection"),
+    ("smartmemory.save.local_status", "status_text"),
+    ("smartmemory.save.local_status", "local_capabilities"),
+    ("smartmemory.authority", "AuthorityVerdict"),
+    ("smartmemory.ownership", "OwnershipContext"),
+    ("smartmemory.pipeline.work_graph.port", "Scope"),
+    ("smartmemory.pipeline.work_graph.port", "WorkGraphContractError"),
+    ("smartmemory.pipeline.work_graph.sqlite_store", "SQLiteWorkGraph"),
+    ("smartmemory.pipeline.work_graph.v2", "bind_sqlite_v2"),
+    ("smartmemory.save.read_port", "InvalidRow"),
+    ("smartmemory.save.read_port", "ScopeKeys"),
+    ("smartmemory.visibility", "ReadVisibilityGate"),
+    ("smartmemory_app.storage", "_resolve_data_dir"),
+]
 
 DEPENDENCY_ROWS = [
     "smartmemory.authority",
@@ -357,7 +373,47 @@ DEPENDENCY_ROWS = [
     "smartmemory.pipeline.work_graph.v2",
     "smartmemory.save.read_port",
     "smartmemory.visibility",
+    "smartmemory_app.storage",
 ]
+
+
+def test_row_tables_cover_the_whole_import_table():
+    table = work_graph.STATUS_IMPORTS
+    assert SYMBOL_ROWS == [(module, symbol) for module, symbol, _ in table]
+    assert len({symbol for _, symbol, _ in table}) == len(table)  # one namespace
+    assert (
+        DEPENDENCY_ROWS
+        == list(work_graph.OPEN_DEPENDENCIES)
+        == sorted({module for module, _, _ in table} - {work_graph.ADAPTER_MODULE})
+    )
+
+
+@pytest.mark.parametrize(
+    "module_name, symbol", SYMBOL_ROWS, ids=[s for _, s in SYMBOL_ROWS]
+)
+def test_missing_symbol_is_typed_unavailable_with_one_warning(
+    lite, caplog, module_name, symbol
+):
+    _, _, _, _, items = lite
+    module = sys.modules[module_name]
+    saved = getattr(module, symbol)
+    delattr(module, symbol)
+    try:
+        with pytest.raises(work_graph.LocalStatusUnavailable) as raised:
+            read(items)
+    finally:
+        setattr(module, symbol, saved)
+    lost = {(m, s): lost for m, s, lost in work_graph.STATUS_IMPORTS}[
+        (module_name, symbol)
+    ]
+    assert (
+        str(raised.value)
+        == f"local status unavailable: installed core has no {module_name}.{symbol}"
+    )
+    one_warning(
+        caplog,
+        f"Local status dependency {module_name} has no {symbol} ({lost}); status replay refused, no status returned",
+    )
 
 
 @pytest.mark.parametrize("missing", DEPENDENCY_ROWS)
@@ -378,22 +434,224 @@ def test_missing_open_dependency_is_typed_unavailable_with_one_warning(
     )
 
 
-def test_every_open_import_follows_the_one_dependency_boundary():
-    """The imports ``open_local_status`` makes after ``_require_open_dependencies`` are all in the tuple."""
+class _BrokenImport:
+    """A finder for one module whose own import raises ImportError (a dependency of the dependency is missing)."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def find_spec(self, fullname, path=None, target=None):
+        import importlib.util
+
+        if fullname != self.name:
+            return None
+        return importlib.util.spec_from_loader(fullname, self)
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        raise ImportError("cannot import name 'test_gone' from 'smartmemory.test_dep'")
+
+
+# An ImportError raised inside a module's own import (not the module's absence) names its cause: the adapter whose
+# own ``from ... import SQLiteWorkGraph`` fails is not reported as an absent adapter, and a broken dependency import
+# is reported with the error it raised.
+INSIDE_ROWS = [
+    # (name, module whose import fails, fault installed)
+    (
+        "adapter import misses a core name",
+        "smartmemory.save.local_status",
+        lambda mp: mp.delattr(
+            sys.modules["smartmemory.pipeline.work_graph.sqlite_store"],
+            "SQLiteWorkGraph",
+        ),
+    ),
+    (
+        "dependency import raises ImportError",
+        "smartmemory_app.storage",
+        lambda mp: mp.setattr(
+            sys,
+            "meta_path",
+            [_BrokenImport("smartmemory_app.storage"), *sys.meta_path],
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "failing, install",
+    [row[1:] for row in INSIDE_ROWS],
+    ids=[row[0] for row in INSIDE_ROWS],
+)
+def test_import_error_inside_a_dependency_is_typed_unavailable_with_one_warning(
+    lite, monkeypatch, caplog, failing, install
+):
+    _, _, _, _, items = lite
+    monkeypatch.delitem(sys.modules, failing)  # restored after the test
+    install(monkeypatch)
+    with pytest.raises(work_graph.LocalStatusUnavailable) as raised:
+        read(items)
+    cause = raised.value.__cause__
+    assert isinstance(cause, ImportError) and cause.name != failing
+    detail = f"{type(cause).__name__}: {cause}"
+    assert (
+        str(raised.value)
+        == f"local status unavailable: {failing} is not importable ({detail})"
+    )
+    one_warning(
+        caplog,
+        f"Local status dependency {failing} is not importable ({detail}); status replay refused, no status returned",
+    )
+
+
+# ``get_work_graph`` resolves its two rows through the same boundary. Its legacy callers (CLI, daemon, viewer) have
+# always seen an ImportError there, so its typed error is an ImportError, now with one WARNING.
+WORK_GRAPH_ROWS = [
+    # (name, fault installed, expected message, expected log)
+    (
+        "store module missing",
+        lambda mp: mp.setitem(
+            sys.modules, "smartmemory.pipeline.work_graph.sqlite_store", None
+        ),
+        "local status unavailable: installed core has no smartmemory.pipeline.work_graph.sqlite_store",
+        "Local status dependency smartmemory.pipeline.work_graph.sqlite_store is not importable; "
+        "the local work graph was not opened",
+    ),
+    (
+        "store class missing",
+        lambda mp: mp.delattr(
+            sys.modules["smartmemory.pipeline.work_graph.sqlite_store"],
+            "SQLiteWorkGraph",
+        ),
+        "local status unavailable: installed core has no "
+        "smartmemory.pipeline.work_graph.sqlite_store.SQLiteWorkGraph",
+        "Local status dependency smartmemory.pipeline.work_graph.sqlite_store has no SQLiteWorkGraph "
+        "(the Lite work graph store); the local work graph was not opened",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "install, message, logged",
+    [row[1:] for row in WORK_GRAPH_ROWS],
+    ids=[row[0] for row in WORK_GRAPH_ROWS],
+)
+def test_work_graph_dependency_failure_is_one_typed_import_error(
+    tmp_path, monkeypatch, caplog, install, message, logged
+):
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
+    install(monkeypatch)
+    with pytest.raises(work_graph.WorkGraphUnavailable) as raised:
+        work_graph.get_work_graph()
+    assert isinstance(raised.value, ImportError) and str(raised.value) == message
+    one_warning(caplog, logged)
+
+
+def status_path_names(source):
+    """AST scan of the status path in ``work_graph`` source: the call closure from its entry points, then every
+    import those functions make outside ``_core_names`` and every name they read off a ``_core_names`` result."""
     import ast
+
+    tree = ast.parse(source)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    reached, todo = (
+        [],
+        [
+            "open_local_status",
+            "get_work_graph",
+            "get_local_status",
+            "project_local_status",
+            "local_status_capability",
+        ],
+    )
+    while todo:
+        name = todo.pop()
+        if name in reached or name not in funcs:
+            continue
+        reached.append(name)
+        todo += [
+            n.id
+            for n in ast.walk(funcs[name])
+            if isinstance(n, ast.Name) and n.id in funcs
+        ]
+    imports, used = [], set()
+    for name in reached:
+        if name == "_core_names":
+            continue
+        bound = set()
+        for n in ast.walk(funcs[name]):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                imports += [
+                    f"{name}:{n.lineno}: {getattr(n, 'module', None) or ''} {a.name}"
+                    for a in n.names
+                ]
+            if isinstance(n, ast.Call) and ast.unparse(n.func) in (
+                "importlib.import_module",
+                "__import__",
+            ):
+                imports.append(f"{name}:{n.lineno}: {ast.unparse(n)}")
+            if isinstance(n, ast.Assign) and ast.unparse(n.value).startswith(
+                "_core_names("
+            ):
+                bound |= {t.id for t in n.targets}
+        for n in ast.walk(funcs[name]):
+            if isinstance(n, ast.Attribute) and (
+                (isinstance(n.value, ast.Name) and n.value.id in bound)
+                or (
+                    isinstance(n.value, ast.Call)
+                    and ast.unparse(n.value.func) == "_core_names"
+                )
+            ):
+                used.add(n.attr)
+    return reached, imports, used
+
+
+def test_every_status_path_name_goes_through_the_one_boundary():
+    """Re-runs the scan on the real module: no import runs outside ``_core_names``, and the names read off it are
+    exactly the table (a new name without a row would be a raw AttributeError, a stale row a false refusal)."""
     import inspect
 
-    tree = ast.parse(inspect.getsource(work_graph))
-    wrapper = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-    imported = {
-        n.module
-        for name in ("open_local_status", "_read_only_fence")
-        for n in ast.walk(wrapper[name])
-        if isinstance(n, ast.ImportFrom) and n.module.startswith("smartmemory.")
-    } | {
-        "smartmemory.pipeline.work_graph.sqlite_store"
-    }  # via get_work_graph(), called by open_local_status
-    assert imported <= set(work_graph.OPEN_DEPENDENCIES)
+    reached, imports, used = status_path_names(inspect.getsource(work_graph))
+    assert {"open_local_status", "get_work_graph", "_read_only_fence"} <= set(reached)
+    assert imports == []
+    assert used == {symbol for _, symbol, _ in work_graph.STATUS_IMPORTS}
+
+
+GUARD_ROWS = [
+    # (name, line added to open_local_status, what the guard must report)
+    (
+        "from-import",
+        "    from smartmemory.test_new import TestName\n",
+        "imports",
+    ),
+    ("module import", "    import smartmemory.test_new\n", "imports"),
+    (
+        "dynamic import",
+        "    importlib.import_module('smartmemory.test_new')\n",
+        "imports",
+    ),
+    ("name without a row", "    core.TestNewName\n", "used"),
+]
+
+
+@pytest.mark.parametrize(
+    "line, kind", [row[1:] for row in GUARD_ROWS], ids=[row[0] for row in GUARD_ROWS]
+)
+def test_the_guard_reports_a_new_name_outside_the_table(line, kind):
+    import inspect
+
+    source = inspect.getsource(work_graph)
+    anchor = "    core = _core_names()\n    try:\n        scope"
+    assert source.count(anchor) == 1
+    reached, imports, used = status_path_names(
+        source.replace(anchor, anchor.replace("    try:\n", line + "    try:\n"))
+    )
+    table = {symbol for _, symbol, _ in work_graph.STATUS_IMPORTS}
+    if kind == "imports":
+        assert len(imports) == 1 and imports[0].startswith("open_local_status:")
+    else:
+        assert imports == [] and used - table == {"TestNewName"}
 
 
 # -- wiring faults are typed refusals, never a grant --------------------------------------------------------

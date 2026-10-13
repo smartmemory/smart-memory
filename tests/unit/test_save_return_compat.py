@@ -418,58 +418,138 @@ def test_receipt_without_the_status_badge_reader_is_refused_not_str(
 
 # -- every consumer of the wrapper's ingest, enumerated by AST (review r1 F3) -------------------------------
 def ingest_callers(root):
-    """Every call of ``smartmemory_app.storage.ingest`` under ``root``: bare imported name, module alias or dotted.
+    """Every reference to ``smartmemory_app.storage.ingest`` under ``root``, resolved through the file's imports:
+    the bare imported name, an ``as`` alias, ``import M``/``import M as x``, the package attribute chain and a
+    relative import, then any dotted chain ending in ``.ingest`` whose root resolves to the module.
 
-    Returns ``(file relative to root, enclosing function, how the return value is used)``.
+    Returns ``{(file relative to root, enclosing function, how the return value is used)}``. A reference the scan
+    cannot follow (``getattr``, the module or ``ingest`` itself escaping as a value, a dynamic or star import, a
+    string naming the module) raises AssertionError naming file:line, so the census never passes silently.
     """
-    found = set()
-    for path in sorted(Path(root).rglob("*.py")):
-        if path.name == "storage.py":
-            continue
+    import ast
+    from pathlib import Path
+
+    module, target = "smartmemory_app.storage", "smartmemory_app.storage.ingest"
+    tracked = {"smartmemory_app", module, target}
+    root = Path(root)
+    found, unresolved = set(), []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root)
         tree = ast.parse(path.read_text())
         parents = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
-        names, mods = set(), set()
+        package = [root.name, *rel.parent.parts]
+        aliases = {}
         for n in ast.walk(tree):
-            if isinstance(n, ast.ImportFrom) and n.module == "smartmemory_app.storage":
-                names |= {a.asname or a.name for a in n.names if a.name == "ingest"}
-            if isinstance(n, ast.ImportFrom) and n.module == "smartmemory_app":
-                mods |= {a.asname or a.name for a in n.names if a.name == "storage"}
             if isinstance(n, ast.Import):
-                mods |= {
-                    a.asname
-                    for a in n.names
-                    if a.name == "smartmemory_app.storage" and a.asname
-                }
-        for n in ast.walk(tree):
-            f = n.func if isinstance(n, ast.Call) else None
-            if not (
-                (isinstance(f, ast.Name) and f.id in names)
-                or (
-                    isinstance(f, ast.Attribute)
-                    and f.attr == "ingest"
-                    and (
-                        (isinstance(f.value, ast.Name) and f.value.id in mods)
-                        or ast.unparse(f.value) == "smartmemory_app.storage"
+                for a in n.names:
+                    bound = a.asname or a.name.split(".")[0]
+                    aliases.setdefault(bound, set()).add(a.asname and a.name or bound)
+            elif isinstance(n, ast.ImportFrom):
+                base = n.module or ""
+                if n.level:
+                    base = ".".join(
+                        [
+                            *package[: len(package) - n.level + 1],
+                            *filter(None, [n.module]),
+                        ]
                     )
+                for a in n.names:
+                    if a.name == "*":
+                        if base in tracked:
+                            unresolved.append(
+                                f"{rel}:{n.lineno}: star import from {base}"
+                            )
+                        continue
+                    aliases.setdefault(a.asname or a.name, set()).add(
+                        f"{base}.{a.name}"
+                    )
+
+        def resolve(node):
+            if isinstance(node, ast.Name):
+                return aliases.get(node.id, set())
+            if isinstance(node, ast.Attribute):
+                return {f"{d}.{node.attr}" for d in resolve(node.value)}
+            return set()
+
+        strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)}
+        for n in ast.walk(tree):
+            p = parents.get(n)
+            if isinstance(n, ast.Constant) and (
+                n.value == target or (n.value == "ingest" and module in strings)
+            ):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: string {n.value!r} (dynamic lookup)"
                 )
+            elif (
+                isinstance(n, ast.Subscript)
+                and ast.unparse(n.value).endswith("modules")
+                and isinstance(n.slice, ast.Constant)
+                and n.slice.value in tracked
+            ):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: {ast.unparse(n)} (dynamic lookup)"
+                )
+            elif (
+                isinstance(n, ast.Call)
+                and ast.unparse(n.func) in ("getattr", "builtins.getattr")
+                and len(n.args) > 1
+                and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value == "ingest"
+            ):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: getattr(..., 'ingest') on an unresolved receiver"
+                )
+            elif (
+                isinstance(n, ast.Call)
+                and ast.unparse(n.func).split(".")[-1]
+                in ("import_module", "__import__")
+                and n.args
+                and isinstance(n.args[0], ast.Constant)
+                and n.args[0].value in tracked
+            ):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: dynamic import of {n.args[0].value}"
+                )
+            if not isinstance(n, (ast.Name, ast.Attribute)) or not isinstance(
+                n.ctx, ast.Load
             ):
                 continue
-            fn = n
-            while fn in parents and not isinstance(fn, ast.FunctionDef):
+            if isinstance(p, ast.Attribute) and p.value is n:
+                continue  # the chain continues; judged at its end
+            hits = resolve(n) & tracked
+            if not hits:
+                continue
+            if target not in hits:
+                unresolved.append(
+                    f"{rel}:{n.lineno}: {ast.unparse(n)} ({module} or its package) used as a value"
+                )
+                continue
+            if not (isinstance(p, ast.Call) and p.func is n):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: {ast.unparse(n)} referenced as a value, not called"
+                )
+                continue
+            fn = p
+            while fn in parents and not isinstance(
+                fn, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
                 fn = parents[fn]
-            p = parents[n]
+            use_of = parents.get(p)
             use = (
                 "discarded"
-                if isinstance(p, ast.Expr)
+                if isinstance(use_of, ast.Expr)
                 else "returned"
-                if isinstance(p, ast.Return)
-                else "assigned to " + ast.unparse(p.targets[0])
-                if isinstance(p, ast.Assign)
-                else "argument of " + ast.unparse(p.func)
-                if isinstance(p, ast.Call)
-                else "used in " + type(p).__name__
+                if isinstance(use_of, ast.Return)
+                else "assigned to " + ast.unparse(use_of.targets[0])
+                if isinstance(use_of, ast.Assign)
+                else "argument of " + ast.unparse(use_of.func)
+                if isinstance(use_of, ast.Call)
+                else "used in " + type(use_of).__name__
             )
-            found.add((str(path.relative_to(root)), fn.name, use))
+            found.add((str(rel), getattr(fn, "name", "<module>"), use))
+    assert not unresolved, (
+        "storage.ingest references the census cannot resolve: " + "; ".join(unresolved)
+    )
     return found
 
 
@@ -493,6 +573,126 @@ INGEST_CONSUMER_ROWS = [
 def test_every_wrapper_ingest_consumer_is_assessed():
     root = Path(save_return.__file__).parent
     assert ingest_callers(root) == {row[:3] for row in INGEST_CONSUMER_ROWS}
+
+
+# -- the census helper itself, over every import form (review r2 F3): in-memory source, no repository file written ----
+CALLER = {("test_scan.py", "caller", "returned")}
+CENSUS_ROWS = [
+    # (name, source of one file, package name of the scan root, consumers found or the file:line it must fail on)
+    (
+        "bare imported name",
+        "from smartmemory_app.storage import ingest\n\ndef caller():\n    return ingest('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "imported name alias",
+        "from smartmemory_app.storage import ingest as save\n\ndef caller():\n    return save('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "import module, fully dotted call",
+        "import smartmemory_app.storage\n\ndef caller():\n    return smartmemory_app.storage.ingest('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "import module as alias",
+        "import smartmemory_app.storage as st\n\ndef caller():\n    return st.ingest('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "import package, attribute chain",
+        "import smartmemory_app\n\ndef caller():\n    return smartmemory_app.storage.ingest('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "from package import module",
+        "from smartmemory_app import storage\n\ndef caller():\n    return storage.ingest('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "from package import module as alias",
+        "from smartmemory_app import storage as s\n\ndef caller():\n    return s.ingest('test')\n",
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "relative import of the name",
+        "from .storage import ingest\n\ndef caller():\n    return ingest('test')\n",
+        "smartmemory_app",
+        CALLER,
+    ),
+    (
+        "relative import of the module",
+        "from . import storage\n\ndef caller():\n    x = storage.ingest('test')\n",
+        "smartmemory_app",
+        {("test_scan.py", "caller", "assigned to x")},
+    ),
+    (
+        "getattr with a string on the module",
+        "from smartmemory_app import storage\n\ndef caller():\n    return getattr(storage, 'ingest')('test')\n",
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "getattr with a string on an unknown receiver",
+        "def caller(mod):\n    return getattr(mod, 'ingest')('test')\n",
+        "test_scan_pkg",
+        "test_scan.py:2: ",
+    ),
+    (
+        "module alias made by assignment",
+        "from smartmemory_app import storage\n\ndef caller():\n    st = storage\n    return st.ingest('test')\n",
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "dynamic import of the module",
+        "import importlib\n\ndef caller():\n    return importlib.import_module('smartmemory_app.storage').ingest('test')\n",
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "ingest passed on as a value",
+        "from smartmemory_app import storage\n\ndef caller(run):\n    return run(storage.ingest)\n",
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "star import of the module",
+        "from smartmemory_app.storage import *\n\ndef caller():\n    return ingest('test')\n",
+        "test_scan_pkg",
+        "test_scan.py:1: ",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "source, package, expected",
+    [row[1:] for row in CENSUS_ROWS],
+    ids=[row[0] for row in CENSUS_ROWS],
+)
+def test_census_resolves_every_import_form_or_fails_naming_the_line(
+    monkeypatch, source, package, expected
+):
+    import re
+    from pathlib import Path
+
+    root = Path(package)
+    with monkeypatch.context() as mp:
+        mp.setattr(Path, "rglob", lambda self, pattern: [root / "test_scan.py"])
+        mp.setattr(Path, "read_text", lambda self, *a, **k: source)
+        if isinstance(expected, str):
+            with pytest.raises(AssertionError, match=re.escape(expected)):
+                ingest_callers(root)
+            return
+        found = ingest_callers(root)
+    assert found == expected
 
 
 # Rows below drive the real consumers that read the return (cli ``add``, the daemon ``/ingest`` route) with the

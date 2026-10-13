@@ -1,23 +1,133 @@
 """Thin wrapper adapters for the core-owned local work graph."""
 
+import importlib
 import logging
+import sqlite3
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 log = logging.getLogger(__name__)
 
-STATUS_UNAVAILABLE = (
-    "local status unavailable: installed core has no smartmemory.save.local_status"
+ADAPTER_MODULE = "smartmemory.save.local_status"
+STATUS_UNAVAILABLE = f"local status unavailable: installed core has no {ADAPTER_MODULE}"
+STATUS_REFUSED = "status replay refused, no status returned"
+WORK_GRAPH_REFUSED = "the local work graph was not opened"
+
+#: Every name the local status path takes from another package, as (module, symbol, what is lost without it).
+#: The path is ``open_local_status``, ``project_local_status``, ``local_status_capability``, the read-only fence
+#: and ``get_work_graph``. ``_core_names`` is the one boundary that resolves these rows, module and symbol, before
+#: any use; none of those functions imports anything itself. A guard test re-derives this table from the code.
+STATUS_IMPORTS = (
+    (ADAPTER_MODULE, "LocalStatusAdapter", "the scoped status adapter"),
+    (ADAPTER_MODULE, "InvalidArgument", "the typed refusal for an unreadable caller"),
+    (
+        ADAPTER_MODULE,
+        "LocalStatusRefused",
+        "the typed refusal for an unopenable work graph",
+    ),
+    (ADAPTER_MODULE, "LegacyRunProjection", "the display-only legacy run projection"),
+    (ADAPTER_MODULE, "status_text", "the status line"),
+    (ADAPTER_MODULE, "local_capabilities", "the Lite capability statement"),
+    ("smartmemory.authority", "AuthorityVerdict", "the read-only fence denial"),
+    ("smartmemory.ownership", "OwnershipContext", "the caller's ownership context"),
+    ("smartmemory.pipeline.work_graph.port", "Scope", "the work graph scope"),
+    (
+        "smartmemory.pipeline.work_graph.port",
+        "WorkGraphContractError",
+        "the work graph contract refusal",
+    ),
+    (
+        "smartmemory.pipeline.work_graph.sqlite_store",
+        "SQLiteWorkGraph",
+        "the Lite work graph store",
+    ),
+    (
+        "smartmemory.pipeline.work_graph.v2",
+        "bind_sqlite_v2",
+        "the v2 lifecycle binding",
+    ),
+    ("smartmemory.save.read_port", "InvalidRow", "the read port row refusal"),
+    ("smartmemory.save.read_port", "ScopeKeys", "the caller scope keys"),
+    ("smartmemory.visibility", "ReadVisibilityGate", "the read visibility gate"),
+    ("smartmemory_app.storage", "_resolve_data_dir", "the Lite data directory"),
 )
+
+#: The modules of that table other than the adapter itself, derived from it (the round-1 name, still read by callers).
+OPEN_DEPENDENCIES = tuple(
+    sorted({module for module, _, _ in STATUS_IMPORTS} - {ADAPTER_MODULE})
+)
+
+#: The rows ``get_work_graph`` needs. Its legacy callers (CLI, daemon, viewer) still get an ImportError.
+WORK_GRAPH_IMPORTS = ("SQLiteWorkGraph", "_resolve_data_dir")
+
+
+class LocalStatusUnavailable(RuntimeError):
+    """The installed core cannot answer local save status. Nothing was inferred."""
+
+
+class WorkGraphUnavailable(ImportError):
+    """The installed core cannot open the Lite work graph. An ImportError, as ``get_work_graph`` always raised."""
+
+
+def _core_names(
+    symbols=None, *, refused=STATUS_REFUSED, error=LocalStatusUnavailable
+) -> SimpleNamespace:
+    """Resolve ``STATUS_IMPORTS`` (or the rows naming ``symbols``): a module that does not import, an ImportError
+    raised while importing it, or a module without the symbol is ``error`` with exactly one WARNING."""
+    names = {}
+    for module_name, symbol, lost in STATUS_IMPORTS:
+        if symbols is not None and symbol not in symbols:
+            continue
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as exc:
+            if exc.name == module_name:  # the module itself is absent
+                if module_name == ADAPTER_MODULE:
+                    log.warning("%s; %s", STATUS_UNAVAILABLE, refused)
+                    raise error(STATUS_UNAVAILABLE) from exc
+                log.warning(
+                    "Local status dependency %s is not importable; %s",
+                    module_name,
+                    refused,
+                )
+                raise error(
+                    f"local status unavailable: installed core has no {module_name}"
+                ) from exc
+            # raised inside the module's own import (one of its dependencies or names is missing): name that cause
+            cause = f"{type(exc).__name__}: {exc}"
+            log.warning(
+                "Local status dependency %s is not importable (%s); %s",
+                module_name,
+                cause,
+                refused,
+            )
+            raise error(
+                f"local status unavailable: {module_name} is not importable ({cause})"
+            ) from exc
+        try:
+            names[symbol] = getattr(module, symbol)
+        except AttributeError as exc:
+            log.warning(
+                "Local status dependency %s has no %s (%s); %s",
+                module_name,
+                symbol,
+                lost,
+                refused,
+            )
+            raise error(
+                f"local status unavailable: installed core has no {module_name}.{symbol}"
+            ) from exc
+    return SimpleNamespace(**names)
 
 
 def get_work_graph():
-    from smartmemory.pipeline.work_graph.sqlite_store import SQLiteWorkGraph
-    from smartmemory_app.storage import _resolve_data_dir
-
-    path = _resolve_data_dir()
+    core = _core_names(
+        WORK_GRAPH_IMPORTS, refused=WORK_GRAPH_REFUSED, error=WorkGraphUnavailable
+    )
+    path = core._resolve_data_dir()
     path.mkdir(parents=True, exist_ok=True)
-    return SQLiteWorkGraph(str(path / "memory.db"))
+    return core.SQLiteWorkGraph(str(path / "memory.db"))
 
 
 def get_work_status() -> dict:
@@ -75,49 +185,6 @@ def show_reextract_offer(emit) -> None:
 # -- Lite save status: live / retained projection (N-02.activate.outer-readers; G53, G137, G148, G44) ----------
 
 
-class LocalStatusUnavailable(RuntimeError):
-    """The installed core cannot answer local save status. Nothing was inferred."""
-
-
-def _local_status_module():
-    try:
-        from smartmemory.save import local_status
-    except ImportError as exc:
-        log.warning("%s; status replay refused, no status returned", STATUS_UNAVAILABLE)
-        raise LocalStatusUnavailable(STATUS_UNAVAILABLE) from exc
-    return local_status
-
-
-#: Core modules ``open_local_status`` imports after the adapter module. One boundary names them all (the same
-#: typed refusal a core without the adapter gets), so no ``ModuleNotFoundError`` escapes untyped. A table test
-#: removes each in turn.
-OPEN_DEPENDENCIES = (
-    "smartmemory.authority",
-    "smartmemory.ownership",
-    "smartmemory.pipeline.work_graph.port",
-    "smartmemory.pipeline.work_graph.sqlite_store",
-    "smartmemory.pipeline.work_graph.v2",
-    "smartmemory.save.read_port",
-    "smartmemory.visibility",
-)
-
-
-def _require_open_dependencies() -> None:
-    import importlib
-
-    for name in OPEN_DEPENDENCIES:
-        try:
-            importlib.import_module(name)
-        except ImportError as exc:
-            log.warning(
-                "Local status dependency %s is not importable; status replay refused, no status returned",
-                name,
-            )
-            raise LocalStatusUnavailable(
-                f"local status unavailable: installed core has no {name}"
-            ) from exc
-
-
 def local_status_capability() -> dict[str, Any]:
     """Explicit Lite status capability (G137): what this placement supports and what is hosted-only.
 
@@ -125,18 +192,17 @@ def local_status_capability() -> dict[str, Any]:
     never mistakes a missing reader for "no runs".
     """
     try:
-        module = _local_status_module()
-    except LocalStatusUnavailable:
-        return {"available": False, "reason": STATUS_UNAVAILABLE}
-    return {"available": True, **module.local_capabilities()}
+        core = _core_names()
+    except LocalStatusUnavailable as exc:
+        return {"available": False, "reason": str(exc)}
+    return {"available": True, **core.local_capabilities()}
 
 
 def _read_only_fence(request):
     """Status reads never take the authority fence (core docstring); a call here is a wiring bug, so it denies."""
-    from smartmemory.authority import AuthorityVerdict
-
+    denied = _core_names(("AuthorityVerdict",)).AuthorityVerdict.unavailable
     log.warning("Local status fence called on a read-only status adapter; denied")
-    return AuthorityVerdict.unavailable
+    return denied
 
 
 def open_local_status(
@@ -154,27 +220,18 @@ def open_local_status(
     every source), ``pending`` is the submitter's own admission-row port, and ``fetch_subject(kind, id)`` is the
     authoritative row read the visibility gate hydrates through. Nothing here defaults to a grant.
     """
-    import sqlite3
-
-    module = _local_status_module()
-    _require_open_dependencies()
-    from smartmemory.ownership import OwnershipContext
-    from smartmemory.pipeline.work_graph.port import Scope, WorkGraphContractError
-    from smartmemory.pipeline.work_graph.v2 import bind_sqlite_v2
-    from smartmemory.save.read_port import InvalidRow, ScopeKeys
-    from smartmemory.visibility import ReadVisibilityGate
-
+    core = _core_names()
     try:
-        scope = Scope(tenant_id=tenant_id, workspace_id=workspace_id)
-        caller = ScopeKeys(tenant_id, workspace_id, user_id)
-    except (WorkGraphContractError, InvalidRow, TypeError, ValueError) as exc:
+        scope = core.Scope(tenant_id=tenant_id, workspace_id=workspace_id)
+        caller = core.ScopeKeys(tenant_id, workspace_id, user_id)
+    except (core.WorkGraphContractError, core.InvalidRow, TypeError, ValueError) as exc:
         log.warning(
             "Local status refused: caller identity is not readable (%s); nothing returned",
             type(exc).__name__,
         )
-        raise module.InvalidArgument("caller identity is not readable") from exc
-    gate = ReadVisibilityGate(
-        OwnershipContext(
+        raise core.InvalidArgument("caller identity is not readable") from exc
+    gate = core.ReadVisibilityGate(
+        core.OwnershipContext(
             workspace_id=workspace_id, tenant_id=tenant_id, user_id=user_id
         ),
         {},
@@ -182,35 +239,35 @@ def open_local_status(
     )
     try:
         store = get_work_graph()
-    except (OSError, sqlite3.Error, WorkGraphContractError) as exc:
+    except (OSError, sqlite3.Error, core.WorkGraphContractError) as exc:
         log.warning(
             "Local status refused: the work graph could not be opened (%s); nothing returned",
             type(exc).__name__,
         )
-        raise module.LocalStatusRefused("the work graph could not be opened") from exc
+        raise core.LocalStatusRefused("the work graph could not be opened") from exc
     try:
-        lifecycle = bind_sqlite_v2(store, scope=scope, fence=_read_only_fence)
+        lifecycle = core.bind_sqlite_v2(store, scope=scope, fence=_read_only_fence)
     # core's bind logs its own refusal (one WARNING), so there is no second line here
-    except WorkGraphContractError as exc:
-        raise module.LocalStatusRefused("the work graph could not be opened") from exc
+    except core.WorkGraphContractError as exc:
+        raise core.LocalStatusRefused("the work graph could not be opened") from exc
     except (OSError, sqlite3.Error) as exc:
         log.warning(
             "Local status refused: the work graph could not be opened (%s); nothing returned",
             type(exc).__name__,
         )
-        raise module.LocalStatusRefused("the work graph could not be opened") from exc
-    return module.LocalStatusAdapter(
+        raise core.LocalStatusRefused("the work graph could not be opened") from exc
+    return core.LocalStatusAdapter(
         lifecycle, store, pending, gate, fetch_subject, caller=caller
     )
 
 
 def project_local_status(result) -> dict[str, Any]:
     """The JSON-able projection of one status read: a receipt (live or retained) or a display-only legacy row."""
-    module = _local_status_module()
-    if isinstance(result, module.LegacyRunProjection):
+    core = _core_names()
+    if isinstance(result, core.LegacyRunProjection):
         return {
             "arm": "legacy",
-            "status_text": module.status_text(result),
+            "status_text": core.status_text(result),
             "legacy": {
                 "run_id": result.run_id,
                 "item_id": result.item_id,
@@ -223,7 +280,7 @@ def project_local_status(result) -> dict[str, Any]:
         }
     return {
         "arm": "receipt",
-        "status_text": module.status_text(result),
+        "status_text": core.status_text(result),
         "receipt": result.to_dict(),
     }
 
