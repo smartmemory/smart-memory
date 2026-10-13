@@ -417,21 +417,34 @@ def test_receipt_without_the_status_badge_reader_is_refused_not_str(
 
 
 # -- every consumer of the wrapper's ingest, enumerated by AST (review r1 F3) -------------------------------
-def ingest_callers(root):
+def ingest_callers(root, allowed_dynamic=()):
     """Every reference to ``smartmemory_app.storage.ingest`` under ``root``, resolved through the file's imports:
-    the bare imported name, an ``as`` alias, ``import M``/``import M as x``, the package attribute chain and a
-    relative import, then any dotted chain ending in ``.ingest`` whose root resolves to the module.
+    the bare imported name, an ``as`` alias, ``import M``/``import M as x``, the package attribute chain, a
+    relative import, a dynamic import with a constant module name (``importlib.import_module``/``__import__``
+    under any alias, as a call receiver), then any dotted chain ending in ``.ingest`` whose root resolves to the
+    module.
 
-    Returns ``{(file relative to root, enclosing function, how the return value is used)}``. A reference the scan
-    cannot follow (``getattr``, the module or ``ingest`` itself escaping as a value, a dynamic or star import, a
-    string naming the module) raises AssertionError naming file:line, so the census never passes silently.
+    Returns ``{(file relative to root, enclosing function, how the return value is used)}``. The scan fails closed:
+    a reference it cannot follow (``getattr``, the module or ``ingest`` itself escaping as a value, a star import,
+    a string naming the module, a dynamic import whose name is not a constant, the dynamic-import functions or
+    ``importlib``/``sys``/``builtins`` escaping as values, ``sys.modules`` used other than by a constant key)
+    raises AssertionError naming file:line. ``allowed_dynamic`` is a set of ``(file, function)`` pairs (``<module>``
+    for module level) whose module-name strings and non-constant dynamic imports are known not to load the wrapper.
     """
     import ast
     from pathlib import Path
 
     module, target = "smartmemory_app.storage", "smartmemory_app.storage.ingest"
     tracked = {"smartmemory_app", module, target}
+    loaders = {
+        "importlib.import_module",
+        "importlib.__import__",
+        "builtins.__import__",
+        "__import__",
+    }
+    surface = {"importlib", "sys", "builtins"}
     root = Path(root)
+    allowed = set(allowed_dynamic)
     found, unresolved = set(), []
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root)
@@ -455,7 +468,7 @@ def ingest_callers(root):
                     )
                 for a in n.names:
                     if a.name == "*":
-                        if base in tracked:
+                        if base in tracked or base in surface:
                             unresolved.append(
                                 f"{rel}:{n.lineno}: star import from {base}"
                             )
@@ -464,18 +477,54 @@ def ingest_callers(root):
                         f"{base}.{a.name}"
                     )
 
+        def loaded(call):
+            """What a dynamic import with a constant, absolute module name returns (empty when unreadable)."""
+            arg = call.args[0] if call.args else None
+            arg = arg or next((k.value for k in call.keywords if k.arg == "name"), None)
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                return set()
+            if not arg.value or arg.value.startswith("."):
+                return set()
+            if resolve(call.func) & {"importlib.import_module"}:
+                return {arg.value}
+            return {
+                arg.value,
+                arg.value.split(".")[0],
+            }  # __import__ without fromlist returns the top package
+
         def resolve(node):
             if isinstance(node, ast.Name):
+                if node.id == "__import__" and node.id not in aliases:
+                    return {"__import__"}
                 return aliases.get(node.id, set())
             if isinstance(node, ast.Attribute):
                 return {f"{d}.{node.attr}" for d in resolve(node.value)}
+            if isinstance(node, ast.Call) and resolve(node.func) & loaders:
+                return loaded(node)
             return set()
 
-        strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)}
+        def enclosing(node):
+            while node in parents and not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                node = parents[node]
+            return node
+
         for n in ast.walk(tree):
             p = parents.get(n)
-            if isinstance(n, ast.Constant) and (
-                n.value == target or (n.value == "ingest" and module in strings)
+            if (
+                isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and (
+                    n.value == module
+                    or n.value.startswith((module + ".", module + ":"))
+                )
+                and (str(rel), getattr(enclosing(n), "name", "<module>")) not in allowed
+                and not (  # the name of a dynamic import that resolves is enumerated, not a blind reference
+                    isinstance(p, ast.Call)
+                    and resolve(p.func) & loaders
+                    and p.args[:1] == [n]
+                )
             ):
                 unresolved.append(
                     f"{rel}:{n.lineno}: string {n.value!r} (dynamic lookup)"
@@ -499,24 +548,61 @@ def ingest_callers(root):
                 unresolved.append(
                     f"{rel}:{n.lineno}: getattr(..., 'ingest') on an unresolved receiver"
                 )
-            elif (
-                isinstance(n, ast.Call)
-                and ast.unparse(n.func).split(".")[-1]
-                in ("import_module", "__import__")
-                and n.args
-                and isinstance(n.args[0], ast.Constant)
-                and n.args[0].value in tracked
+            elif isinstance(n, ast.Call) and (
+                resolve(n.func) & loaders
+                or ast.unparse(n.func).split(".")[-1] in ("import_module", "__import__")
             ):
-                unresolved.append(
-                    f"{rel}:{n.lineno}: dynamic import of {n.args[0].value}"
-                )
+                got = loaded(n)
+                first = n.args[0] if n.args else None
+                if not resolve(n.func) & loaders:
+                    if (
+                        isinstance(first, ast.Constant)
+                        and isinstance(first.value, str)
+                        and first.value in tracked
+                    ):
+                        unresolved.append(
+                            f"{rel}:{n.lineno}: dynamic import of {first.value} on an unresolved receiver"
+                        )
+                elif not got:
+                    if (
+                        str(rel),
+                        getattr(enclosing(n), "name", "<module>"),
+                    ) not in allowed:
+                        unresolved.append(
+                            f"{rel}:{n.lineno}: {ast.unparse(n)} (dynamic import of a name the scan cannot read)"
+                        )
+                elif got & tracked and not (
+                    isinstance(p, ast.Attribute) and p.value is n
+                ):
+                    unresolved.append(
+                        f"{rel}:{n.lineno}: {ast.unparse(n)} (dynamic import of {module} or its package used as a value)"
+                    )
             if not isinstance(n, (ast.Name, ast.Attribute)) or not isinstance(
                 n.ctx, ast.Load
             ):
                 continue
+            refs = resolve(n)
+            if "sys.modules" in refs:
+                key = p.slice if isinstance(p, ast.Subscript) and p.value is n else None
+                if not (
+                    isinstance(key, ast.Constant)
+                    and isinstance(key.value, str)
+                    and key.value.split(".")[0] != "smartmemory_app"
+                ):
+                    unresolved.append(
+                        f"{rel}:{n.lineno}: {ast.unparse(n)} (sys.modules used other than by a constant key outside the package)"
+                    )
+            if refs & surface and not (isinstance(p, ast.Attribute) and p.value is n):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: {ast.unparse(n)} (import machinery escaping as a value)"
+                )
+            if refs & loaders and not (isinstance(p, ast.Call) and p.func is n):
+                unresolved.append(
+                    f"{rel}:{n.lineno}: {ast.unparse(n)} (dynamic import function referenced as a value, not called)"
+                )
             if isinstance(p, ast.Attribute) and p.value is n:
                 continue  # the chain continues; judged at its end
-            hits = resolve(n) & tracked
+            hits = refs & tracked
             if not hits:
                 continue
             if target not in hits:
@@ -529,11 +615,7 @@ def ingest_callers(root):
                     f"{rel}:{n.lineno}: {ast.unparse(n)} referenced as a value, not called"
                 )
                 continue
-            fn = p
-            while fn in parents and not isinstance(
-                fn, (ast.FunctionDef, ast.AsyncFunctionDef)
-            ):
-                fn = parents[fn]
+            fn = enclosing(p)
             use_of = parents.get(p)
             use = (
                 "discarded"
@@ -570,9 +652,23 @@ INGEST_CONSUMER_ROWS = [
 ]
 
 
+#: The only dynamic loading in the wrapper that is not a ``storage.ingest`` consumer: ``work_graph.py`` names core
+#: modules (and one wrapper helper, ``_resolve_data_dir``) in the ``STATUS_IMPORTS`` table and imports them by name.
+#: The test below proves the table never names ``ingest``, which is what makes the allowance sound.
+DYNAMIC_IMPORT_ALLOWED = {
+    ("work_graph.py", "<module>"),
+    ("work_graph.py", "_core_names"),
+}
+
+
 def test_every_wrapper_ingest_consumer_is_assessed():
+    from smartmemory_app.work_graph import STATUS_IMPORTS
+
+    assert not [row for row in STATUS_IMPORTS if row[1] == "ingest"]
     root = Path(save_return.__file__).parent
-    assert ingest_callers(root) == {row[:3] for row in INGEST_CONSUMER_ROWS}
+    assert ingest_callers(root, DYNAMIC_IMPORT_ALLOWED) == {
+        row[:3] for row in INGEST_CONSUMER_ROWS
+    }
 
 
 # -- the census helper itself, over every import form (review r2 F3): in-memory source, no repository file written ----
@@ -652,10 +748,10 @@ CENSUS_ROWS = [
         "test_scan.py:4: ",
     ),
     (
-        "dynamic import of the module",
+        "dynamic import of the module, constant name (resolved since review r3 F3)",
         "import importlib\n\ndef caller():\n    return importlib.import_module('smartmemory_app.storage').ingest('test')\n",
         "test_scan_pkg",
-        "test_scan.py:4: ",
+        CALLER,
     ),
     (
         "ingest passed on as a value",
@@ -668,6 +764,96 @@ CENSUS_ROWS = [
         "from smartmemory_app.storage import *\n\ndef caller():\n    return ingest('test')\n",
         "test_scan_pkg",
         "test_scan.py:1: ",
+    ),
+    (
+        "aliased import_module, call receiver (review r3 F3)",
+        'from importlib import import_module as load\n\ndef caller():\n    return load("smartmemory_app.storage").ingest("test")\n',
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "aliased __import__ through builtins, fromlist",
+        'from builtins import __import__ as imp\n\ndef caller():\n    return imp("smartmemory_app.storage", fromlist=["ingest"]).ingest("test")\n',
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "import importlib as il, il.import_module",
+        'import importlib as il\n\ndef caller():\n    return il.import_module("smartmemory_app.storage").ingest("test")\n',
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "call receiver chain through the package",
+        'import importlib\n\ndef caller():\n    return importlib.import_module("smartmemory_app").storage.ingest("test")\n',
+        "test_scan_pkg",
+        CALLER,
+    ),
+    (
+        "sys.modules aliased by from-import",
+        'from sys import modules as registry\n\ndef caller():\n    return registry["smartmemory_app.storage"].ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "sys.modules held in a variable through import sys as s",
+        'import sys as s\n\ndef caller():\n    table = s.modules\n    return table["smartmemory_app.storage"].ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "sys.modules read without a constant key",
+        'import sys\n\ndef caller():\n    return sys.modules.get("smartmemory_app.storage").ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "module name as a string only",
+        'NAME = "smartmemory_app.storage"\n',
+        "test_scan_pkg",
+        "test_scan.py:1: ",
+    ),
+    (
+        "dynamic import with a name read at run time",
+        'import importlib\n\ndef caller(name):\n    return importlib.import_module(name).ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "dynamic import with a relative name",
+        'import importlib\n\ndef caller():\n    return importlib.import_module(".storage", "smartmemory_app").ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "aliased dynamic import result held in a variable",
+        'from importlib import import_module as load\n\ndef caller():\n    m = load("smartmemory_app.storage")\n    return m.ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "importlib itself held in a variable",
+        'import importlib\n\ndef caller():\n    loader = importlib\n    return loader.import_module("smartmemory_app.storage").ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "dynamic import function held as a value",
+        'from importlib import import_module\n\ndef caller():\n    load = import_module\n    return load("smartmemory_app.storage").ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
+    ),
+    (
+        "star import of importlib",
+        'from importlib import *\n\ndef caller():\n    return import_module("smartmemory_app.storage").ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:1: ",
+    ),
+    (
+        "getattr on sys passes the registry on",
+        'import sys\n\ndef caller():\n    return getattr(sys, "modules")["smartmemory_app.storage"].ingest("test")\n',
+        "test_scan_pkg",
+        "test_scan.py:4: ",
     ),
 ]
 
@@ -693,6 +879,38 @@ def test_census_resolves_every_import_form_or_fails_naming_the_line(
             return
         found = ingest_callers(root)
     assert found == expected
+
+
+def test_census_allows_a_named_dynamic_import_and_no_other(monkeypatch):
+    import re
+    from pathlib import Path
+
+    source = "import importlib\n\ndef loader(name):\n    return importlib.import_module(name)\n"
+    root = Path("test_scan_pkg")
+    with monkeypatch.context() as mp:
+        mp.setattr(Path, "rglob", lambda self, pattern: [root / "test_scan.py"])
+        mp.setattr(Path, "read_text", lambda self, *a, **k: source)
+        assert ingest_callers(root, {("test_scan.py", "loader")}) == set()
+        for allowed in ((), {("test_scan.py", "other")}, {("other.py", "loader")}):
+            with pytest.raises(AssertionError, match=re.escape("test_scan.py:4: ")):
+                ingest_callers(root, allowed)
+
+
+#: sha256 of ``ingest_callers`` source. The wrapper and the MCP package each hold a copy (the repositories cannot
+#: import each other), and both tests pin this one hash, so the copies cannot drift apart unnoticed.
+INGEST_CALLERS_SHA256 = (
+    "5b79b81b0da964c53a498925b7f3ae396d00c8d1477ca687628e1a0d24d8888e"
+)
+
+
+def test_census_helper_copy_matches_its_twin():
+    import hashlib
+    import inspect
+
+    digest = hashlib.sha256(inspect.getsource(ingest_callers).encode()).hexdigest()
+    assert digest == INGEST_CALLERS_SHA256, (
+        "ingest_callers changed: update the copy in the other repository and this hash together"
+    )
 
 
 # Rows below drive the real consumers that read the return (cli ``add``, the daemon ``/ingest`` route) with the
