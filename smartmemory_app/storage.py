@@ -330,9 +330,13 @@ def _normalize_ingest_result(result) -> str:
     """
     if isinstance(result, str):
         return result
-    if isinstance(result, dict):
+    if isinstance(result, dict) and "schema_version" not in result:
         return result.get("item_id") or str(result)
-    return str(result)
+    # Receipt arm (N-02.activate.outer-readers): a save receipt reads as its subject id, never str(receipt).
+    from smartmemory_app.save_return import resolve_save_return
+
+    resolved = resolve_save_return(result, op="ingest").value
+    return resolved if isinstance(resolved, str) else str(resolved)
 
 
 def _split_recall_counts(top_k: int) -> tuple[int, int]:
@@ -437,6 +441,10 @@ def ingest(
     lock = _get_lock_file(data_path)
     with lock:
         result = mem.ingest(content, context=ctx, sync=sync)
+        if not sync:  # receipt arm reads as the legacy dict; legacy returns pass through unchanged
+            from smartmemory_app.save_return import ingest_dict
+
+            result = ingest_dict(result, op="ingest")
         if not sync and isinstance(result, dict):
             # Initialization has applied the effective provider/model settings.
             # Use core's placement resolver, not the foreground extraction status:
