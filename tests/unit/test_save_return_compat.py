@@ -395,3 +395,155 @@ def test_only_the_ingest_seam_imports_the_receipt_arm():
             ):
                 importers.add(path.name)
     assert importers == {"storage.py"}
+
+
+def test_receipt_without_the_status_badge_reader_is_refused_not_str(
+    monkeypatch, caplog
+):
+    """A receipt exists, so core has receipts: a missing badge reader refuses (typed, one WARNING), it never raises raw."""
+    import sys
+
+    import smartmemory.save
+
+    skipped = receipt(state="completed", outcome="skipped", terminal=True)
+    monkeypatch.delattr(smartmemory.save, "status", raising=False)
+    monkeypatch.setitem(sys.modules, "smartmemory.save.status", None)
+    with pytest.raises(SaveReturnRefused):
+        resolve_save_return(skipped, op="add")
+    one_warning(
+        caplog,
+        "Save return add refused: the installed core cannot read save status badges; no id returned",
+    )
+
+
+# -- every consumer of the wrapper's ingest, enumerated by AST (review r1 F3) -------------------------------
+def ingest_callers(root):
+    """Every call of ``smartmemory_app.storage.ingest`` under ``root``: bare imported name, module alias or dotted.
+
+    Returns ``(file relative to root, enclosing function, how the return value is used)``.
+    """
+    found = set()
+    for path in sorted(Path(root).rglob("*.py")):
+        if path.name == "storage.py":
+            continue
+        tree = ast.parse(path.read_text())
+        parents = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        names, mods = set(), set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module == "smartmemory_app.storage":
+                names |= {a.asname or a.name for a in n.names if a.name == "ingest"}
+            if isinstance(n, ast.ImportFrom) and n.module == "smartmemory_app":
+                mods |= {a.asname or a.name for a in n.names if a.name == "storage"}
+            if isinstance(n, ast.Import):
+                mods |= {
+                    a.asname
+                    for a in n.names
+                    if a.name == "smartmemory_app.storage" and a.asname
+                }
+        for n in ast.walk(tree):
+            f = n.func if isinstance(n, ast.Call) else None
+            if not (
+                (isinstance(f, ast.Name) and f.id in names)
+                or (
+                    isinstance(f, ast.Attribute)
+                    and f.attr == "ingest"
+                    and (
+                        (isinstance(f.value, ast.Name) and f.value.id in mods)
+                        or ast.unparse(f.value) == "smartmemory_app.storage"
+                    )
+                )
+            ):
+                continue
+            fn = n
+            while fn in parents and not isinstance(fn, ast.FunctionDef):
+                fn = parents[fn]
+            p = parents[n]
+            use = (
+                "discarded"
+                if isinstance(p, ast.Expr)
+                else "returned"
+                if isinstance(p, ast.Return)
+                else "assigned to " + ast.unparse(p.targets[0])
+                if isinstance(p, ast.Assign)
+                else "argument of " + ast.unparse(p.func)
+                if isinstance(p, ast.Call)
+                else "used in " + type(p).__name__
+            )
+            found.add((str(path.relative_to(root)), fn.name, use))
+    return found
+
+
+#: One row per consumer. A new caller of ``storage.ingest`` fails this table until its reading of the return is
+#: stated: it either discards the value, or reads it as an id string, or reads ``["item_id"]`` of the dict.
+INGEST_CONSUMER_ROWS = [
+    ("cli.py", "add_cmd", "argument of click.echo", "reads an id string (sync)"),
+    ("cli.py", "add_cmd", "argument of ids.append", "reads an id string (sync)"),
+    ("lifecycle.py", "observe", "discarded", "discards the value"),
+    ("lifecycle.py", "distill", "discarded", "discards the value"),
+    ("lifecycle.py", "learn", "discarded", "discards the value"),
+    (
+        "local_api.py",
+        "ingest_endpoint",
+        "assigned to result",
+        "reads item_id of the dict, or an id string (async)",
+    ),
+]
+
+
+def test_every_wrapper_ingest_consumer_is_assessed():
+    root = Path(save_return.__file__).parent
+    assert ingest_callers(root) == {row[:3] for row in INGEST_CONSUMER_ROWS}
+
+
+# Rows below drive the real consumers that read the return (cli ``add``, the daemon ``/ingest`` route) with the
+# scripted core return on both arms. The lifecycle sites discard the value, so the arm cannot change what they read.
+CONSUMER_ARMS = [
+    # (name, core return, expected id read by the consumer)
+    ("legacy id", "test-id", "test-id"),
+    ("legacy queued dict", {"item_id": "test-id", "queued": True}, "test-id"),
+    ("receipt", receipt(), "test_item"),
+    ("receipt wire", receipt().to_dict(), "test_item"),
+    (
+        "terminal receipt",
+        receipt(state="completed", outcome="skipped", terminal=True),
+        "test_item",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "result, expected",
+    [row[1:] for row in CONSUMER_ARMS],
+    ids=[row[0] for row in CONSUMER_ARMS],
+)
+def test_daemon_ingest_route_reads_the_id_on_both_arms(lite_ingest, result, expected):
+    from smartmemory_app.local_api import IngestRequest, ingest_endpoint
+
+    lite_ingest(result)
+    assert ingest_endpoint(IngestRequest(content="test content")) == {
+        "item_id": expected
+    }
+
+
+@pytest.mark.parametrize(
+    "result, expected",
+    [row[1:] for row in CONSUMER_ARMS],
+    ids=[row[0] for row in CONSUMER_ARMS],
+)
+def test_cli_add_prints_the_id_on_both_arms(lite_ingest, result, expected):
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from smartmemory_app.cli import cli
+
+    lite_ingest(result)
+    with (
+        patch("smartmemory_app.cli._daemon_request", return_value=None),
+        patch("smartmemory_app.cli._prepare_direct_access"),
+    ):
+        single = CliRunner().invoke(cli, ["add", "test content"])
+        piped = CliRunner().invoke(cli, ["add", "-"], input="test one\ntest two\n")
+    assert single.exit_code == 0 and single.output.strip() == expected
+    assert piped.exit_code == 0
+    assert piped.output.split() == ["Added", "2", "memories", expected, expected]

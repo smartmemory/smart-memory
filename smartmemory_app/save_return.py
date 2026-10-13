@@ -67,7 +67,7 @@ def _refuse(op: str, reason: str, cause: BaseException | None = None) -> NoRetur
     raise SaveReturnRefused(reason) from cause
 
 
-def _summary(receipt: Any, wire: dict[str, Any], subject_id: str) -> str:
+def _summary(receipt: Any, wire: dict[str, Any], subject_id: str, op: str) -> str:
     """G98: a save that skipped extraction reads "Saved, extraction skipped" through core's own badge."""
     subject = wire.get("subject") or {}
     if (
@@ -76,13 +76,16 @@ def _summary(receipt: Any, wire: dict[str, Any], subject_id: str) -> str:
         and wire.get("processing_stage") == "stored"
         and wire.get("execution_state") == "completed"
     ):
-        from smartmemory.save.status import (
-            ExecutionState,
-            ProcessingOutcome,
-            ProcessingStage,
-            ProcessingStatus,
-            status_badge,
-        )
+        try:
+            from smartmemory.save.status import (
+                ExecutionState,
+                ProcessingOutcome,
+                ProcessingStage,
+                ProcessingStatus,
+                status_badge,
+            )
+        except ImportError as exc:  # a receipt exists, so core has receipts: a missing badge reader is a refusal
+            _refuse(op, "the installed core cannot read save status badges", exc)
 
         badge = status_badge(
             ProcessingStatus(
@@ -142,7 +145,7 @@ def resolve_save_return(value: Any, *, op: str) -> SaveReturn:
     subject_id = value.item_id or value.document_id or value.generation_id
     if not subject_id:
         _refuse(op, "receipt names no stored subject id")
-    return SaveReturn(subject_id, wire, _summary(value, wire, subject_id))
+    return SaveReturn(subject_id, wire, _summary(value, wire, subject_id, op))
 
 
 def save_value(value: Any, *, op: str) -> Any:

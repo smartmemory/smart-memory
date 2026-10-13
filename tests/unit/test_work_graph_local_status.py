@@ -233,9 +233,9 @@ def test_legacy_queue_run_projects_as_display_only(lite, caplog):
     assert out["arm"] == "legacy" and out["legacy"]["status"] == "pending"
     assert out["legacy"]["provenance"] == "legacy_queue" and "receipt" not in out
     assert out["legacy"]["status_url"] == "local-status:test_ls_legacy"
-    assert [r.levelno for r in caplog.records] == [
-        logging.WARNING
-    ]  # core's one downgrade warning
+    one_warning(
+        caplog, local_status.LEGACY_DOWNGRADE_LOG
+    )  # core's one downgrade warning, naming the display-only loss
 
 
 # -- G44: actor / workspace gating, every refusal the same as an absent id ----------------------------------
@@ -342,6 +342,60 @@ def test_core_without_the_adapter_is_unavailable_not_empty(lite, monkeypatch, ca
     one_warning(caplog, expected)
 
 
+# -- C1/C8: every core module the adapter opens with is one typed, logged boundary ---------------------------------
+# One row per dependency in ``work_graph.OPEN_DEPENDENCIES`` (the table must cover the whole tuple). Each is removed
+# with the adapter module still present, the case review r1 F1 found escaping as a raw ModuleNotFoundError.
+def test_dependency_table_covers_every_open_dependency():
+    assert sorted(DEPENDENCY_ROWS) == sorted(work_graph.OPEN_DEPENDENCIES)
+
+
+DEPENDENCY_ROWS = [
+    "smartmemory.authority",
+    "smartmemory.ownership",
+    "smartmemory.pipeline.work_graph.port",
+    "smartmemory.pipeline.work_graph.sqlite_store",
+    "smartmemory.pipeline.work_graph.v2",
+    "smartmemory.save.read_port",
+    "smartmemory.visibility",
+]
+
+
+@pytest.mark.parametrize("missing", DEPENDENCY_ROWS)
+def test_missing_open_dependency_is_typed_unavailable_with_one_warning(
+    lite, monkeypatch, caplog, missing
+):
+    _, _, _, _, items = lite
+    monkeypatch.setitem(sys.modules, missing, None)  # ImportError on import
+    with pytest.raises(work_graph.LocalStatusUnavailable) as raised:
+        read(items)
+    assert (
+        str(raised.value)
+        == f"local status unavailable: installed core has no {missing}"
+    )
+    one_warning(
+        caplog,
+        f"Local status dependency {missing} is not importable; status replay refused, no status returned",
+    )
+
+
+def test_every_open_import_follows_the_one_dependency_boundary():
+    """The imports ``open_local_status`` makes after ``_require_open_dependencies`` are all in the tuple."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(work_graph))
+    wrapper = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    imported = {
+        n.module
+        for name in ("open_local_status", "_read_only_fence")
+        for n in ast.walk(wrapper[name])
+        if isinstance(n, ast.ImportFrom) and n.module.startswith("smartmemory.")
+    } | {
+        "smartmemory.pipeline.work_graph.sqlite_store"
+    }  # via get_work_graph(), called by open_local_status
+    assert imported <= set(work_graph.OPEN_DEPENDENCIES)
+
+
 # -- wiring faults are typed refusals, never a grant --------------------------------------------------------
 def test_status_open_has_no_default_grant(lite):
     _, _, _, _, items = lite
@@ -370,8 +424,10 @@ def test_non_boolean_workspace_authority_is_refused_before_any_read(lite, caplog
 
     with pytest.raises(TYPED_REFUSALS):
         read(items, workspace_hidden=None)
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
-    assert caplog.records[0].getMessage().startswith("Read visibility unavailable")
+    one_warning(
+        caplog,
+        "Read visibility unavailable: workspace_hidden authority must be an explicit boolean",
+    )
 
 
 def test_read_only_fence_denies_and_logs(caplog):
@@ -389,7 +445,10 @@ def test_unreadable_run_id_is_typed(lite, caplog):
 
     with pytest.raises(InvalidRunId):
         read(items, "")
-    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    one_warning(
+        caplog,
+        "Local status get_receipt refused: run id must be a non-empty string; nothing returned",
+    )
 
 
 # -- C1/C8: setup I/O and identity faults are typed refusals with one WARNING, never a raw driver error --------

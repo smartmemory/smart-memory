@@ -88,6 +88,36 @@ def _local_status_module():
     return local_status
 
 
+#: Core modules ``open_local_status`` imports after the adapter module. One boundary names them all (the same
+#: typed refusal a core without the adapter gets), so no ``ModuleNotFoundError`` escapes untyped. A table test
+#: removes each in turn.
+OPEN_DEPENDENCIES = (
+    "smartmemory.authority",
+    "smartmemory.ownership",
+    "smartmemory.pipeline.work_graph.port",
+    "smartmemory.pipeline.work_graph.sqlite_store",
+    "smartmemory.pipeline.work_graph.v2",
+    "smartmemory.save.read_port",
+    "smartmemory.visibility",
+)
+
+
+def _require_open_dependencies() -> None:
+    import importlib
+
+    for name in OPEN_DEPENDENCIES:
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            log.warning(
+                "Local status dependency %s is not importable; status replay refused, no status returned",
+                name,
+            )
+            raise LocalStatusUnavailable(
+                f"local status unavailable: installed core has no {name}"
+            ) from exc
+
+
 def local_status_capability() -> dict[str, Any]:
     """Explicit Lite status capability (G137): what this placement supports and what is hosted-only.
 
@@ -126,13 +156,14 @@ def open_local_status(
     """
     import sqlite3
 
+    module = _local_status_module()
+    _require_open_dependencies()
     from smartmemory.ownership import OwnershipContext
     from smartmemory.pipeline.work_graph.port import Scope, WorkGraphContractError
     from smartmemory.pipeline.work_graph.v2 import bind_sqlite_v2
     from smartmemory.save.read_port import InvalidRow, ScopeKeys
     from smartmemory.visibility import ReadVisibilityGate
 
-    module = _local_status_module()
     try:
         scope = Scope(tenant_id=tenant_id, workspace_id=workspace_id)
         caller = ScopeKeys(tenant_id, workspace_id, user_id)
