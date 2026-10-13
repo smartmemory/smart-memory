@@ -481,6 +481,24 @@ class WildcardEnumerationOverflowError(RuntimeError):
     """Core's wildcard enumeration still returned a full window at the cap (U5.22, C1/C4)."""
 
 
+def _result_dict(hit) -> dict:
+    """A core read result as a response dict, its read_status carrier checked first (U5.22, C1/C8).
+
+    Core's ``MemoryItem.to_dict()`` copies the response-only carrier with ``dict()``, so an unreadable carrier would
+    escape as a raw ValueError/TypeError, and an empty or stateless dict would be copied as valid. Every result this
+    module serializes goes through here: absent stays legacy, unreadable is ``MalformedReadStatusError`` (one WARNING).
+    """
+    from smartmemory.models.read_status import read_status_of
+
+    from smartmemory_app.recall_format import validated_carrier
+
+    item_id = (
+        hit.get("item_id") if isinstance(hit, dict) else getattr(hit, "item_id", None)
+    )
+    validated_carrier(read_status_of(hit), item_id)
+    return hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+
+
 def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
     """Gate-ON wildcard: core's merged enumeration is the one authority for membership, payload and read_status.
 
@@ -493,6 +511,17 @@ def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
     window = _WILDCARD_PENDING_WINDOW
     while True:
         hits = mem.search("*", top_k=window, **core_kwargs)
+        if len(hits) > window:
+            # C4: the bound caps every fetch. A callee that over-returns broke the window contract, so its page can
+            # neither prove exhaustion nor be trusted as complete: refuse, never consume or truncate it.
+            log.warning(
+                "wildcard search refused: core returned %d hits for a window of %d, so the listing bound is broken",
+                len(hits),
+                window,
+            )
+            raise WildcardEnumerationOverflowError(
+                f"wildcard enumeration returned {len(hits)} hits for a window of {window}"
+            )
         if len(hits) < window:
             break
         if window >= _WILDCARD_CORE_CAP:
@@ -507,7 +536,7 @@ def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
         window = min(window * 2, _WILDCARD_CORE_CAP)
     rows = []
     for hit in hits:
-        payload = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+        payload = _result_dict(hit)
         rows.append({"confidence": 1.0, "stale": False, "reference": False, **payload})
     return rows
 
@@ -725,14 +754,16 @@ def search(
     if not filters:
         results = mem.search(query, top_k=top_k, **core_kwargs)
         if isinstance(results, dict):
-            return {key: [r.to_dict() for r in items] for key, items in results.items()}
-        return [r.to_dict() for r in results]
+            return {
+                key: [_result_dict(r) for r in items] for key, items in results.items()
+            }
+        return [_result_dict(r) for r in results]
     # With filters: fetch a wider window, then post-filter. If still short,
     # widen progressively to avoid missing sparse matches.
     for multiplier in (5, 20, 50):
         fetch_k = top_k * multiplier
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
-        items = [r.to_dict() for r in results]
+        items = [_result_dict(r) for r in results]
         matched = [
             r
             for r in items
@@ -986,4 +1017,4 @@ def get(item_id: str) -> dict:
     if isinstance(mem, RemoteMemory):
         return mem.get(item_id) or {}  # already a dict
     item = mem.get(item_id)
-    return item.to_dict() if item else {}
+    return _result_dict(item) if item else {}

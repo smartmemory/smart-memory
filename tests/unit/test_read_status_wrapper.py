@@ -10,6 +10,7 @@ import logging
 import pytest
 
 from smartmemory.configuration.switch_testing import switch_override
+from smartmemory.models.read_status import READ_STATUS_KEY
 from smartmemory.save.read_port import (
     AdmissionRow,
     InMemoryPendingStore,
@@ -53,22 +54,26 @@ def _row(item_id="test_pending", revision=1, summary="atlas budget"):
 @pytest.fixture
 def lane(tmp_path, monkeypatch):
     mem = create_lite_memory(data_dir=str(tmp_path / "test_u522_wrapper"))
-    store = InMemoryPendingStore()
-    row = _row()
-    store.admit(row, LexicalRecord(row.item_id, 1, TEXT, source_sha256(TEXT), SCOPE))
-    mem._graph.backend.add_node(
-        "test_legacy",
-        {
-            "content": "atlas budget stored text",
-            "origin": "user:test",
-            "created_at": TIME,
-        },
-        memory_type="semantic",
-    )
-    with switch_override(SWITCH, True):
-        mem.bind_pending_reads(store, workspace_hidden=False)
-    monkeypatch.setattr(storage, "get_memory", lambda *a, **k: mem)
+    # F3: everything after the memory exists runs inside the try, so a setup failure (admission, the graph row,
+    # the pending-read binding) still closes it.
     try:
+        store = InMemoryPendingStore()
+        row = _row()
+        store.admit(
+            row, LexicalRecord(row.item_id, 1, TEXT, source_sha256(TEXT), SCOPE)
+        )
+        mem._graph.backend.add_node(
+            "test_legacy",
+            {
+                "content": "atlas budget stored text",
+                "origin": "user:test",
+                "created_at": TIME,
+            },
+            memory_type="semantic",
+        )
+        with switch_override(SWITCH, True):
+            mem.bind_pending_reads(store, workspace_hidden=False)
+        monkeypatch.setattr(storage, "get_memory", lambda *a, **k: mem)
         yield mem, store
     finally:
         mem.close()
@@ -178,9 +183,27 @@ def test_wildcard_gate_on_is_core_merged_identity(
         assert got["test_same"]["read_status"]["revision"] == 2
 
 
+def _bounded_search(monkeypatch, mem, limit=5, extra=0):
+    """Wrap the real core search: fail the test instead of looping forever (the r1 cap mutation hung), and
+    optionally ask core for ``extra`` more rows than the window to break the window contract (C4 fault probe)."""
+    real = mem.search
+    calls = []
+
+    def search(query, *args, top_k=5, **kwargs):
+        calls.append(top_k)
+        if len(calls) > limit:
+            pytest.fail(f"wildcard enumeration did not terminate: windows {calls}")
+        return real(query, *args, top_k=top_k + extra, **kwargs)
+
+    monkeypatch.setattr(mem, "search", search)
+    return calls
+
+
 def test_wildcard_gate_on_full_window_at_cap_is_a_typed_refusal(
     lane, caplog, monkeypatch
 ):
+    mem, _store = lane
+    calls = _bounded_search(monkeypatch, mem)
     monkeypatch.setattr(storage, "_WILDCARD_PENDING_WINDOW", 1)
     monkeypatch.setattr(storage, "_WILDCARD_CORE_CAP", 1)
     caplog.set_level(logging.WARNING)
@@ -196,6 +219,32 @@ def test_wildcard_gate_on_full_window_at_cap_is_a_typed_refusal(
             "WARNING",
             "wildcard search refused: core still returned a full window of 1 hits at the cap, "
             "so the listing would be incomplete",
+        )
+    ]
+    assert calls == [1]
+
+
+def test_wildcard_over_return_is_a_typed_refusal(lane, caplog, monkeypatch):
+    """C4 fault probe: a real core search that returns more rows than the window broke the listing bound."""
+    mem, _store = lane
+    calls = _bounded_search(monkeypatch, mem, extra=1)
+    monkeypatch.setattr(storage, "_WILDCARD_PENDING_WINDOW", 1)
+    caplog.set_level(logging.WARNING)
+    with switch_override(SWITCH, True):
+        with pytest.raises(
+            storage.WildcardEnumerationOverflowError,
+            match="^wildcard enumeration returned 2 hits for a window of 1$",
+        ):
+            storage.search("*")
+    assert calls == [1]
+    assert [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.name == storage.log.name
+    ] == [
+        (
+            "WARNING",
+            "wildcard search refused: core returned 2 hits for a window of 1, so the listing bound is broken",
         )
     ]
 
@@ -274,6 +323,7 @@ MALFORMED = [
     ("int", 7, "a int, not a dict"),
     ("empty-string", "", "a str, not a dict"),
     ("false", False, "a bool, not a dict"),
+    ("empty-dict", {}, "a dict without a string extraction_state"),
     ("dict-without-state", {"revision": 1}, "a dict without a string extraction_state"),
     (
         "dict-empty-state",
@@ -323,3 +373,135 @@ def test_absent_carrier_stays_legacy_and_silent(caplog):
         assert "read_status" not in _item_to_recall_dict(row)
         assert "[" in format_recall_lines([row], top_k=5)
     assert [r for r in caplog.records if "read_status" in r.getMessage()] == []
+
+
+def _stamped(mem, carrier):
+    """A real core MemoryItem whose response-only carrier is unreadable (the shape core's to_dict would copy)."""
+    item = mem.get("test_legacy")
+    item.__dict__[READ_STATUS_KEY] = carrier
+    return item
+
+
+def _site_search(mem, carrier, monkeypatch):
+    monkeypatch.setattr(mem, "search", lambda *a, **k: [_stamped(mem, carrier)])
+    return storage.search(
+        "atlas budget", top_k=10, reranker="none", enable_hybrid=False
+    )
+
+
+def _site_grouped(mem, carrier, monkeypatch):
+    monkeypatch.setattr(
+        mem, "search", lambda *a, **k: {"semantic": [_stamped(mem, carrier)]}
+    )
+    return storage.search("atlas budget", top_k=10)
+
+
+def _site_filter(mem, carrier, monkeypatch):
+    monkeypatch.setattr(mem, "search", lambda *a, **k: [_stamped(mem, carrier)])
+    return storage.search("atlas budget", top_k=10, filters={"origin": "user:test"})
+
+
+def _site_get(mem, carrier, monkeypatch):
+    item = _stamped(mem, carrier)
+    monkeypatch.setattr(mem, "get", lambda item_id: item)
+    return storage.get("test_legacy")
+
+
+def _site_wildcard(mem, carrier, monkeypatch):
+    monkeypatch.setattr(mem, "search", lambda *a, **k: [_stamped(mem, carrier)])
+    return storage.search("*")
+
+
+# C8/C1 table: every storage site that serializes a core result (`_result_dict`) refuses an unreadable carrier on a
+# real MemoryItem, never `to_dict()`'s raw ValueError/TypeError or a copied stateless dict. One row per malformed
+# shape, each site at least once (the shapes themselves are the MALFORMED table above, through recall_format).
+RESULT_SITE_ROWS = [
+    ("search-string", _site_search, "extraction_pending", "a str, not a dict"),
+    ("grouped-list", _site_grouped, ["extraction_pending"], "a list, not a dict"),
+    ("filter-int", _site_filter, 7, "a int, not a dict"),
+    ("get-empty-string", _site_get, "", "a str, not a dict"),
+    ("wildcard-false", _site_wildcard, False, "a bool, not a dict"),
+    ("search-empty-dict", _site_search, {}, "a dict without a string extraction_state"),
+    (
+        "grouped-dict-without-state",
+        _site_grouped,
+        {"revision": 1},
+        "a dict without a string extraction_state",
+    ),
+    (
+        "get-dict-empty-state",
+        _site_get,
+        {"extraction_state": ""},
+        "a dict without a string extraction_state",
+    ),
+    (
+        "wildcard-dict-int-state",
+        _site_wildcard,
+        {"extraction_state": 3},
+        "a dict without a string extraction_state",
+    ),
+    (
+        "filter-dict-without-state",
+        _site_filter,
+        {"revision": 1},
+        "a dict without a string extraction_state",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "name,site,carrier,reason", RESULT_SITE_ROWS, ids=[r[0] for r in RESULT_SITE_ROWS]
+)
+def test_result_sites_refuse_an_unreadable_carrier(
+    lane, monkeypatch, caplog, name, site, carrier, reason
+):
+    mem, _store = lane
+    caplog.set_level(logging.WARNING)
+    with switch_override(SWITCH, True):
+        with pytest.raises(MalformedReadStatusError) as raised:
+            site(mem, carrier, monkeypatch)
+    assert str(raised.value) == f"read_status on test_legacy is {reason}"
+    assert [
+        (r.levelname, r.getMessage())
+        for r in caplog.records
+        if r.name == "smartmemory_app.recall_format"
+    ] == [
+        (
+            "WARNING",
+            f"read_status carrier on test_legacy is {reason}: refusing to normalize the row without its extraction status",
+        )
+    ]
+
+
+def test_lane_fixture_closes_memory_when_setup_fails_after_it_exists(
+    tmp_path, monkeypatch
+):
+    """F3: a failure after the lite memory exists (here: binding pending reads) still closes it."""
+    import sys
+
+    module = sys.modules[__name__]
+    opened = []
+    factory = create_lite_memory  # the real one, captured before the module global is replaced
+
+    def tracked_factory(*args, **kwargs):
+        mem = factory(*args, **kwargs)
+        record = {"closed": False}
+        opened.append(record)
+        close = mem.close
+
+        def tracked_close():
+            record["closed"] = True
+            return close()
+
+        def fail_binding(*a, **k):
+            raise RuntimeError("test_u522 injected binding failure")
+
+        mem.close = tracked_close
+        mem.bind_pending_reads = fail_binding
+        return mem
+
+    monkeypatch.setattr(module, "create_lite_memory", tracked_factory)
+    gen = lane.__wrapped__(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="injected binding failure"):
+        next(gen)
+    assert [r["closed"] for r in opened] == [True]
