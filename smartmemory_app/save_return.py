@@ -12,6 +12,14 @@ one view of either arm:
   invalid wire dict raises ``SaveReturnRefused``, each with one WARNING. A rejected or refused return is never
   turned into an id, never ``str(receipt)`` (``"<id> (<status>)"`` is not an id).
 
+``is_receipt_arm`` is the one rule that tells the arms apart (U4.42 r2 N1). It is never an exact class-name
+equality: any instance of core's ``Receipt``/``ReceiptRefusal`` or of a subclass, any object whose class or a base
+is named like one (a second copy of core, a reloaded module), and any mapping with ``schema_version`` is the receipt
+arm. A receipt-arm object that is not this core's receipt is refused, never read as legacy. Every receipt is read
+through core's own export and codec (``Receipt.to_dict`` then ``decode_receipt``), so a subclass cannot hide its
+``admission_error`` by overriding a method. ``smartmemory_mcp.backends.local._is_receipt_arm`` and the service's
+``cli.ingest_return._is_receipt_arm`` mirror this rule; their tests run the same rows.
+
 No switch: nothing under the legacy save path reaches the receipt arm until core returns a receipt, and
 ``str`` and legacy-dict returns never leave the first branch of ``resolve_save_return``.
 """
@@ -19,6 +27,7 @@ No switch: nothing under the legacy save path reaches the receipt arm until core
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn
@@ -29,6 +38,41 @@ log = logging.getLogger(__name__)
 SAVE_SUBJECT_KINDS = frozenset(
     {"item_save", "document_save", "generation_save", "edit"}
 )
+
+#: Core's receipt classes, by name. An object whose class or a base has one of these names is the receipt arm.
+RECEIPT_CLASS_NAMES = frozenset({"Receipt", "ReceiptRefusal"})
+
+
+def is_receipt_arm(value: Any) -> bool:
+    """Whether a save return is the receipt arm (a receipt object or its wire mapping) rather than a legacy shape.
+
+    ``str`` and a mapping without ``schema_version`` are legacy. A mapping with it is a wire receipt. Any other object
+    is a receipt when its class or a base is named ``Receipt``/``ReceiptRefusal``, or when it is an instance of the
+    classes of an already-imported ``smartmemory.save.receipt`` (read from ``sys.modules``, so the legacy arm never
+    imports core). Everything else is legacy.
+    """
+    if isinstance(value, str):
+        return False
+    if isinstance(value, Mapping):
+        return "schema_version" in value
+    if any(
+        getattr(cls, "__name__", None) in RECEIPT_CLASS_NAMES
+        for cls in type(value).__mro__
+    ):
+        return True
+    try:  # a constant-key read: the U4.32 import census admits only that form of sys.modules use
+        module = sys.modules["smartmemory.save.receipt"]
+    except KeyError:
+        module = None
+    classes = tuple(
+        cls
+        for cls in (
+            getattr(module, "Receipt", None),
+            getattr(module, "ReceiptRefusal", None),
+        )
+        if isinstance(cls, type)
+    )
+    return bool(classes) and isinstance(value, classes)
 
 
 class SaveReturnError(RuntimeError):
@@ -114,9 +158,11 @@ def _summary(receipt: Any, wire: dict[str, Any], subject_id: str, op: str) -> st
 
 def resolve_save_return(value: Any, *, op: str) -> SaveReturn:
     """The receipt-or-legacy view of one save return. ``op`` names the doorway in refusal logs."""
-    if isinstance(value, str) or (
-        isinstance(value, Mapping) and "schema_version" not in value
-    ):
+    try:
+        receipt_arm = is_receipt_arm(value)
+    except Exception as exc:  # a return that cannot even be told apart is never an id or a legacy value
+        _refuse(op, "save return cannot be inspected", exc)
+    if not receipt_arm:
         return SaveReturn(value)
     try:
         from smartmemory.save.receipt import (
@@ -125,24 +171,30 @@ def resolve_save_return(value: Any, *, op: str) -> SaveReturn:
             ReceiptValidationError,
             decode_receipt,
         )
-    except ImportError as exc:
-        if isinstance(
-            value, Mapping
-        ):  # a receipt wire dict that this core cannot read is never an id or a legacy dict
-            _refuse(op, "the installed core cannot read save receipts", exc)
-        return SaveReturn(
-            value
-        )  # a core without receipts has no receipt object, so any other value is legacy
-    if isinstance(value, Mapping):
-        try:
-            value = decode_receipt(value)
-        except ReceiptValidationError as exc:
-            _refuse(op, "save return is not a valid receipt", exc)
+    except ImportError as exc:  # a receipt exists, so a core that cannot read one is a refusal, never legacy
+        _refuse(op, "the installed core cannot read save receipts", exc)
     if isinstance(value, ReceiptRefusal):
-        _refuse(op, f"receipt refused by the reader ({value.status})")
-    if not isinstance(value, Receipt):
-        return SaveReturn(value)
-    wire = value.to_dict()
+        _refuse(op, f"receipt refused by the reader ({_refusal_status(value)})")
+    if isinstance(value, Mapping):
+        source = value
+    elif isinstance(value, Receipt):
+        try:  # core's own export, so a subclass override of to_dict cannot drop admission_error
+            source = Receipt.to_dict(value)
+        except Exception as exc:
+            _refuse(op, "save return is not a readable receipt", exc)
+    else:
+        _refuse(
+            op, "save return is named like a receipt but is not this core's receipt"
+        )
+    try:
+        decoded = decode_receipt(source)
+    except ReceiptValidationError as exc:
+        _refuse(op, "save return is not a valid receipt", exc)
+    except Exception as exc:  # any other codec failure is uncertainty, never an id
+        _refuse(op, "save return is not a readable receipt", exc)
+    if isinstance(decoded, ReceiptRefusal):
+        _refuse(op, f"receipt refused by the reader ({decoded.status})")
+    wire = decoded.to_dict()
     error = wire.get("admission_error")
     if error is not None:
         log.warning(
@@ -154,10 +206,21 @@ def resolve_save_return(value: Any, *, op: str) -> SaveReturn:
     kind = (wire.get("subject") or {}).get("kind")
     if kind is not None and kind not in SAVE_SUBJECT_KINDS:
         _refuse(op, f"receipt subject {kind} is not a save")
-    subject_id = value.item_id or value.document_id or value.generation_id
+    subject_id = decoded.item_id or decoded.document_id or decoded.generation_id
     if not subject_id:
         _refuse(op, "receipt names no stored subject id")
-    return SaveReturn(subject_id, wire, _summary(value, wire, subject_id, op))
+    return SaveReturn(subject_id, wire, _summary(decoded, wire, subject_id, op))
+
+
+def _refusal_status(value: Any) -> str:
+    """The refusal code of a ``ReceiptRefusal`` (or subclass) read through core's own property, or ``unreadable``."""
+    from smartmemory.save.receipt import ReceiptRefusal
+
+    try:
+        status = ReceiptRefusal.status.fget(value)
+    except Exception:  # a refusal whose code cannot be read is still a refusal
+        return "unreadable"
+    return status if type(status) is str else "unreadable"
 
 
 def save_value(value: Any, *, op: str) -> Any:

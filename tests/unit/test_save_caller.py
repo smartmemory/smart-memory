@@ -19,11 +19,14 @@ Classes pinned, one explicit row table each (no stacked parametrize):
 
 import ast
 import copy
+import enum
 import logging
+import marshal
 import operator
 import re
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,8 +46,11 @@ from smartmemory_app import save_caller, storage
 from smartmemory_app.save_caller import (
     INVALID_SEAM,
     MEMORY_UNAVAILABLE,
+    NO_RENDERER,
     NOT_A_RECEIPT,
+    NOT_A_SAVE_CALL,
     SAVE_UNAVAILABLE,
+    SNAPSHOT_UNREADABLE,
     UNCOPYABLE_REQUEST,
     WRITE_LOCK_UNAVAILABLE,
     SaveCall,
@@ -688,6 +694,10 @@ class Recorder:
         return saved_receipt()
 
 
+def _link(target):
+    return {"target_id": target, "link_type": "RELATED"}
+
+
 def _after_build(change):
     return lambda kwargs, call, rec: change(kwargs)
 
@@ -720,15 +730,17 @@ FROZEN_ROWS = [
         None,
     ),
     (
-        "link object attribute changed",
-        lambda: {"content": "c", "requested_links": [Link("t1")]},
-        _after_build(lambda kw: setattr(kw["requested_links"][0], "target", "t2")),
+        "link mapping changed",
+        lambda: {"content": "c", "requested_links": [_link("t1")]},
+        _after_build(
+            lambda kw: kw["requested_links"][0].__setitem__("target_id", "t2")
+        ),
         None,
     ),
     (
         "link list appended",
-        lambda: {"content": "c", "requested_links": [Link("t1")]},
-        _after_build(lambda kw: kw["requested_links"].append(Link("t2"))),
+        lambda: {"content": "c", "requested_links": [_link("t1")]},
+        _after_build(lambda kw: kw["requested_links"].append(_link("t2"))),
         None,
     ),
     (
@@ -766,7 +778,7 @@ FROZEN_ROWS = [
     (
         "snapshot slot rebound",
         lambda: {"content": "c"},
-        lambda kw, call, rec: setattr(call.request, "_snapshot", {}),
+        lambda kw, call, rec: setattr(call.request, "_wire", b""),
         AttributeError,
     ),
     (
@@ -796,6 +808,175 @@ def test_a_built_call_is_a_snapshot_the_retry_sends_unchanged(
     assert dict(call.request) == before, label
     submit(rec, call)
     assert rec.sent[-1] == before, label
+
+
+# --- fix round 2 (N2): a retry resends the first submission byte for byte -------------------------------------------
+# Bug class: unstable retry identity/payload. A copy hook (``__deepcopy__``/``__copy__``/``__reduce_ex__``) is the
+# caller's code and may hand back the live object, so the snapshot never calls one: it is rebuilt from exact
+# plain-JSON types and held as bytes. One row per way the caller or a receiver can still hold a live reference.
+
+
+class SharedList(list):
+    """The reviewer's N2 repro: a list whose deep copy is itself."""
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+class SharedDict(dict):
+    def __deepcopy__(self, memo):
+        return self
+
+
+class AllHooksShared(list):
+    """Every copy hook hands back the live object."""
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __reduce_ex__(self, protocol):
+        return (list, (), None, iter(self))
+
+
+class CopyOnceList(list):
+    """The reviewer's N3 repro: copies once, then fails on every later copy (no later copy is ever taken)."""
+
+    copied = False
+
+    def __deepcopy__(self, memo):
+        if self.copied:
+            raise RuntimeError("test copy fails on retry export")
+        result = CopyOnceList(self)
+        result.copied = True
+        return result
+
+
+class LiveMapping(Mapping):
+    """A mapping whose items view reads a dict the caller keeps."""
+
+    def __init__(self, backing):
+        self.backing = backing
+
+    def __iter__(self):
+        return iter(self.backing)
+
+    def __getitem__(self, key):
+        return self.backing[key]
+
+    def __len__(self):
+        return len(self.backing)
+
+    def items(self):
+        return self.backing.items()
+
+
+class SuppliedKey(str):
+    def __str__(self):
+        return "not-the-key"
+
+
+class KindEnum(enum.StrEnum):
+    SEMANTIC = "semantic"
+
+
+class SeenRecorder:
+    """Records the object ``save`` was handed and, separately, what it held at that moment."""
+
+    def __init__(self):
+        self.sent, self.seen = [], []
+
+    def save(self, request, *, adapter_namespace=None):
+        self.sent.append(request)
+        self.seen.append(copy.deepcopy(request))
+        return saved_receipt()
+
+
+def _mutate_sent(kw, call, rec):
+    rec.sent[0]["data"]["k"].append(9)
+    rec.sent[0]["idempotency_key"] = "receiver-key"
+
+
+# (label, build kwargs factory, change made after the FIRST submission). Every row must resend the first request.
+RETRY_ROWS = [
+    (
+        "deep copy returns the shared list",
+        lambda: {"data": {"k": SharedList([1])}},
+        lambda kw, c, r: kw["data"]["k"].append(2),
+    ),
+    (
+        "deep copy returns the shared dict",
+        lambda: {"data": {"k": SharedDict(a=1)}},
+        lambda kw, c, r: kw["data"]["k"].__setitem__("a", 2),
+    ),
+    (
+        "every copy hook returns the shared list",
+        lambda: {"data": {"k": AllHooksShared([1])}},
+        lambda kw, c, r: kw["data"]["k"].append(2),
+    ),
+    (
+        "copy hook fails after the first copy",
+        lambda: {"data": {"k": CopyOnceList([1])}},
+        lambda kw, c, r: kw["data"]["k"].append(2),
+    ),
+    (
+        "mapping with a live items view",
+        lambda: {"data": LiveMapping({"a": 1})},
+        lambda kw, c, r: kw["data"].backing.__setitem__("a", 2),
+    ),
+    (
+        "plain nested list",
+        lambda: {"data": {"k": [1]}},
+        lambda kw, c, r: kw["data"]["k"].append(2),
+    ),
+    (
+        "context list",
+        lambda: {"content": "c", "context": {"session_id": ["s1"]}},
+        lambda kw, c, r: kw["context"]["session_id"].append("s2"),
+    ),
+    (
+        "link mapping",
+        lambda: {"content": "c", "requested_links": [_link("t1")]},
+        lambda kw, c, r: kw["requested_links"][0].__setitem__("target_id", "t2"),
+    ),
+    (
+        "str-subclass key and StrEnum memory type",
+        lambda: {
+            "content": "c",
+            "idempotency_key": SuppliedKey("test-key"),
+            "memory_type": KindEnum.SEMANTIC,
+        },
+        lambda kw, c, r: None,
+    ),
+    ("receiver mutates what it was handed", lambda: {"data": {"k": [1]}}, _mutate_sent),
+]
+
+
+@pytest.mark.parametrize(
+    "label, make, change", RETRY_ROWS, ids=[r[0] for r in RETRY_ROWS]
+)
+def test_a_retry_resends_the_first_submission_byte_for_byte(
+    label, make, change, caplog
+):
+    kwargs = make()
+    call = build_save_call(seam="mcp", **kwargs)
+    wire, key = call.request.wire, call.idempotency_key
+    rec = SeenRecorder()
+    submit(rec, call)
+    change(kwargs, call, rec)
+    submit(rec, call)
+    assert rec.seen[0] == rec.seen[1] == marshal.loads(wire), label
+    assert rec.sent[0] is not rec.sent[1], (
+        label
+    )  # every submission gets its own decoded copy
+    assert call.request.wire == wire and call.idempotency_key == key, label
+    assert type(rec.seen[1]["idempotency_key"]) is str, label
+    assert all(
+        type(rec.seen[1].get(name, "")) is str for name in ("memory_type", "content")
+    ), label
+    assert warnings_of(caplog) == [], label
 
 
 def test_a_directly_built_savecall_snapshots_its_request_too():
@@ -970,7 +1151,7 @@ def _lock_failure_in_a_core_without_the_mark(ctx):
                 CALLER_LOGGER,
                 logging.WARNING,
                 f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): the local write lock could not be taken "
-                "(OSError: test lock failure); nothing was saved and ingest was not used",
+                f"({NO_RENDERER}); nothing was saved and ingest was not used",
             )
         ],
         False,
@@ -988,9 +1169,9 @@ def _uncopyable_request(ctx):
             (
                 CALLER_LOGGER,
                 logging.WARNING,
-                f"Save call refused ({UNCOPYABLE_REQUEST}): the request holds a value that cannot be copied, so it "
-                "cannot be frozen for a retry (TypeError: cannot pickle '_thread.lock' object); nothing was saved "
-                "and no retry key was bound to it",
+                f"Save call refused ({UNCOPYABLE_REQUEST}): the request holds a value that is not plain JSON, so it "
+                "cannot be frozen for a retry (NotPlainJson: request['context']['lock'] is a lock, not plain JSON); "
+                "nothing was saved and no retry key was bound to it",
             )
         ],
         True,
@@ -1047,6 +1228,178 @@ def _rejected():
     )
 
 
+# --- fix round 2 (N3): every snapshot boundary, and a cause that cannot be rendered -----------------------------------
+# Bug class: C1 failure path without a typed, logged, marked refusal (C8 raw escape). The snapshot is taken once and
+# read back from bytes, so its boundaries are: the build walk (each way a value is not plain JSON), the read-back of
+# the bytes (a field read, ``thaw``, ``submit``), ``submit`` of an object that is not a ``SaveCall``, and the cause
+# text itself (an old core has no renderer that cannot raise).
+
+
+def _self_list():
+    looped = []
+    looped.append(looped)
+    return looped
+
+
+class TwiceKeyed(Mapping):
+    """A mapping whose iteration yields the key ``a`` twice."""
+
+    def __iter__(self):
+        return iter(["a", "a"])
+
+    def __getitem__(self, key):
+        return 1
+
+    def __len__(self):
+        return 2
+
+
+class BrokenItems(Mapping):
+    def __iter__(self):
+        raise RuntimeError("test items failure")
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+    def __len__(self):
+        return 1
+
+
+class MustNotSave:
+    def save(self, request, *, adapter_namespace=None):
+        raise AssertionError("save must not be called")
+
+
+def _uncopyable(cause):
+    return [
+        (
+            CALLER_LOGGER,
+            logging.WARNING,
+            f"Save call refused ({UNCOPYABLE_REQUEST}): the request holds a value that is not plain JSON, so it "
+            f"cannot be frozen for a retry ({cause}); nothing was saved and no retry key was bound to it",
+        )
+    ]
+
+
+def _not_plain(kwargs, problem, cause=None):
+    def row(ctx):
+        return (
+            lambda: build_save_call(seam="mcp", **kwargs()),
+            SaveCallRefused,
+            UNCOPYABLE_REQUEST,
+            _uncopyable(cause or f"NotPlainJson: {problem}"),
+            True,
+        )
+
+    return row
+
+
+def _savecall_not_a_mapping(ctx):
+    return (
+        lambda: SaveCall("x", "mcp.local"),
+        SaveCallRefused,
+        UNCOPYABLE_REQUEST,
+        _uncopyable("NotPlainJson: the request is a str, not a mapping"),
+        True,
+    )
+
+
+def _snapshot_unreadable(read):
+    def row(ctx):
+        call = build_save_call(seam="mcp", data={"k": [1]})
+        corrupt = b"\x00test-corrupt"
+        object.__setattr__(call.request, "_wire", corrupt)
+        try:
+            marshal.loads(corrupt)
+        except (
+            Exception
+        ) as exc:  # the same bytes, read the same way: the cause the refusal must name
+            cause = f"{type(exc).__name__}: {exc}"
+        return (
+            lambda: read(call),
+            SaveCallRefused,
+            SNAPSHOT_UNREADABLE,
+            [
+                (
+                    CALLER_LOGGER,
+                    logging.WARNING,
+                    f"Save call refused ({SNAPSHOT_UNREADABLE}): the frozen request could not be read back ({cause}); "
+                    "nothing was sent and the retry key was not used",
+                )
+            ],
+            True,
+        )
+
+    return row
+
+
+def _not_a_save_call(ctx):
+    return (
+        lambda: submit(MustNotSave(), {"content": "c", "idempotency_key": "test-key"}),
+        SaveCallRefused,
+        NOT_A_SAVE_CALL,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({NOT_A_SAVE_CALL}): the call was not built by build_save_call, so it has no "
+                "frozen request; nothing was saved and add/ingest were not used",
+            )
+        ],
+        True,
+    )
+
+
+class UnrenderableOSError(OSError):
+    def __str__(self):
+        raise ValueError("test render failure")
+
+
+def _unrenderable_cause_old_core(ctx):
+    """The reviewer's N3 repro: no ``smartmemory.refusal_logging``, and a cause whose ``__str__`` raises."""
+    ctx.monkeypatch.setitem(sys.modules, "smartmemory.refusal_logging", None)
+    return (
+        lambda: save_caller.refuse_from(
+            UnrenderableOSError(),
+            WRITE_LOCK_UNAVAILABLE,
+            "lock failed",
+            "nothing saved",
+        ),
+        SaveCallRefused,
+        WRITE_LOCK_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): lock failed ({NO_RENDERER}); nothing saved",
+            )
+        ],
+        False,
+    )
+
+
+def _unrenderable_cause(ctx):
+    return (
+        lambda: save_caller.refuse_from(
+            UnrenderableOSError(),
+            WRITE_LOCK_UNAVAILABLE,
+            "lock failed",
+            "nothing saved",
+        ),
+        SaveCallRefused,
+        WRITE_LOCK_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): lock failed "
+                "(UnrenderableOSError: <UnrenderableOSError could not be rendered>); nothing saved",
+            )
+        ],
+        True,
+    )
+
+
 REJECTED_WARNING = "Save return save rejected at admission (idempotency_conflict); nothing was stored under a new id"
 
 # (label, row builder). A row builder returns (act, error type, code or None, the exact WARNING list, marked).
@@ -1064,6 +1417,57 @@ BOUNDARY_ROWS = [
         _lock_failure_in_a_core_without_the_mark,
     ),
     ("request value cannot be copied", _uncopyable_request),
+    (
+        "request list contains itself",
+        _not_plain(
+            lambda: {"data": {"k": _self_list()}},
+            "request['data']['k'][0] contains itself",
+        ),
+    ),
+    (
+        "link object, not a plain mapping",
+        _not_plain(
+            lambda: {"content": "c", "requested_links": [Link("t1")]},
+            "request['requested_links'][0] is a Link, not plain JSON",
+        ),
+    ),
+    (
+        "tuple key",
+        _not_plain(
+            lambda: {"data": {("a", "b"): 1}}, "request['data'] has a tuple key"
+        ),
+    ),
+    (
+        "mapping yields a key twice",
+        _not_plain(
+            lambda: {"data": TwiceKeyed()}, "request['data'] repeats the key 'a'"
+        ),
+    ),
+    (
+        "mapping whose items cannot be read",
+        _not_plain(
+            lambda: {"data": BrokenItems()}, None, "RuntimeError: test items failure"
+        ),
+    ),
+    ("directly built call whose request is not a mapping", _savecall_not_a_mapping),
+    (
+        "snapshot unreadable on a read of a field",
+        _snapshot_unreadable(lambda call: call.request["data"]),
+    ),
+    (
+        "snapshot unreadable on thaw",
+        _snapshot_unreadable(lambda call: call.request.thaw()),
+    ),
+    (
+        "snapshot unreadable on submit, save never called",
+        _snapshot_unreadable(lambda call: submit(MustNotSave(), call)),
+    ),
+    ("submit given what build_save_call did not build", _not_a_save_call),
+    (
+        "unrenderable cause in a core without refusal_logging",
+        _unrenderable_cause_old_core,
+    ),
+    ("unrenderable cause in a core with refusal_logging", _unrenderable_cause),
     (
         "returned rejected admission",
         _reader_refusal(

@@ -8,17 +8,28 @@ One explicit row table per class, no stacked parametrize.
 """
 
 import ast
+import importlib.util
 import logging
+import sys
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
+from smartmemory.save import receipt as core_receipt
 from smartmemory.save.receipt import ReceiptSubject, build_local_receipt, decode_receipt
 from smartmemory_app import save_return, storage
+from smartmemory_app.save_caller import (
+    NOT_A_RECEIPT,
+    SaveCallRefused,
+    build_save_call,
+    submit,
+)
 from smartmemory_app.save_return import (
     SaveRejected,
     SaveReturnRefused,
     ingest_dict,
+    is_receipt_arm,
     resolve_save_return,
     save_value,
 )
@@ -283,6 +294,254 @@ def test_reader_refusal_object_is_refused_too(caplog):
         caplog,
         "Save return add refused: receipt refused by the reader (unsupported_version); no id returned",
     )
+
+
+# --- fix round 2 (N1): one receipt/legacy discrimination rule, every receipt subtype --------------------------------
+# Bug class: legacy id envelope broken at the receipt boundary. An exact class-name or dict-only test sent a subclass of
+# core's receipt, a non-dict mapping or a foreign copy of core's receipt to the legacy arm, where a rejected admission
+# read as success. One row per member of the class. The same rows run against the wrapper
+# (tests/unit/test_save_return_compat.py), smartmemory_mcp (tests/test_local_save_return_compat.py) and the service
+# (tests/unit/test_cli_add_receipt.py), each against its own consumers.
+N1_REJECTED = {
+    "schema_version": "1.1",
+    "admission_error": {"code": "idempotency_conflict", "message": "test conflict"},
+}
+N1_FUTURE = {"schema_version": "2.0", "run_id": "test_run"}
+
+
+def _n1_wire(kind="item_save"):
+    if kind == "item_save":
+        subject, fields = (
+            core_receipt.ReceiptSubject("item_save", item_id="test_item"),
+            {"processing_stage": "stored", "revision": 1},
+        )
+    else:
+        subject, fields = (
+            core_receipt.ReceiptSubject(
+                "stage_job", occurrence_id="test_occ", stage_id="test_stage"
+            ),
+            {"processing_stage": None},
+        )
+    return core_receipt.build_local_receipt(
+        subject=subject,
+        run_id="test_run",
+        execution_state="queued",
+        outcome=None,
+        terminal=False,
+        result_availability="pending",
+        **fields,
+    ).to_dict()
+
+
+class DerivedReceipt(core_receipt.Receipt):
+    """A plain subclass: still core's receipt, validated by core's own constructor (the reviewer's N1 repro)."""
+
+
+class HidingReceipt(core_receipt.Receipt):
+    """Overrides ``to_dict`` to report an admitted save: only core's own export shows the rejection."""
+
+    def to_dict(self):
+        return _n1_wire()
+
+
+class DerivedRefusal(core_receipt.ReceiptRefusal):
+    """A subclass of core's reader refusal."""
+
+
+def _named_receipt():
+    class Receipt:  # not core's: a lookalike whose to_dict reads as an admitted save
+        def to_dict(self):
+            return _n1_wire()
+
+    return Receipt()
+
+
+def _refusal_named_base():
+    class ReceiptRefusal:
+        pass
+
+    class Wrapped(ReceiptRefusal):
+        def to_dict(self):
+            return _n1_wire()
+
+    return Wrapped()
+
+
+def _second_core_copy_rejected():
+    """A rejected receipt built by a second, separately loaded copy of core's receipt module (its classes differ)."""
+    spec = importlib.util.spec_from_file_location(
+        "test_u442_second_core_receipt", core_receipt.__file__
+    )
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses reads the module while the class body runs; it is removed again below
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        del sys.modules[spec.name]
+    return module.decode_receipt(N1_REJECTED)
+
+
+# (label, make, kind). kind is admitted | rejected | refusal | not_save | foreign | legacy.
+N1_ROWS = [
+    (
+        "core receipt admitted",
+        lambda: core_receipt.decode_receipt(_n1_wire()),
+        "admitted",
+    ),
+    (
+        "core receipt rejected",
+        lambda: core_receipt.decode_receipt(N1_REJECTED),
+        "rejected",
+    ),
+    ("core reader refusal", lambda: core_receipt.decode_receipt(N1_FUTURE), "refusal"),
+    ("subclass admitted", lambda: DerivedReceipt(_n1_wire()), "admitted"),
+    (
+        "subclass rejected, the reviewer's N1 repro",
+        lambda: DerivedReceipt(N1_REJECTED),
+        "rejected",
+    ),
+    (
+        "subclass hiding admission_error in to_dict",
+        lambda: HidingReceipt(N1_REJECTED),
+        "rejected",
+    ),
+    (
+        "subclass with a job subject",
+        lambda: DerivedReceipt(_n1_wire("stage_job")),
+        "not_save",
+    ),
+    (
+        "subclass of the reader refusal",
+        lambda: DerivedRefusal(
+            core_receipt.ReceiptError("unsupported_version", "test"), dict(N1_FUTURE)
+        ),
+        "refusal",
+    ),
+    ("lookalike class named Receipt", _named_receipt, "foreign"),
+    ("lookalike with a base named ReceiptRefusal", _refusal_named_base, "foreign"),
+    (
+        "rejected receipt from a second copy of core's receipt module",
+        _second_core_copy_rejected,
+        "foreign",
+    ),
+    ("mapping proxy wire admitted", lambda: MappingProxyType(_n1_wire()), "admitted"),
+    (
+        "mapping proxy wire rejected",
+        lambda: MappingProxyType(dict(N1_REJECTED)),
+        "rejected",
+    ),
+    ("legacy id string", lambda: "test-id", "legacy"),
+    ("legacy dict", lambda: {"item_id": "test-id", "queued": True}, "legacy"),
+    ("legacy int", lambda: 7, "legacy"),
+    ("legacy None", lambda: None, "legacy"),
+]
+
+
+def _n1_refused(kind, op):
+    """The typed error and the exact WARNING message for a receipt-arm kind that never resolves to an id."""
+    return {
+        "rejected": (
+            SaveRejected,
+            f"Save return {op} rejected at admission (idempotency_conflict); nothing was stored under a new id",
+        ),
+        "refusal": (
+            SaveReturnRefused,
+            f"Save return {op} refused: receipt refused by the reader (unsupported_version); no id returned",
+        ),
+        "not_save": (
+            SaveReturnRefused,
+            f"Save return {op} refused: receipt subject stage_job is not a save; no id returned",
+        ),
+        "foreign": (
+            SaveReturnRefused,
+            f"Save return {op} refused: save return is named like a receipt but is not this core's receipt; "
+            "no id returned",
+        ),
+    }[kind]
+
+
+class _Returns:
+    """A memory whose ``save`` answers with the row's value."""
+
+    def __init__(self, returned):
+        self.returned = returned
+
+    def save(self, request, *, adapter_namespace=None):
+        return self.returned
+
+
+# (consumer label, call). Every consumer of the wrapper's reader, each fed the same row.
+N1_CONSUMERS = [
+    ("resolve_save_return", lambda value: resolve_save_return(value, op="add").value),
+    ("save_value", lambda value: save_value(value, op="add")),
+    ("ingest_dict", lambda value: ingest_dict(value, op="add")),
+    (
+        "submit",
+        lambda value: submit(
+            _Returns(value), build_save_call(seam="mcp", content="c"), op="add"
+        ).value,
+    ),
+]
+
+
+@pytest.mark.parametrize("label, make, kind", N1_ROWS, ids=[r[0] for r in N1_ROWS])
+def test_every_receipt_subtype_reaches_the_reader_on_every_consumer(
+    label, make, kind, caplog
+):
+    from smartmemory.refusal_logging import refusal_logged
+
+    assert is_receipt_arm(make()) is (kind != "legacy"), label
+    for consumer, call in N1_CONSUMERS:
+        caplog.clear()
+        value = make()
+        if kind == "admitted":
+            got = call(value)
+            if consumer == "ingest_dict":
+                assert (got["item_id"], got["queued"], got["run_id"]) == (
+                    "test_item",
+                    True,
+                    "test_run",
+                )
+            else:
+                assert got == "test_item", (label, consumer)
+            assert _warning_records(caplog) == [], (label, consumer)
+        elif (
+            kind == "legacy" and consumer == "submit"
+        ):  # save() promises a receipt: a legacy return is refused
+            with pytest.raises(SaveCallRefused) as caught:
+                call(value)
+            assert caught.value.code == NOT_A_RECEIPT
+            assert _warning_records(caplog) == [
+                (
+                    "smartmemory_app.save_caller",
+                    logging.WARNING,
+                    f"Save call refused (not_a_receipt): _Returns.save() returned {type(value).__name__}, not a "
+                    "receipt; no id was inferred from it",
+                )
+            ], label
+            assert refusal_logged(caught.value) is True
+        elif kind == "legacy":
+            assert call(value) == value, (label, consumer)
+            assert _warning_records(caplog) == [], (label, consumer)
+        else:
+            error, message = _n1_refused(kind, "add")
+            with pytest.raises(error) as caught:
+                call(value)
+            assert type(caught.value) is error, (label, consumer)
+            assert _warning_records(caplog) == [(LOGGER, logging.WARNING, message)], (
+                label,
+                consumer,
+            )
+            assert refusal_logged(caught.value) is True, (label, consumer)
+
+
+def _warning_records(caplog):
+    return [
+        (r.name, r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    ]
 
 
 # -- the wrapper's ingest seam, both arms -------------------------------------------------------------
