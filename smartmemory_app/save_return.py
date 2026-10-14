@@ -62,9 +62,21 @@ class SaveReturn:
     summary: str | None = None
 
 
+def _logged(exc: SaveReturnError) -> SaveReturnError:
+    """Mark ``exc`` logged with core's ``mark_refusal_logged``, so a boundary above that reads the mark does not log it again.
+
+    A core without ``smartmemory.refusal_logging`` has no such boundary: ``exc`` is raised unmarked, still after its one WARNING.
+    """
+    try:
+        from smartmemory.refusal_logging import mark_refusal_logged
+    except ImportError:
+        return exc
+    return mark_refusal_logged(exc)
+
+
 def _refuse(op: str, reason: str, cause: BaseException | None = None) -> NoReturn:
     log.warning("Save return %s refused: %s; no id returned", op, reason)
-    raise SaveReturnRefused(reason) from cause
+    raise _logged(SaveReturnRefused(reason)) from cause
 
 
 def _summary(receipt: Any, wire: dict[str, Any], subject_id: str, op: str) -> str:
@@ -138,7 +150,7 @@ def resolve_save_return(value: Any, *, op: str) -> SaveReturn:
             op,
             error["code"],
         )
-        raise SaveRejected(error["code"], error["message"])
+        raise _logged(SaveRejected(error["code"], error["message"]))
     kind = (wire.get("subject") or {}).get("kind")
     if kind is not None and kind not in SAVE_SUBJECT_KINDS:
         _refuse(op, f"receipt subject {kind} is not a save")

@@ -468,9 +468,26 @@ def save(call, *, memory=None):
     ``memory`` lets a caller that already holds the local ``SmartMemory`` (the MCP backend) pass it; the default is
     the active backend.
     """
-    from smartmemory_app.save_caller import SAVE_UNAVAILABLE, refuse, submit
+    from contextlib import ExitStack
 
-    mem = memory if memory is not None else get_memory()
+    from smartmemory_app.save_caller import (
+        MEMORY_UNAVAILABLE,
+        SAVE_UNAVAILABLE,
+        WRITE_LOCK_UNAVAILABLE,
+        refuse,
+        refuse_from,
+        submit,
+    )
+
+    try:
+        mem = memory if memory is not None else get_memory()
+    except Exception as exc:  # the default memory could not be opened: nothing is saved
+        refuse_from(
+            exc,
+            MEMORY_UNAVAILABLE,
+            "the local memory could not be opened",
+            "nothing was saved and ingest was not used",
+        )
     from smartmemory_app.remote_backend import RemoteMemory
 
     if isinstance(mem, RemoteMemory):
@@ -479,8 +496,18 @@ def save(call, *, memory=None):
             "hosted mode has no receipt save from this client",
             "nothing was saved and ingest was not used",
         )
-    data_path = _data_path if _data_path is not None else _resolve_data_dir()
-    with _get_lock_file(data_path):
+    stack = ExitStack()
+    try:  # only taking the lock is guarded: what submit raises (core's typed refusals) passes through unchanged
+        data_path = _data_path if _data_path is not None else _resolve_data_dir()
+        stack.enter_context(_get_lock_file(data_path))
+    except Exception as exc:  # an unusable data dir, or a lock that is held or times out, saves nothing
+        refuse_from(
+            exc,
+            WRITE_LOCK_UNAVAILABLE,
+            "the local write lock could not be taken",
+            "nothing was saved and ingest was not used",
+        )
+    with stack:
         return submit(mem, call)
 
 

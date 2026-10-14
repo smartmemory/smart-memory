@@ -18,9 +18,13 @@ Classes pinned, one explicit row table each (no stacked parametrize):
 """
 
 import ast
+import copy
 import logging
+import operator
 import re
 import sys
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -38,8 +42,11 @@ from smartmemory.tools.factory import create_lite_memory
 from smartmemory_app import save_caller, storage
 from smartmemory_app.save_caller import (
     INVALID_SEAM,
+    MEMORY_UNAVAILABLE,
     NOT_A_RECEIPT,
     SAVE_UNAVAILABLE,
+    UNCOPYABLE_REQUEST,
+    WRITE_LOCK_UNAVAILABLE,
     SaveCall,
     SaveCallRefused,
     build_save_call,
@@ -645,3 +652,490 @@ def test_savecall_is_a_dataclass_of_request_and_namespace():
         "request",
         "adapter_namespace",
     ]
+
+
+# --- fix round 1 (F2): a built call is a snapshot --------------------------------------------------------------------
+# Bug class: unstable retry identity/payload. The call holds caller-owned mutable values, so a change made after the
+# first submit changes what the retry sends under the old key.
+
+
+@dataclass
+class Link:
+    target: str
+
+
+def saved_receipt():
+    return build_local_receipt(
+        subject=ReceiptSubject("item_save", item_id="test_item_u442"),
+        run_id="test_run_u442",
+        processing_stage="stored",
+        execution_state="queued",
+        outcome=None,
+        terminal=False,
+        result_availability="pending",
+        revision=1,
+    )
+
+
+class Recorder:
+    """A memory whose ``save`` records the exact request object it is handed and answers with a real receipt."""
+
+    def __init__(self):
+        self.sent = []
+
+    def save(self, request, *, adapter_namespace=None):
+        self.sent.append(request)
+        return saved_receipt()
+
+
+def _after_build(change):
+    return lambda kwargs, call, rec: change(kwargs)
+
+
+def _receiver_mutates(kwargs, call, rec):
+    submit(rec, call)
+    rec.sent[0]["data"]["k"].append(9)
+    rec.sent[0]["idempotency_key"] = "receiver-key"
+
+
+# (label, build kwargs factory, the change to attempt after build, the error that change must raise or None). Every
+# row must leave the request, and so the retry, exactly as it was built.
+FROZEN_ROWS = [
+    (
+        "nested list appended",
+        lambda: {"data": {"k": [1]}},
+        _after_build(lambda kw: kw["data"]["k"].append(2)),
+        None,
+    ),
+    (
+        "nested dict changed",
+        lambda: {"data": {"k": {"a": 1}}},
+        _after_build(lambda kw: kw["data"]["k"].__setitem__("a", 2)),
+        None,
+    ),
+    (
+        "context mapping changed",
+        lambda: {"content": "c", "context": {"session_id": ["s1"]}},
+        _after_build(lambda kw: kw["context"]["session_id"].append("s2")),
+        None,
+    ),
+    (
+        "link object attribute changed",
+        lambda: {"content": "c", "requested_links": [Link("t1")]},
+        _after_build(lambda kw: setattr(kw["requested_links"][0], "target", "t2")),
+        None,
+    ),
+    (
+        "link list appended",
+        lambda: {"content": "c", "requested_links": [Link("t1")]},
+        _after_build(lambda kw: kw["requested_links"].append(Link("t2"))),
+        None,
+    ),
+    (
+        "nested value changed through a read of the exposed request",
+        lambda: {"data": {"k": [1]}},
+        lambda kw, call, rec: call.request["data"]["k"].append(2),
+        None,
+    ),
+    (
+        "key reassigned on the exposed request",
+        lambda: {"content": "c"},
+        lambda kw, call, rec: operator.setitem(
+            call.request, "idempotency_key", "replacement-key"
+        ),
+        TypeError,
+    ),
+    (
+        "key deleted from the exposed request",
+        lambda: {"content": "c"},
+        lambda kw, call, rec: operator.delitem(call.request, "idempotency_key"),
+        TypeError,
+    ),
+    (
+        "field added with update",
+        lambda: {"content": "c"},
+        lambda kw, call, rec: call.request.update({"wait": "stored"}),
+        AttributeError,
+    ),
+    (
+        "request attribute rebound",
+        lambda: {"content": "c"},
+        lambda kw, call, rec: setattr(call, "request", {"content": "other"}),
+        AttributeError,
+    ),
+    (
+        "snapshot slot rebound",
+        lambda: {"content": "c"},
+        lambda kw, call, rec: setattr(call.request, "_snapshot", {}),
+        AttributeError,
+    ),
+    (
+        "receiver mutates what it was handed",
+        lambda: {"data": {"k": [1]}},
+        _receiver_mutates,
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label, make, change, raises", FROZEN_ROWS, ids=[r[0] for r in FROZEN_ROWS]
+)
+def test_a_built_call_is_a_snapshot_the_retry_sends_unchanged(
+    label, make, change, raises
+):
+    kwargs = make()
+    call = build_save_call(seam="mcp", **kwargs)
+    before = copy.deepcopy(dict(call.request))
+    rec = Recorder()
+    if raises is None:
+        change(kwargs, call, rec)
+    else:
+        with pytest.raises(raises):
+            change(kwargs, call, rec)
+    assert dict(call.request) == before, label
+    submit(rec, call)
+    assert rec.sent[-1] == before, label
+
+
+def test_a_directly_built_savecall_snapshots_its_request_too():
+    request = {"content": "c", "idempotency_key": "test-key", "data": {"k": [1]}}
+    call = SaveCall(request, "mcp.local")
+    request["data"]["k"].append(2)
+    assert call.request["data"] == {"k": [1]} and call.idempotency_key == "test-key"
+    assert (
+        SaveCall(call.request, "mcp.local").request is call.request
+    )  # an already-frozen request is not re-copied
+
+
+# --- fix round 1 (F3): every new failure boundary is a typed, marked, single-WARNING refusal -------------------------
+# Bug class: C1 failure path without a typed/logged/marked refusal; C8 raw failure escape. One row per site of the
+# census (u-U4.42/census.py): each asserts the exact full WARNING list (logger, level, message), the typed error and
+# the propagated core mark (``refusal_logged``).
+
+READER_LOGGER = "smartmemory_app.save_return"
+
+
+def _warning_records(caplog):
+    return [
+        (r.name, r.levelno, r.getMessage())
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    ]
+
+
+def _wire(**over):
+    return {**saved_receipt().to_dict(), **over}
+
+
+class Returns:
+    def __init__(self, returned):
+        self.returned = returned
+
+    def save(self, request, *, adapter_namespace=None):
+        return self.returned
+
+
+def _lock_dir_is_a_file(ctx):
+    blocked = ctx.tmp_path / "blocked"
+    blocked.write_text("a file, not a data dir")
+    ctx.monkeypatch.setattr(storage, "_data_path", blocked)
+    cause = f"FileExistsError: [Errno 17] File exists: {str(blocked)!r}"
+    return (
+        lambda: storage.save(
+            build_save_call(seam="mcp", content="c"), memory=Recorder()
+        ),
+        SaveCallRefused,
+        WRITE_LOCK_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): the local write lock could not be taken ({cause}); "
+                "nothing was saved and ingest was not used",
+            )
+        ],
+        True,
+    )
+
+
+def _lock_is_held(ctx):
+    import filelock
+
+    ctx.monkeypatch.setattr(storage, "_data_path", ctx.tmp_path)
+    ctx.monkeypatch.setattr(storage, "WRITE_LOCK_TIMEOUT", 0.05)
+    lock_path = str(ctx.tmp_path / ".write.lock")
+    held = filelock.FileLock(lock_path)
+    held.acquire()
+    ctx.addfinalizer(held.release)
+    cause = f"Timeout: The file lock {lock_path!r} could not be acquired."
+    return (
+        lambda: storage.save(
+            build_save_call(seam="mcp", content="c"), memory=Recorder()
+        ),
+        SaveCallRefused,
+        WRITE_LOCK_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): the local write lock could not be taken ({cause}); "
+                "nothing was saved and ingest was not used",
+            )
+        ],
+        True,
+    )
+
+
+def _data_dir_resolution_fails(ctx):
+    def boom(explicit=None):
+        raise RuntimeError("test data dir failure")
+
+    ctx.monkeypatch.setattr(storage, "_data_path", None)
+    ctx.monkeypatch.setattr(storage, "_resolve_data_dir", boom)
+    return (
+        lambda: storage.save(
+            build_save_call(seam="mcp", content="c"), memory=Recorder()
+        ),
+        SaveCallRefused,
+        WRITE_LOCK_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): the local write lock could not be taken "
+                "(RuntimeError: test data dir failure); nothing was saved and ingest was not used",
+            )
+        ],
+        True,
+    )
+
+
+def _default_memory_cannot_be_opened(ctx):
+    def boom():
+        raise RuntimeError("test memory failure")
+
+    ctx.monkeypatch.setattr(storage, "get_memory", boom)
+    return (
+        lambda: storage.save(build_save_call(seam="mcp", content="c")),
+        SaveCallRefused,
+        MEMORY_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({MEMORY_UNAVAILABLE}): the local memory could not be opened "
+                "(RuntimeError: test memory failure); nothing was saved and ingest was not used",
+            )
+        ],
+        True,
+    )
+
+
+def _lock_failure_already_logged_is_not_logged_again(ctx):
+    from smartmemory.refusal_logging import mark_refusal_logged
+
+    def already_logged(path):
+        raise mark_refusal_logged(RuntimeError("test lock refusal"))
+
+    ctx.monkeypatch.setattr(storage, "_data_path", ctx.tmp_path)
+    ctx.monkeypatch.setattr(storage, "_get_lock_file", already_logged)
+    return (
+        lambda: storage.save(
+            build_save_call(seam="mcp", content="c"), memory=Recorder()
+        ),
+        RuntimeError,
+        None,
+        [],
+        True,
+    )
+
+
+def _lock_failure_in_a_core_without_the_mark(ctx):
+    ctx.monkeypatch.setitem(sys.modules, "smartmemory.refusal_logging", None)
+    ctx.monkeypatch.setattr(storage, "_data_path", ctx.tmp_path)
+
+    def boom(path):
+        raise OSError("test lock failure")
+
+    ctx.monkeypatch.setattr(storage, "_get_lock_file", boom)
+    return (
+        lambda: storage.save(
+            build_save_call(seam="mcp", content="c"), memory=Recorder()
+        ),
+        SaveCallRefused,
+        WRITE_LOCK_UNAVAILABLE,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({WRITE_LOCK_UNAVAILABLE}): the local write lock could not be taken "
+                "(OSError: test lock failure); nothing was saved and ingest was not used",
+            )
+        ],
+        False,
+    )
+
+
+def _uncopyable_request(ctx):
+    return (
+        lambda: build_save_call(
+            seam="mcp", content="c", context={"lock": threading.Lock()}
+        ),
+        SaveCallRefused,
+        UNCOPYABLE_REQUEST,
+        [
+            (
+                CALLER_LOGGER,
+                logging.WARNING,
+                f"Save call refused ({UNCOPYABLE_REQUEST}): the request holds a value that cannot be copied, so it "
+                "cannot be frozen for a retry (TypeError: cannot pickle '_thread.lock' object); nothing was saved "
+                "and no retry key was bound to it",
+            )
+        ],
+        True,
+    )
+
+
+def _reader_refusal(
+    returned,
+    reason,
+    error=SaveReturnRefused,
+    code=None,
+    marked=True,
+    missing_module=None,
+):
+    def row(ctx):
+        if missing_module:
+            ctx.monkeypatch.setitem(sys.modules, missing_module, None)
+        return (
+            lambda: submit(
+                Returns(returned()), build_save_call(seam="mcp", content="c")
+            ),
+            error,
+            code,
+            [(READER_LOGGER, logging.WARNING, reason)],
+            marked,
+        )
+
+    return row
+
+
+def _stage_job_receipt():
+    return build_local_receipt(
+        subject=ReceiptSubject(
+            "stage_job", occurrence_id="test_occ", stage_id="test_stage"
+        ),
+        run_id="test_run_u442",
+        processing_stage=None,
+        execution_state="queued",
+        outcome=None,
+        terminal=False,
+        result_availability="pending",
+    )
+
+
+def _rejected():
+    return decode_receipt(
+        {
+            "schema_version": "1.1",
+            "admission_error": {
+                "code": "idempotency_conflict",
+                "message": "test conflict",
+            },
+        }
+    )
+
+
+REJECTED_WARNING = "Save return save rejected at admission (idempotency_conflict); nothing was stored under a new id"
+
+# (label, row builder). A row builder returns (act, error type, code or None, the exact WARNING list, marked).
+BOUNDARY_ROWS = [
+    ("write-lock data dir is a file", _lock_dir_is_a_file),
+    ("write lock held by another process", _lock_is_held),
+    ("data dir resolution fails", _data_dir_resolution_fails),
+    ("default memory cannot be opened", _default_memory_cannot_be_opened),
+    (
+        "lock failure already logged and marked",
+        _lock_failure_already_logged_is_not_logged_again,
+    ),
+    (
+        "lock failure in a core without the mark",
+        _lock_failure_in_a_core_without_the_mark,
+    ),
+    ("request value cannot be copied", _uncopyable_request),
+    (
+        "returned rejected admission",
+        _reader_refusal(
+            _rejected, REJECTED_WARNING, SaveRejected, "idempotency_conflict"
+        ),
+    ),
+    (
+        "returned rejected admission, core without the mark",
+        _reader_refusal(
+            _rejected,
+            REJECTED_WARNING,
+            SaveRejected,
+            "idempotency_conflict",
+            False,
+            "smartmemory.refusal_logging",
+        ),
+    ),
+    (
+        "returned receipt that is not a save",
+        _reader_refusal(
+            _stage_job_receipt,
+            "Save return save refused: receipt subject stage_job is not a save; no id returned",
+        ),
+    ),
+    (
+        "returned receipt wire that fails validation",
+        _reader_refusal(
+            lambda: _wire(subject={"item_id": "test_item_u442"}),
+            "Save return save refused: save return is not a valid receipt; no id returned",
+        ),
+    ),
+    (
+        "returned receipt of an unsupported major version",
+        _reader_refusal(
+            lambda: _wire(schema_version="2.0"),
+            "Save return save refused: receipt refused by the reader (unsupported_version); no id returned",
+        ),
+    ),
+    (
+        "returned receipt the installed core cannot read",
+        _reader_refusal(
+            lambda: _wire(),
+            "Save return save refused: the installed core cannot read save receipts; no id returned",
+            missing_module="smartmemory.save.receipt",
+        ),
+    ),
+]
+
+
+class Ctx:
+    def __init__(self, monkeypatch, tmp_path, addfinalizer):
+        self.monkeypatch, self.tmp_path, self.addfinalizer = (
+            monkeypatch,
+            tmp_path,
+            addfinalizer,
+        )
+
+
+@pytest.mark.parametrize(
+    "label, build", BOUNDARY_ROWS, ids=[r[0] for r in BOUNDARY_ROWS]
+)
+def test_every_new_failure_boundary_is_one_typed_marked_refusal(
+    label, build, monkeypatch, tmp_path, caplog, request
+):
+    from smartmemory.refusal_logging import refusal_logged
+
+    act, error, code, warnings, marked = build(
+        Ctx(monkeypatch, tmp_path, request.addfinalizer)
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(error) as caught:
+        act()
+    if code is not None:
+        assert caught.value.code == code, label
+    assert _warning_records(caplog) == warnings, label
+    assert refusal_logged(caught.value) is marked, label

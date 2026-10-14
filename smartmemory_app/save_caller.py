@@ -27,10 +27,11 @@ and the receipt only exists once core's facade is enabled.
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
@@ -44,6 +45,9 @@ _SEAM = re.compile(r"[A-Za-z0-9._-]{1,32}")
 SAVE_UNAVAILABLE = "save_unavailable"
 INVALID_SEAM = "invalid_seam"
 NOT_A_RECEIPT = "not_a_receipt"
+UNCOPYABLE_REQUEST = "uncopyable_request"
+WRITE_LOCK_UNAVAILABLE = "write_lock_unavailable"
+MEMORY_UNAVAILABLE = "memory_unavailable"
 
 
 class SaveCallRefused(RuntimeError):
@@ -61,12 +65,41 @@ def refuse(code: str, reason: str, lost: str) -> NoReturn:
     without that module has no such boundary, and the exception is raised unmarked.
     """
     log.warning("Save call refused (%s): %s; %s", code, reason, lost)
-    exc = SaveCallRefused(code, reason)
+    raise mark_logged(SaveCallRefused(code, reason)) from None
+
+
+def mark_logged(exc: BaseException) -> BaseException:
+    """Mark ``exc`` as already logged at WARNING (core's ``mark_refusal_logged``) so a boundary above does not log it again.
+
+    A core without ``smartmemory.refusal_logging`` has no such boundary: ``exc`` is returned unmarked and the refusal
+    is still raised with the one WARNING its raiser logged.
+    """
     try:
         from smartmemory.refusal_logging import mark_refusal_logged
     except ImportError:
-        raise exc from None
-    raise mark_refusal_logged(exc) from None
+        return exc
+    return mark_refusal_logged(exc)
+
+
+def refuse_from(exc: Exception, code: str, reason: str, lost: str) -> NoReturn:
+    """A failure of this seam's own I/O (a data-dir or write-lock step) becomes one typed, marked ``SaveCallRefused``.
+
+    An ``exc`` that is already a logged refusal (core's mark) is raised as it is, so it is never logged twice.
+    """
+    try:
+        from smartmemory.refusal_logging import describe_error, refusal_logged
+    except ImportError:
+        refusal_logged = None
+
+        def describe_error(error: BaseException) -> str:
+            return f"{type(error).__name__}: {error}"
+
+    if refusal_logged is not None and refusal_logged(exc):
+        raise exc
+    log.warning(
+        "Save call refused (%s): %s (%s); %s", code, reason, describe_error(exc), lost
+    )
+    raise mark_logged(SaveCallRefused(code, reason)) from exc
 
 
 def retry_key(supplied: Any = None, *, seam: str) -> Any:
@@ -85,16 +118,66 @@ def retry_key(supplied: Any = None, *, seam: str) -> Any:
     return f"{seam}:{uuid.uuid4().hex}"
 
 
+class FrozenRequest(Mapping):
+    """A deep-copied, read-only snapshot of one save request.
+
+    Built once from the caller's values, so a later change to the caller's own dict, list, context or link objects
+    cannot reach the retry. It has no item assignment, and every read hands back a fresh copy, so changing what a
+    read returned changes nothing here. ``thaw`` is the plain-dict copy ``SmartMemory.save`` receives.
+    """
+
+    __slots__ = ("_snapshot",)
+
+    def __init__(self, request: Mapping[str, Any]) -> None:
+        try:
+            snapshot = copy.deepcopy(dict(request))
+        except (
+            Exception
+        ) as exc:  # a value that cannot be copied cannot be held stable for a retry
+            refuse_from(
+                exc,
+                UNCOPYABLE_REQUEST,
+                "the request holds a value that cannot be copied, so it cannot be frozen for a retry",
+                "nothing was saved and no retry key was bound to it",
+            )
+        object.__setattr__(self, "_snapshot", snapshot)
+
+    def __getitem__(self, name: str) -> Any:
+        return copy.deepcopy(self._snapshot[name])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._snapshot)
+
+    def __len__(self) -> int:
+        return len(self._snapshot)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("a frozen save request cannot be changed")
+
+    def __repr__(self) -> str:
+        return f"FrozenRequest({self._snapshot!r})"
+
+    def thaw(self) -> dict[str, Any]:
+        """A fresh plain-dict deep copy: what one submission hands to ``SmartMemory.save``."""
+        return copy.deepcopy(self._snapshot)
+
+
 @dataclass(frozen=True)
 class SaveCall:
     """One save call, frozen so a re-submission sends the identical request and retry key.
 
-    ``request`` is exactly what ``SmartMemory.save`` receives (it carries ``idempotency_key``).
+    ``request`` is a ``FrozenRequest``: a deep-copied, read-only snapshot taken when the call is built (or constructed),
+    so neither the caller's later changes to the values it passed in nor an assignment to the exposed request changes
+    what a retry sends. Its ``thaw()`` is exactly what ``SmartMemory.save`` receives (it carries ``idempotency_key``).
     ``adapter_namespace`` is this caller's own registered producer namespace (G158), never read from the request.
     """
 
     request: Mapping[str, Any]
     adapter_namespace: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.request, FrozenRequest):
+            object.__setattr__(self, "request", FrozenRequest(self.request))
 
     @property
     def idempotency_key(self) -> Any:
@@ -143,7 +226,7 @@ def submit(memory: Any, call: SaveCall, *, op: str = "save") -> SaveReturn:
             "nothing was saved and add/ingest were not used",
         )
     resolved = resolve_save_return(
-        save(call.request, adapter_namespace=call.adapter_namespace), op=op
+        save(call.request.thaw(), adapter_namespace=call.adapter_namespace), op=op
     )
     if (
         resolved.receipt is None
