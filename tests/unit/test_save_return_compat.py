@@ -394,7 +394,8 @@ def test_only_the_ingest_seam_imports_the_receipt_arm():
                 and node.module == "smartmemory_app.save_return"
             ):
                 importers.add(path.name)
-    assert importers == {"storage.py"}
+    # save_caller.py (U4.42) reads the receipt core's save() returns through the same resolver
+    assert importers == {"storage.py", "save_caller.py"}
 
 
 def test_receipt_without_the_status_badge_reader_is_refused_not_str(
