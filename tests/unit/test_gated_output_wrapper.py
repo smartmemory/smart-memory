@@ -15,13 +15,18 @@ Every case runs the real core: a real lite SQLite store, the real pending read p
 its ``max_scan`` is lowered). The only stand-ins are named where they appear: a recorder around the real ``search``,
 a fault injected at the snapshot read, and a callee that over-returns (real core cannot be made to break its own bound).
 
-WARNING lists are asserted EXACTLY as (logger, level, message), for the loggers this unit writes through. The real
-facade also logs environment lines (reranker, Redis, SmartGraph fallback) and core's own ``lane_gate`` budget line, whose
-exact text core's ``test_search_gate_partial_coverage`` pins, so those loggers are not part of this list.
+WARNING lists are asserted EXACTLY as ordered (logger, level, message) tuples across EVERY logger (fix round 2, F4).
+Rows whose callee is a stand-in assert the complete list (``full_log``). Rows on the real store assert the complete list
+minus ``NOISE``: an explicit, closed list of (logger, message prefix) pairs the real facade logs for its environment, not
+for this unit. Measured by ``u-U5.21/fix2/noise_probe.py``: 31-191 records per call, some of them non-deterministic (the
+reranker's background load, a once-per-process Redis notice, the read-runner OFF notice). Core's own ``lane_gate`` budget
+line is listed too: its exact text is pinned by core's ``test_search_gate_partial_coverage``. A record from any other
+logger, or with any other text, fails the row.
 """
 
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -46,7 +51,27 @@ from smartmemory_app import recall_format, storage
 GATE_LOG = "smartmemory.search.visibility_gate"
 STORAGE_LOG = "smartmemory_app.storage"
 FORMAT_LOG = "smartmemory_app.recall_format"
-UNIT_LOGGERS = {GATE_LOG, STORAGE_LOG, FORMAT_LOG}
+#: (logger, message prefix) the real facade logs for its environment on every call, never for this unit. Closed list.
+NOISE = (
+    ("smartmemory.search.rerank", "Reranker "),
+    ("smartmemory.search.rerank", "Reranking took "),
+    ("smartmemory.redis_gate", "activation boost disabled"),
+    ("smartmemory.redis_gate", "retrieval tracking disabled"),
+    ("smartmemory.search.read_runner_adapter", "switch sm2_read_runner_default OFF"),
+    (
+        "smartmemory.memory.pipeline.stages.search",
+        "SmartGraph returned no usable candidates",
+    ),
+    (
+        "smartmemory.memory.pipeline.stages.search",
+        "Manual similarity scan rejected item ",
+    ),
+    ("smartmemory.smart_memory", "Strength ranking SKIPPED"),
+    ("smartmemory.smart_memory", "Search refill cap"),
+    ("smartmemory.models.rerank", "rerank_unscored"),
+    ("smartmemory.search.pending_facade", "Extraction status unavailable for"),
+    ("smartmemory.search.lane_gate", "Read gate scan budget spent in lane "),
+)
 OFF_SWITCH_WARNING = (
     GATE_LOG,
     "WARNING",
@@ -55,6 +80,7 @@ OFF_SWITCH_WARNING = (
 )
 PARTIAL = ("complete", "read_gate_scan_budget_spent")
 CAP = 200  # min(lane_gate.DEFAULT_MAX_SCAN, read_port.MAX_PAGE_LIMIT)
+FETCH_BOUND = "fetch_bound"  # the client's own reason: it stopped at the widest fetch it may ask for
 
 
 def gate_warning(where, names="complete, read_gate_scan_budget_spent"):
@@ -119,11 +145,17 @@ def world(tmp_path, monkeypatch, caplog):
         mem.close()
 
 
-def unit_log(caplog):
+def full_log(caplog):
+    """The ENTIRE WARNING-or-worse list, every logger, in order: for rows whose callee is a stand-in."""
+    return [(r.name, r.levelname, r.getMessage()) for r in caplog.records]
+
+
+def answer_log(caplog):
+    """The entire list minus the closed ``NOISE`` list: for rows that run the real facade."""
     return [
-        (r.name, r.levelname, r.getMessage())
-        for r in caplog.records
-        if r.name in UNIT_LOGGERS
+        t
+        for t in full_log(caplog)
+        if not any(t[0] == name and t[2].startswith(prefix) for name, prefix in NOISE)
     ]
 
 
@@ -168,7 +200,7 @@ RECALL_ROWS = [
         1,
         [(Q, k) for k in (6, 12, 24, 48, 96, 192, 200)],
         [],
-        PARTIAL,
+        (*PARTIAL, FETCH_BOUND),
         [gate_warning("recall search")] * 7
         + [(STORAGE_LOG, "WARNING", SHORTFALL_BOUND % 0)],
     ),
@@ -199,7 +231,7 @@ RECALL_ROWS = [
         1,
         [(t, k) for k in (3, 6, 12, 24, 48, 96, 192, 200) for t in ("", "/project")],
         ["test_u521_5"],
-        ("read_gate_scan_budget_spent",),
+        ("read_gate_scan_budget_spent", FETCH_BOUND),
         [gate_warning("recall workspace search", "read_gate_scan_budget_spent")] * 8
         + [(STORAGE_LOG, "WARNING", SHORTFALL_BOUND % 1)],
     ),
@@ -262,7 +294,7 @@ def test_recall_widens_to_the_bound_and_says_when_the_answer_is_partial(
     assert ids_in(out) == ids
     assert getattr(out, "partial", ()) == names
     assert type(out) is (PartialText if names else str)
-    assert unit_log(caplog) == warnings
+    assert answer_log(caplog) == warnings
 
 
 def test_a_partial_empty_recall_is_not_the_empty_string(world):
@@ -270,7 +302,7 @@ def test_a_partial_empty_recall_is_not_the_empty_string(world):
     world.budget["max_scan"] = 1
     with switch_override(SWITCH, True):
         out = recall(query=Q)
-    assert out == "" and out.partial == PARTIAL
+    assert out == "" and out.partial == (*PARTIAL, FETCH_BOUND)
 
 
 def test_a_huge_caller_count_is_rendered_bounded_and_the_refusal_still_logs(
@@ -293,18 +325,161 @@ def test_a_huge_caller_count_is_rendered_bounded_and_the_refusal_still_logs(
     finally:
         sys.set_int_max_str_digits(old)
     assert max(k for _, k in world.calls) == CAP
-    assert out.partial == PARTIAL
-    assert unit_log(caplog)[-1] == (
-        STORAGE_LOG,
-        "WARNING",
-        "recall shortfall: requested=<an integer of 16610 bits> emitted=0; stopped widening at a fetch of 200 (core "
-        "reported a partial answer), so eligible candidates past what core examined are not shown",
+    assert out.partial == (*PARTIAL, FETCH_BOUND)
+    assert answer_log(caplog) == [gate_warning("recall search")] * len(world.calls) + [
+        (
+            STORAGE_LOG,
+            "WARNING",
+            "recall shortfall: requested=<an integer of 16610 bits> emitted=0; stopped widening at a fetch of 200 "
+            "(core reported a partial answer), so eligible candidates past what core examined are not shown",
+        )
+    ]
+
+
+# -- recall: a stop at the bound is carried whatever caused it (fix round 2, F1) -------------------------------------
+SHORTFALL_FULL = (
+    "recall shortfall: requested=3 emitted=%d; stopped widening at a fetch of 200 (the page came back full), so "
+    "eligible candidates past what core examined are not shown"
+)
+
+
+@pytest.fixture
+def capped(tmp_path, monkeypatch, caplog):
+    """Review r2 F1 on the real store: 201 visible semantic rows, newest first by one second each. The newest 200 sit
+    below the recall confidence floor; the oldest (``test_cap_200``) is eligible but past the 200-row bound."""
+    monkeypatch.setattr(recall_format, "_trace", lambda **kw: None)
+    mem = create_lite_memory(
+        data_dir=str(tmp_path / "test_u521_cap"), spawn_worker=False
     )
+    calls = []
+    real_search = mem.search
+
+    def recorder(text, **kwargs):
+        calls.append(kwargs.get("top_k"))
+        return real_search(text, **kwargs)
+
+    monkeypatch.setattr(mem, "search", recorder)
+    monkeypatch.setattr(storage, "get_memory", lambda *a, **k: mem)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for n in range(201):
+        mem._graph.backend.add_node(
+            f"test_cap_{n:03d}",
+            {
+                "content": f"atlas budget {n}",
+                "origin": "user:test",
+                "created_at": (base + timedelta(seconds=200 - n)).isoformat(),
+                "confidence": 1.0 if n == 200 else 0.01,
+            },
+            memory_type="semantic",
+        )
+    with switch_override(SWITCH, True):
+        mem.bind_pending_reads(InMemoryPendingStore(), workspace_hidden=False)
+    caplog.set_level(logging.WARNING)
+    try:
+        yield mem, calls
+    finally:
+        mem.close()
+
+
+def floor_drops(fetches, eligible=()):
+    """The wrapper's exact per-row floor WARNINGs: each fetch re-reads its window, newest first."""
+    return [
+        (
+            STORAGE_LOG,
+            "WARNING",
+            f"recall dropped test_cap_{n:03d}: confidence below floor 0.3",
+        )
+        for k in fetches
+        for n in range(min(k, 201))
+        if n != 200 and n not in eligible
+    ]
+
+
+ON_FETCHES = (3, 6, 12, 24, 48, 96, 192, 200)
+OFF_FETCHES = (3, 6, 12, 24, 48, 96, 192, 384)
+
+# (case, the newest row made eligible or None, gate on, fetches, ids emitted, names carried, WARNINGs minus NOISE).
+# ON stops at the bound on a FULL page (core's answer complete) and the answer carries ``fetch_bound``, empty or not.
+# OFF is the legacy unbounded doubling: it reaches the oldest row at 384 and is a plain str.
+CAP_ROWS = [
+    (
+        "on empty carries fetch_bound",
+        None,
+        True,
+        ON_FETCHES,
+        [],
+        (FETCH_BOUND,),
+        [*floor_drops(ON_FETCHES), (STORAGE_LOG, "WARNING", SHORTFALL_FULL % 0)],
+    ),
+    (
+        "on non-empty carries fetch_bound",
+        0,
+        True,
+        ON_FETCHES,
+        ["test_cap_000"],
+        (FETCH_BOUND,),
+        [
+            *floor_drops(ON_FETCHES, eligible=(0,)),
+            (STORAGE_LOG, "WARNING", SHORTFALL_FULL % 1),
+        ],
+    ),
+    (
+        "off empty is the legacy answer",
+        None,
+        False,
+        OFF_FETCHES,
+        ["test_cap_200"],
+        (),
+        [
+            OFF_SWITCH_WARNING,
+            *floor_drops(OFF_FETCHES),
+            (STORAGE_LOG, "WARNING", SHORTFALL_EXHAUSTED % 1),
+        ],
+    ),
+    (
+        "off non-empty is the legacy answer",
+        0,
+        False,
+        OFF_FETCHES,
+        ["test_cap_000", "test_cap_200"],
+        (),
+        [
+            OFF_SWITCH_WARNING,
+            *floor_drops(OFF_FETCHES, eligible=(0,)),
+            (STORAGE_LOG, "WARNING", SHORTFALL_EXHAUSTED % 2),
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case,eligible,on,fetches,ids,names,warnings",
+    CAP_ROWS,
+    ids=[r[0] for r in CAP_ROWS],
+)
+def test_a_stop_at_the_bound_on_a_full_page_is_carried(
+    capped, caplog, case, eligible, on, fetches, ids, names, warnings
+):
+    mem, calls = capped
+    if eligible is not None:
+        mem._graph.backend.set_properties(
+            f"test_cap_{eligible:03d}", {"confidence": 1.0}
+        )
+    with switch_override(SWITCH, on):
+        out = storage.recall(
+            top_k=3, include_snapshot=False, workspace_id="test", strict=False
+        )
+    assert calls == list(fetches)
+    assert ids_in(out) == ids
+    assert getattr(out, "partial", ()) == names
+    assert type(out) is (PartialText if names else str)
+    assert answer_log(caplog) == warnings
 
 
 class OverReturning:
     """A callee that ignores the fetch it was given. Real core cannot be made to break its own bound, so this is the one
-    stand-in for the over-return rows: it returns three times the rows asked for."""
+    stand-in for the over-return rows: it returns three times the rows asked for. Its rows carry a user origin and a
+    write date, so the formatter's own origin and freshness lines stay out of these rows' logs."""
 
     def __init__(self):
         self.calls = []
@@ -320,6 +495,8 @@ class OverReturning:
                 metadata={},
                 confidence=1.0,
                 reference=False,
+                origin="user:test",
+                created_at="2026-01-01T00:00:00+00:00",
             )
             for n in range(top_k * 3)
         ]
@@ -344,66 +521,206 @@ class PartialCallee(OverReturning):
         return SearchResults([row], SearchDiagnostics(coverage={"complete": False}))
 
 
-# (case, arm, gate on, ids emitted, WARNINGs). ON: rows past the fetch are not used and one WARNING says so. OFF: the
-# legacy answer consumes what the callee returned.
-OVER_ROWS = [
-    (
-        "query on",
-        {"query": Q},
-        True,
-        ["o0", "o1", "o2"],
-        [
-            (
-                STORAGE_LOG,
-                "WARNING",
-                "recall search returned 18 rows for a fetch of 6: the extra rows are not used, so the fetch bound holds",
-            )
-        ],
-    ),
-    (
-        "workspace on",
-        {"cwd": "/project"},
-        True,
-        ["o0", "o1", "o2"],
-        [
-            (
-                STORAGE_LOG,
-                "WARNING",
-                "recall recency search returned 9 rows for a fetch of 3: the extra rows are not used, so the fetch bound holds",
-            ),
-            (
-                STORAGE_LOG,
-                "WARNING",
-                "recall workspace search returned 9 rows for a fetch of 3: the extra rows are not used, so the fetch bound holds",
-            ),
-        ],
-    ),
-    ("query off", {"query": Q}, False, ["o0", "o1", "o2"], []),
-]
-
-
-@pytest.mark.parametrize(
-    "case,arm,on,ids,warnings", OVER_ROWS, ids=[r[0] for r in OVER_ROWS]
-)
-def test_recall_does_not_use_rows_past_the_fetch_bound(
-    monkeypatch, caplog, case, arm, on, ids, warnings
-):
-    monkeypatch.setattr(recall_format, "_trace", lambda **kw: None)
-    callee = OverReturning()
-    monkeypatch.setattr(storage, "get_memory", lambda *a, **k: callee)
-    caplog.set_level(logging.WARNING)
-    with switch_override(SWITCH, on):
-        out = recall(**arm)
-    assert ids_in(out) == ids
-    assert [t for t in unit_log(caplog) if t[0] == STORAGE_LOG] == warnings
-
-
-# -- search: filtered widening ---------------------------------------------------------------------------------------
-
 FILTER_WARNING = (
     "local filtered search stopped at a fetch of %d: %d of %d wanted matched and candidates past that window were not "
     "examined"
 )
+
+
+class OverDicts(OverReturning):
+    """The over-returning stand-in in the dictionary shape ``storage.search`` normalizes (review r2's ``Over``): three
+    times the rows asked for, and only the LAST one carries ``marker=yes``, so a match is only ever past the fetch."""
+
+    def search(self, text, *, top_k, **kwargs):
+        self.calls.append((text, top_k))
+        rows = [
+            {
+                "item_id": f"test_over_{n}",
+                "content": "atlas",
+                "memory_type": "semantic",
+                "metadata": {"marker": "yes" if n == top_k * 3 - 1 else "no"},
+            }
+            for n in range(top_k * 3)
+        ]
+        return SearchResults(rows, SearchDiagnostics(coverage={"complete": True}))
+
+
+def over(where, count, fetch):
+    """Core's one fetch-bound WARNING (``visibility_gate.gated_fetch_bound``), the same text at every client site."""
+    return (
+        GATE_LOG,
+        "WARNING",
+        f"{where} returned {count} rows for a fetch of {fetch}: the rows past the fetch were never asked for and are "
+        "not used",
+    )
+
+
+def cap_drops(ids):
+    return [(FORMAT_LOG, "WARNING", f"recall dropped {i}: top_k cap (3)") for i in ids]
+
+
+def dup_drops(ids):
+    """The workspace arm's recency and semantic channels return the same stand-in rows: the second copy is dropped."""
+    return [
+        (FORMAT_LOG, "WARNING", f"recall dropped {i}: duplicate item_id") for i in ids
+    ]
+
+
+def o(*ns):
+    return [f"o{n}" for n in ns]
+
+
+def _recall_ids(**arm):
+    return ids_in(recall(**arm))
+
+
+def _search_ids(**kw):
+    got = storage.search("atlas", **kw)
+    return [r["item_id"] for r in got], getattr(got, "partial", ())
+
+
+# The F2 class (C4 on an over-returning callee): every client fetch consumes at most what it asked for. One row per
+# fetch site in the wrapper: recall query / workspace (recency + semantic) / orient, the orient snapshot lookup, the
+# unfiltered search and the filtered widening. (case, callee, call, gate on, answer, the COMPLETE WARNING list). ON: rows
+# past the fetch are never used and core's one WARNING names the site. OFF: the legacy answer consumes what came back.
+OVER_ROWS = [
+    (
+        "recall query on",
+        OverReturning,
+        lambda: _recall_ids(query=Q),
+        True,
+        o(0, 1, 2),
+        [over("recall search", 18, 6), *cap_drops(o(3, 4, 5))],
+    ),
+    (
+        "recall query off",
+        OverReturning,
+        lambda: _recall_ids(query=Q),
+        False,
+        o(0, 1, 2),
+        cap_drops(o(*range(3, 18))),
+    ),
+    (
+        "recall workspace on",
+        OverReturning,
+        lambda: _recall_ids(cwd="/project"),
+        True,
+        o(0, 1, 2),
+        [
+            over("recall recency search", 9, 3),
+            over("recall workspace search", 9, 3),
+            *dup_drops(o(0, 1, 2)),
+        ],
+    ),
+    (
+        "recall workspace off",
+        OverReturning,
+        lambda: _recall_ids(cwd="/project"),
+        False,
+        o(0, 1, 2),
+        # the formatter walks the two channels in turn: o0's semantic copy, then recency's cap, then semantic's copies
+        [*dup_drops(o(0)), *cap_drops(o(*range(3, 9))), *dup_drops(o(*range(1, 9)))],
+    ),
+    (
+        "orient on",
+        OverReturning,
+        lambda: _recall_ids(),
+        True,
+        o(0, 1, 2),
+        [over("orient recency search", 9, 3)],
+    ),
+    (
+        "orient off",
+        OverReturning,
+        lambda: _recall_ids(),
+        False,
+        o(0, 1, 2),
+        cap_drops(o(*range(3, 9))),
+    ),
+    (
+        "orient snapshot lookup on",
+        OverReturning,
+        lambda: ids_in(
+            storage.recall(
+                top_k=3, include_snapshot=True, workspace_id="test", strict=False
+            )
+        ),
+        True,
+        o(0, 1, 2),
+        [over("orient snapshot lookup", 3, 1), over("orient recency search", 9, 3)],
+    ),
+    (
+        "orient snapshot lookup off",
+        OverReturning,
+        lambda: ids_in(
+            storage.recall(
+                top_k=3, include_snapshot=True, workspace_id="test", strict=False
+            )
+        ),
+        False,
+        o(0, 1, 2),
+        cap_drops(o(*range(3, 9))),
+    ),
+    (
+        "unfiltered search on",
+        OverDicts,
+        lambda: _search_ids(top_k=2),
+        True,
+        (["test_over_0", "test_over_1"], ()),
+        [over("local search", 6, 2)],
+    ),
+    (
+        "unfiltered search off",
+        OverDicts,
+        lambda: _search_ids(top_k=2),
+        False,
+        ([f"test_over_{n}" for n in range(6)], ()),
+        [],
+    ),
+    # review r2 F2: a fetch of 5 used the 15th row. ON: 5/20/50 are each cut, nothing past a fetch matches, the stop at
+    # the loop's widest fetch is said and carried. OFF: the legacy loop matches the row past its fetch.
+    (
+        "filtered search on",
+        OverDicts,
+        lambda: _search_ids(top_k=1, filters={"marker": "yes"}),
+        True,
+        ([], (FETCH_BOUND,)),
+        [
+            over("local filtered search", 15, 5),
+            over("local filtered search", 60, 20),
+            over("local filtered search", 150, 50),
+            (STORAGE_LOG, "WARNING", FILTER_WARNING % (50, 0, 1)),
+        ],
+    ),
+    (
+        "filtered search off",
+        OverDicts,
+        lambda: _search_ids(top_k=1, filters={"marker": "yes"}),
+        False,
+        (["test_over_14"], ()),
+        [],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "case,callee,call,on,answer,warnings", OVER_ROWS, ids=[r[0] for r in OVER_ROWS]
+)
+def test_no_client_fetch_uses_a_row_past_what_it_asked_for(
+    monkeypatch, caplog, case, callee, call, on, answer, warnings
+):
+    monkeypatch.setattr(recall_format, "_trace", lambda **kw: None)
+    stand_in = callee()
+    monkeypatch.setattr(storage, "get_memory", lambda *a, **k: stand_in)
+    caplog.set_level(logging.WARNING)
+    with switch_override(SWITCH, on):
+        got = call()
+    assert got == answer
+    assert full_log(caplog) == warnings
+
+
+# -- search: filtered widening ---------------------------------------------------------------------------------------
+
 # (case, gate on, scan budget, top_k, the fetches core was asked, ids returned, carrier names, WARNINGs). Five of the
 # six matching rows are retired. A partial core is widened 10/40/100 (50x top_k is the loop's own ceiling) and the
 # stop is said. top_k=30 shows the bound: 150/600/1500 becomes 150/200, never a fetch past what core can examine.
@@ -460,7 +777,7 @@ def test_filtered_search_widens_to_the_bound_and_carries_the_partial_answer(
     assert sorted(r["item_id"] for r in got) == sorted(ids)
     assert getattr(got, "partial", ()) == names
     assert type(got) is (PartialRows if names else list)
-    assert unit_log(caplog) == warnings
+    assert answer_log(caplog) == warnings
 
 
 UNFILTERED_ROWS = [
@@ -486,7 +803,7 @@ def test_unfiltered_search_carries_the_partial_answer_on_the_plain_list(
     assert getattr(got, "partial", ()) == names and type(got) is (
         PartialRows if names else list
     )
-    assert unit_log(caplog) == warnings
+    assert answer_log(caplog) == warnings
 
 
 def test_wildcard_complete_page_is_exhaustion_and_a_partial_one_is_refused_at_the_cap(
@@ -496,7 +813,7 @@ def test_wildcard_complete_page_is_exhaustion_and_a_partial_one_is_refused_at_th
     with switch_override(SWITCH, True):
         got = storage.search("*")
     assert [r["item_id"] for r in got] == ["test_u521_5"] and type(got) is list
-    assert unit_log(caplog) == []
+    assert answer_log(caplog) == []
     caplog.clear()
     callee = PartialCallee()
     monkeypatch.setattr(storage, "get_memory", lambda *a, **k: callee)
@@ -508,7 +825,7 @@ def test_wildcard_complete_page_is_exhaustion_and_a_partial_one_is_refused_at_th
         storage.search("*")
     assert [k for _, k in callee.calls] == [200, 400]
     # core's coverage WARNING (visibility_gate) once per widened window (200, 400), then the wrapper's refusal
-    assert unit_log(caplog) == [
+    assert full_log(caplog) == [
         (
             GATE_LOG,
             "WARNING",
@@ -534,7 +851,7 @@ def test_the_wildcard_refuses_a_callee_that_over_returns(monkeypatch, caplog):
         pytest.raises(storage.WildcardEnumerationOverflowError),
     ):
         storage.search("*")
-    assert unit_log(caplog) == [
+    assert full_log(caplog) == [
         (
             STORAGE_LOG,
             "WARNING",
@@ -575,26 +892,99 @@ ORIGIN = (GATE_LOG, "WARNING", "origin: intake port unavailable")
 SNAPSHOT_LOST = (FORMAT_LOG, "WARNING", "Orient lost snapshot context: no intake port")
 DECISION_LOST = (FORMAT_LOG, "WARNING", "Recall lost decision lookup: no intake port")
 
-# (case, exception, gate on, whether the origin logged it, the exact WARNING list). ON: a marked refusal adds nothing to
-# what its origin wrote, an unmarked failure is logged here. OFF: the base's behavior whatever the mark: the origin line
-# AND the wrapper's own line (BASE OFF = ['origin: intake port unavailable', 'Orient lost snapshot context: no intake
-# port'], measured with the base helper by the reviewer and again in the report).
+SHORT_1 = (STORAGE_LOG, "WARNING", SHORTFALL_EXHAUSTED % 1)
+
+# The C1 and C8 classes on the two optional-context degrade arms (hooks must degrade, so they are carried, not raised).
+# (case, site, exception, gate on, whether the origin logged it, names the answer carries, the WARNING list minus NOISE).
+# ON: a marked refusal adds nothing to what its origin wrote, an unmarked failure is logged here, and the answer CARRIES
+# what was lost (fix round 2, decision 2): a lost snapshot frame or lost decisions are never read as "none". OFF: the
+# base's behavior whatever the mark: the origin line AND the wrapper's own line (BASE OFF = ['origin: intake port
+# unavailable', 'Orient lost snapshot context: no intake port'], measured with the base helper by the reviewer and again
+# in the report), and a plain str.
 DEGRADE_ROWS = [
-    ("on marked", _marked, True, True, [ORIGIN], [ORIGIN]),
-    ("on unmarked", _unmarked, True, False, [SNAPSHOT_LOST], [DECISION_LOST]),
     (
-        "off marked is the base's two lines",
+        "snapshot on marked",
+        "snapshot",
+        _marked,
+        True,
+        True,
+        ("snapshot_lookup_failed",),
+        [ORIGIN, SHORT_1],
+    ),
+    (
+        "snapshot on unmarked",
+        "snapshot",
+        _unmarked,
+        True,
+        False,
+        ("snapshot_lookup_failed",),
+        [SNAPSHOT_LOST, SHORT_1],
+    ),
+    (
+        "snapshot off marked",
+        "snapshot",
         _marked,
         False,
         True,
-        [ORIGIN, SNAPSHOT_LOST],
-        [ORIGIN, DECISION_LOST],
+        (),
+        [ORIGIN, SNAPSHOT_LOST, OFF_SWITCH_WARNING],
     ),
-    ("off unmarked", _unmarked, False, False, [SNAPSHOT_LOST], [DECISION_LOST]),
+    (
+        "snapshot off unmarked",
+        "snapshot",
+        _unmarked,
+        False,
+        False,
+        (),
+        [SNAPSHOT_LOST, OFF_SWITCH_WARNING],
+    ),
+    (
+        "decision on marked",
+        "decision",
+        _marked,
+        True,
+        True,
+        ("decision_lookup_failed",),
+        [ORIGIN, SHORT_1],
+    ),
+    (
+        "decision on unmarked",
+        "decision",
+        _unmarked,
+        True,
+        False,
+        ("decision_lookup_failed",),
+        [DECISION_LOST, SHORT_1],
+    ),
+    (
+        "decision off marked",
+        "decision",
+        _marked,
+        False,
+        True,
+        (),
+        [ORIGIN, DECISION_LOST, OFF_SWITCH_WARNING],
+    ),
+    (
+        "decision off unmarked",
+        "decision",
+        _unmarked,
+        False,
+        False,
+        (),
+        [DECISION_LOST, OFF_SWITCH_WARNING],
+    ),
 ]
 
 
-def _run_degrade(world, caplog, exc, on, origin, site):
+@pytest.mark.parametrize(
+    "case,site,exc,on,origin,names,warnings",
+    DEGRADE_ROWS,
+    ids=[r[0] for r in DEGRADE_ROWS],
+)
+def test_a_degrade_arm_logs_a_refusal_once_and_the_answer_says_what_was_lost(
+    world, caplog, case, site, exc, on, origin, names, warnings
+):
     def raise_it():
         error = exc()
         if origin:
@@ -602,7 +992,6 @@ def _run_degrade(world, caplog, exc, on, origin, site):
         raise error
 
     real = world.mem.search
-    kwargs = {"include_snapshot": site == "snapshot"}
     if site == "snapshot":
 
         def search(text, **kw):
@@ -618,40 +1007,24 @@ def _run_degrade(world, caplog, exc, on, origin, site):
     caplog.clear()
     try:
         with switch_override(SWITCH, on):
-            storage.recall(
-                cwd="/project", top_k=3, workspace_id="test", strict=False, **kwargs
+            out = storage.recall(
+                cwd="/project",
+                top_k=3,
+                workspace_id="test",
+                strict=False,
+                include_snapshot=site == "snapshot",
             )
     finally:
         recall_format._ACTIVE_TRACE.reset(token)
-    # the OFF arm also logs core's OFF switch line and the recall bookkeeping, which are not this refusal's
-    return [
-        t
-        for t in unit_log(caplog)
-        if t != OFF_SWITCH_WARNING
-        and not t[2].startswith(("recall shortfall", "recall dropped"))
-    ], trace
-
-
-@pytest.mark.parametrize(
-    "case,exc,on,origin,snap,_d", DEGRADE_ROWS, ids=[r[0] for r in DEGRADE_ROWS]
-)
-def test_snapshot_degrade_logs_a_refusal_once(
-    world, caplog, case, exc, on, origin, snap, _d
-):
-    warnings, trace = _run_degrade(world, caplog, exc, on, origin, "snapshot")
-    assert warnings == snap
-    assert trace["degradations"] == ["Orient lost snapshot context: no intake port"]
-
-
-@pytest.mark.parametrize(
-    "case,exc,on,origin,_s,decision", DEGRADE_ROWS, ids=[r[0] for r in DEGRADE_ROWS]
-)
-def test_decision_lookup_degrade_logs_a_refusal_once(
-    world, caplog, case, exc, on, origin, _s, decision
-):
-    warnings, trace = _run_degrade(world, caplog, exc, on, origin, "decision")
-    assert warnings == decision
-    assert trace["degradations"] == ["Recall lost decision lookup: no intake port"]
+    assert getattr(out, "partial", ()) == names
+    assert type(out) is (PartialText if names else str)
+    assert answer_log(caplog) == warnings
+    lost = (
+        "Orient lost snapshot context"
+        if site == "snapshot"
+        else "Recall lost decision lookup"
+    )
+    assert trace["degradations"] == [f"{lost}: no intake port"]
 
 
 # (case, error, gate on, WARNING list). The log is skipped for exactly one input: a marked refusal with the gate ON.
@@ -692,7 +1065,7 @@ def test_record_hook_degradation_reads_the_mark_from_the_exception_only(
             recall_format.record_hook_degradation("Lost thing", make())
     finally:
         recall_format._ACTIVE_TRACE.reset(token)
-    assert unit_log(caplog) == warnings
+    assert full_log(caplog) == warnings
     assert trace["degradations"] == ["Lost thing: boom"]
 
 
@@ -739,25 +1112,21 @@ def test_a_gate_refusal_propagates_from_search_and_is_logged_once(unbound, caplo
     with switch_override(SWITCH, True), pytest.raises(PendingFacadeUnavailable):
         storage.search("atlas", top_k=3)
     core_logger = "smartmemory.search.pending_facade"
-    assert [
-        (r.name, r.levelname, r.getMessage())
-        for r in caplog.records
-        if r.name == core_logger
-    ] == [
+    # a refusal row: the COMPLETE list, every logger. The origin's line once, nothing from the wrapper.
+    assert full_log(caplog) == [
         (
             core_logger,
             "WARNING",
             "Pending facade read refused: intake port and workspace visibility authority are not bound",
         )
     ]
-    assert unit_log(caplog) == []
 
 
 def test_the_same_search_with_the_gate_off_is_the_legacy_answer(unbound, caplog):
     with switch_override(SWITCH, False):
         got = storage.search("atlas", top_k=3)
     assert [r["item_id"] for r in got] == ["test_row"] and type(got) is list
-    assert unit_log(caplog) == [OFF_SWITCH_WARNING]
+    assert answer_log(caplog) == [OFF_SWITCH_WARNING]
 
 
 def test_the_bound_gate_serves_the_row_with_its_status_carrier(unbound):

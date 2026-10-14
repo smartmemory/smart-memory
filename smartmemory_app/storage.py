@@ -483,8 +483,10 @@ def persist_provenance(edits) -> dict:
 
 _WILDCARD_PENDING_WINDOW = 200
 _WILDCARD_CORE_CAP = 102_400
-#: Reason the wrapper adds, beside core's coverage names, when a widening loop stopped at the bound it may ask for.
-_FETCH_BOUND_REASON = "fetch_bound"
+#: Reasons the wrapper adds to a gated (switch ON) recall answer, beside core's coverage names, when optional context it
+#: would have included could not be read: the answer is then partial, never read as "there was none" (U5.21, C8).
+_SNAPSHOT_LOST_REASON = "snapshot_lookup_failed"
+_DECISIONS_LOST_REASON = "decision_lookup_failed"
 
 
 def _gated_fetch_cap() -> int | None:
@@ -793,15 +795,27 @@ def search(
             all_items = [r for r in all_items if _keep(r)]
         return all_items
     from smartmemory.search.results import carry_partial
-    from smartmemory.search.visibility_gate import gated_partial_coverage
+    from smartmemory.search.visibility_gate import (
+        FETCH_BOUND_REASON,
+        gated_fetch_bound,
+        gated_partial_coverage,
+    )
 
     if not filters:
         results = mem.search(query, top_k=top_k, **core_kwargs)
         partial = gated_partial_coverage(results, where="local search")
         if isinstance(results, dict):
+            # U5.21 (C4): gate ON, no group holds a row past the fetch (a conforming grouped answer is never cut).
             return {
-                key: [_result_dict(r) for r in items] for key, items in results.items()
+                key: [
+                    _result_dict(r)
+                    for r in gated_fetch_bound(
+                        items, top_k, where=f"local search group {key!r}"
+                    )
+                ]
+                for key, items in results.items()
             }
+        results = gated_fetch_bound(results, top_k, where="local search")
         # U5.21 (C8): the call's completeness rides on the returned list (still a plain list to every caller), so a
         # partial answer with no visible row is never read downstream as "nothing found".
         return carry_partial([_result_dict(r) for r in results], partial)
@@ -821,6 +835,8 @@ def search(
             asked = fetch_k
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
         partial = gated_partial_coverage(results, where="local filtered search")
+        # U5.21 (C4): a row past the fetch was never asked for, so it is neither matched nor used (gate ON).
+        results = gated_fetch_bound(results, fetch_k, where="local filtered search")
         items = [_result_dict(r) for r in results]
         matched = [
             r
@@ -843,7 +859,7 @@ def search(
             len(matched),
             top_k,
         )
-        partial = (*partial, _FETCH_BOUND_REASON)
+        partial = (*partial, FETCH_BOUND_REASON)
     return carry_partial(matched[:top_k], partial)
 
 
@@ -885,7 +901,11 @@ def recall(
     )
 
     from smartmemory.search.results import carry_partial_text
-    from smartmemory.search.visibility_gate import gated_partial_coverage
+    from smartmemory.search.visibility_gate import (
+        FETCH_BOUND_REASON,
+        gated_fetch_bound,
+        gated_partial_coverage,
+    )
 
     t0 = time_ms()
     mem = get_memory()
@@ -913,17 +933,26 @@ def recall(
     # 1. Optional snapshot frame (graph-mirrored markdown from CORE-SUMMARY-1)
     excluded = set()
     frame = ""
+    # U5.21 (C3/C8): why the optional context that rides on the answer is incomplete. Gate ON only; OFF stays ().
+    context_partial: tuple[str, ...] = ()
+    gated = _gated_fetch_cap() is not None
     if include_snapshot:
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
-            # The frame is one newest row: a partial answer only means the newest one may be unexamined, and the
-            # WARNING from the reader names it. The frame is optional context, never the recall answer.
-            gated_partial_coverage(snaps, where="orient snapshot lookup")
+            # The frame is one newest row: a partial answer means the newest one may be unexamined. The reader's WARNING
+            # names it and the answer carries it, so a missing frame is not read as "no snapshot".
+            context_partial = gated_partial_coverage(
+                snaps, where="orient snapshot lookup"
+            )
+            snaps = gated_fetch_bound(snaps, 1, where="orient snapshot lookup")
         except Exception as exc:  # noqa: BLE001
             # U5.21 (C1): record_hook_degradation reads core's logged mark off ``exc`` (gate ON only), so a refusal the
             # raising site already logged is not logged twice. Any other failure logs as before.
             record_hook_degradation("Orient lost snapshot context", exc)
             snaps = []
+            if gated:
+                # C8: a lookup that failed is not "no snapshot". The answer says the frame was lost.
+                context_partial = (_SNAPSHOT_LOST_REASON,)
         snaps = filter_hook_items(snaps, excluded)
         if snaps:
             snap = snaps[0]
@@ -988,6 +1017,9 @@ def recall(
     except Exception as exc:
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
+        if gated:
+            # C8: a lookup that failed is not "no decisions". The answer says the decisions were lost.
+            context_partial = (*context_partial, _DECISIONS_LOST_REASON)
 
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
@@ -998,16 +1030,7 @@ def recall(
         fetch_k = min(fetch_k, cap)
 
     def examined(found, bound: int, where: str) -> list:
-        rows = list(found)
-        if cap is not None and len(rows) > bound:
-            log.warning(
-                "%s returned %d rows for a fetch of %d: the extra rows are not used, so the fetch bound holds",
-                where,
-                len(rows),
-                bound,
-            )
-            rows = rows[:bound]
-        return rows
+        return list(gated_fetch_bound(found, bound, where=where))
 
     recent_k, semantic_k = _split_recall_counts(requested)
     results = []
@@ -1074,6 +1097,8 @@ def recall(
                 if partial
                 else "the page came back full"
             )
+            # C3/C8: candidates past the bound were not examined, so the answer is partial whatever made the stop.
+            partial_names = (*partial_names, FETCH_BOUND_REASON)
             break
         fetch_k = fetch_k * 2 if cap is None else min(fetch_k * 2, cap)
 
@@ -1124,7 +1149,9 @@ def recall(
 
     # U5.21 (C8): an empty or short recall from a partial answer is not "no memories". The text it returns is the plain
     # str it always was (OFF: the same object) and its ``.partial`` names why core called the answer partial.
-    return carry_partial_text(out, partial_names)
+    return carry_partial_text(
+        out, tuple(dict.fromkeys((*context_partial, *partial_names)))
+    )
 
 
 def _count_text(n: int) -> str:
