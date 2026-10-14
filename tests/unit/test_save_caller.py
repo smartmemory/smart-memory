@@ -161,7 +161,10 @@ def test_a_bad_seam_is_one_typed_refusal_with_one_warning(label, seam, caplog):
 def test_a_bad_seam_is_refused_even_when_a_key_is_supplied(caplog):
     with caplog.at_level(logging.WARNING), pytest.raises(SaveCallRefused):
         retry_key("test-key", seam="a:b")
-    assert len(warnings_of(caplog)) == 1
+    assert warnings_of(caplog) == [
+        "Save call refused (invalid_seam): seam 'a:b' is not 1-32 characters of A-Z a-z 0-9 . _ -; "
+        "no retry key minted"
+    ]
 
 
 def test_a_resubmitted_call_sends_the_same_key_and_request(memory, manager):
@@ -317,9 +320,13 @@ def test_a_bad_supplied_key_is_cores_refusal_and_never_replaced(
 ):
     call = build_save_call(seam="mcp", content="c", idempotency_key=key)
     assert call.idempotency_key == key
-    with caplog.at_level(logging.WARNING), pytest.raises(SaveRequestError):
+    with caplog.at_level(logging.WARNING), pytest.raises(SaveRequestError) as caught:
         submit(memory, call)
-    assert len(warnings_of(caplog)) == 1
+    from smartmemory.refusal_logging import refusal_class_name, refusal_text
+
+    assert warnings_of(caplog) == [
+        f"save refused ({refusal_class_name(caught.value)}): {refusal_text(caught.value)}; nothing was admitted"
+    ]  # core's one WARNING, rendered by core's own helpers; this seam adds none
     assert manager.calls == []
 
 
@@ -564,6 +571,17 @@ def test_storage_save_refuses_hosted_with_one_warning_and_never_ingests(
     ]
 
 
+#: The one WARNING each seam refusal in the test below logs.
+SEAM_REFUSAL_MESSAGES = {
+    INVALID_SEAM: "Save call refused (invalid_seam): seam 'bad seam!' is not 1-32 characters of A-Z a-z 0-9 . _ -; "
+    "no retry key minted",
+    SAVE_UNAVAILABLE: "Save call refused (save_unavailable): NoSave has no save(); nothing was saved and add/ingest "
+    "were not used",
+    NOT_A_RECEIPT: "Save call refused (not_a_receipt): Legacy.save() returned str, not a receipt; no id was "
+    "inferred from it",
+}
+
+
 def test_every_refusal_of_the_seam_is_marked_logged_for_the_boundary_above(caplog):
     """One row per refusal site: the WARNING is logged here, so the exception carries core's already-logged mark."""
     from smartmemory.refusal_logging import refusal_logged
@@ -591,7 +609,7 @@ def test_every_refusal_of_the_seam_is_marked_logged_for_the_boundary_above(caplo
         with caplog.at_level(logging.WARNING), pytest.raises(SaveCallRefused) as caught:
             act()
         assert caught.value.code == code and refusal_logged(caught.value), code
-        assert len(warnings_of(caplog)) == 1, code
+        assert warnings_of(caplog) == [SEAM_REFUSAL_MESSAGES[code]], code
 
 
 def test_a_core_without_refusal_logging_still_refuses_once_unmarked(
@@ -603,7 +621,7 @@ def test_a_core_without_refusal_logging_still_refuses_once_unmarked(
         build_save_call(seam="bad seam!", content="c")
     assert caught.value.code == INVALID_SEAM
     assert not any(k.startswith("_") and "logged" in k for k in vars(caught.value))
-    assert len(warnings_of(caplog)) == 1
+    assert warnings_of(caplog) == [SEAM_REFUSAL_MESSAGES[INVALID_SEAM]]
 
 
 def test_storage_save_with_the_facade_off_is_cores_refusal(
@@ -612,7 +630,10 @@ def test_storage_save_with_the_facade_off_is_cores_refusal(
     monkeypatch.setattr(storage, "_data_path", tmp_path)
     with caplog.at_level(logging.WARNING), pytest.raises(SaveNotEnabled):
         storage.save(build_save_call(seam="mcp", content="c"), memory=memory)
-    assert len(warnings_of(caplog)) == 1
+    assert warnings_of(caplog) == [
+        "save refused: no save manager is installed (the common-receipt facade is not enabled); "
+        "nothing was admitted and add/ingest were not used"
+    ]
 
 
 # --- dormancy -----------------------------------------------------------------------------------------------------
