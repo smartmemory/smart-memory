@@ -1,6 +1,6 @@
 """DIST-OBSIDIAN-LITE-1 — daemon HTTP contract tests against SDK shapes.
 
-Pins the request/response shapes the smartmemory-obsidian plugin (via
+Pins the request/response shapes the smart-memory-obsidian plugin (via
 smartmemory-sdk-js) sends, so the daemon stays compatible with the SDK
 contract used by the cloud service. Each test sends the exact body the
 SDK produces and asserts the response is what the plugin parses.
