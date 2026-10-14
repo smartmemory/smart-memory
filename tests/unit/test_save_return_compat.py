@@ -820,6 +820,23 @@ def test_a_failed_inspection_is_one_typed_refusal_and_is_never_inspected_again(c
         assert refusal_logged(caught.value) is True, consumer
 
 
+def test_a_core_without_refusal_logging_still_refuses_once_unmarked(
+    monkeypatch, caplog
+):
+    """The ImportError arms of the mark (``_logged``, ``_cause_logged``): no mark module means no boundary that reads one, never a lost refusal."""
+    monkeypatch.setitem(sys.modules, "smartmemory.refusal_logging", None)
+    with caplog.at_level(logging.WARNING), pytest.raises(SaveReturnRefused) as caught:
+        resolve_save_return(FlakyMapping(), op="add")
+    assert not any("logged" in key for key in vars(caught.value))
+    assert _warning_records(caplog) == [
+        (
+            LOGGER,
+            logging.WARNING,
+            "Save return add refused: save return cannot be inspected; no id returned",
+        )
+    ]
+
+
 def _warning_records(caplog):
     return [
         (r.name, r.levelno, r.getMessage())
