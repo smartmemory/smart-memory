@@ -383,6 +383,27 @@ def _second_core_copy_rejected():
     return module.decode_receipt(N1_REJECTED)
 
 
+def _refusal_status_unreadable():
+    """A reader-refusal subclass whose ``status`` (core reads ``error.code``) raises."""
+    refusal = DerivedRefusal(
+        core_receipt.ReceiptError("unsupported_version", "test"), dict(N1_FUTURE)
+    )
+    object.__setattr__(refusal, "error", None)
+    return refusal
+
+
+class _NoDeepcopy:
+    def __deepcopy__(self, memo):
+        raise RuntimeError("test: the receipt's data cannot be exported")
+
+
+def _unexportable_receipt():
+    """A receipt subclass whose core export (``Receipt.to_dict``, a deepcopy of its data) raises."""
+    receipt = DerivedReceipt(_n1_wire())
+    object.__setattr__(receipt, "_data", _NoDeepcopy())
+    return receipt
+
+
 class UninspectableMapping(Mapping):
     """A mapping whose membership test raises: the arm rule itself cannot tell it apart."""
 
@@ -399,7 +420,7 @@ class UninspectableMapping(Mapping):
         raise RuntimeError("test: membership cannot be read")
 
 
-# (label, make, kind). kind is admitted | rejected | refusal | not_save | foreign | uninspectable | legacy.
+# (label, make, kind). kind is admitted | rejected | refusal | not_save | foreign | uninspectable | refusal_unreadable | unexportable | legacy.
 N1_ROWS = [
     (
         "core receipt admitted",
@@ -449,6 +470,12 @@ N1_ROWS = [
         "rejected",
     ),
     ("mapping whose membership test raises", UninspectableMapping, "uninspectable"),
+    (
+        "reader refusal whose status cannot be read",
+        _refusal_status_unreadable,
+        "refusal_unreadable",
+    ),
+    ("receipt whose core export raises", _unexportable_receipt, "unexportable"),
     ("legacy id string", lambda: "test-id", "legacy"),
     ("legacy dict", lambda: {"item_id": "test-id", "queued": True}, "legacy"),
     ("legacy int", lambda: 7, "legacy"),
@@ -470,6 +497,14 @@ def _n1_refused(kind, op):
         "not_save": (
             SaveReturnRefused,
             f"Save return {op} refused: receipt subject stage_job is not a save; no id returned",
+        ),
+        "refusal_unreadable": (
+            SaveReturnRefused,
+            f"Save return {op} refused: receipt refused by the reader (unreadable); no id returned",
+        ),
+        "unexportable": (
+            SaveReturnRefused,
+            f"Save return {op} refused: save return is not a readable receipt; no id returned",
         ),
         "uninspectable": (
             SaveReturnRefused,
