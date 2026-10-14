@@ -420,6 +420,52 @@ class UninspectableMapping(Mapping):
         raise RuntimeError("test: membership cannot be read")
 
 
+class ProjectedReceipt(core_receipt.Receipt, Mapping):
+    """A receipt whose Mapping view projects an admitted wire; core's own export shows its rejection (r3 F1)."""
+
+    def __iter__(self):
+        return iter(_n1_wire())
+
+    def __len__(self):
+        return len(_n1_wire())
+
+    def __getitem__(self, key):
+        return _n1_wire()[key]
+
+
+class MappingReceipt(core_receipt.Receipt, Mapping):
+    """A receipt whose Mapping view is a plain legacy id shape with no schema_version (r3 F1)."""
+
+    def __iter__(self):
+        return iter(("item_id", "queued"))
+
+    def __len__(self):
+        return 2
+
+    def __getitem__(self, key):
+        return {"item_id": "test-legacy-id", "queued": True}[key]
+
+
+class StringReceipt(core_receipt.Receipt, str):
+    """A receipt that also is a (here empty, so falsy) string (r3 F1)."""
+
+
+def _named_mapping_receipt():
+    class Receipt(
+        Mapping
+    ):  # not core's: a mapping lookalike projecting an admitted wire
+        def __iter__(self):
+            return iter(_n1_wire())
+
+        def __len__(self):
+            return len(_n1_wire())
+
+        def __getitem__(self, key):
+            return _n1_wire()[key]
+
+    return Receipt()
+
+
 # (label, make, kind). kind is admitted | rejected | refusal | not_save | foreign | uninspectable | refusal_unreadable | unexportable | legacy.
 N1_ROWS = [
     (
@@ -476,6 +522,31 @@ N1_ROWS = [
         "refusal_unreadable",
     ),
     ("receipt whose core export raises", _unexportable_receipt, "unexportable"),
+    (
+        "receipt that also is a Mapping projecting an admitted wire, r3 F1",
+        lambda: ProjectedReceipt(N1_REJECTED),
+        "rejected",
+    ),
+    (
+        "receipt that also is a Mapping with no schema_version, r3 F1",
+        lambda: MappingReceipt(N1_REJECTED),
+        "rejected",
+    ),
+    (
+        "receipt that also is a str, r3 F1",
+        lambda: StringReceipt(N1_REJECTED),
+        "rejected",
+    ),
+    (
+        "admitted receipt that also is a str, r3 F1",
+        lambda: StringReceipt(_n1_wire()),
+        "admitted",
+    ),
+    (
+        "lookalike Mapping named Receipt projecting an admitted wire, r3 F1",
+        _named_mapping_receipt,
+        "foreign",
+    ),
     ("legacy id string", lambda: "test-id", "legacy"),
     ("legacy dict", lambda: {"item_id": "test-id", "queued": True}, "legacy"),
     ("legacy int", lambda: 7, "legacy"),
@@ -595,6 +666,158 @@ def test_every_receipt_subtype_reaches_the_reader_on_every_consumer(
                 consumer,
             )
             assert refusal_logged(caught.value) is True, (label, consumer)
+
+
+# --- fix round 3 (F2, F3) ---------------------------------------------------------------------------------------
+# F2, bug class "re-log of an already-marked failure": a reader catch whose cause already carries core's logged mark
+# raises the typed refusal chained from it with no WARNING of its own, so the whole failure leaves ONE WARNING (the
+# dependency's). One row per catch site of resolve_save_return. F3, bug class "uncertainty read as legacy success": an
+# inspection failure ends in the typed, once-logged refusal on the FIRST failure and is never inspected again.
+DEPENDENCY_WARNING = "test dependency refused; receipt inspection unavailable"
+DEPENDENCY_RECORD = ("test_dependency", logging.WARNING, DEPENDENCY_WARNING)
+
+
+def _dependency_fails(*_args, **_kwargs):
+    """A dependency that logs its one WARNING, marks the refusal it raises as logged, and raises."""
+    from smartmemory.refusal_logging import mark_refusal_logged
+
+    logging.getLogger("test_dependency").warning(DEPENDENCY_WARNING)
+    raise mark_refusal_logged(RuntimeError("test dependency unavailable"))
+
+
+class MarkedMapping(Mapping):
+    """A mapping whose membership test (the arm rule) fails with a marked refusal."""
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, key):
+        _dependency_fails()
+
+
+def _patch_core_export(mp):
+    mp.setattr(core_receipt.Receipt, "to_dict", _dependency_fails)
+
+
+def _patch_codec(mp):
+    mp.setattr(core_receipt, "decode_receipt", _dependency_fails)
+
+
+def _patch_codec_validation(mp):
+    from smartmemory.refusal_logging import mark_refusal_logged
+
+    def fails(wire):
+        logging.getLogger("test_dependency").warning(DEPENDENCY_WARNING)
+        raise mark_refusal_logged(core_receipt.ReceiptValidationError([]))
+
+    mp.setattr(core_receipt, "decode_receipt", fails)
+
+
+def _patch_refusal_status(mp):
+    mp.setattr(core_receipt.ReceiptRefusal, "status", property(_dependency_fails))
+
+
+def _patch_receipt_text(mp):
+    mp.setattr(core_receipt.Receipt, "__str__", _dependency_fails)
+
+
+def _no_patch(mp):
+    return None
+
+
+# (site, make, patch, the reader line that catches). One row per except of resolve_save_return that has a cause.
+MARKED_ROWS = [
+    ("arm check (is_receipt_arm)", MarkedMapping, _no_patch),
+    (
+        "core export of a receipt object",
+        lambda: core_receipt.Receipt(N1_REJECTED),
+        _patch_core_export,
+    ),
+    ("codec raises (generic catch)", lambda: dict(N1_REJECTED), _patch_codec),
+    (
+        "codec raises a validation error",
+        lambda: dict(N1_REJECTED),
+        _patch_codec_validation,
+    ),
+    (
+        "status of a reader refusal object",
+        lambda: core_receipt.decode_receipt(N1_FUTURE),
+        _patch_refusal_status,
+    ),
+    (
+        "status of a decoded reader refusal",
+        lambda: dict(N1_FUTURE),
+        _patch_refusal_status,
+    ),
+    ("export of the decoded receipt", _n1_wire, _patch_core_export),
+    ("summary of an admitted receipt", _n1_wire, _patch_receipt_text),
+]
+
+
+@pytest.mark.parametrize(
+    "label, make, patch", MARKED_ROWS, ids=[r[0] for r in MARKED_ROWS]
+)
+def test_a_marked_cause_is_refused_with_no_second_warning_on_every_consumer(
+    label, make, patch, monkeypatch, caplog
+):
+    from smartmemory.refusal_logging import refusal_logged
+
+    value = make()
+    patch(monkeypatch)
+    for consumer, call in N1_CONSUMERS:
+        caplog.clear()
+        with pytest.raises(SaveReturnRefused) as caught:
+            call(value)
+        assert type(caught.value) is SaveReturnRefused, (label, consumer)
+        assert _warning_records(caplog) == [DEPENDENCY_RECORD], (label, consumer)
+        assert refusal_logged(caught.value) is True, (label, consumer)
+        assert refusal_logged(caught.value.__cause__) is True, (label, consumer)
+
+
+class FlakyMapping(Mapping):
+    """The first membership test fails, every later one succeeds without schema_version (the r3 F3 repro)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __iter__(self):
+        return iter(("item_id",))
+
+    def __len__(self):
+        return 1
+
+    def __getitem__(self, key):
+        if key == "item_id":
+            return "test-legacy-id"
+        raise KeyError(key)
+
+    def __contains__(self, key):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("test inspection unavailable")
+        return False
+
+
+def test_a_failed_inspection_is_one_typed_refusal_and_is_never_inspected_again(caplog):
+    from smartmemory.refusal_logging import refusal_logged
+
+    for consumer, call in N1_CONSUMERS:
+        caplog.clear()
+        value = FlakyMapping()
+        with pytest.raises(SaveReturnRefused) as caught:
+            call(value)
+        assert value.calls == 1, consumer
+        assert _warning_records(caplog) == [
+            (
+                LOGGER,
+                logging.WARNING,
+                "Save return add refused: save return cannot be inspected; no id returned",
+            )
+        ], consumer
+        assert refusal_logged(caught.value) is True, consumer
 
 
 def _warning_records(caplog):
