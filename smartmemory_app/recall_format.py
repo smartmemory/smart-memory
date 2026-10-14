@@ -490,10 +490,17 @@ def record_hook_error(message: str, error: Exception | str) -> None:
         active["errors"].append(detail)
 
 
-def record_hook_degradation(message: str, error: Exception | str) -> None:
-    """Log a non-fatal loss separately from a failed injection."""
+def record_hook_degradation(
+    message: str, error: Exception | str, *, logged: bool = False
+) -> None:
+    """Log a non-fatal loss separately from a failed injection.
+
+    ``logged``: the site that raised ``error`` already wrote its WARNING (a core refusal carrying
+    ``smartmemory.refusal_logging``'s mark), so the loss is recorded in the trace without a second one (U5.21).
+    """
     detail = f"{message}: {error}"
-    log.warning("%s", detail)
+    if not logged:
+        log.warning("%s", detail)
     active = _ACTIVE_TRACE.get()
     if active is not None:
         active.setdefault("degradations", []).append(detail)

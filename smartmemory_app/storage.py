@@ -516,9 +516,13 @@ def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
     comes back full is doubled until it comes back short, so no returned row is left without its carrier. A full
     window at the cap is refused (one WARNING, typed error), never truncated. Gate OFF never calls this.
     """
+    from smartmemory.search.visibility_gate import gated_partial_coverage
+
     window = _WILDCARD_PENDING_WINDOW
     while True:
         hits = mem.search("*", top_k=window, **core_kwargs)
+        # U5.21 (C3): a short page is exhaustion only when core did not report its own answer as partial.
+        partial = gated_partial_coverage(hits, where="wildcard search")
         if len(hits) > window:
             # C4: the bound caps every fetch. A callee that over-returns broke the window contract, so its page can
             # neither prove exhaustion nor be trusted as complete: refuse, never consume or truncate it.
@@ -530,14 +534,21 @@ def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
             raise WildcardEnumerationOverflowError(
                 f"wildcard enumeration returned {len(hits)} hits for a window of {window}"
             )
-        if len(hits) < window:
+        if len(hits) < window and not partial:
             break
         if window >= _WILDCARD_CORE_CAP:
-            log.warning(
-                "wildcard search refused: core still returned a full window of %d hits at the cap, "
-                "so the listing would be incomplete",
-                window,
-            )
+            if len(hits) < window:
+                log.warning(
+                    "wildcard search refused: core reported a partial answer at the cap of %d hits, "
+                    "so the listing would be incomplete",
+                    window,
+                )
+            else:
+                log.warning(
+                    "wildcard search refused: core still returned a full window of %d hits at the cap, "
+                    "so the listing would be incomplete",
+                    window,
+                )
             raise WildcardEnumerationOverflowError(
                 f"wildcard enumeration exceeds {_WILDCARD_CORE_CAP} hits"
             )
@@ -759,8 +770,11 @@ def search(
 
             all_items = [r for r in all_items if _keep(r)]
         return all_items
+    from smartmemory.search.visibility_gate import gated_partial_coverage
+
     if not filters:
         results = mem.search(query, top_k=top_k, **core_kwargs)
+        gated_partial_coverage(results, where="local search")
         if isinstance(results, dict):
             return {
                 key: [_result_dict(r) for r in items] for key, items in results.items()
@@ -771,6 +785,7 @@ def search(
     for multiplier in (5, 20, 50):
         fetch_k = top_k * multiplier
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
+        partial = gated_partial_coverage(results, where="local filtered search")
         items = [_result_dict(r) for r in results]
         matched = [
             r
@@ -780,8 +795,8 @@ def search(
                 for k, v in filters.items()
             )
         ]
-        if len(matched) >= top_k or len(results) < fetch_k:
-            break  # enough matches found, or exhausted all results
+        if len(matched) >= top_k or (len(results) < fetch_k and not partial):
+            break  # enough matches found, or exhausted all results (core's partial answer is not exhaustion)
     return matched[:top_k]
 
 
@@ -822,6 +837,9 @@ def recall(
         time_ms,
     )
 
+    from smartmemory.refusal_logging import refusal_logged
+    from smartmemory.search.visibility_gate import gated_partial_coverage
+
     t0 = time_ms()
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
@@ -851,8 +869,15 @@ def recall(
     if include_snapshot:
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
+            # The frame is one newest row: a partial answer only means the newest one may be unexamined, and the
+            # WARNING from the reader names it. The frame is optional context, never the recall answer.
+            gated_partial_coverage(snaps, where="orient snapshot lookup")
         except Exception as exc:  # noqa: BLE001
-            record_hook_degradation("Orient lost snapshot context", exc)
+            # U5.21 (C1/C8): a gate refusal was already logged by the site that raised it, so the trace records the
+            # loss without a second WARNING. Any other failure logs as before.
+            record_hook_degradation(
+                "Orient lost snapshot context", exc, logged=refusal_logged(exc)
+            )
             snaps = []
         snaps = filter_hook_items(snaps, excluded)
         if snaps:
@@ -916,7 +941,9 @@ def recall(
             )
         )
     except Exception as exc:
-        record_hook_degradation("Recall lost decision lookup", exc)
+        record_hook_degradation(
+            "Recall lost decision lookup", exc, logged=refusal_logged(exc)
+        )
         lessons = []
 
     requested = max(0, top_k)
@@ -926,13 +953,25 @@ def recall(
     body = ""
     emitted = 0
     while requested:
+        # U5.21 (C3): a short page is exhaustion only when core did not report that answer as partial.
+        partial = False
         if query:
-            raw = list(mem.search(query, top_k=fetch_k))
+            found = mem.search(query, top_k=fetch_k)
+            partial = bool(gated_partial_coverage(found, where="recall search"))
+            raw = list(found)
             results = eligible(raw)
-            exhausted = len(raw) < fetch_k
+            exhausted = len(raw) < fetch_k and not partial
         elif cwd:
-            recent = list(mem.search("", top_k=fetch_k, sort_by="recency"))
-            semantic = list(mem.search(cwd, top_k=fetch_k))
+            found_recent = mem.search("", top_k=fetch_k, sort_by="recency")
+            found_semantic = mem.search(cwd, top_k=fetch_k)
+            partial_recent = gated_partial_coverage(
+                found_recent, where="recall recency search"
+            )
+            partial_semantic = gated_partial_coverage(
+                found_semantic, where="recall workspace search"
+            )
+            partial = bool(partial_recent or partial_semantic)
+            recent, semantic = list(found_recent), list(found_semantic)
             recent_rows, semantic_rows = eligible(recent), eligible(semantic)
             # Preserve ceil(k/2) recency first, then floor(k/2) semantic.
             # Overflow from either channel can replace missing/duplicate slots.
@@ -942,11 +981,15 @@ def recall(
                 + recent_rows[recent_k:]
                 + semantic_rows[semantic_k:]
             )
-            exhausted = len(recent) < fetch_k and len(semantic) < fetch_k
+            exhausted = (len(recent) < fetch_k and not partial_recent) and (
+                len(semantic) < fetch_k and not partial_semantic
+            )
         else:
-            raw = list(mem.search("", top_k=fetch_k, sort_by="recency"))
+            found = mem.search("", top_k=fetch_k, sort_by="recency")
+            partial = bool(gated_partial_coverage(found, where="orient recency search"))
+            raw = list(found)
             results = eligible(raw)
-            exhausted = len(raw) < fetch_k
+            exhausted = len(raw) < fetch_k and not partial
 
         body = format_recall_lines(
             [_item_to_recall_dict(r) for r in lessons + results],
@@ -955,6 +998,14 @@ def recall(
         )
         emitted = body.count("\n- ") if body else 0
         if emitted >= requested or exhausted:
+            break
+        if partial and fetch_k >= _RECALL_PARTIAL_FETCH_CAP:
+            # Core's gate examines at most its scan budget, so a wider fetch cannot reach what it did not examine.
+            log.warning(
+                "recall stopped widening at a fetch of %d: core reported a partial answer, so eligible "
+                "candidates past what it examined are not shown",
+                fetch_k,
+            )
             break
         fetch_k *= 2
 
@@ -994,6 +1045,11 @@ def recall(
     )
 
     return out
+
+
+# Core's read gate examines at most this many candidates per lane (`search.lane_gate.DEFAULT_MAX_SCAN`), so recall
+# stops widening a fetch that core keeps reporting as partial once it has asked for that many.
+_RECALL_PARTIAL_FETCH_CAP = 1000
 
 
 def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:
