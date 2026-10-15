@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
+
+- README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.
+
 ## Unreleased - HUB-DOCS-LINK-1 (2026-10-15)
 
 - README: Links section now lists the SmartMemory Hub (plugin and integration marketplace, hub.smartmemory.ai).

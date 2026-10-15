@@ -1,6 +1,6 @@
 # SmartMemory
 
-**Give your AI a memory.** Your coding assistant forgets everything the moment a session ends. SmartMemory fixes that.
+**Give your AI a memory.** Your coding assistant forgets everything the moment a session ends. SmartMemory gives it a place to keep what it learned.
 
 [![Docs](https://img.shields.io/badge/docs-smartmemory.ai-blue)](https://docs.smartmemory.ai/)
 [![PyPI version](https://badge.fury.io/py/smartmemory.svg)](https://pypi.org/project/smartmemory/)
@@ -8,13 +8,13 @@
 
 **[Read the docs](https://docs.smartmemory.ai/)**
 
-SmartMemory remembers what you and your AI learn while you work: decisions, preferences, facts, and hard-won lessons. Next session, the relevant parts come back automatically. It runs on your machine by default, with no Docker and no database to install.
+SmartMemory remembers what you and your AI learn while you work: decisions, preferences, facts, and hard-won lessons. Next session, SmartMemory looks up the relevant parts and hands them back to your assistant automatically. It runs on your machine by default, with no Docker and no database to install.
 
 Works out of the box with **Claude Code**, **Cursor**, and other MCP-compatible tools, or directly from **Python**.
 
 _(new: export and import your whole memory as portable Open Knowledge Format bundles.)_
 
-## Get started in 2 minutes
+## Get started
 
 ```bash
 pip install smartmemory
@@ -37,7 +37,7 @@ sm search "which database did we pick"
 
 ### What you get from here
 
-- **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts. No more re-explaining your project every morning.
+- **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts.
 - **Ask questions in plain language.** `sm search` is semantic search. "Which database did we pick" finds the Postgres memory even though the words don't match.
 - **A knowledge graph you can see.** Everything you add gets linked into a graph you can explore in your browser. The tour below shows you around.
 
@@ -85,7 +85,7 @@ sm search --top-k 20 "*"            # list more of everything
 
 ### 4. Meet the daemon
 
-SmartMemory runs a small background daemon so the CLI answers in under 200ms instead of cold-starting Python on every command. Setup starts it for you, and on macOS it comes back after login and crashes.
+SmartMemory runs a small background daemon so the CLI does not cold-start Python on every command. In our own timing on version 1.5.16, a warm `sm add` took about 210 ms (median of 15 runs) and the first `sm add` after startup took about 0.9 seconds (3 runs). Setup starts it for you, and on macOS it comes back after login and crashes.
 
 ```bash
 sm status     # daemon health, memory count, enrichment queue
@@ -94,7 +94,7 @@ sm restart    # if you ever need a fresh start
 
 In local mode, `sm status` shows how many memories are saved on this machine and explains that they are outside your cloud account, even when the daemon is stopped or warming. Use `sm status --json` for machine-readable status. Local output includes `local_only` and `local_memory_count` alongside the daemon health fields. Remote output retains the hosted summary fields and reports `local_only: false`.
 
-The daemon is also where the quality comes from. `sm add` returns instantly because fast entity extraction runs in about 4ms. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You never wait for it, and `sm status` shows the queue draining.
+The daemon is also where the quality comes from. `sm add` returns quickly because only a fast entity extraction pass runs before it answers. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You do not wait for it, and `sm status` shows the queue draining.
 
 ### 5. Explore your knowledge graph
 
@@ -126,11 +126,11 @@ If you ran `smartmemory setup`, this is already working. Setup installs six hook
 - **Session starts**: SmartMemory recalls what it knows about the directory you're working in.
 - **You send a prompt**: memories relevant to that prompt are injected as context.
 - **Tools run**: tool calls are observed and captured.
-- **A tool fails**: the error pattern is saved so the same mistake isn't repeated.
+- **A tool fails**: the error pattern is saved so it can be recalled later.
 - **Claude finishes responding**: the response is paired with the prompt that produced it.
 - **Session ends**: a session summary is persisted.
 
-The net effect is that tomorrow's session starts where today's left off, without you pasting context around.
+The aim is that tomorrow's session can pick up from what today's captured, without you pasting context around.
 
 You also get slash commands inside Claude Code:
 
@@ -501,15 +501,15 @@ Each stage implements the `StageCommand` protocol (`execute(state, config) -> st
 
 When an LLM API key is available, the daemon runs **two-tier ingestion**:
 
-- **Tier 1 (sync, ~4ms):** spaCy + EntityRuler extracts entities immediately and returns the item ID
-- **Tier 2 (async, ~740ms):** A background drain thread runs LLM extraction and adds net-new entities and relations
+- **Tier 1 (sync, fast):** spaCy + EntityRuler extracts entities immediately and returns the item ID
+- **Tier 2 (async, slower):** A background drain thread runs LLM extraction and adds net-new entities and relations
 
-This means `sm add` returns instantly while quality improves in the background.
+This means `sm add` returns after the fast pass while quality improves in the background.
 
 ### What makes it different
 
-- **Self-learning EntityRuler**: Pattern-matching NER that improves with use. LLM discoveries feed back into rules (96.9% entity F1 at 4ms)
-- **Memory evolution**: Built-in evolvers automatically transform memories over time, promoting stable facts, decaying stale ones, and strengthening what you actually use
+- **Self-learning EntityRuler**: Pattern-matching NER that improves with use. LLM discoveries feed back into rules
+- **Memory evolution**: Built-in evolvers transform memories over time, promoting stable facts, decaying stale ones, and tracking what you actually use
 - **Hybrid search**: Graph-structured search plus BM25/embedding RRF fusion with query decomposition for compound queries
 - **Code indexer**: AST-based Python and TypeScript parser with cross-file call resolution, semantic code search, and memory-to-code graph bridging
 - **Two-tier ingestion**: Instant spaCy extraction plus async LLM enrichment
