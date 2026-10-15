@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## Unreleased - HUB-DOCS-LINK-1 (2026-10-15)
+
+- README: Links section now lists the SmartMemory Hub (plugin and integration marketplace, hub.smartmemory.ai).
+
 ## 1.5.26 — 2026-10-09
 
 - Hotfix: pins `smartmemory-core==1.5.26`, which bounds `tree-sitter<0.26`. With tree-sitter 0.26.0, `smartmemory code bundle` on a real TypeScript tree crashed with a segfault (exit 139).

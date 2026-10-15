@@ -775,6 +775,7 @@ The hosted service and platform are licensed separately.
 - **PyPI Package**: https://pypi.org/project/smartmemory/
 - **Core Library**: https://pypi.org/project/smartmemory-core/
 - **Documentation**: https://docs.smartmemory.ai
+- **Hub** (plugins and integrations): https://hub.smartmemory.ai
 - **Support**: support@smartmemory.ai
 
 ---
