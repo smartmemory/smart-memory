@@ -76,6 +76,7 @@ class TestCanRunTui:
     def test_returns_true_when_all_conditions_met(self, monkeypatch):
         monkeypatch.setattr("sys.stdin", MagicMock(isatty=lambda: True))
         monkeypatch.setattr("sys.stdout", MagicMock(isatty=lambda: True))
+        monkeypatch.setattr("sys.stderr", MagicMock(isatty=lambda: True))
         monkeypatch.delenv("TERM", raising=False)
         monkeypatch.delenv("CI", raising=False)
         # textual is installed in test env

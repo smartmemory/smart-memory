@@ -15,13 +15,18 @@ from typing import Callable, ContextManager, Iterator
 
 import click
 
-# Measured 2026-10-17 by the measure script in the CLI-SETUP-UX-1 report (units/CLI-SETUP-UX-1/): a clean
-# venv (Python 3.12, smartmemory 2.0 wrapper with core 1.5.26 from PyPI), an empty
-# tmp HOME (no spaCy model, no Hugging Face cache) and a real network, on a Mac under
-# a 1-minute load of 87, so a quiet machine is usually faster. Seconds per step:
-#   spacy 70.6, embedding 95.8, extra models 302.2, config/hooks/seed under 0.1,
-#   daemon start 2.6 cold and 2.1 warm (model files already cached, as in setup).
-# Re-measure with that script (kept beside the report) when a model or the dependency set changes.
+# Measured 2026-10-17 by the measure script in the CLI-SETUP-UX-1 unit folder
+# (units/CLI-SETUP-UX-1/measure.py, raw rows in measure-output.txt): a clean venv
+# (Python 3.12, smartmemory 2.0 wrapper with core 1.5.26 from PyPI), an empty tmp HOME
+# (no spaCy model, no Hugging Face cache) and a real network, on a Mac under a 1-minute
+# load of 87, so a quiet machine is usually faster. Seconds per step:
+#   spacy 70.6, embedding 95.8, extra models 302.2, and the small local steps
+#   (config, hooks, skills, register, seed) under 0.1 each, measured one by one.
+# A step with no row here prints no estimate, only its real elapsed time afterwards:
+#   "restart" (stop_daemon touches launchd and live workers) and "daemon"
+#   (_start_daemon_local installs launchd and the worker agent), neither of which is
+#   safe to run against a throwaway HOME. Do not add a number for them without a row.
+# Re-measure with that script when a model or the dependency set changes.
 STEP_ESTIMATE_SECONDS = {
     "config": 1,
     "spacy": 71,
@@ -31,8 +36,6 @@ STEP_ESTIMATE_SECONDS = {
     "skills": 1,
     "register": 1,
     "seed": 1,
-    "restart": 5,
-    "daemon": 3,
 }
 
 
@@ -45,8 +48,9 @@ class PlanStep:
     title: str
 
     @property
-    def estimate_seconds(self) -> int:
-        return STEP_ESTIMATE_SECONDS[self.key]
+    def estimate_seconds(self) -> int | None:
+        """Measured seconds, or None when the step has no measurement."""
+        return STEP_ESTIMATE_SECONDS.get(self.key)
 
 
 def local_setup_plan(
@@ -104,7 +108,9 @@ def format_elapsed(seconds: float) -> str:
 
 
 def estimate_phrase(step: PlanStep) -> str:
-    return f"about {format_estimate(step.estimate_seconds)}"
+    """ "about 2 minutes" for a measured step, an empty string for one with no measurement."""
+    seconds = step.estimate_seconds
+    return "" if seconds is None else f"about {format_estimate(seconds)}"
 
 
 def model_download_progress(
@@ -145,7 +151,8 @@ class StepTracker:
         """
         index, step = self._locate(name)
         label = f"[{index}/{len(self._plan)}] {step.title}"
-        click.echo(f"{label} ... ({estimate_phrase(step)})")
+        phrase = estimate_phrase(step)
+        click.echo(f"{label} ... ({phrase})" if phrase else f"{label} ...")
         started = self._clock()
         try:
             if live:

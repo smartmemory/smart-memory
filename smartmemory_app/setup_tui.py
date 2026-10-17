@@ -331,9 +331,9 @@ class ProgressScreen(Screen):
 
     def _row(self, symbol: str, index: int, step: PlanStep, suffix: str) -> str:
         """One checklist row. The counter is escaped so markup never reads it as a tag."""
-        return (
-            f"{symbol} {escape(f'[{index}/{len(self._plan)}]')} {step.name} ({suffix})"
-        )
+        counter = escape(f"[{index}/{len(self._plan)}]")
+        tail = f" ({suffix})" if suffix else ""
+        return f"{symbol} {counter} {step.name}{tail}"
 
     def _step_at(self, name: str) -> tuple[int, PlanStep] | None:
         for index, step in enumerate(getattr(self, "_plan", ()), start=1):
@@ -388,7 +388,14 @@ class ProgressScreen(Screen):
             return
         index, step = found
         self.query_one("#step-daemon", Static).update(
-            self._row("●", index, step, f"{elapsed}s, {estimate_phrase(step)}")
+            self._row(
+                "●",
+                index,
+                step,
+                ", ".join(
+                    part for part in (f"{elapsed}s", estimate_phrase(step)) if part
+                ),
+            )
         )
 
     def _show_daemon_log(self, line: str) -> None:
@@ -427,7 +434,7 @@ class ProgressScreen(Screen):
                 )
                 status_text = (
                     "\n[bold yellow]Setup is configured, but SmartMemory is still warming up.[/bold yellow]"
-                    "\nCheck: [cyan]sm status[/cyan]. Additional worker startup is deferred. Once warmup finishes, run [cyan]sm start --wait[/cyan]."
+                    "\nCheck: [cyan]sm status[/cyan]. Additional worker startup is deferred, so once warmup finishes, run [cyan]sm start --wait[/cyan]."
                     "\n\nPress any key to exit."
                 )
             elif daemon_status and daemon_status.get("status") == "degraded":
@@ -449,6 +456,16 @@ class ProgressScreen(Screen):
                 )
                 status_text = "\n[bold red]Setup could not start SmartMemory.[/bold red]\nRun: [cyan]sm doctor[/cyan]\n\nPress any key to exit."
 
+            from smartmemory_app.config import (
+                NO_LOCAL_MODEL_OFF_LINE,
+                local_llm_without_model,
+            )
+
+            if local_llm_without_model(self.app._result):
+                status_text = status_text.replace(
+                    "\n\nPress any key to exit.",
+                    f"\n\n{escape(NO_LOCAL_MODEL_OFF_LINE)}\n\nPress any key to exit.",
+                )
             self.app.call_from_thread(self._set_final_status, status_text)
         except BaseException as e:
             import logging

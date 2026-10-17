@@ -1087,6 +1087,13 @@ def run_tour(
             "Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
         )
         return None
+    from smartmemory_app.console import NO_TERMINAL_MESSAGE, interactive_terminal
+
+    if not interactive_terminal():
+        import click
+
+        click.echo(NO_TERMINAL_MESSAGE.format(name="The guided tour"))
+        return None
     runner = TourSessionRunner(
         keep=keep,
         code=code,

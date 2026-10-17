@@ -50,6 +50,30 @@ _LOCAL_OPENAI_PROVIDERS = {
 }
 
 
+# Providers where setup asks which local model to use. "none" saves an empty model.
+LOCAL_MODEL_PROVIDERS = ("ollama", "lmstudio")
+
+# Said at the end of setup and by `sm status` when a local provider has no model.
+NO_LOCAL_MODEL_OFF_LINE = (
+    "LLM extraction is off until you pick a model. "
+    "Turn it on with: sm config llm_model <model name>"
+)
+
+
+def local_llm_without_model(cfg) -> bool:
+    """True when a local LLM provider is configured with no model chosen.
+
+    ``cfg`` is anything with ``llm_provider`` and ``llm_model`` (config or setup result).
+
+    That is the "none" choice in setup: extraction is off. Core's
+    ``get_default_model()`` would otherwise fall through to ``gpt-4o-mini`` for an
+    empty name, so every gate below treats this state as "no LLM", not as "pick one".
+    """
+    return (
+        cfg.llm_provider or ""
+    ).lower() in LOCAL_MODEL_PROVIDERS and not cfg.llm_model
+
+
 class UnconfiguredError(RuntimeError):
     """Raised by storage.get_memory() when no config exists and auto-migration fails.
 
@@ -215,6 +239,9 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]
         set_derived_env(
             env, "OPENAI_BASE_URL", default_base, "provider default", derived
         )
+    if local_llm_without_model(cfg):
+        # No model chosen: do not mint the placeholder key that switches extraction on.
+        return derived
     set_derived_env(
         env, "OPENAI_API_KEY", "local-llm-no-key", "local placeholder", derived
     )
@@ -307,6 +334,11 @@ def llm_key_present() -> bool:
     boot banner, and `smartmemory status`. Checks all of LLM_KEY_ENV_VARS, so a
     user configured with Anthropic or DeepSeek is recognised — not just GROQ/OpenAI.
     """
+    try:
+        if local_llm_without_model(load_config()):
+            return False
+    except Exception:
+        pass  # an unreadable config falls through to the key check, as before
     return any(os.environ.get(k) for k in LLM_KEY_ENV_VARS)
 
 

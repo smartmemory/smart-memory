@@ -53,6 +53,7 @@
 - The local model choice (ollama, lmstudio) now defaults to none, in the text prompt and as the first, highlighted row of the TUI model screen, with one line saying what you lose and how to add one later (`sm config llm_model <model name>`). The TUI Skip button is gone because none replaces it.
 - Fix: `hf_progress._DownloadBar` lacked the tqdm display methods the Hugging Face Xet reporter calls, which printed an `AttributeError` traceback during downloads.
 - Setup choice lists and TUI choice text no longer use em dashes or semicolons.
+- Fix round 1: setup prints an estimate only for steps that were measured. The daemon start and daemon stop steps have none (they touch launchd and cannot be timed safely), so they show only the real elapsed time. Choosing no model for ollama or lmstudio now really turns LLM extraction off (`llm_key_present()` is false and no placeholder key is set), and setup ends with the line that says how to turn it on. Setup asks again whether the daemon is running after the downloads, as it did before this unit. `sm tour`, `sm explore`, the setup TUI and the `sm import` progress bar start only when stdin, stdout and stderr are all terminals (`console.interactive_terminal`), so piped output holds no escape codes. Repaired the TUI warm-up message so it keeps the tested wording without a semicolon.
 
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 

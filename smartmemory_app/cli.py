@@ -1200,7 +1200,16 @@ def status_cmd(as_json: bool) -> None:
     _llm = info.get("llm_provider", "?")
     # Flag the silent-failure case: a provider is configured but no key is present,
     # so extraction is actually disabled despite the config saying otherwise.
-    if info.get("llm_key_present") is False and _llm not in ("none", "?"):
+    from smartmemory_app.config import (
+        NO_LOCAL_MODEL_OFF_LINE,
+        load_config,
+        local_llm_without_model,
+    )
+
+    if _llm not in ("none", "?") and local_llm_without_model(load_config()):
+        click.echo(f"  LLM:        {_llm} (no model chosen, extraction off)")
+        click.echo(f"  {NO_LOCAL_MODEL_OFF_LINE}")
+    elif info.get("llm_key_present") is False and _llm not in ("none", "?"):
         click.echo(f"  LLM:        {_llm} (no API key — extraction disabled)")
     else:
         click.echo(f"  LLM:        {_llm}")
@@ -2277,6 +2286,11 @@ def explore_cmd(target: str | None) -> None:
             "The graph explorer TUI is disabled on Windows while terminal support is tested. "
             "Try 'sm search' and 'sm get'. Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
         )
+        return
+    from smartmemory_app.console import NO_TERMINAL_MESSAGE, interactive_terminal
+
+    if not interactive_terminal():
+        click.echo(NO_TERMINAL_MESSAGE.format(name="The graph explorer"))
         return
     try:
         from smartmemory_app.tui.app import ExploreApp
@@ -3560,7 +3574,10 @@ def import_cmd(
             MofNCompleteColumn,
         )
 
-        use_rich = True
+        from smartmemory_app.console import interactive_terminal
+
+        # The live bar redraws with escapes, so it needs a terminal on every stream.
+        use_rich = interactive_terminal()
     except ImportError:
         use_rich = False
 

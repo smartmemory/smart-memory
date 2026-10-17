@@ -30,6 +30,7 @@ from xml.sax.saxutils import escape
 
 import click
 
+from smartmemory_app import console as _console
 from smartmemory_app.install_check import (
     PROXY_ENV_VARS,
     SOCKS_PROXY_ERROR,
@@ -447,6 +448,14 @@ def _setup_click(
                 click.echo("All done. Run 'sm tour' if this is your first time.")
             else:
                 click.echo("Done. SmartMemory is ready.")
+        from smartmemory_app.config import (
+            NO_LOCAL_MODEL_OFF_LINE,
+            load_config,
+            local_llm_without_model,
+        )
+
+        if local_llm_without_model(load_config()):
+            click.echo(NO_LOCAL_MODEL_OFF_LINE)
         props = {"mode": "local"}
         if daemon_status.get("status") == "warming":
             props["warming"] = True
@@ -463,7 +472,7 @@ def _can_run_tui() -> bool:
     if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
         logger.debug("Skipping setup TUI on Windows, using text prompts")
         return False
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
+    if not _console.interactive_terminal():
         return False
     if os.environ.get("TERM") == "dumb":
         return False
@@ -742,8 +751,6 @@ def _persist_env_var(name: str, value: str) -> None:
     os.environ[name] = value
 
 
-_LOCAL_MODEL_PROVIDERS = ("ollama", "lmstudio")
-
 # Shown wherever the local model choice is made (click prompt and TUI model screen).
 NO_LOCAL_MODEL_NOTE = (
     "No local model chosen: SmartMemory will not use your local model for extraction "
@@ -767,7 +774,12 @@ def _setup_local(tracker=None) -> bool:
     All local deps (smartmemory-core, spaCy, usearch, filelock) are already
     installed as part of `pip install smartmemory` — no extra install step needed.
     """
-    from smartmemory_app.config import SmartMemoryConfig, config_path, save_config
+    from smartmemory_app.config import (
+        LOCAL_MODEL_PROVIDERS,
+        SmartMemoryConfig,
+        config_path,
+        save_config,
+    )
 
     # DIST-UPDATE-HINT-1: read before save_config writes one.
     was_first_run = not config_path().exists()
@@ -800,7 +812,7 @@ def _setup_local(tracker=None) -> bool:
         "gemini": "GEMINI_API_KEY",
     }
     llm_model = ""
-    if llm in _LOCAL_MODEL_PROVIDERS:
+    if llm in LOCAL_MODEL_PROVIDERS:
         llm_model = _prompt_local_model(llm)
     key_envvar = _LLM_KEY_ENVVAR.get(llm)
     if key_envvar:
@@ -846,7 +858,7 @@ def _setup_local(tracker=None) -> bool:
                     click.echo("  Also stored in OS keychain.")
                 except Exception as exc:
                     logger.warning(
-                        "OS credential store unavailable; using shell profile: %s",
+                        "OS credential store unavailable, using shell profile: %s",
                         redact_credentials(str(exc)),
                     )
 
@@ -913,6 +925,11 @@ def _setup_local(tracker=None) -> bool:
         _seed_data_dir()
 
     # Stop a live daemon so the lifecycle owner can restart it with the new config.
+    # Ask again here, after the downloads: a daemon can start or stop while they run.
+    now_running = is_running(require_healthy=False)
+    if now_running != restart:
+        restart = now_running
+        tracker.set_plan(local_setup_plan(cfg.embedding_provider, restart=restart))
     if restart:
         import time
 

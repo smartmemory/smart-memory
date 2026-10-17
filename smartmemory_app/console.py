@@ -12,6 +12,25 @@ def read_utf8_stdin() -> str:
     return stream.read()
 
 
+def interactive_terminal() -> bool:
+    """True only when stdin, stdout and stderr are all terminals.
+
+    A full-screen app (Textual) draws with cursor and colour escapes, and it writes some
+    of them to stderr. Any one stream that is a pipe or a file would receive those bytes,
+    so an app must not start unless all three are terminals.
+    """
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            if not stream.isatty():
+                return False
+        except Exception:
+            return False
+    return True
+
+
+NO_TERMINAL_MESSAGE = "{name} needs a terminal. Run it directly in a terminal window."
+
+
 def configure_console_encoding() -> None:
     """Use UTF-8 on legacy streams without breaking embedded/captured consoles."""
     for stream in (sys.stdout, sys.stderr):
