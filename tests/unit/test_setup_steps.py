@@ -174,14 +174,17 @@ def test_click_setup_numbers_every_step_including_the_daemon(tmp_path, capsys):
                 return_value={"status": "ok"},
             )
         )
-        # _setup_click builds the tracker and the daemon step is counted at its call site.
+        # _setup_click builds the tracker; the daemon step and the two checks after it
+        # (SETUP-RESUMABLE-1) share its counter.
         setup._setup_click("local", None)
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[")]
     starts = [ln for ln in lines if ln.endswith(" ...") or " ... (about " in ln]
-    assert len(starts) == 9
-    assert starts[0].startswith("[1/9] Saving your settings")
-    assert starts[-1] == "[9/9] Starting SmartMemory ..."  # no measurement, no estimate
-    assert sum(1 for ln in lines if " done (" in ln) == 9
+    assert len(starts) == 11
+    assert starts[0].startswith("[1/11] Saving your settings")
+    assert starts[8] == "[9/11] Starting SmartMemory ..."  # no measurement, no estimate
+    assert starts[9] == "[10/11] Checking which mode the CLI runs in ..."
+    assert starts[-1] == "[11/11] Saving and recalling a test memory ..."
+    assert sum(1 for ln in lines if " done (" in ln) == 11
 
 
 def test_apply_setup_result_reports_every_plan_step_in_order(tmp_path):
@@ -323,7 +326,12 @@ def test_choice_screens_and_prompts_have_no_em_dash_or_semicolon():
     texts.append(setup_tui.NO_MODEL_LABEL)
     for func in (
         setup._setup_local,
+        setup._ask_local_choices,  # SETUP-RESUMABLE-1: the prompts moved here
         setup._setup_click,
+        setup._finish_local_run,
+        setup._resume_setup,
+        setup._verify_after_tui,
+        setup._remote_login,
         setup._prompt_local_model,
         setup_tui.WelcomeScreen.compose,
         setup_tui.EmbeddingScreen.compose,

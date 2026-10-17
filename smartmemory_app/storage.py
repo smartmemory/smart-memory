@@ -1104,6 +1104,23 @@ def get(item_id: str) -> dict:
     return item.to_dict() if item else {}
 
 
+def delete(item_id: str) -> bool:
+    """Delete one memory, as the daemon's DELETE /memory/{id} does. True when it existed.
+
+    Local deletes take the same cross-process write lock as ingest(). Used by
+    sm setup to remove its save-and-recall test memory when no daemon answers.
+    """
+    mem = get_memory()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        mem.request("DELETE", f"/memory/{item_id}")
+        return True
+    data_path = _data_path if _data_path is not None else _resolve_data_dir()
+    with _get_lock_file(data_path):
+        return bool(mem.delete(item_id))
+
+
 def get_mirror_state(data_dir: str | None = None):
     """Resolve the actual Lite root without opening memory or creating config.
 

@@ -325,18 +325,37 @@ HOOK_REGISTRATIONS = _get_hook_registrations(shell="bash")
 @click.option(
     "--api-url", help="Remote service base URL (overrides SMARTMEMORY_API_URL)."
 )
+@click.option(
+    "--restart",
+    is_flag=True,
+    default=False,
+    help="Start over: forget the saved progress of an unfinished run.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    default=False,
+    help="Accept the default for every question (local mode unless --mode says otherwise).",
+)
 @_doctor_after_setup  # SETUP-DOCTOR-1: show what the CLI will use, stop on a FAIL
 def setup(
     mode: str | None,
     api_key: str | None,
     for_tool: str | None,
     api_url: str | None = None,
+    restart: bool = False,
+    yes: bool = False,
 ) -> None:
     """First-run questionnaire: configure local or remote mode.
 
     Three self-contained branches — each handles config, post-config, AND daemon
     start. No shared post-branch code to avoid double-start bugs.
     """
+    # SETUP-RESUMABLE-1: every step is checked after it runs and its result saved
+    # (setup_run.py). A re-run after an unfinished run resumes at the first step
+    # whose effect is gone. --restart starts over.
     installation = check_installation()
     if not installation.ok:
         raise click.ClickException(_SETUP_INSTALLATION_ERROR)
@@ -356,10 +375,35 @@ def setup(
             click.echo(
                 "Automatic anonymous crash reports are on. Disable: SMARTMEMORY_CRASH_REPORTS=0"
             )
+    from smartmemory_app import setup_state
+    from smartmemory_app.setup_run import SetupRun
+
+    if restart:
+        setup_state.clear()
+    else:
+        saved = SetupRun.resumable(mode=mode)
+        if saved is not None:
+            _resume_setup(saved, api_key=api_key, yes=yes)
+            if for_tool:
+                _setup_tool_config(for_tool)
+            return
+
+    if yes and mode is None:
+        mode = "local"
+    if (
+        yes
+        and mode == "remote"
+        and not (api_key or os.environ.get("SMARTMEMORY_API_KEY"))
+    ):
+        raise click.ClickException(
+            "Remote setup with --yes needs an API key.\n"
+            "Fix: run sm setup --mode remote --yes --api-key KEY"
+        )
+
     # Branch 1: Flags provided — use click flow directly
     # _setup_click() already handles daemon start for local mode internally
     if mode is not None:
-        _setup_click(mode, api_key, api_url)
+        _setup_click(mode, api_key, api_url, **({"yes": True} if yes else {}))
         if for_tool:
             _setup_tool_config(for_tool)
         return
@@ -396,7 +440,8 @@ def setup(
                     pass
                 if result.daemon_warming:
                     click.echo(_SETUP_WARMING_WARNING)
-                elif first_run:
+                _verify_after_tui()
+                if not result.daemon_warming and first_run:
                     click.echo("All done. Run 'sm tour' if this is your first time.")
             if for_tool:
                 _setup_tool_config(for_tool)
@@ -416,7 +461,11 @@ def setup(
 
 
 def _setup_click(
-    mode: str | None, api_key: str | None, api_url: str | None = None
+    mode: str | None,
+    api_key: str | None,
+    api_url: str | None = None,
+    *,
+    yes: bool = False,
 ) -> None:
     """Click-based setup flow (non-TUI). Self-contained: config + post-config."""
     if mode is None:
@@ -440,9 +489,8 @@ def _setup_click(
         from smartmemory_app.setup_steps import StepTracker
 
         tracker = StepTracker()
-        first_run = _setup_local(tracker)
-        with tracker.step("SmartMemory started", live=False):
-            daemon_status = _start_daemon_local()
+        first_run = _setup_local(tracker, **({"yes": True} if yes else {}))
+        daemon_status = _finish_local_run(tracker)
         if daemon_status and daemon_status.get("status") == "ok":
             if first_run:
                 click.echo("All done. Run 'sm tour' if this is your first time.")
@@ -465,6 +513,85 @@ def _setup_click(
             _lm_emit("setup.complete", props)
         except Exception:
             pass
+
+
+def _finish_local_run(tracker) -> dict:
+    """Start SmartMemory and run the checks: the steps after _setup_local, same counter."""
+    from smartmemory_app import setup_state
+    from smartmemory_app.setup_run import SetupRun
+
+    state = setup_state.load()
+    if state is None or state.choices.get("mode") != "local" or state.complete:
+        # _setup_local could not save its progress: start SmartMemory as before,
+        # but say that the checks were skipped.
+        logger.warning(
+            "Setup progress was not saved, so the mode and save-and-recall checks "
+            "did not run. Run: sm doctor"
+        )
+        with tracker.step("SmartMemory started", live=False):
+            return _start_daemon_local() or {}
+    run = SetupRun(state, tracker=tracker, check_restart=False)
+    run.run(run.index_of("daemon"))
+    return run.daemon_status
+
+
+def _resume_setup(state, *, api_key: str | None = None, yes: bool = False) -> None:
+    """Continue an unfinished run with its saved choices (no questions asked again)."""
+    from smartmemory_app.setup_run import SetupRun
+
+    if (
+        yes
+        and state.choices.get("mode") == "remote"
+        and not (api_key or os.environ.get("SMARTMEMORY_API_KEY"))
+    ):
+        from smartmemory_app.config import load_config
+
+        if not load_config(apply_env=False).api_key_set:
+            raise click.ClickException(
+                "Remote setup with --yes needs an API key.\n"
+                "Fix: run sm setup --mode remote --yes --api-key KEY"
+            )
+    run = SetupRun(state, api_key=api_key)
+    run.resume()
+    mode = state.choices.get("mode", "local")
+    if mode == "local":
+        if run.daemon_status.get("status") == "warming":
+            click.echo(_SETUP_WARMING_WARNING)
+        else:
+            click.echo("Done. SmartMemory is ready.")
+    else:
+        click.echo("\nSetup complete.")
+    try:
+        from smartmemory_app.launch_metrics import emit as _lm_emit
+
+        _lm_emit("setup.complete", {"mode": mode, "resumed": True})
+    except Exception:
+        pass
+
+
+def _verify_after_tui() -> None:
+    """Run the checks after the setup screen closes (it ran the install steps)."""
+    from smartmemory_app import setup_state
+    from smartmemory_app.setup_run import SetupRun
+
+    state = setup_state.load()
+    if state is None or state.choices.get("mode") != "local":
+        logger.warning(
+            "Setup progress was not saved, so the mode and save-and-recall checks "
+            "did not run. Run: sm doctor"
+        )
+        return
+    run = SetupRun(state, check_restart=False)
+    start = run.first_unrecorded()
+    if start < run.index_of("mode"):
+        total = len(run.plan)
+        raise click.ClickException(
+            f"Setup did not finish: step {start + 1} of {total} "
+            f"({run.plan[start].title}) did not complete.\n"
+            "Fix: run sm setup again. It resumes at that step."
+        )
+    click.echo("")
+    run.run(start)
 
 
 def _can_run_tui() -> bool:
@@ -595,54 +722,25 @@ def _apply_setup_result(
                  Used by ProgressScreen for per-step UI updates.
         on_log: Optional sink for newline-only model download progress lines.
     """
-    from smartmemory_app.setup_steps import model_download_progress
-
-    from smartmemory_app.config import SmartMemoryConfig, save_config
+    from smartmemory_app.setup_run import SetupRun
 
     data_dir = str(Path(result.data_dir).expanduser())
-
-    cfg = SmartMemoryConfig(
-        mode=result.mode,
-        coreference=result.coreference,
-        llm_provider=result.llm_provider,
-        llm_model=result.llm_model,
-        embedding_provider=result.embedding_provider,
-        spacy_model=result.spacy_model,
-        data_dir=data_dir,
+    choices = {
+        "mode": result.mode,
+        "coreference": result.coreference,
+        "llm_provider": result.llm_provider,
+        "llm_model": result.llm_model,
+        "embedding_provider": result.embedding_provider,
+        "spacy_model": result.spacy_model,
+        "data_dir": data_dir,
+        "seed_dir": data_dir,
+    }
+    # SETUP-RESUMABLE-1: the same steps and checks as the text flow, saved after
+    # each one. The screen draws progress (quiet), and starts SmartMemory itself.
+    run = SetupRun.fresh(
+        choices, on_step=on_step, on_log=on_log, quiet=True, check_restart=False
     )
-    save_config(cfg)
-    if on_step:
-        on_step("Config written")
-
-    _ensure_spacy(result.spacy_model)
-    if on_step:
-        on_step("spaCy model ready")
-
-    with model_download_progress(on_log):
-        _ensure_embedding_model(cfg.embedding_provider)
-    if on_step and cfg.embedding_provider == "local":
-        on_step("Embedding model ready")
-
-    with model_download_progress(on_log):
-        _ensure_lazy_models()
-    if on_step:
-        on_step("Helper models ready")
-
-    _copy_hooks()
-    if on_step:
-        on_step("Hooks installed")
-
-    _copy_skills()
-    if on_step:
-        on_step("Skills installed")
-
-    _register_hooks()
-    if on_step:
-        on_step("Hooks registered")
-
-    _seed_data_dir(data_dir)
-    if on_step:
-        on_step("Patterns seeded")
+    run.run(stop_before="daemon")
 
 
 # ── Mode setup helpers ────────────────────────────────────────────────────────
@@ -775,23 +873,49 @@ def _prompt_local_model(provider: str) -> str:
     return "" if choice.lower() == "none" else choice
 
 
-def _setup_local(tracker=None) -> bool:
+# SETUP-RESUMABLE-1: what ``sm setup --yes`` answers to every local question.
+LOCAL_DEFAULTS = {
+    "mode": "local",
+    "coreference": False,
+    "llm_provider": "groq",
+    "llm_model": "",
+    "embedding_provider": "local",
+    "spacy_model": "en_core_web_sm",
+    "data_dir": "~/.smartmemory",
+}
+
+
+def _setup_local(tracker=None, *, yes: bool = False) -> bool:
     """Ask pipeline questions, write config, wire Claude Code hooks.
 
-    ``tracker`` is the run's ``StepTracker`` (the daemon step is counted by the caller).
+    ``tracker`` is the run's ``StepTracker`` (the daemon step and the checks after it
+    run in ``_finish_local_run``). ``yes`` takes every default with no prompt.
 
     All local deps (smartmemory-core, spaCy, usearch, filelock) are already
     installed as part of `pip install smartmemory` — no extra install step needed.
     """
-    from smartmemory_app.config import (
-        LOCAL_MODEL_PROVIDERS,
-        SmartMemoryConfig,
-        config_path,
-        save_config,
-    )
+    from smartmemory_app.config import config_path
+    from smartmemory_app.daemon import is_running
+    from smartmemory_app.setup_run import SetupRun
+    from smartmemory_app.setup_steps import StepTracker
 
     # DIST-UPDATE-HINT-1: read before save_config writes one.
     was_first_run = not config_path().exists()
+
+    choices = dict(LOCAL_DEFAULTS) if yes else _ask_local_choices()
+    choices["restart"] = is_running(require_healthy=False)
+    run = SetupRun.fresh(choices, tracker=tracker or StepTracker())
+    click.echo("")
+    # Stops before starting SmartMemory. A live daemon is stopped first so the
+    # lifecycle owner restarts it with the new config; the runner asks again after
+    # the downloads, since a daemon can start or stop while they run.
+    run.run(stop_before="daemon")
+    return was_first_run
+
+
+def _ask_local_choices() -> dict:
+    """The local-mode questions. Returns the choices (an LLM key goes to its store)."""
+    from smartmemory_app.config import LOCAL_MODEL_PROVIDERS
 
     coref = click.confirm(
         "\nEnable coreference resolution? "
@@ -885,79 +1009,24 @@ def _setup_local(tracker=None) -> bool:
     spacy_model = f"en_core_web_{spacy_size}"
 
     data_dir = click.prompt("Default data directory", default="~/.smartmemory")
-
-    cfg = SmartMemoryConfig(
-        mode="local",
-        coreference=coref,
-        llm_provider=llm,
-        llm_model=llm_model,
-        embedding_provider=embedding,
-        spacy_model=spacy_model,
-        data_dir=data_dir,
-    )
-    from smartmemory_app.daemon import is_running, stop_daemon
-    from smartmemory_app.setup_steps import (
-        StepTracker,
-        local_setup_plan,
-        model_download_progress,
-    )
-
-    restart = is_running(require_healthy=False)
-    if tracker is None:
-        tracker = StepTracker()
-    tracker.set_plan(local_setup_plan(cfg.embedding_provider, restart=restart))
-    click.echo("")
-
-    with tracker.step("Config written", live=False):
-        save_config(cfg)
-
-    # Wire Claude Code hooks (preserved from original setup.py)
-    with tracker.step("spaCy model ready"):
-        _ensure_spacy(spacy_model)
-    if cfg.embedding_provider == "local":
-        with tracker.step("Embedding model ready") as log:
-            with model_download_progress(log):
-                _ensure_embedding_model(cfg.embedding_provider)
-    with tracker.step("Helper models ready") as log:
-        with model_download_progress(log):
-            _ensure_lazy_models()
-    with tracker.step("Hooks installed", live=False):
-        _copy_hooks()
-    with tracker.step("Skills installed", live=False):
-        _copy_skills()
-    with tracker.step("Hooks registered", live=False):
-        _register_hooks()
-    with tracker.step("Patterns seeded", live=False):
-        _seed_data_dir()
-
-    # Stop a live daemon so the lifecycle owner can restart it with the new config.
-    # Ask again here, after the downloads: a daemon can start or stop while they run.
-    now_running = is_running(require_healthy=False)
-    if now_running != restart:
-        restart = now_running
-        tracker.set_plan(local_setup_plan(cfg.embedding_provider, restart=restart))
-    if restart:
-        import time
-
-        with tracker.step("SmartMemory stopped"):
-            stop_daemon()
-            time.sleep(2)
-    return was_first_run
+    return {
+        "mode": "local",
+        "coreference": coref,
+        "llm_provider": llm,
+        "llm_model": llm_model,
+        "embedding_provider": embedding,
+        "spacy_model": spacy_model,
+        "data_dir": data_dir,
+    }
 
 
-def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
-    """Validate API key, store in OS keychain, write remote config."""
-    import httpx
-    from smartmemory_app.config import (
-        SmartMemoryConfig,
-        load_config,
-        save_config,
-        set_api_key,
-    )
-
-    api_url = (api_url or load_config().api_url).rstrip("/")
+def _remote_api_url(api_url: str | None) -> str:
+    """The remote base URL, refused when it carries credentials, a query or a fragment."""
     from urllib.parse import urlsplit
 
+    from smartmemory_app.config import load_config
+
+    api_url = (api_url or load_config().api_url).rstrip("/")
     parsed = urlsplit(api_url)
     if (
         parsed.scheme not in ("http", "https")
@@ -969,7 +1038,34 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         raise click.ClickException(
             "API URL must be an HTTP(S) base URL without credentials, query or fragment."
         )
+    return api_url
 
+
+def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
+    """Validate API key, store in OS keychain, write remote config, then check it.
+
+    SETUP-RESUMABLE-1: the steps are ``setup_steps.remote_setup_plan`` (login, hooks,
+    the mode check and a save-and-recall round trip), run and saved by setup_run.
+    The key itself is never saved in the progress file.
+    """
+    from smartmemory_app.setup_run import SetupRun
+
+    api_url = _remote_api_url(api_url)
+    choices = {"mode": "remote", "api_url": api_url}
+    run = SetupRun.fresh(choices, api_key=api_key)
+    run.run()
+    click.echo("Lifecycle hooks installed. Auto-recall and observation active.")
+
+
+def _remote_login(api_key: str | None, api_url: str | None = None) -> str:
+    """Check the API key against /auth/me, keep it in the OS keychain, write remote config.
+
+    Returns the account's default team id.
+    """
+    import httpx
+    from smartmemory_app.config import SmartMemoryConfig, save_config, set_api_key
+
+    api_url = _remote_api_url(api_url)
     api_key = api_key or os.environ.get("SMARTMEMORY_API_KEY")
     if not api_key:
         api_key = click.prompt(
@@ -1001,13 +1097,7 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         mode="remote", api_url=api_url, api_key_set=True, team_id=team_id
     )
     save_config(cfg)
-
-    # DIST-AGENT-HOOKS-1: Wire hooks for remote mode too.
-    # Hooks call CLI which falls back to remote API via storage dispatch.
-    _copy_hooks()
-    _copy_skills()
-    _register_hooks()
-    click.echo("Lifecycle hooks installed. Auto-recall and observation active.")
+    return team_id
 
 
 def _setup_tool_config(tool: str) -> None:

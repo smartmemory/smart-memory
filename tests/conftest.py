@@ -69,6 +69,17 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
     from smartmemory_app import doctor
 
     monkeypatch.setattr(doctor, "run_checks", lambda context="doctor": [])
+    # SETUP-RESUMABLE-1: every setup step is checked against its real effect (model
+    # files, daemon health, a save-and-recall round trip). Suites that fake the
+    # install steps get an all-pass check here. tests/unit/test_setup_resumable.py
+    # restores the real one (setup_verify._verify_step) for the checks it tests.
+    from smartmemory_app import setup_verify
+
+    monkeypatch.setattr(
+        setup_verify,
+        "verify_step",
+        lambda key, choices: setup_verify.Check(True, f"{key} checked (test stub)"),
+    )
 
     # Detached-entry tests also install global handlers/hooks. Restore them per test.
     import logging

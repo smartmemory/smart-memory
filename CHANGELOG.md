@@ -9,6 +9,13 @@
 ## 1.5.27 — 2026-10-17
 
 - Setup and first-run hardening from the 2026-10-17 demo feedback: pins `smartmemory-core==1.5.27` and `smartmemory-mcp==1.5.23`. Ships the `Unreleased` sections below: CLI-TENANT-1, LOCAL-DAEMON-1, TOUR-ASK-502-1, CLI-WORKSPACE-UX-1, CLI-ENV-DETECT-1, SETUP-DOCTOR-1, CLI-SETUP-UX-1, BENEFITS-WORDING-1, plus the SM-SETUP-BATCH-1 integration glue. The per-unit headings keep their `Unreleased` labels.
+## Unreleased - SETUP-RESUMABLE-1 (2026-10-17)
+
+- `sm setup` now checks every step after it runs and saves its progress in `setup-state.json` next to `config.toml` (names and paths only, never a key). A re-run after an interrupted or failed setup resumes at the first step whose effect is gone (for example a deleted model or a daemon that died) instead of asking every question again. `sm setup --restart` starts over.
+- `sm setup` ends with two new steps: it checks that the CLI really runs in the chosen mode (an exported `SMARTMEMORY_MODE` that overrides it is named, with the fix), and it saves, reads back and searches for a test memory through `sm add`, `sm get` and `sm search`, then deletes it. It prints the mode, tenant and workspace it checked against, and one line on how to change the mode later (`sm config mode`, or the env variable for one shell).
+- New `sm setup --yes` (`-y`) accepts every default with no prompt (local mode unless `--mode remote`, which then needs `--api-key` or `SMARTMEMORY_API_KEY`).
+- Remote setup now runs the same checked steps (login, hooks, mode, save and recall). Every failed step prints one `Fix:` line.
+
 ## Unreleased - CLI-FU-SWEEP-1a (2026-10-17)
 
 - `sm report --zip` and `sm report --send` no longer put env-sourced values (team id, LLM provider and model, embedding provider, data directory, workspace id) in the support archive. Every member (doctor, environment, config, both log tails) now prints them as `$NAME (env)`, the same masking `sm doctor` uses. Your own message text is left as you wrote it. (SUPPORT-BUNDLE-REDACT-1)

@@ -417,11 +417,27 @@ class ProgressScreen(Screen):
                 self.app._result, on_step=on_step, on_log=self._show_daemon_log
             )
 
+            from smartmemory_app.setup_run import mark_step
+            from smartmemory_app.setup_state import DONE, FAILED
+
             self.app.call_from_thread(self._begin_daemon_wait)
             try:
                 daemon_status = _start_daemon_local(on_log=self._show_daemon_log)
+            except BaseException as exc:
+                mark_step("daemon", FAILED, f"{type(exc).__name__}: {exc}")
+                raise
             finally:
                 self.app.call_from_thread(self._finish_daemon_wait)
+            # SETUP-RESUMABLE-1: setup checks the daemon (and saves and recalls a test
+            # memory) after this screen closes, so record how the start went.
+            started = (daemon_status or {}).get("status") in ("ok", "warming")
+            mark_step(
+                "daemon",
+                DONE if started else FAILED,
+                ""
+                if started
+                else f"daemon status {(daemon_status or {}).get('status', 'none')}",
+            )
 
             if daemon_status and daemon_status.get("status") == "ok":
                 self.app.call_from_thread(self._mark_step_done, "SmartMemory started")
