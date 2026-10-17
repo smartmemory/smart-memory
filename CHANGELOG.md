@@ -24,6 +24,10 @@
 - Every memory command prints one header line on stderr naming mode, tenant and workspace (`[smartmemory] mode=... tenant=... workspace=...`). Hidden with `sm --quiet`, any `--json` flag, or `SMARTMEMORY_QUIET=1`. Never on `lifecycle` hooks. The remote tenant comes from the identity cached by the last `sm workspace` command, so the header makes no network call.
 - Fix (CLI-WORKSPACE-UX-1 round 1): the header and the request now name the same workspace. With `SMARTMEMORY_WORKSPACE_ID` set, `sm add` and `sm recall` used to print that workspace but send none (the daemon is another process and cannot see the CLI's env), so the item was stored untagged. The env var, then the pin, is now sent explicitly on both the daemon path and the daemon-down fallback, from the same resolver the header reads. A workspace you pass as a property can no longer override it: `sm add --prop workspace_id=...` is refused ("Reserved properties"), and the daemon and fallback stamp the request's workspace over any caller property.
 
+## Unreleased - CLI-ENV-DETECT-1 (2026-10-17)
+
+- New `smartmemory_app.env_sources.inherited_vars()`: lists every `SMARTMEMORY_*` variable the process inherited, with the shell startup file and line that exported it (`~/.zshrc:42`) and this project's saved decision (`use`, `ignore`, `override` or undecided). Names only, it never reads or returns a value. `SMARTMEMORY_ENV_CHECK=0` is a meta switch and is never listed.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.
