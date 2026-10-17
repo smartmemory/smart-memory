@@ -372,3 +372,131 @@ def test_zip_paths(case, monkeypatch, isolate):
     assert not leaks, f"raw identifier or secret in extracted zip: {leaks}"
     if row.get("message"):
         assert (extracted / "message.txt").read_text() != message
+
+
+def _captured(callable_, *args):
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+        callable_(*args)
+    return captured.getvalue()
+
+
+@pytest.mark.parametrize(
+    "shell,profile",
+    [("/bin/zsh", ".zshrc"), ("/bin/bash", ".bashrc"), ("/bin/sh", ".profile")],
+)
+def test_profile_write_failure_does_not_echo_key(shell, profile, monkeypatch, isolate):
+    from smartmemory_app.setup import _persist_env_var
+
+    monkeypatch.setenv("SHELL", shell)
+    (isolate / profile).mkdir()  # a directory where the profile file should be
+    output = _captured(_persist_env_var, "GROQ_API_KEY", KEY)
+    assert KEY not in output, "setup failure echoes full provider key"
+    assert 'export GROQ_API_KEY="<your key>"' in output
+
+
+def test_keyring_exception_does_not_log_key(monkeypatch, caplog):
+    from smartmemory_app.setup import _daemon_can_read_key
+
+    monkeypatch.setattr("keyring.get_password", lambda *a: None)
+
+    def broken(*args):
+        raise RuntimeError(KEY)
+
+    monkeypatch.setattr("keyring.set_password", broken)
+    assert not _daemon_can_read_key("GROQ_API_KEY", KEY)
+    assert caplog.text and KEY not in caplog.text, (
+        "keychain exception leaks provider key"
+    )
+
+
+def test_windows_credential_failure_does_not_log_key(monkeypatch, caplog):
+    import sys
+
+    from smartmemory_app.setup import _persist_env_var
+
+    def broken(*args):
+        raise RuntimeError(f"cannot store {KEY}")
+
+    monkeypatch.setattr("keyring.set_password", broken)
+    monkeypatch.setattr(sys, "platform", "win32")
+    output = _captured(_persist_env_var, "GROQ_API_KEY", KEY)
+    assert caplog.text and KEY not in caplog.text + output
+
+
+def test_launchctl_stderr_carrying_the_key_is_not_printed(
+    monkeypatch, plist_env, caplog
+):
+    from smartmemory_app import daemon
+
+    _home, _agents, _store, run = plist_env
+    monkeypatch.setenv("GROQ_API_KEY", KEY)
+
+    def failing(cmd, **kw):
+        code = 1 if cmd[1] == "load" else 0
+        return subprocess.CompletedProcess(cmd, code, "", f"load failed for {KEY}")
+
+    monkeypatch.setattr(daemon, "_run_command", failing)
+    from smartmemory_app import setup
+
+    output = _captured(setup._install_launchd_plist)
+    assert "load failed" in output and KEY not in output
+
+
+def test_remote_auth_failure_does_not_echo_key(monkeypatch):
+    import click
+
+    from smartmemory_app.setup import _setup_remote
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError(f"rejected {KEY}")
+
+    monkeypatch.setattr("httpx.get", refuse)
+    with pytest.raises(click.ClickException) as raised:
+        _setup_remote(KEY, "https://api.example.test")
+    assert "Remote authentication failed" in raised.value.message
+    assert KEY not in raised.value.message
+
+
+@pytest.mark.parametrize(
+    "key,expect",
+    [
+        ("sk-test-PROBE123", "...E123"),  # a prefix is never shown
+        ("gsk_0123456789abcdefghij", "...ghij"),
+        ("short-key", "***"),
+    ],
+)
+def test_key_prompt_hint_shows_at_most_the_last_four_characters(key, expect):
+    from smartmemory_app.setup import _masked_key_hint
+
+    hint = _masked_key_hint(key)
+    assert hint.endswith(expect) or hint == expect
+    assert key[:8] not in hint and len(hint) <= 7
+
+
+# redact_credentials with supplied secrets: every printed form, any length.
+_SECRET_ROWS = [
+    ("plain", "boom: k9Zq refused", "k9Zq"),
+    ("one-char", "boom: z refused", "z"),
+    ("no-known-prefix", "rejected abc123def456ghi789jkl", "abc123def456ghi789jkl"),
+    ("json-escaped", 'detail {"k": "a\\"b\\\\c9"}', 'a"b\\c9'),
+    ("url-quoted", "GET /x?k=p%40ss%2Fword9", "p@ss/word9"),
+    ("with-spaces-trimmed", "key was  spaced9Key  here", " spaced9Key "),
+]
+
+
+@pytest.mark.parametrize(
+    "label,message,secret", _SECRET_ROWS, ids=[r[0] for r in _SECRET_ROWS]
+)
+def test_redact_credentials_masks_the_exact_supplied_secret(label, message, secret):
+    from smartmemory_app.diagnostics import redact_credentials
+
+    out = redact_credentials(message, (secret,))
+    assert secret.strip() not in out and "<redacted>" in out
+
+
+def test_redact_credentials_without_secrets_is_unchanged():
+    from smartmemory_app.diagnostics import redact_credentials
+
+    assert redact_credentials("plain error text", ()) == "plain error text"
+    assert redact_credentials("plain error text") == "plain error text"

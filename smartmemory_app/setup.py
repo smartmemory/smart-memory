@@ -689,6 +689,11 @@ def _read_env_from_profile(name: str) -> str:
     return _profile_lookup(name).value
 
 
+def _masked_key_hint(key: str) -> str:
+    """What a prompt may show of a stored key: its last four characters, never a prefix."""
+    return "..." + key[-4:] if len(key) > 12 else "***"
+
+
 def _persist_env_var(name: str, value: str) -> None:
     """Persist through Windows credentials or a UTF-8 shell profile.
 
@@ -704,7 +709,7 @@ def _persist_env_var(name: str, value: str) -> None:
         except Exception as exc:
             logger.warning(
                 "Credential persistence failed; key is only available in this setup process: %s",
-                redact_credentials(str(exc)),
+                redact_credentials(str(exc), (value,)),
             )
             click.echo(
                 "  Warning: credential storage failed. The key is only set for this setup session."
@@ -744,8 +749,12 @@ def _persist_env_var(name: str, value: str) -> None:
 
         click.echo(f"  Written to {profile}")
     except Exception as e:
-        click.echo(f"  Warning: could not write to {profile}: {e}")
-        click.echo(f"  Add this manually: {export_line}")
+        click.echo(
+            f"  Warning: could not write to {profile}: "
+            f"{redact_credentials(str(e), (value,))}"
+        )
+        # Never print the key: it lands in terminal scrollback and CI logs.
+        click.echo(f'  Add this line to {profile} yourself: export {name}="<your key>"')
 
     # Set in current process so daemon picks it up
     os.environ[name] = value
@@ -835,11 +844,8 @@ def _setup_local(tracker=None) -> bool:
             if existing:
                 os.environ[key_envvar] = existing
         if existing:
-            masked = (
-                existing[:8] + "..." + existing[-4:] if len(existing) > 12 else "***"
-            )
             api_key = click.prompt(
-                f"\n{key_envvar} ({masked}). Press Enter to keep, or paste new key",
+                f"\n{key_envvar} ({_masked_key_hint(existing)}). Press Enter to keep, or paste new key",
                 default="",
             )
         else:
@@ -859,7 +865,7 @@ def _setup_local(tracker=None) -> bool:
                 except Exception as exc:
                     logger.warning(
                         "OS credential store unavailable, using shell profile: %s",
-                        redact_credentials(str(exc)),
+                        redact_credentials(str(exc), (api_key.strip(),)),
                     )
 
     embedding = click.prompt(
@@ -987,7 +993,7 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         click.echo(f"Authenticated as {user.get('email')}. Team: {team_id}")
     except Exception as e:
         raise click.ClickException(
-            redact_credentials(f"Remote authentication failed: {e}")
+            redact_credentials(f"Remote authentication failed: {e}", (api_key,))
         ) from e
 
     set_api_key(api_key)  # persist to OS keychain (warns if unavailable, never raises)
@@ -1339,7 +1345,7 @@ def _daemon_can_read_key(name: str, value: str) -> bool:
         logger.warning(
             "OS credential store unavailable for %s: %s",
             name,
-            redact_credentials(str(exc)),
+            redact_credentials(str(exc), (value,)),
         )
     return _read_env_from_profile(name) == value
 
@@ -1544,7 +1550,7 @@ def _install_launchd_plist() -> bool:
         else:
             click.echo(
                 f"Warning: launchctl load failed for {display_name}: "
-                f"{redact_credentials(result.stderr.strip())}"
+                f"{redact_credentials(result.stderr.strip(), (groq_key,))}"
             )
             click.echo(f"Load manually: launchctl load {plist_dest}")
             all_ok = False
