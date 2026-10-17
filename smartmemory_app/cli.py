@@ -25,6 +25,7 @@ from smartmemory_app.daemon import (
 )
 from smartmemory_app.remote_cli import require_local
 from smartmemory_app.diagnostics import redact_credentials
+from smartmemory_app import scope_header as _scope_header
 from smartmemory_app.runtime_diagnostics import ConsoleFormatter, RedactingFormatter
 
 log = logging.getLogger(__name__)
@@ -256,6 +257,7 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
     import httpx
     import time
 
+    _scope_header.print_scope_header(path=path, kwargs=kwargs)
     url = f"{_daemon_url()}{path}"
     debug_enabled = log.isEnabledFor(logging.DEBUG)
     if debug_enabled:
@@ -342,6 +344,9 @@ def _memory_request(method: str, path: str, **kwargs):
     from smartmemory_app.remote_cli import request_memory
 
     cfg = load_config()
+    # CLI-WORKSPACE-UX-1: say which scope this touches, and send the pinned workspace.
+    _scope_header.print_scope_header(cfg, path=path, kwargs=kwargs)
+    kwargs = _scope_header.apply_local_pin(cfg, path, kwargs)
     if cfg.mode == "remote":
         return request_memory(cfg, method, path, **kwargs)
     if path == "/memory/ask":
@@ -560,6 +565,13 @@ class _CLIGroup(click.Group):
 
 @click.group(cls=_CLIGroup)
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
+@click.option(
+    "--quiet",
+    is_flag=True,
+    expose_value=False,
+    callback=_scope_header.set_quiet,
+    help="Hide the mode/tenant/workspace header line.",
+)
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
     configure_console_encoding()
@@ -669,8 +681,11 @@ cli.add_command(_uninstall_cmd, name="uninstall")
 from smartmemory_app.cli_code import code_group as _code_group  # noqa: E402
 from smartmemory_app.cli_mcp import mcp_group as _mcp_group  # noqa: E402
 
+from smartmemory_app.cli_workspace import workspace_group as _workspace_group  # noqa: E402
+
 cli.add_command(_code_group, name="code")
 cli.add_command(_mcp_group, name="mcp")
+cli.add_command(_workspace_group, name="workspace")
 
 
 # ── `sm provenance …` — code-to-conversation provenance (CORE-CODE-PROVENANCE-1) ──
@@ -1547,7 +1562,10 @@ def add_cmd(
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
                     receipt = ingest(
-                        chunk, memory_type, properties=props, origin="cli:add"
+                        chunk,
+                        memory_type,
+                        properties=_scope_header.fallback_properties(body, props),
+                        origin="cli:add",
                     )
                     if isinstance(receipt, dict) and receipt.get("status") == "held":
                         click.echo(f"Held: {receipt.get('reason')}")
@@ -1592,7 +1610,12 @@ def add_cmd(
         _prepare_direct_access(download=True)
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
-            receipt = ingest(text, memory_type, properties=props, origin="cli:add")
+            receipt = ingest(
+                text,
+                memory_type,
+                properties=_scope_header.fallback_properties(body, props),
+                origin="cli:add",
+            )
             if isinstance(receipt, dict) and receipt.get("status") == "held":
                 click.echo(f"Held: {receipt.get('reason')}")
             else:
@@ -1650,7 +1673,8 @@ def recall_cmd(
             cwd,
             top_k,
             query=query,
-            workspace_id=workspace_id,
+            # CLI-WORKSPACE-UX-1: params carries the pin when the daemon is down.
+            workspace_id=params.get("workspace_id") or None,
             include_snapshot=not no_snapshot,
             strict=strict,
         )

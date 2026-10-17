@@ -95,7 +95,8 @@ def test_remote_ask_hosted_contract_and_rendering(hosted, reasoning):
         + (["--reasoning"] if reasoning else [])
     )
     assert result.exit_code == 0, result.output
-    assert result.output.startswith(ANSWER["answer"])
+    # CLI-WORKSPACE-UX-1: the scope header goes to stderr, which click 8.2+ mixes into .output.
+    assert result.stdout.startswith(ANSWER["answer"])
     assert ("Reasoning:" in result.output) == reasoning
     assert ("SQLite keeps the setup small." in result.output) == reasoning
     if reasoning:
@@ -299,7 +300,8 @@ def test_remote_get(hosted):
     hosted[1]["body"] = {"item_id": "test_remote_get", "content": "The hosted note"}
     result = invoke(["get", "test_remote_get"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["content"] == "The hosted note"
+    # CLI-WORKSPACE-UX-1: the scope header is on stderr, which click 8.2+ mixes into .output.
+    assert json.loads(result.stdout)["content"] == "The hosted note"
     assert hosted[0][-1].url.path.endswith("/memory/test_remote_get")
 
 

@@ -18,6 +18,11 @@
 - Ask failures show their reason. The daemon's 502 detail names the error type. The tour shows `HTTP <code>: <server detail>` instead of the bare status line. The hosted `sm ask` shows the service's 502 detail (503 stays hidden, it names server settings).
 - Handled failures are reported (when crash reports are on): every daemon route that answers 5xx through `HTTPException` (except the by-design 501 of remote-proxy mode), the tour's ask failure and empty answer, the tour's "seeded content not returned" degradation, and a tour run that fails.
 
+## Unreleased - CLI-WORKSPACE-UX-1 (2026-10-17)
+
+- New `sm workspace list | create <name> | switch <name|id|auto> | current`, in both modes. Remote: the list is what the web console can select (`/memory/workspaces` minus system teams, names from `/memory/teams`), `switch` writes `team_id`, `current` compares the CLI's workspace with the console's default for the same account (`/auth/me` `default_team_id`, the field the console opens) and says MISMATCH loudly, `--check` exits 1. Local: named workspaces and a pin in `workspaces.toml` next to the config, `sm add` and `sm recall` send the pin, `list` counts the tags in the store.
+- Every memory command prints one header line on stderr naming mode, tenant and workspace (`[smartmemory] mode=... tenant=... workspace=...`). Hidden with `sm --quiet`, any `--json` flag, or `SMARTMEMORY_QUIET=1`. Never on `lifecycle` hooks. The remote tenant comes from the identity cached by the last `sm workspace` command, so the header makes no network call.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.
