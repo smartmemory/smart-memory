@@ -605,7 +605,7 @@ def _store_locked(monkeypatch):
 # reason that belongs to this machine" (permission, offline, lock). One row per
 # probe boundary doctor has, each paired with the row that must stay FAIL when
 # the same boundary gives a definite answer.
-_OLLAMA = LOCAL_CFG + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
+_OLLAMA_MODEL = LOCAL_CFG + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
 CANNOT_CHECK = [
     # (id, build kwargs, row key, patch, status, text)
     (
@@ -628,7 +628,7 @@ CANNOT_CHECK = [
     (
         "llm-remote-endpoint-offline",
         {
-            "config": _OLLAMA,
+            "config": _OLLAMA_MODEL,
             "environ": {"OPENAI_BASE_URL": "http://llm.example.test:11434/v1"},
         },
         "llm",
@@ -654,7 +654,14 @@ CANNOT_CHECK = [
         FAIL,
         "not ready",
     ),
-    ("llm-loopback-down", {"config": _OLLAMA}, "llm", None, FAIL, "not answering"),
+    (
+        "llm-loopback-down",
+        {"config": _OLLAMA_MODEL},
+        "llm",
+        None,
+        FAIL,
+        "not answering",
+    ),
     ("store-corrupt", {"store": "corrupt"}, "graph", None, FAIL, "cannot be opened"),
 ]
 
@@ -669,6 +676,93 @@ def test_cannot_check_is_warn_and_definite_failure_is_fail(case, monkeypatch, tm
     assert result.status == status, result
     assert text in result.detail, result
     assert result.fix, result
+
+
+# CLI-FU-SWEEP-1a (SM-SETUP-BATCH-1 LOW): a local provider with no model has core's route
+# held off whatever else is set, so no input may bring the LLM row to PASS. One row per
+# input that used to route past the no-model check, plus the controls that must not warn.
+_BASE = "http://llm.example.test:11434/v1"
+_NO_MODEL = LOCAL_CFG + '[local]\nllm_provider = "{p}"\n'
+_WITH_MODEL = LOCAL_CFG + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
+NO_MODEL_HELD = [
+    # (id, build kwargs, status, text)
+    (
+        "ollama-base-url",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "lmstudio-base-url",
+        {
+            "config": _NO_MODEL.format(p="lmstudio"),
+            "environ": {"OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "ollama-provider-key",
+        {"config": _NO_MODEL.format(p="ollama"), "environ": {"GROQ_API_KEY": "g"}},
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "ollama-pinned-provider",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"LLM_PROVIDER": "groq", "GROQ_API_KEY": "g"},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "ollama-base-url-and-key",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"OPENAI_BASE_URL": _BASE, "OPENAI_API_KEY": "k"},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    # controls: a model chosen (config or env) is not held, so the endpoint is probed
+    (
+        "control-config-model-base-url",
+        {
+            "config": _WITH_MODEL,
+            "environ": {"OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        PASS,
+        "server answering",
+    ),
+    (
+        "control-env-model-base-url",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"SMARTMEMORY_LLM_MODEL": "llama3.2", "OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        PASS,
+        "server answering",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", NO_MODEL_HELD, ids=[c[0] for c in NO_MODEL_HELD])
+def test_local_provider_without_model_is_never_pass(case, monkeypatch, tmp_path):
+    _id, kwargs, status, text = case
+    result = row(build(monkeypatch, tmp_path, **kwargs), "llm")
+    assert result.status == status, result
+    assert text in result.detail, result
+    if status == WARN:
+        assert "sm config llm_model" in result.fix, result
 
 
 def test_tour_context_rows(monkeypatch, tmp_path):

@@ -1405,19 +1405,19 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
 
     provider = route.provider
     app_provider = (cfg.llm_provider or "none").lower()
+    # storage.apply_runtime_config holds core's route off while a local provider has
+    # no model (CLI-SETUP-UX-1), whatever else is set: an OPENAI_BASE_URL, a provider
+    # key, a pinned provider. So no branch below may answer PASS for it.
+    held = local_llm_without_model(cfg)
+    no_model = f"provider {app_provider} has no model chosen. {NO_LOCAL_MODEL_OFF_LINE}"
+    no_model_fix = "Run: sm config llm_model <model name>, then sm restart"
+    if held and not route.from_base_url:
+        return row(WARN, no_model, no_model_fix)
     # An explicit base URL wins over a pin too (call_llm skips the pin then).
     if app_provider in _LOCAL_OPENAI_PROVIDERS and (
         not route.pin or route.from_base_url
     ):
         if not route.from_base_url:
-            if local_llm_without_model(cfg):
-                # storage.apply_runtime_config holds core's route off for this state
-                # (CLI-SETUP-UX-1), so the row says that, not "calls do not go to it".
-                return row(
-                    WARN,
-                    f"provider {app_provider} has no model chosen. {NO_LOCAL_MODEL_OFF_LINE}",
-                    "Run: sm config llm_model <model name>, then sm restart",
-                )
             return row(
                 WARN,
                 f"{route_text}. llm_provider {app_provider} is set, but LLM calls do not go to it.",
@@ -1448,6 +1448,12 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
                 FAIL,
                 f"{route_text}, answered HTTP {status}",
                 f"Check {app_provider} is serving its OpenAI-compatible API, then run: sm doctor",
+            )
+        if held:
+            # An explicit endpoint is probed (it still tells you the server is up),
+            # but extraction stays off until a model is chosen.
+            return row(
+                WARN, f"{route_text}, server answering. {no_model}", no_model_fix
             )
         return row(PASS, f"{route_text}, server answering, no key needed")
     if not route.pin and app_provider == "claude-agent":
