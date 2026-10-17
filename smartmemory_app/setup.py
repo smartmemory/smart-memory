@@ -1467,21 +1467,24 @@ def _install_launchd_plist() -> bool:
             )
         except Exception:
             pass
-    key_readable = not groq_key or _daemon_can_read_key("GROQ_API_KEY", groq_key)
+    # An installed plist written before SETUP-PLIST-PLAINTEXT-KEY-1 may hold the
+    # daemon's only persistent copy of the key, and the rewrite below removes it.
+    legacy_key = _installed_plist_key("GROQ_API_KEY")
     if not groq_key:
-        # The key may live only in the plists about to be rewritten. Move it to the
-        # secure store first, and keep the old plists if it cannot be moved.
-        groq_key = _installed_plist_key("GROQ_API_KEY")
-        if groq_key:
-            key_readable = _daemon_can_read_key("GROQ_API_KEY", groq_key)
-            if not key_readable:
-                click.echo(
-                    "Warning: your Groq key is stored only in the existing auto-start "
-                    "files, and it could not be moved to the OS keychain. The files were "
-                    "left as they are. Unlock the keychain or export GROQ_API_KEY in "
-                    "your shell, then run sm setup again."
-                )
-                return (LAUNCH_AGENTS_DIR / PLIST_NAME).exists()
+        groq_key = legacy_key
+    key_readable = not groq_key or _daemon_can_read_key("GROQ_API_KEY", groq_key)
+    # The invariant, checked right before the rewrite whatever the key's source
+    # (this shell, the old plist, or a key kept by pressing Enter in sm setup):
+    # never replace a plist that holds a key unless the daemon can read a key from
+    # a persistent store afterwards. Otherwise leave both files byte-identical.
+    if legacy_key and not key_readable:
+        click.echo(
+            "Warning: your Groq key could not be saved to the OS keychain, and the "
+            "existing auto-start files hold the only copy the background service can "
+            "read. The files were left as they are. Unlock the keychain or add "
+            "GROQ_API_KEY to your shell profile, then run sm setup again."
+        )
+        return (LAUNCH_AGENTS_DIR / PLIST_NAME).exists()
 
     proxy_env_xml = "".join(
         f"\n        <key>{name}</key>\n        <string>{escape(value)}</string>"

@@ -380,6 +380,136 @@ def test_key_that_cannot_be_migrated_keeps_the_old_plists(
     assert KEY not in output.getvalue()
 
 
+# Review r2 H2, verbatim: an env-present key whose storage fails.
+def test_env_present_unmigratable_key_keeps_legacy_files(
+    monkeypatch,
+    plist_env,
+    caplog,
+):
+    from smartmemory_app import config, setup
+
+    home, agents, store, run = plist_env
+    names = (setup.PLIST_NAME, setup.WORKER_PLIST_NAME)
+    _old_plist(agents, *names)
+    before = {n: (agents / n).read_bytes() for n in names}
+    monkeypatch.setenv("GROQ_API_KEY", KEY)
+
+    def refuse(*args):
+        raise RuntimeError("credential store locked")
+
+    monkeypatch.setattr("keyring.set_password", refuse)
+    monkeypatch.setattr(setup, "_read_env_from_profile", lambda name: "")
+    run(caplog)
+    preserved = all((agents / n).read_bytes() == before[n] for n in names)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        config.load_llm_keys_from_stores()
+    reloaded = bool(os.environ.get("GROQ_API_KEY"))
+    assert preserved or reloaded, "only persistent copy was replaced without migration"
+
+
+NEW_KEY = "sk-test-NEWKEY456"
+# id -> (key in this shell, key in the old plists, store accepts, key in the profile,
+# expected result). "kept" means both plists stay byte-identical. "rewritten" means
+# the plists lose the key and the daemon's loader finds the named key afterwards.
+_KEY_INVARIANT_ROWS = {
+    "env-same-store-fails": (KEY, KEY, False, "", "kept"),
+    "env-other-store-fails": (NEW_KEY, KEY, False, "", "kept"),
+    "env-empty-legacy-store-fails": ("", KEY, False, "", "kept"),
+    "env-same-store-ok": (KEY, KEY, True, "", KEY),
+    "env-other-store-ok": (NEW_KEY, KEY, True, "", NEW_KEY),
+    "env-empty-legacy-store-ok": ("", KEY, True, "", KEY),
+    "env-store-fails-profile-has-it": (KEY, KEY, False, KEY, KEY),
+    "env-store-fails-no-old-key": (KEY, "", False, "", ""),
+}
+
+
+def _assert_key_invariant(expect, agents, before, output, monkeypatch):
+    from smartmemory_app import config, setup
+
+    assert KEY not in output and NEW_KEY not in output
+    if expect == "kept":
+        assert {n: (agents / n).read_bytes() for n in before} == before
+        assert "left as they are" in output
+        return
+    for name in (setup.PLIST_NAME, setup.WORKER_PLIST_NAME):
+        assert "GROQ_API_KEY" not in _plist_env(agents, name)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    with contextlib.redirect_stdout(io.StringIO()):
+        config.load_llm_keys_from_stores()
+    assert os.environ.get("GROQ_API_KEY", "") == expect
+
+
+@pytest.mark.parametrize("case", sorted(_KEY_INVARIANT_ROWS))
+def test_plist_rewrite_never_drops_the_only_persistent_key(
+    case, monkeypatch, plist_env, caplog
+):
+    from smartmemory_app import setup
+
+    home, agents, _store, run = plist_env
+    env_key, old_key, store_ok, profile_key, expect = _KEY_INVARIANT_ROWS[case]
+    names = (setup.PLIST_NAME, setup.WORKER_PLIST_NAME)
+    if old_key:
+        _old_plist(agents, *names, key=old_key)
+    before = {n: (agents / n).read_bytes() for n in names if (agents / n).exists()}
+    if env_key:
+        monkeypatch.setenv("GROQ_API_KEY", env_key)
+    if not store_ok:
+
+        def refuse(*args):
+            raise RuntimeError("credential store locked")
+
+        monkeypatch.setattr("keyring.set_password", refuse)
+    if profile_key:
+        (home / ".zshrc").write_text(f'export GROQ_API_KEY="{profile_key}"\n')
+    output = run(caplog)
+    _assert_key_invariant(expect, agents, before, output, monkeypatch)
+    if case == "env-store-fails-no-old-key":
+        assert "set in this shell only" in output
+
+
+@pytest.mark.parametrize("store_ok", [False, True], ids=["store-fails", "store-ok"])
+def test_key_kept_with_enter_in_setup_never_drops_the_old_plist_key(
+    store_ok, monkeypatch, plist_env, caplog, tmp_path
+):
+    """sm setup: the shell has the key, the user presses Enter to keep it, then the
+    plists are rewritten. Enter persists nothing, so the rewrite is the check."""
+    from unittest.mock import patch
+
+    from smartmemory_app import setup
+
+    _home, agents, _store, run = plist_env
+    names = (setup.PLIST_NAME, setup.WORKER_PLIST_NAME)
+    _old_plist(agents, *names)
+    before = {n: (agents / n).read_bytes() for n in names}
+    monkeypatch.setenv("GROQ_API_KEY", KEY)
+    if not store_ok:
+
+        def refuse(*args):
+            raise RuntimeError("credential store locked")
+
+        monkeypatch.setattr("keyring.set_password", refuse)
+    prompts = ["groq", "", "openai", "sm", str(tmp_path / "data")]
+    with (
+        patch("smartmemory_app.setup._ensure_spacy"),
+        patch("smartmemory_app.setup._ensure_lazy_models"),
+        patch("smartmemory_app.setup._copy_hooks"),
+        patch("smartmemory_app.setup._copy_skills"),
+        patch("smartmemory_app.setup._register_hooks"),
+        patch("smartmemory_app.setup._seed_data_dir"),
+        patch("smartmemory_app.config.save_config"),
+        patch("smartmemory_app.daemon.is_running", return_value=False),
+        patch("click.confirm", return_value=False),
+        patch("click.prompt", side_effect=prompts) as prompt,
+    ):
+        setup_output = _captured(setup._setup_local)
+    assert prompt.call_count == len(prompts)
+    output = setup_output + run(caplog)
+    _assert_key_invariant(
+        KEY if store_ok else "kept", agents, before, output, monkeypatch
+    )
+
+
 _BASE_IDS = {
     "SMARTMEMORY_TEAM_ID": "ReviewTeamCanary73",
     "SMARTMEMORY_LLM_PROVIDER": "ReviewProviderCanary73",
