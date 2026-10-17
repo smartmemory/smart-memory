@@ -355,7 +355,7 @@ def test_setup_remote_and_cancel_do_not_start_daemon(setup_runtime, monkeypatch)
     monkeypatch.setattr(setup, "_setup_remote", remote)
     result = CliRunner().invoke(setup.setup, ["--mode", "remote"])
     assert result.exit_code == 0, result.output
-    remote.assert_called_once_with(None)
+    remote.assert_called_once_with(None, None)
     metrics.assert_called_once_with("setup.complete", {"mode": "remote"})
 
     metrics.reset_mock()

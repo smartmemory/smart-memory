@@ -276,6 +276,9 @@ class TourArcDriver:
             # Type first, then run: the graph reacts while the command is on screen.
             self._session_type(emit, f'sm add "{fact}"')
             result = self.client.ingest(fact, memory_type="semantic")
+            if result.get("status") == "held":
+                self._session_print(emit, f"Held: {result.get('reason')}")
+                continue
             seeded_ids.append(str(result.get("item_id", "?")))
             self._session_print(emit, seeded_ids[-1])
             self._emit(
@@ -292,7 +295,11 @@ class TourArcDriver:
             emit,
             2,
             "Semantic search",
-            "A question in plain language, answered from the facts just stored.",
+            (
+                "A question in plain language, answered from the facts just stored."
+                if seeded_ids
+                else "A question in plain language, searching the existing memory."
+            ),
         )
         self._session_type(emit, f'sm search "{SEARCH_QUERY}"')
         search_response = self.client.search(SEARCH_QUERY, top_k=5)
@@ -362,6 +369,7 @@ class TourArcDriver:
         self._session_print(emit, recall_text or "(recall returned no context)")
 
         imported_claude = False
+        claude_hold = None
         imported_search_text = ""
         claude_path = self.cwd / "CLAUDE.md"
         if include_claude_import and claude_path.exists() and claude_path.is_file():
@@ -375,8 +383,11 @@ class TourArcDriver:
                     "Already keeping a CLAUDE.md? One command imports it, searchable like everything else.",
                 )
                 self._session_type(emit, "sm add --all - < ./CLAUDE.md")
-                self.client.ingest(content, memory_type="semantic")
-                imported_claude = True
+                receipt = self.client.ingest(content, memory_type="semantic")
+                if receipt.get("status") == "held":
+                    claude_hold = receipt
+                    self._session_print(emit, f"Held: {receipt.get('reason')}")
+                imported_claude = receipt.get("status") != "held"
                 imported_search_text = _format_search_response(
                     self.client.search("project instructions", top_k=3)
                 )
@@ -387,7 +398,9 @@ class TourArcDriver:
                 emit,
                 5,
                 "Import your CLAUDE.md",
-                "No ./CLAUDE.md found in this directory, so the import step was skipped.",
+                f"CLAUDE.md held: {claude_hold.get('reason')}"
+                if claude_hold
+                else "No ./CLAUDE.md found in this directory, so the import step was skipped.",
                 "sm add --all - < ./CLAUDE.md",
             )
 
@@ -643,8 +656,22 @@ class TourDaemon:
                     )
                 try:
                     response = client.get(f"{self.base_url}/health")
-                    if response.status_code == 200:
+                    # /health answers 200 while still "warming"; memory routes block until
+                    # warmup ends, so only a finished warmup counts as ready.
+                    status = (
+                        response.json().get("status")
+                        if response.status_code == 200
+                        else None
+                    )
+                    if status == "degraded":
+                        raise RuntimeError(
+                            "tour daemon failed to start: "
+                            f"{response.json().get('degraded_reason') or 'warmup did not complete'}"
+                        )
+                    if response.status_code == 200 and status != "warming":
                         return
+                except RuntimeError:
+                    raise
                 except Exception as exc:
                     last_error = exc
                 time.sleep(0.25)
@@ -652,7 +679,7 @@ class TourDaemon:
         raise TimeoutError(f"tour daemon did not become healthy{detail}")
 
     def _assert_reached_empty_store(self) -> None:
-        with httpx.Client(trust_env=False, timeout=5.0) as client:
+        with httpx.Client(trust_env=False, timeout=60.0) as client:
             response = client.get(f"{self.base_url}/memory/graph/full")
             response.raise_for_status()
             payload = response.json()
@@ -980,6 +1007,16 @@ def run_tour(
     no_viewer: bool = False,
 ) -> TourRunResult | None:
     """Launch the guided tour TUI."""
+    if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
+        import click
+
+        logging.getLogger(__name__).debug("Skipping guided tour TUI on Windows")
+        click.echo(
+            "The guided tour TUI is disabled on Windows while terminal support is tested. "
+            "Try 'sm add', 'sm search' and 'sm recall'. "
+            "Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
+        )
+        return None
     runner = TourSessionRunner(
         keep=keep,
         code=code,

@@ -8,6 +8,7 @@ Entry point: run_setup_tui() -> SetupResult | None
 """
 
 import os
+import sys
 import time
 
 from textual import work
@@ -418,7 +419,31 @@ class ProgressScreen(Screen):
 
             self.app.call_from_thread(self._set_final_status, status_text)
         except BaseException as e:
-            message = str(e) or e.__class__.__name__
+            import logging
+            from smartmemory_app.diagnostics import redact_credentials
+
+            from smartmemory_app.runtime_diagnostics import record_cli_crash
+            import sys
+
+            if isinstance(e, Exception):
+                record_cli_crash(e, sys.argv[1:])
+            logging.getLogger(__name__).warning(
+                "Setup TUI worker failed", exc_info=True
+            )
+            message = redact_credentials(
+                " ".join(str(e).split()) or e.__class__.__name__
+            )
+            try:
+                import click
+                from smartmemory_app.bug_report import debug_log_path
+
+                if not isinstance(e, click.ClickException):
+                    message = redact_credentials(
+                        f"{type(e).__name__}: {message[:500]}\nLog: {debug_log_path()}\n"
+                        "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                    )
+            except Exception:
+                pass
             self.app._setup_error = message
             self.app.call_from_thread(
                 self._set_final_status,
@@ -517,7 +542,18 @@ class SetupApp(App):
 def run_setup_tui() -> SetupResult | None:
     """Launch the Textual TUI. Returns SetupResult on success, None on cancel."""
     app = SetupApp()
-    result = app.run()
+    try:
+        result = app.run()
+    finally:
+        # Restore terminal reporting before click prompts, including on crashes.
+        try:
+            if sys.stdout.isatty():
+                sys.stdout.write(
+                    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l"
+                )
+                sys.stdout.flush()
+        except Exception:
+            pass
     if app._setup_error is not None:
         import click
 

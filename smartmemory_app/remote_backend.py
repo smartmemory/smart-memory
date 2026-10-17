@@ -17,14 +17,19 @@ Critical invariants:
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
 
 from smartmemory_app.config import get_api_key, set_api_key
 
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from smartmemory.code.models import IndexResult
 
 
 class RemoteBackendError(RuntimeError):
@@ -37,6 +42,20 @@ class RemoteBackendError(RuntimeError):
     Background callers (e.g. `recall()`) catch it and degrade; explicit CLI
     commands (`sm add` / `sm search`) let it surface.
     """
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        *,
+        body: Any = None,
+        result: IndexResult | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+        if result is not None:
+            self.result = result
 
 
 class RemoteMemory:
@@ -109,9 +128,130 @@ class RemoteMemory:
                 "error": f"SmartMemory API unreachable at {self._api_url}. Check SMARTMEMORY_API_URL."
             }
         except httpx.HTTPStatusError as e:
-            return {"error": f"API error {e.response.status_code}: {e.response.text}"}
+            try:
+                body = e.response.json()
+            except ValueError:
+                body = {"detail": e.response.text}
+            return {
+                "error": f"API error {e.response.status_code}: {e.response.text}",
+                "status_code": e.response.status_code,
+                "body": body,
+            }
+        except httpx.TimeoutException:
+            return {"error": "SmartMemory service did not respond in time (timeout)."}
+        except httpx.HTTPError as e:
+            return {
+                "error": f"SmartMemory service network/proxy request failed ({type(e).__name__})."
+            }
         except Exception as e:
             return {"error": f"Request failed: {e}"}
+
+    def request(self, method: str, path: str, **kwargs):
+        """Explicit hosted operation: raise on errors, preserving quota details."""
+        if not self._access_token:
+            raise RemoteBackendError(
+                "No SmartMemory API key configured. Run: smartmemory setup --mode remote --api-key KEY",
+                401,
+            )
+        result = self._request(method, path, **kwargs)
+        if isinstance(result, dict) and result.get("error"):
+            status = result.get("status_code", 502)
+            body = result.get("body", {})
+            detail = body.get("detail", body) if isinstance(body, dict) else body
+            detail = detail if isinstance(detail, str) else json.dumps(detail)
+            if status == 401:
+                message = "SmartMemory API key is invalid or expired. Run: smartmemory setup --mode remote --api-key KEY"
+            elif status in (403, 429):
+                message = (
+                    f"SmartMemory service refused the request (HTTP {status}): {detail}"
+                )
+                if isinstance(body, dict):
+                    for field in ("limit", "current", "resets_at", "subscription_tier"):
+                        if field in body:
+                            message += f" ({field}: {body[field]})"
+            elif (
+                status in (502, 503)
+                and path == "/memory/ask"
+                and "status_code" in result
+            ):
+                message = (
+                    "SmartMemory hosted LLM is unavailable. No answer was generated."
+                )
+            else:
+                message = (
+                    f"SmartMemory service error (HTTP {status}): {detail}"
+                    if "status_code" in result
+                    else result["error"]
+                )
+            raise RemoteBackendError(message, status, body=body)
+        return result
+
+    def ask(self, question: str, limit: int = 5, *, reasoning: bool = True) -> dict:
+        """Hosted DIST-LITE-9 contract, using the platform's LLM credentials."""
+        result = self.request(
+            "POST",
+            "/memory/ask",
+            timeout=120,
+            json={"question": question, "limit": limit, "reasoning": reasoning},
+        )
+
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("answer"), str)
+            or not result["answer"].strip()
+        ):
+            raise RemoteBackendError(
+                "SmartMemory service returned an invalid ask response."
+            )
+        return result
+
+    def list_memories(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        order: str = "asc",
+        *,
+        metadata_key: str | None = None,
+        metadata_value: str | None = None,
+        memory_type: str | None = None,
+    ) -> dict:
+        """Scoped GRAPH-API-1l page, following the Python SDK list contract.
+
+        Keep the page envelope and raise RemoteBackendError on HTTP failures or
+        malformed responses so a failed listing never looks like an empty store.
+        """
+        if limit < 1 or offset < 0 or order not in ("asc", "desc"):
+            raise RemoteBackendError("Invalid memory list limit, offset or order.", 422)
+        if (metadata_key is None) != (metadata_value is None):
+            raise RemoteBackendError(
+                "metadata_key and metadata_value must be supplied together.", 422
+            )
+        params = {"limit": limit, "offset": offset, "order": order}
+        if metadata_key is not None:
+            params.update(metadata_key=metadata_key, metadata_value=metadata_value)
+        if memory_type is not None:
+            params["memory_type"] = memory_type
+        result = self.request(
+            "GET",
+            "/memory/list",
+            params=params,
+        )
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("items"), list)
+            or any(not isinstance(item, dict) for item in result["items"])
+            or any(
+                type(result.get(field)) is not int or result[field] < 0
+                for field in ("total", "limit", "offset")
+            )
+            or result["limit"] != limit
+            or result["offset"] != offset
+            or len(result["items"]) > limit
+        ):
+            raise RemoteBackendError(
+                "SmartMemory service returned an invalid list response."
+            )
+        return result
 
     # ── Auth ────────────────────────────────────────────────────────────────
 
@@ -160,18 +300,154 @@ class RemoteMemory:
 
     # ── MCP tool interface (same signatures as local storage.py) ────────────
 
-    def ingest(self, content: str, memory_type: str = "semantic") -> str:
-        """POST /memory/ingest (full pipeline). Returns item_id string.
+    def ingest_code(
+        self,
+        directory: str,
+        repo: str,
+        commit_hash: str | None = None,
+        exclude_dirs: list[str] | None = None,
+        languages: list[str] | None = None,
+    ) -> IndexResult:
+        """Parse locally, then replace one repo in the configured hosted workspace.
+
+        Use the existing authenticated HTTP client. Never issue DELETE or send
+        a local directory for the server to read. Replacement and rollback are
+        owned by the scoped service endpoint, so do not chunk or retry writes.
+        """
+        from smartmemory_app.hosted_code import prepare_code_index
+
+        if not self._team_id:
+            raise RemoteBackendError(
+                "Hosted code index requires a configured workspace (team_id).", 400
+            )
+        if not self._access_token:
+            raise RemoteBackendError(
+                "Hosted code index requires a SmartMemory API key.", 401
+            )
+        started = time.monotonic()
+        body, result = prepare_code_index(
+            directory, repo, commit_hash, exclude_dirs, languages
+        )
+        try:
+            response = self.request(
+                "POST", "/memory/code/index", timeout=120, json=body
+            )
+        except RemoteBackendError as exc:
+            server_summary = exc.body if isinstance(exc.body, dict) else {}
+            if exc.status_code == 402:
+                message = f"Hosted code index refused by max_repos cap: {exc}"
+            elif exc.status_code == 413:
+                message = (
+                    f"Hosted code index refused by MAX_REQUEST_BODY_BYTES cap: {exc}"
+                )
+            elif server_summary.get("publication") not in (None, "unknown"):
+                message = f"Hosted code replacement {server_summary['publication']}: {exc}. No retry was attempted."
+            else:
+                message = (
+                    f"Hosted code replacement failed: {exc}. "
+                    "Replacement was not confirmed, partial server changes may exist. No retry was attempted."
+                )
+            for key in result.parse_summary():
+                setattr(
+                    result,
+                    key,
+                    server_summary.get(key, [] if key == "diagnostics" else "unknown"),
+                )
+            result.replaced = False
+            result.g16_complete = False
+            result.errors.append(message)
+            log.warning("%s", message)
+            raise RemoteBackendError(
+                message, exc.status_code, body=exc.body, result=result
+            ) from exc
+        counts = ("entities_created", "edges_created")
+        expected = (len(body["entities"]), len(body["relations"]))
+        if (
+            not isinstance(response, dict)
+            or response.get("replaced") is not True
+            or response.get("errors")
+            or any(
+                type(response.get(key)) is not int or response[key] != n
+                for key, n in zip(counts, expected)
+            )
+        ):
+            message = (
+                "Hosted code replacement incomplete or unconfirmed: "
+                f"expected entities={expected[0]} edges={expected[1]}, received {response!r}. "
+                "Partial server changes may exist. No retry was attempted."
+            )
+            log.warning("%s", message)
+            for key in result.parse_summary():
+                setattr(
+                    result,
+                    key,
+                    response.get(key, [] if key == "diagnostics" else "unknown")
+                    if isinstance(response, dict)
+                    else []
+                    if key == "diagnostics"
+                    else "unknown",
+                )
+            result.g16_complete = False
+            raise RemoteBackendError(
+                message,
+                body=response if isinstance(response, dict) else None,
+                result=result,
+            )
+        if any(key not in response for key in result.parse_summary()):
+            log.warning(
+                "Server omitted code diagnostic evidence; missing counts/outcomes reported as unknown"
+            )
+        result.entities_created, result.edges_created = expected
+        result.replaced = True
+        for key in result.parse_summary():
+            setattr(
+                result,
+                key,
+                response.get(key, [] if key == "diagnostics" else "unknown"),
+            )
+        result.g16_complete = False
+        result.elapsed_seconds = round(time.monotonic() - started, 2)
+        # CODE-INDEXER-HARDEN-1 F25: current services embed REST bundles and report the count.
+        embedded = response.get("embeddings_generated")
+        if type(embedded) is int:
+            result.embeddings_generated = embedded
+            if embedded < result.entities_created:
+                log.warning(
+                    "Hosted code index embedded %d of %d entities; semantic code search coverage is partial.",
+                    embedded,
+                    result.entities_created,
+                )
+        else:
+            log.warning(
+                "Hosted code index stores graph entities and relations only: "
+                "the hosted endpoint does not generate vector embeddings (embeddings=0)."
+            )
+        return result
+
+    def ingest(
+        self,
+        content: str,
+        memory_type: str = "semantic",
+        *,
+        context: dict | None = None,
+    ) -> str | dict:
+        """POST /memory/ingest (full pipeline). Returns item_id or a terminal held receipt.
 
         Uses /memory/ingest (not /memory/add) — ingest runs entity extraction,
         enrichment, linking, grounding. Returns {"item_id": ...} (not {"id": ...}).
+        Context carries producer origin and sanitized properties from storage.
+        The service overwrites workspace/scope metadata with authenticated scope.
         """
-        body = {"content": content, "context": {"memory_type": memory_type}}
+        ingest_context = dict(context or {})
+        ingest_context["memory_type"] = memory_type
+        body = {"content": content, "context": ingest_context}
         result = self._request("POST", "/memory/ingest", timeout=120, json=body)
         if err := (result or {}).get("error"):
             # Surface the failure — do NOT return "Error: ..." as the item_id, which
             # the CLI would print as if the add succeeded.
             raise RemoteBackendError(err)
+        if result.get("status") == "held":
+            return result
         return result.get("item_id", "unknown")
 
     def search(self, query: str, top_k: int = 5, **kwargs) -> list[dict]:
@@ -208,6 +484,7 @@ class RemoteMemory:
         workspace_id: str | None = None,
         strict: bool | None = None,
         exclude_ids: list[str] | None = None,
+        raise_on_error: bool = False,
     ) -> str:
         """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall (remote).
 
@@ -231,6 +508,7 @@ class RemoteMemory:
             time_ms,
         )
 
+        request = self.request if raise_on_error else self._request
         t0 = time_ms()
         workspace_id = workspace_id or derive_workspace_id(cwd)
         if strict is None:
@@ -246,7 +524,7 @@ class RemoteMemory:
         frame = ""
         if include_snapshot:
             try:
-                snaps = self._request(
+                snaps = request(
                     "POST",
                     "/memory/search",
                     workspace_id=workspace_id,
@@ -276,6 +554,8 @@ class RemoteMemory:
                             "## SmartMemory Context\n"
                         )
             except Exception as exc:
+                if raise_on_error:
+                    raise
                 record_hook_degradation("Orient lost remote snapshot context", exc)
 
         # 2. Candidates — recall runs on every prompt hook, so a remote search
@@ -296,10 +576,12 @@ class RemoteMemory:
                 )
                 results = list(recent) + list(semantic)
         except RemoteBackendError as e:
+            if raise_on_error:
+                raise
             record_hook_error("Remote recall lost search context", e)
             results = []
         try:
-            response = self._request(
+            response = request(
                 "GET",
                 "/memory/decisions",
                 workspace_id=workspace_id,
@@ -319,6 +601,8 @@ class RemoteMemory:
                 )
             results = matching_lessons(lessons, query) + list(results)
         except Exception as exc:
+            if raise_on_error:
+                raise
             record_hook_degradation("Recall lost remote decision lookup", exc)
         results = [
             _item_to_recall_dict(r)

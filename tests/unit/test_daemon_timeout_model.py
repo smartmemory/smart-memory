@@ -82,24 +82,27 @@ def test_uncooperative_worker_reaches_core_escalation(launchd, monkeypatch, plat
     monkeypatch.setattr(daemon.sys, "platform", platform)
     (daemon._data_dir() / ".worker.pid").write_text("434343")
     monkeypatch.setattr(spawn, "worker_is_running", lambda data: True)
-    real_kill = daemon.os.kill
     signals = []
+    monkeypatch.setattr(spawn, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        spawn,
+        "process_cmdline",
+        lambda pid: ["python", "-m", "smartmemory_app.worker_entry"],
+    )
+    from smartmemory.utils import process as process_utils
 
-    def kill(pid, sig):
-        if pid == 434343:
-            signals.append(sig)
-        else:
-            return real_kill(pid, sig)
+    class Child:
+        def terminate(self):
+            signals.append(signal.SIGTERM)
 
-    def run(cmd, **kwargs):
-        if cmd[0] == "ps":
-            return subprocess.CompletedProcess(
-                cmd, 0, "python -m smartmemory_app.worker_entry", ""
-            )
-        return launchd.run(cmd, **kwargs)
+        def kill(self):
+            signals.append(signal.SIGKILL)
 
-    monkeypatch.setattr(daemon.os, "kill", kill)
-    monkeypatch.setattr(subprocess, "run", run)
+        def wait(self, timeout):
+            if signal.SIGKILL not in signals:
+                raise process_utils.psutil.TimeoutExpired(timeout)
+
+    monkeypatch.setattr(process_utils.psutil, "Process", lambda pid: Child())
     started = time.monotonic()
     try:
         with daemon.lifecycle_budget(0.25):
@@ -168,20 +171,13 @@ def test_default_worker_grace_preserves_core_timeout(launchd, monkeypatch, entry
 
     launchd.start()
     calls = []
-    function_type = daemon.FunctionType
+    original_stop = spawn.stop_worker
 
-    def bind(code, scope, name, defaults, closure):
-        function = function_type(code, scope, name, defaults, closure)
-        if name != "stop_worker":
-            return function
+    def stop(data, *, timeout):
+        calls.append((timeout, daemon._remaining(200)))
+        return original_stop(data, timeout=timeout)
 
-        def stop(data, *, timeout):
-            calls.append((timeout, daemon._remaining(200)))
-            return function(data, timeout=timeout)
-
-        return stop
-
-    monkeypatch.setattr(daemon, "FunctionType", bind)
+    monkeypatch.setattr(spawn, "stop_worker", stop)
     monkeypatch.setattr(spawn, "worker_is_running", lambda data: False)
     monkeypatch.setattr(
         "smartmemory_app.cli._start_with_progress",
@@ -211,7 +207,8 @@ signal.signal(signal.SIGTERM, lambda *args: stopped.set())
 d = pathlib.Path(sys.argv[1])
 with FileLock(str(d / '.worker.lock')):
     (d / '.worker.pid').write_text(str(os.getpid()))
-    stopped.wait(60)
+    while not (d / f'.worker.stop-{os.getpid()}').exists():
+        time.sleep(0.01)
     time.sleep(5)
 """
     process = subprocess.Popen(
@@ -259,23 +256,32 @@ with FileLock(str(d / '.worker.lock')):
         stderr=subprocess.PIPE,
         text=True,
     )
-    real_run = subprocess.run
+    from smartmemory.utils import process as process_utils
+
     inspections = []
+    exit_codes = []
+    real_inspect = spawn.process_cmdline
+    real_wait = process_utils.psutil.Process.wait
 
-    def run(command, **kwargs):
-        assert command[0] == "ps"
-        inspections.append(kwargs["timeout"])
+    def inspect(pid):
+        inspections.append(pid)
         if slow_identity:
-            time.sleep(min(0.03, kwargs["timeout"] / 2))
-        return real_run(command, **kwargs)
+            time.sleep(0.01)
+        return real_inspect(pid)
 
+    def wait(child, *args, **kwargs):
+        result = real_wait(child, *args, **kwargs)
+        exit_codes.append(result)
+        return result
+
+    monkeypatch.setattr(process_utils.psutil.Process, "wait", wait)
     try:
         until = time.monotonic() + 15
         while not (tmp_path / ".worker.pid").exists() and time.monotonic() < until:
             assert process.poll() is None, process.stderr.read()
             time.sleep(0.05)
         assert (tmp_path / ".worker.pid").exists()
-        monkeypatch.setattr(subprocess, "run", run)
+        monkeypatch.setattr(spawn, "process_cmdline", inspect)
         started = time.monotonic()
         with daemon.lifecycle_budget(0.8):
             daemon._stop_workers()
@@ -283,9 +289,10 @@ with FileLock(str(d / '.worker.lock')):
         assert not spawn.worker_is_running(tmp_path), (
             "Stop returned before the worker released its lock"
         )
-        assert process.wait(timeout=0.1) == -signal.SIGKILL
+        assert -signal.SIGKILL in exit_codes
+        process.wait(timeout=0.1)
         assert len(inspections) >= 3
-        assert all(0 < cap <= 0.08 for cap in inspections)
+        assert all(pid == process.pid for pid in inspections)
     finally:
         if process.poll() is None:
             process.kill()

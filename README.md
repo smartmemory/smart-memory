@@ -1,6 +1,6 @@
 # SmartMemory
 
-**Give your AI a memory.** Your coding assistant forgets everything the moment a session ends. SmartMemory fixes that.
+**Give your AI a memory.** Your coding assistant forgets everything the moment a session ends. SmartMemory gives it a place to keep what it learned.
 
 [![Docs](https://img.shields.io/badge/docs-smartmemory.ai-blue)](https://docs.smartmemory.ai/)
 [![PyPI version](https://badge.fury.io/py/smartmemory.svg)](https://pypi.org/project/smartmemory/)
@@ -8,13 +8,13 @@
 
 **[Read the docs](https://docs.smartmemory.ai/)**
 
-SmartMemory remembers what you and your AI learn while you work: decisions, preferences, facts, and hard-won lessons. Next session, the relevant parts come back automatically. It runs on your machine by default, with no Docker and no database to install.
+SmartMemory remembers what you and your AI learn while you work: decisions, preferences, facts, and hard-won lessons. Next session, SmartMemory looks up the relevant parts and hands them back to your assistant automatically. It runs on your machine by default, with no Docker and no database to install.
 
 Works out of the box with **Claude Code**, **Cursor**, and other MCP-compatible tools, or directly from **Python**.
 
 _(new: export and import your whole memory as portable Open Knowledge Format bundles.)_
 
-## Get started in 2 minutes
+## Get started
 
 ```bash
 pip install smartmemory
@@ -37,7 +37,7 @@ sm search "which database did we pick"
 
 ### What you get from here
 
-- **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts. No more re-explaining your project every morning.
+- **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts.
 - **Ask questions in plain language.** `sm search` is semantic search. "Which database did we pick" finds the Postgres memory even though the words don't match.
 - **A knowledge graph you can see.** Everything you add gets linked into a graph you can explore in your browser. The tour below shows you around.
 
@@ -85,14 +85,16 @@ sm search --top-k 20 "*"            # list more of everything
 
 ### 4. Meet the daemon
 
-SmartMemory runs a small background daemon so the CLI answers in under 200ms instead of cold-starting Python on every command. Setup starts it for you, and on macOS it comes back after login and crashes.
+SmartMemory runs a small background daemon so the CLI does not cold-start Python on every command. In our own timing on version 1.5.16, a warm `sm add` took about 210 ms (median of 15 runs) and the first `sm add` after startup took about 0.9 seconds (3 runs). Setup starts it for you, and on macOS it comes back after login and crashes.
 
 ```bash
 sm status     # daemon health, memory count, enrichment queue
 sm restart    # if you ever need a fresh start
 ```
 
-The daemon is also where the quality comes from. `sm add` returns instantly because fast entity extraction runs in about 4ms. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You never wait for it, and `sm status` shows the queue draining.
+In local mode, `sm status` shows how many memories are saved on this machine and explains that they are outside your cloud account, even when the daemon is stopped or warming. Use `sm status --json` for machine-readable status. Local output includes `local_only` and `local_memory_count` alongside the daemon health fields. Remote output retains the hosted summary fields and reports `local_only: false`.
+
+The daemon is also where the quality comes from. `sm add` returns quickly because only a fast entity extraction pass runs before it answers. If you have an LLM API key configured, the daemon then quietly re-reads each memory in the background and adds the entities and relations the fast pass missed. You do not wait for it, and `sm status` shows the queue draining.
 
 ### 5. Explore your knowledge graph
 
@@ -124,11 +126,11 @@ If you ran `smartmemory setup`, this is already working. Setup installs six hook
 - **Session starts**: SmartMemory recalls what it knows about the directory you're working in.
 - **You send a prompt**: memories relevant to that prompt are injected as context.
 - **Tools run**: tool calls are observed and captured.
-- **A tool fails**: the error pattern is saved so the same mistake isn't repeated.
+- **A tool fails**: the error pattern is saved so it can be recalled later.
 - **Claude finishes responding**: the response is paired with the prompt that produced it.
 - **Session ends**: a session summary is persisted.
 
-The net effect is that tomorrow's session starts where today's left off, without you pasting context around.
+The aim is that tomorrow's session can pick up from what today's captured, without you pasting context around.
 
 You also get slash commands inside Claude Code:
 
@@ -151,7 +153,7 @@ Using Cursor as your editor? `smartmemory setup --for cursor` configures it in o
 
 The SmartMemory Obsidian plugin brings the same memory to your vault: every note becomes a structured memory with extracted entities, entity chips link every note that mentions the same person or project, a graph pane shows the neighborhood around the active note, and `Cmd+Shift+R` runs multi-hop semantic search across the whole vault. It can also propose `[[wikilinks]]` for entity mentions and warn you inline when a note contradicts something newer.
 
-The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). For access, write to support@smartmemory.ai, then paste your API key from [app.smartmemory.ai](https://app.smartmemory.ai) into Settings → SmartMemory.
+The plugin uses a SmartMemory account (free tier: 1,000 notes, 200 searches per day). For access, write to support@smartmemory.ai, then paste your API key from [www.smartmemory.ai](https://www.smartmemory.ai) into Settings → SmartMemory.
 
 ## What happens when you add a memory
 
@@ -183,13 +185,30 @@ memory = create_lite_memory(pipeline_profile=PipelineConfig.lite(llm_enabled=Fal
 sm add "text"                  # Remember something
 sm search "query"              # Find memories by meaning
 sm search "*"                  # List everything
-sm ask "what did we decide?"   # Direct answer; add --reasoning for why + evidence
+sm ask "what did we decide?"   # Answer, or labelled excerpts locally without an LLM key
 sm viewer                      # Open the knowledge graph in your browser
 sm explore                     # Walk the knowledge graph in the terminal
 sm status                      # Daemon health and memory count
 sm config                      # View settings
 sm clear                       # Start over (deletes all memories)
 ```
+
+In remote mode, `sm search '*' --top-k 20` lists a page of memories in your
+configured workspace. The output shows the scoped total and a next-page command
+using `--offset`. The default page size is 5. Local wildcard listing continues to
+list all local memories.
+
+Remote `sm add "note" --prop project=atlas` stores the property in hosted ingest
+context. Repeat `--prop key=value` for more properties, or use `--project atlas`.
+Producer fields such as `origin` and `memory_type`, and hosted scope fields such
+as `workspace_id`, are reserved. Write keys must be simple identifiers without
+`__`. Use `--type` to choose the memory type.
+
+Remote `sm search '*' --prop project=atlas` lists exact matches without semantic
+ranking. One property filter is supported per request. `--prop memory_type=decision`
+uses the list route's type filter. Pagination retains the filter in the next-page
+command. Property filters with a text query, multiple filters, and semantic or
+time-window options on wildcard listing are explicitly refused.
 
 <details>
 <summary><strong>Full command reference</strong></summary>
@@ -202,12 +221,17 @@ smartmemory add --type semantic "..."  # Add with specific memory type
 smartmemory add - < notes.txt          # Add from stdin, one memory per line
 smartmemory add --all - < doc.txt      # Add entire stdin as one memory
 smartmemory add --project atlas "..."  # Add with arbitrary property flags
+smartmemory add "..." --project=atlas  # Equal-form properties also work
 
-smartmemory search "query"             # Semantic search
+smartmemory search "query"             # Semantic search (full item IDs)
+smartmemory search "query" --json      # Full IDs, bodies and returned fields as JSON
+smartmemory search "query" --full      # Whole bodies instead of 200-character previews
+smartmemory get abcdef                 # Local read-only lookup by unique ID prefix (6+ hex chars)
+smartmemory help search                # Show command help
 smartmemory search "*"                 # List all memories
 smartmemory search --top-k 20 "query"  # Control result count (default: 5)
 smartmemory search --project atlas "q" # Filter by property
-smartmemory ask "what did we decide?"  # Direct answer; --reasoning shows evidence + relations
+smartmemory ask "what did we decide?"  # Answer, or labelled excerpts locally without an LLM key
 
 smartmemory get <item_id>              # Fetch a single memory by ID
 smartmemory retag --content "x" --origin seed:demo --dry-run  # Re-tag matched items' origin
@@ -227,23 +251,33 @@ smartmemory clear                      # Delete all memories and reset vectors
 ```bash
 smartmemory start                      # Start daemon + enrichment workers
 smartmemory stop                       # Stop daemon
-smartmemory restart                    # Restart daemon
+smartmemory restart                    # Restart daemon and print phase timings
 smartmemory status                     # Daemon health + enrichment stats
 smartmemory worker                     # Run enrichment worker (drain and exit)
 smartmemory worker --loop              # Run enrichment worker continuously
 ```
+
+Search previews mark truncated bodies with `…`. Copy the full ID into `sm get`, or use a unique
+prefix of at least six hexadecimal characters in local mode. Ambiguous prefixes list the full
+candidate IDs and fail. Remote get requires a full ID. Prefix resolution applies only to read-only get.
+Quote inline text containing multiple words, or pipe it with `sm add --all -`.
+Keyless local semantic hop searches print a notice when the heuristic planner is used.
 
 ### Setup and lifecycle
 
 ```bash
 smartmemory setup                      # Interactive first-run questionnaire
 smartmemory setup --mode local         # Skip questionnaire, set local mode
-smartmemory setup --mode remote --api-key sk_...  # Non-interactive remote setup
+smartmemory setup --mode remote --api-url https://your-service.example  # SMARTMEMORY_API_KEY in env
 smartmemory setup --for cursor         # Configure for Cursor instead of Claude Code
 smartmemory server                     # Start MCP server (called by MCP clients)
 smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
+
+In local mode without an LLM key, `sm ask` shows the most relevant stored excerpts with full IDs, types and dates. The output is labelled extractive and contains no AI-written answer. Run `smartmemory setup` or set a supported provider key to enable synthesized answers.
+
+In remote mode, `sm ask`, `add`, `search`, `recall`, `get` and `status` use the hosted service without a local daemon. `sm ask` uses the service's LLM credentials, so you only need your SmartMemory API key. `add` accepts user properties, and `search '*'` supports paginated listing with one exact property filter. Property filters on semantic text searches are explicitly refused. The guided tour, store maintenance, corpus import/export, seed-pack installation and transcript capture commands require local mode. Import dry runs can still validate files in remote mode.
 
 Once a day, any `sm` command may end with one dim line telling you a newer release is on PyPI:
 
@@ -270,8 +304,11 @@ smartmemory admin convert-rebel        # Convert REBEL dataset to corpus JSONL
 
 ### Code indexing and MCP
 
+Code indexing reports clean, partial and failed file counts plus acceptance, staging and publication outcomes. Every hosted response derives counts from uploaded file evidence. Uncomputable evidence and missing server counts are displayed as `unknown`. Localized grammar partials with usable extraction can publish with visible spans and byte coverage. Hard collection or parse failures retain the prior index. Partial 1.x acceptance does not prove G16 complete-generation publication. Successful file extraction checkpoints are stored under `SMARTMEMORY_CODE_CHECKPOINT_DIR` (default `~/.cache/smartmemory/code-parse`) and reused when source, configuration and parser versions match. Hosted CLI failures print diagnostic counts and the server staging and publication outcome, including cleanup failures. Transport loss reports an unconfirmed server outcome.
+
 ```bash
 smartmemory code index <path>          # Index a code repo (AST entities + call graph) into memory
+smartmemory code effects <path>        # Print source-qualified Python effects without a store
 smartmemory mcp install claude-code    # Write MCP server config for a client (claude-code, cursor, codex)
 ```
 
@@ -311,7 +348,7 @@ model, so vectors and existing stores are interchangeable.
 ## Lite or Service
 
 - **Lite** (the default): everything runs on your machine. SQLite graph plus usearch vectors, no Docker, no external services, no account. `pip install smartmemory` and go.
-- **Service**: connect to the managed SmartMemory backend instead of running storage locally. Run `smartmemory setup --mode remote` and paste an API key from [app.smartmemory.ai](https://app.smartmemory.ai). Nothing to install or operate, and there is a free tier to start on.
+- **Service**: connect to the managed SmartMemory backend instead of running storage locally. Run `smartmemory setup --mode remote` and paste an API key from [www.smartmemory.ai](https://www.smartmemory.ai). Nothing to install or operate, and there is a free tier to start on.
 
 You choose Lite or Service at `smartmemory setup` time, not at install time, and you can switch later by re-running setup.
 
@@ -464,15 +501,15 @@ Each stage implements the `StageCommand` protocol (`execute(state, config) -> st
 
 When an LLM API key is available, the daemon runs **two-tier ingestion**:
 
-- **Tier 1 (sync, ~4ms):** spaCy + EntityRuler extracts entities immediately and returns the item ID
-- **Tier 2 (async, ~740ms):** A background drain thread runs LLM extraction and adds net-new entities and relations
+- **Tier 1 (sync, fast):** spaCy + EntityRuler extracts entities immediately and returns the item ID
+- **Tier 2 (async, slower):** A background drain thread runs LLM extraction and adds net-new entities and relations
 
-This means `sm add` returns instantly while quality improves in the background.
+This means `sm add` returns after the fast pass while quality improves in the background.
 
 ### What makes it different
 
-- **Self-learning EntityRuler**: Pattern-matching NER that improves with use. LLM discoveries feed back into rules (96.9% entity F1 at 4ms)
-- **Memory evolution**: Built-in evolvers automatically transform memories over time, promoting stable facts, decaying stale ones, and strengthening what you actually use
+- **Self-learning EntityRuler**: Pattern-matching NER that improves with use. LLM discoveries feed back into rules
+- **Memory evolution**: Built-in evolvers transform memories over time, promoting stable facts, decaying stale ones, and tracking what you actually use
 - **Hybrid search**: Graph-structured search plus BM25/embedding RRF fusion with query decomposition for compound queries
 - **Code indexer**: AST-based Python and TypeScript parser with cross-file call resolution, semantic code search, and memory-to-code graph bridging
 - **Two-tier ingestion**: Instant spaCy extraction plus async LLM enrichment
@@ -653,7 +690,30 @@ class MemoryItem:
 
 Config file: `~/.config/smartmemory/config.toml` (XDG on Linux/macOS, `%APPDATA%\smartmemory\config.toml` on Windows).
 
-API keys are stored in the OS keychain, never in the config file. Set `SMARTMEMORY_API_KEY` as an env var on headless systems where the keychain is unavailable.
+On Windows, run `sm start` after login or a daemon crash. Setup currently starts the daemon for the current session and does not install a login supervisor. Provider keys saved by setup use the Windows credential store for the daemon. Setup also shows PowerShell environment instructions for other CLI sessions. Piped memory text and lifecycle JSON must use UTF-8.
+
+Diagnostic logs rotate with coordination across processes. The daemon's console output is saved separately in `daemon-output.log`. At daemon start, an output log larger than 5 MiB is moved to `daemon-output.log.1` before the child opens it. One previous output log is retained. Override this startup cap with `SMARTMEMORY_DAEMON_OUTPUT_MAX_BYTES` (1 to 104857600 bytes). Output during one continuous run can exceed the cap until the next start.
+
+API keys are stored in the OS keychain, never in the config file. If Windows Credential Manager is unavailable, setup and MCP login share `%APPDATA%\smartmemory\credentials\api_key`. Updates serialize writers and verify a protected current-SID-only file ACL before writing the key. An ACL failure preserves the previous key. Legacy MCP credentials migrate to the shared file and are removed. Standalone MCP uses the same protected writer at its legacy path. Set `SMARTMEMORY_API_KEY` as an env var on other headless systems where the keychain is unavailable. Remote setup uses `--api-url`, then the effective `SMARTMEMORY_API_URL` or saved URL, then the hosted default. Doctor and support zip probe this URL in remote mode and skip the SmartMemory API probe in local mode.
+
+### Windows and PowerShell
+
+Windows setup validates Git Bash and installs its absolute executable path for all six Claude Code hooks. Install Git for Windows before setup. Setup refuses to install hooks if Git Bash cannot run.
+
+PowerShell 5.1 pipes default to ASCII, which can replace non-ASCII text before Python receives it. Set UTF-8 before piping memory text:
+
+```powershell
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+"Remember 中文 and café" | sm add --all -
+```
+
+For PowerShell 5.1 script files containing non-ASCII literals, save the `.ps1` file as UTF-8 with BOM. You can also pass text as a quoted argument (`sm add "Remember 中文"`) or supply a UTF-8 file through stdin from a shell that preserves its bytes.
+
+Direct writes wait up to 30 seconds for store ownership. Set `SMARTMEMORY_WRITE_LOCK_TIMEOUT` to a value greater than 0 and at most 300 seconds. For concurrent CLI use, start the daemon with `sm start`. A busy store returns a normal error without replaying a write.
+
+Before `sm clear --yes`, run `smartmemory stop` and disconnect MCP clients that hold the local store. Reset refuses active owners before deleting graph, FTS or vector files. Detached Windows daemons request breakaway from the terminal's process job. If Windows denies breakaway, startup warns that the process will not survive terminal close.
+
+SOCKS support for Requests and Wikipedia calls is included in the wrapper's `requests[socks]` dependency.
 
 ### Non-interactive / CI
 
@@ -715,6 +775,7 @@ The hosted service and platform are licensed separately.
 - **PyPI Package**: https://pypi.org/project/smartmemory/
 - **Core Library**: https://pypi.org/project/smartmemory-core/
 - **Documentation**: https://docs.smartmemory.ai
+- **Hub** (plugins and integrations): https://hub.smartmemory.ai
 - **Support**: support@smartmemory.ai
 
 ---
@@ -755,3 +816,57 @@ sm worker requeue-dead       # retry dead and skipped boxes
 Flags can be combined. Re-extraction does not require the daemon and does not wait
 for background processing. The default scope is memories marked `ruler_only` or
 `llm_failed`. Grounding and evolution are off by default in local mode.
+
+## Having trouble?
+
+Automatic anonymous crash reports are on by default. They include versions, redacted
+error frames and bounded log tails. Credentials, memory bodies, private API/proxy hosts and home-directory names
+are removed, including OS proxy identities and unsaved setup endpoints. Disable them with `SMARTMEMORY_CRASH_REPORTS=0` or
+`crash_reports = false` in the config file's `[smartmemory]` section.
+
+Handled installation failures also send anonymous reports and print a relevant doctor fix
+plus the report ID when sending finishes promptly. Reports are saved after privacy filtering in a durable outbox at
+`~/.smartmemory/report-outbox` before sending. Interactive commands wait at most
+400 ms for transport. Queued reports retry on non-lifecycle CLI and daemon starts. Cancelling a prompt or entering an invalid flag does not send a report.
+A passing first-run native check is cached for the installed version. Hook shell failures
+are recorded under `~/.smartmemory` even with a custom store directory. A non-lifecycle CLI invocation other than doctor reports them, at most once per hook and exit code each day. Lifecycle
+hooks do not consume markers, run installation probes, auto-diagnose or send reports.
+Markers are consumed only after their report is durably queued. The outbox retains
+up to 50 reports for 14 days. A delivery receipt prevents a recovered report from
+being sent again, and its original hook signature remains deduplicated. Malformed
+queue files are quarantined with a warning, keeping at most 10 copies, while healthy
+reports continue. Opting out deletes queued reports without sending them.
+
+`smartmemory doctor` reads the local SQLite and vector stores, checks vector dimensions
+and item counts, and inspects owner metadata without acquiring the write lock. A verified healthy
+SmartMemory daemon or worker owning its configured store is OK. Stale markers and foreign owners
+remain warnings. Doctor reuses a healthy daemon's successful embedding warmup. Without that result,
+it tests one embedding using cached files with networking disabled and a 20-second budget.
+Each diagnostic phase records its own time and budget. A probe timeout means "not checked",
+including slow embedding cold starts, and does not establish a broken runtime.
+It also checks keyring, Git Bash on Windows, free disk space, and the configured daemon port.
+An existing lock file without verified owner metadata shows "ownership unverified".
+It shows pending hook failures, the queued report count and repair commands. It
+does not consume markers, flush reports, acquire the store write lock, reindex or
+reset your store. Its writability check creates and removes a temporary file in the
+data directory. `smartmemory clear --yes` is a last resort that deletes all local memories. Back up your data first.
+
+For isolated reporter tests, `SMARTMEMORY_CRASH_REPORT_HOST=http://127.0.0.1:<port>`
+redirects the existing reporter to a local capture server. Its default is PostHog.
+Keep `SMARTMEMORY_CRASH_REPORTS=0` for tests that do not explicitly exercise reporting.
+
+Run `smartmemory doctor`, then `smartmemory report "What went wrong" --send` to send
+support diagnostics after confirmation. Use `--yes` to skip the prompt. Quote the printed
+report ID to support@smartmemory.ai. If delivery cannot be confirmed within the wait budget, the command reports that
+the upload is queued and saves a local support zip. With reporting disabled, it
+only saves the local zip.
+
+`smartmemory report --zip` creates a local support archive. Existing queued reports
+may retry on CLI startup, unless reporting is disabled.
+Email the file at the printed path to support@smartmemory.ai. The archive includes
+redacted diagnostics, configuration and recent CLI and daemon logs.
+Use `smartmemory report --zip "PATH"` to choose where to save it.
+
+For slow model downloads, increase `HF_HUB_DOWNLOAD_TIMEOUT` and retry `smartmemory setup`.
+Set `HF_ENDPOINT` if you use a Hugging Face mirror. To show a full terminal traceback,
+set `SMARTMEMORY_DEBUG=1` before running the failing command.

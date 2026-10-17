@@ -314,17 +314,27 @@ def test_unmanaged_missing_gui_domain_uses_pid_path(
     signals = []
 
     def run(command, **kwargs):
-        if command[0] == "launchctl":
-            return subprocess.CompletedProcess(
-                command, 112, "", "Could not find domain for user gui: 501"
-            )
-        assert command[0] == "ps"
+        assert command[0] == "launchctl"
         return subprocess.CompletedProcess(
-            command, 0, "smartmemory_app.viewer_server", ""
+            command, 112, "", "Could not find domain for user gui: 501"
         )
 
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(daemon.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(
+        daemon,
+        "process_cmdline",
+        lambda pid: ["python", "-m", "smartmemory_app.viewer_server"],
+    )
+    alive = True
+    monkeypatch.setattr(daemon, "_pid_alive", lambda pid: alive)
+
+    def terminate(pid, timeout):
+        nonlocal alive
+        signals.append((pid, "terminate"))
+        alive = False
+        return True
+
+    monkeypatch.setattr(daemon, "terminate_process", terminate)
     if command == "restart":
 
         class Child:
@@ -363,7 +373,7 @@ def test_slow_health_shares_shutdown_deadline(launchd, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(httpx.AsyncClient, "get", get)
-    monkeypatch.setattr(daemon.os, "kill", lambda *args: None)
+    monkeypatch.setattr(daemon, "_pid_alive", lambda pid: False)
     started = time.monotonic()
     with pytest.raises(TimeoutError, match="deadline|shutdown"):
         with lifecycle_budget(0.2):

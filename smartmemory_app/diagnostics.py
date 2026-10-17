@@ -5,6 +5,12 @@ import re
 
 def redact_credentials(message: str) -> str:
     """Preserve useful error text and file paths while hiding credential values."""
+    message = re.sub(
+        r"(?i)(--[\w-]*(?:key|token|password|secret|authorization))(?:=|\s+)(?:\"[^\"]*\"|'[^']*'|\S+)",
+        r"\1=<redacted>",
+        message,
+    )
+    message = re.sub(r"\bhf_[A-Za-z0-9]{20,}\b", "<redacted>", message)
     # Provider keys also appear in free-text exceptions without a field name.
     message = re.sub(
         r"(?<![\w/\\.-])(?:gsk_[A-Za-z0-9]{20,}|sk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,})"

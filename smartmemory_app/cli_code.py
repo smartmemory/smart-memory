@@ -1,8 +1,8 @@
 """`sm code` subgroup — code repository indexing.
 
-Wraps :func:`smartmemory.SmartMemory.ingest_code`, which writes ``code:index``
-origin-tagged nodes into the local knowledge graph and emits structured
-progress to stdout.
+Wraps local or remote ``ingest_code`` and emits structured progress to stdout.
+Remote mode parses the checkout locally and uploads entities and relations to
+the configured hosted workspace without opening a local memory store.
 
 Progress streaming
 ------------------
@@ -26,8 +26,11 @@ explicitly.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -88,10 +91,12 @@ def code_group() -> None:
 @click.option("--repo", default=None, help="Repo identifier (defaults to folder name).")
 @click.option(
     "--language",
+    "--languages",
     "languages",
     multiple=True,
     type=click.Choice(["python", "typescript"]),
-    help="Languages to index. Repeatable. Defaults to python.",
+    help="Narrow indexing to these languages. Repeatable. Defaults to every supported "
+    "language present (python, typescript/javascript).",
 )
 @click.option(
     "--exclude",
@@ -115,34 +120,37 @@ def code_index_cmd(
 ) -> None:
     """Index a code repository into the knowledge graph.
 
-    Parses Python (and optionally TypeScript/JavaScript) files, writes code
-    entities + relationships as graph nodes/edges, and generates vector
-    embeddings. Every node is tagged with origin=code:index (Tier 1).
+    Parses every supported language present (Python and TypeScript/JavaScript,
+    including .mjs/.cjs/.mts/.cts), writes code entities + relationships as graph
+    nodes/edges, and generates vector embeddings. Every node is tagged with
+    origin=code:index (Tier 1). --language narrows the set.
 
     \b
     Examples:
         sm code index .
-        sm code index ~/repos/myapp --repo myapp --language python --language typescript
+        sm code index ~/repos/myapp --repo myapp --language python
     """
     repo_path = Path(path).resolve()
     repo_id = repo or _detect_repo_name(repo_path)
-    lang_list = list(languages) if languages else ["python"]
+    # None = core's default: every supported language present (CODE-INDEXER-HARDEN-1 F32).
+    lang_list = list(languages) if languages else None
+    lang_label = ",".join(lang_list) if lang_list else "all"
     excludes = sorted(_DEFAULT_EXCLUDES | set(extra_excludes))
 
     click.echo(
         f"[code:index] phase=start repo={repo_id} path={repo_path} "
-        f"langs={','.join(lang_list)} excludes={len(excludes)}"
+        f"langs={lang_label} excludes={len(excludes)}"
     )
 
     try:
         from smartmemory_app.launch_metrics import emit as _lm_emit
-        _lm_emit("index.start", {"repo": repo_id, "languages": lang_list})
+
+        _lm_emit("index.start", {"repo": repo_id, "languages": lang_list or ["all"]})
     except Exception:
         pass
 
-    # We index against the local lite memory directly. Going through the daemon
-    # HTTP API would require a new route; the indexer is heavy and runs in the
-    # caller's process anyway, so direct is the simpler path.
+    # Storage selects local Lite or the hosted adapter. Both parse in this
+    # process, and the remote adapter uploads only the parsed contract fields.
     try:
         from smartmemory_app.storage import get_memory
     except Exception as exc:  # pragma: no cover — import failure is environmental
@@ -156,10 +164,8 @@ def code_index_cmd(
         )
 
     if not hasattr(memory, "ingest_code"):
-        raise click.ClickException(
-            "Active backend does not support code indexing "
-            "(remote mode is not yet supported). Switch to local mode: sm config mode local"
-        )
+        log.warning("Code indexing refused: active backend lacks ingest_code")
+        raise click.ClickException("Active backend does not support code indexing.")
 
     started = time.time()
     try:
@@ -171,10 +177,13 @@ def code_index_cmd(
             languages=lang_list,
         )
     except Exception as exc:
+        if hasattr(exc, "result"):
+            _report_diagnostics(exc.result)
         click.echo(f"[code:index] error: {exc}", err=True)
         log.exception("code index failed")
         raise SystemExit(1)
     elapsed = time.time() - started
+    _report_diagnostics(result)
 
     click.echo(
         f"[code:index] phase=done repo={repo_id} "
@@ -186,6 +195,7 @@ def code_index_cmd(
 
     try:
         from smartmemory_app.launch_metrics import emit as _lm_emit
+
         _lm_emit(
             "index.complete",
             {
@@ -210,3 +220,208 @@ def code_index_cmd(
         )
         for line in result.errors[:cap]:
             click.echo(f"  - {line}", err=True)
+    if not result.replaced:
+        raise SystemExit(1)
+
+
+def _report_diagnostics(result) -> None:
+    """Report contracted counts and publication separately from transport acceptance."""
+    sites = getattr(result, "call_sites", "unknown")
+    site_summary = (
+        " ".join(
+            f"{key}={sites[key]}"
+            for key in ("extracted", "unresolved", "name_only", "exact")
+        )
+        if isinstance(sites, dict)
+        else "unknown"
+    )
+    click.echo(f"[code:index] source_call_sites {site_summary}")
+    click.echo(
+        f"[code:index] resolved_call_edges={getattr(result, 'resolved_call_edges', 'unknown')} (not recall)"
+    )
+    click.echo(
+        f"[code:index] clean={result.files_clean} partial={result.files_partial} failed={result.files_failed} "
+        f"acceptance={result.acceptance} staging={result.staging} publication={result.publication}"
+    )
+    click.echo(
+        "[code:index] G16 complete-generation publication is not proven by 1.x acceptance."
+    )
+    for diagnostic in result.diagnostics:
+        if diagnostic["status"] != "clean":
+            click.echo(
+                f"  {diagnostic['file_path']}: {diagnostic['status']} coverage={diagnostic['coverage']}",
+                err=True,
+            )
+            for span in diagnostic.get("spans", [])[:20]:
+                click.echo(f"    {span}", err=True)
+
+
+def _is_git_ignored(root: Path, target: Path) -> bool:
+    """True when git reports ``target`` as ignored in the checkout at ``root`` (False when git is unavailable)."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "-q", "--no-index", str(target)],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return done.returncode == 0
+
+
+def _write_atomic(out: Path, snapshot: dict) -> int:
+    """Write ``snapshot`` to ``out`` through a temp file in the same directory, then ``os.replace``."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent)
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(
+                snapshot, stream, sort_keys=True, ensure_ascii=False, allow_nan=False
+            )
+            stream.write("\n")
+        os.replace(temp_name, out)
+    except BaseException:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+    return out.stat().st_size
+
+
+@code_group.command("bundle")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--repo", required=True, help="Repo identifier stamped on the snapshot.")
+@click.option(
+    "--out",
+    "out_path",
+    required=True,
+    type=click.Path(dir_okay=False),
+    help="Snapshot file to write.",
+)
+@click.option(
+    "--language",
+    "--languages",
+    "languages",
+    multiple=True,
+    type=click.Choice(["python", "typescript"]),
+    help="Narrow to these languages. Repeatable. Defaults to every supported language present.",
+)
+@click.option(
+    "--exclude",
+    "extra_excludes",
+    multiple=True,
+    help="Additional directory names to exclude (repeatable).",
+)
+@click.option(
+    "--allow-partial",
+    is_flag=True,
+    default=False,
+    help="Write a snapshot even when some files failed to parse (complete=false, failed_paths lists them).",
+)
+@click.option(
+    "--fields",
+    type=click.Choice(["full", "minimal"]),
+    default="full",
+    show_default=True,
+    help=(
+        "minimal drops framework_evidence and clean per-entity parse diagnostics. "
+        "The forge/stratum code-graph consumer (STRAT-CODEGRAPH-1) reads minimal by default and full is opt-in for it."
+    ),
+)
+def code_bundle_cmd(
+    path: str,
+    repo: str,
+    out_path: str,
+    languages: tuple[str, ...],
+    extra_excludes: tuple[str, ...],
+    allow_partial: bool,
+    fields: str,
+) -> None:
+    """Write a store-free local snapshot of a checkout (no backend, no upload, no embeddings).
+
+    \b
+    Examples:
+        smartmemory code bundle . --repo myapp --out myapp.snapshot.json
+        smartmemory code bundle . --repo myapp --out snap.json --allow-partial
+    """
+    from smartmemory.code.indexer import CodeIndexer
+    from smartmemory.code.models import CodePreparationError
+
+    root = Path(path).resolve()
+    out = Path(out_path).resolve()
+    excludes = sorted(_DEFAULT_EXCLUDES | set(extra_excludes))
+    started = time.time()
+    indexer = CodeIndexer(
+        graph=None, repo=repo, repo_root=str(root), exclude_dirs=set(excludes)
+    )
+    try:
+        snapshot, _result = indexer.prepare_snapshot(
+            list(languages) if languages else None,
+            allow_partial=allow_partial,
+            fields=fields,
+        )
+    except (CodePreparationError, ValueError) as exc:
+        click.echo(f"[code:bundle] error: {exc}", err=True)
+        log.warning("code bundle refused for %s: %s", root, exc)
+        raise SystemExit(1)
+
+    try:
+        out.relative_to(root)
+    except ValueError:
+        inside = False
+    else:
+        inside = True
+    if inside and not _is_git_ignored(root, out):
+        log.warning(
+            "code bundle --out %s is inside the checkout and not git-ignored", out
+        )
+        click.echo(
+            f"[code:bundle] warning: --out is inside the checkout and not git-ignored: {out}. "
+            "The next snapshot will see it as an uncommitted change.",
+            err=True,
+        )
+
+    try:
+        size = _write_atomic(out, snapshot)
+    except OSError as exc:
+        click.echo(f"[code:bundle] error: could not write {out}: {exc}", err=True)
+        raise SystemExit(1)
+    click.echo(
+        f"[code:bundle] repo={repo} entities={len(snapshot['entities'])} relations={len(snapshot['relations'])} "
+        f"complete={str(snapshot['complete']).lower()} commit_hash={snapshot['commit_hash']} "
+        f"bytes={size} elapsed_s={round(time.time() - started, 2)} out={out}"
+    )
+    if not snapshot["complete"]:
+        failed = ", ".join(item["path"] for item in snapshot["failed_paths"])
+        click.echo(
+            f"[code:bundle] warning: incomplete snapshot, failed paths: {failed}",
+            err=True,
+        )
+
+
+@code_group.command("effects")
+@click.argument("path", type=click.Path(exists=True, file_okay=False, dir_okay=True))
+@click.option("--repo", default=None, help="Repository identifier.")
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Caller-owned per-source parse cache.",
+)
+def code_effects_cmd(path: str, repo: str | None, checkpoint_dir: str | None) -> None:
+    """Print deterministic Python effects JSON without opening a memory store."""
+    import json
+
+    from smartmemory.code.effects import scan_effects
+
+    root = Path(path).resolve()
+    try:
+        result = scan_effects(root, repo or root.name, checkpoint_dir=checkpoint_dir)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    )

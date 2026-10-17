@@ -78,7 +78,7 @@ def test_stop_on_demand_worker_without_wrapper_pid(tmp_path, monkeypatch):
         cleanup(process)
 
 
-def test_stop_continues_when_live_legacy_ps_fails(tmp_path, monkeypatch, caplog):
+def test_stop_continues_when_live_legacy_identity_fails(tmp_path, monkeypatch, caplog):
     from smartmemory.pipeline.work_graph.spawn import worker_is_running, worker_pid
 
     children = []
@@ -102,27 +102,16 @@ def test_stop_continues_when_live_legacy_ps_fails(tmp_path, monkeypatch, caplog)
         children.append(core)
         pidfile = tmp_path / "worker.0.pid"
         pidfile.write_text(str(legacy.pid))
-        real_run = subprocess.run
         events = []
+        real_inspect = daemon.process_cmdline
 
-        def inspect(command, **kwargs):
-            if command[0] == "ps":
-                if command[command.index("-p") + 1] == str(legacy.pid):
-                    events.append("retire")
-                    return subprocess.CompletedProcess(
-                        command, 2, "", "legacy inspection denied"
-                    )
-                try:
-                    return real_run(command, **kwargs)
-                except PermissionError:
-                    # Sandbox denies ps; keep the real core lock, signals and exit.
-                    assert command[command.index("-p") + 1] == str(core.pid)
-                    return subprocess.CompletedProcess(
-                        command, 0, " ".join(core.args), ""
-                    )
-            return real_run(command, **kwargs)
+        def inspect(pid):
+            if pid == legacy.pid:
+                events.append("retire")
+                return None
+            return real_inspect(pid)
 
-        monkeypatch.setattr(subprocess, "run", inspect)
+        monkeypatch.setattr(daemon, "process_cmdline", inspect)
         deadline = time.monotonic() + 40
         while worker_pid(tmp_path) != core.pid and time.monotonic() < deadline:
             assert core.poll() is None, core.stderr.read()
@@ -167,7 +156,7 @@ def test_stop_continues_when_live_legacy_ps_fails(tmp_path, monkeypatch, caplog)
         assert any(
             record.levelno == logging.WARNING
             and "continuing shutdown" in record.getMessage()
-            and "legacy inspection denied" in record.getMessage()
+            and "command line unavailable" in record.getMessage()
             for record in caplog.records
         )
         assert caplog.text.count("processing rows remain unrecovered") == 1
@@ -189,32 +178,28 @@ def test_stop_continues_when_live_legacy_ps_fails(tmp_path, monkeypatch, caplog)
 def test_start_retires_only_identified_legacy_process(
     tmp_path, monkeypatch, legacy, real_inspection
 ):
-    if real_inspection:
-        try:
-            subprocess.run(
-                ["ps", "-o", "command=", "-p", str(os.getpid())],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except PermissionError as exc:
-            pytest.skip(f"Sandbox forbids ps command-line inspection: {exc}")
     args = [sys.executable, "-c", "import time; time.sleep(120)"]
     if legacy:
         args.append("smartmemory_app.enrichment_worker")
     real_popen = subprocess.Popen
     process = real_popen(args)
-    reaper = threading.Thread(target=process.wait, daemon=True)
-    reaper.start()
+    from smartmemory.utils import process as process_utils
+
+    exit_codes = []
+    real_wait = process_utils.psutil.Process.wait
+
+    def wait(child, *args, **kwargs):
+        result = real_wait(child, *args, **kwargs)
+        exit_codes.append(result)
+        return result
+
+    monkeypatch.setattr(process_utils.psutil.Process, "wait", wait)
     if not real_inspection:
-
-        def inspect(command, **kwargs):
-            assert command == ["ps", "-o", "command=", "-p", str(process.pid)]
-            return subprocess.CompletedProcess(
-                command, 0, " ".join(args) if process.poll() is None else "", ""
-            )
-
-        monkeypatch.setattr(daemon.subprocess, "run", inspect)
+        monkeypatch.setattr(
+            daemon,
+            "process_cmdline",
+            lambda pid: args if process.poll() is None else None,
+        )
     try:
         (tmp_path / "worker.0.pid").write_text(str(process.pid))
         spawn = Mock()
@@ -231,7 +216,8 @@ def test_start_retires_only_identified_legacy_process(
         spawn.assert_called_once()
         assert "smartmemory_app.worker_entry" in spawn.call_args.args[0]
         if legacy:
-            assert process.wait(timeout=5) == -15
+            assert -15 in exit_codes
+            process.wait(timeout=5)
         else:
             assert process.poll() is None
         assert not (tmp_path / "worker.0.pid").exists()
@@ -394,7 +380,7 @@ def legacy_queue(tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["nonzero", "empty", "oserror"])
-def test_failed_ps_blocks_recovery_and_replacement(
+def test_failed_identity_blocks_recovery_and_replacement(
     tmp_path, monkeypatch, caplog, failure
 ):
     store = legacy_queue(tmp_path)
@@ -403,16 +389,10 @@ def test_failed_ps_blocks_recovery_and_replacement(
         pidfile = tmp_path / "worker.0.pid"
         pidfile.write_text(str(process.pid))
 
-        def inspect(command, **kwargs):
-            if failure == "oserror":
-                raise OSError("inspection denied")
-            return subprocess.CompletedProcess(
-                command, 2 if failure == "nonzero" else 0, "", "inspection failed"
-            )
-
-        monkeypatch.setattr(subprocess, "run", inspect)
+        monkeypatch.setattr(daemon, "process_cmdline", lambda pid: None)
         spawn = Mock()
         monkeypatch.setattr(subprocess, "Popen", spawn)
+
         with pytest.raises(RuntimeError, match="Cannot inspect live legacy PID"):
             daemon._start_workers()
         assert pidfile.exists()
@@ -431,7 +411,9 @@ def test_dead_legacy_pid_needs_no_ps(tmp_path, monkeypatch):
         process.wait(10)
         (tmp_path / "worker.0.pid").write_text(str(process.pid))
         monkeypatch.setattr(
-            subprocess, "run", Mock(side_effect=AssertionError("ps must not run"))
+            daemon,
+            "process_cmdline",
+            Mock(side_effect=AssertionError("identity must not run")),
         )
         assert daemon._retire_legacy_workers()
         assert store.stats()["runs"] == 1
@@ -458,18 +440,26 @@ def test_retired_inflight_job_recovered_before_spawn(tmp_path, monkeypatch):
     )
     try:
         assert process.stdout.readline().strip() == "claimed"
-        threading.Thread(target=process.wait, daemon=True).start()
         (tmp_path / "worker.0.pid").write_text(str(process.pid))
         monkeypatch.setattr(
-            subprocess,
-            "run",
-            lambda command, **kw: subprocess.CompletedProcess(
-                command, 0, "python -m smartmemory_app.enrichment_worker --loop", ""
-            ),
+            daemon,
+            "process_cmdline",
+            lambda pid: ["python", "-m", "smartmemory_app.enrichment_worker", "--loop"],
         )
+        from smartmemory.utils import process as process_utils
+
+        exits = []
+        real_wait = process_utils.psutil.Process.wait
+
+        def wait(child, *args, **kwargs):
+            result = real_wait(child, *args, **kwargs)
+            exits.append(result)
+            return result
+
+        monkeypatch.setattr(process_utils.psutil.Process, "wait", wait)
 
         def spawn(*args, **kwargs):
-            assert process.poll() == -15
+            assert -15 in exits
             assert store.stats()["runs"] == 1
             with sqlite3.connect(tmp_path / "memory.db") as conn:
                 assert (

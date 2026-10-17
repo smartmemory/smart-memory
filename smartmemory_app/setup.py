@@ -18,6 +18,8 @@ DIST-SETUP-TUI-1: When running interactively with textual installed,
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -37,6 +39,9 @@ from smartmemory_app.daemon import (
     _LAUNCHD_DAEMON_LABEL,
     _LAUNCHD_WORKER_LABEL,
 )
+
+from smartmemory_app.support_diagnostics import download_failure, log_download_start
+from smartmemory_app.diagnostics import redact_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -119,20 +124,123 @@ _LEGACY_HOOK_REGISTRATIONS = {
 }
 
 
-def _get_hook_registrations() -> dict:
+def _resolve_hook_shell() -> str:
+    """Validate Git Bash on Windows. Never select Windows' WSL bash launcher."""
+    if sys.platform != "win32":
+        return "bash"
+    git = shutil.which("git")
+    candidates = []
+    if git:
+        git_path = Path(git)
+        candidates.extend(
+            (git_path.parent.parent / "bin/bash.exe", git_path.parent / "bash.exe")
+        )
+        # Portable Git can place git.exe deeper than cmd/ or bin/.
+        try:
+            result = subprocess.run(
+                [git, "--exec-path"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+                creationflags=0x08000000,
+            )
+            exec_path = Path(result.stdout.strip())
+            candidates.append(exec_path.parent.parent.parent / "bin/bash.exe")
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            subprocess.run(
+                [str(candidate), "--noprofile", "--norc", "-c", "exit 0"],
+                capture_output=True,
+                check=True,
+                timeout=5,
+                creationflags=0x08000000,
+            )
+            return str(candidate).replace("\\", "/")
+        except (OSError, subprocess.SubprocessError):
+            continue
+    raise click.ClickException(
+        "Cannot install Windows lifecycle hooks: Git Bash is unavailable or failed validation. "
+        "Install Git for Windows, then rerun smartmemory setup."
+    )
+
+
+def _hook_command(filename: str, shell: str | None = None) -> str:
+    """Quote the installed script and select a verified Windows shell."""
+    path = str(HOOKS_DEST / filename)
+    shell = shell or _resolve_hook_shell()
+    if sys.platform == "win32":
+        path = path.replace("\\", "/")
+        path = path.replace("$", "\\$").replace("`", "\\`").replace('"', '\\"')
+        shell = shell.replace("\\", "/")
+        shell = shell.replace("$", "\\$").replace("`", "\\`").replace('"', '\\"')
+        executable = "bash" if shell == "bash" else '"' + shell + '"'
+        return f'{executable} "{path}"'
+    return f"bash {path}"
+
+
+def _installed_hook_name(command: str) -> str | None:
+    """Recognize only bash commands targeting our known installed hook files."""
+    if not isinstance(command, str):
+        return None
+    match = re.fullmatch(
+        r'\s*(?:bash|"[^"\n]+[/\\]bash\.exe")\s+(.+?)\s*', command, re.IGNORECASE
+    )
+    if not match:
+        return None
+    path = match[1]
+    if path.startswith("'") and path.endswith("'"):
+        try:
+            (path,) = shlex.split(path)
+        except ValueError:
+            return None
+    elif path.startswith('"') and path.endswith('"'):
+        path = path[1:-1].replace("\\$", "$").replace("\\`", "`").replace('\\"', '"')
+    path = path.replace("\\", "/")
+    names = HOOK_NAMES + [
+        "session-start.sh",
+        "session-end.sh",
+        "post-tool-failure.sh",
+        "smartmemory-session-start.sh",
+        "smartmemory-session-end.sh",
+        "smartmemory-post-tool-failure.sh",
+    ]
+    for name in names:
+        if path == str(HOOKS_DEST / name).replace("\\", "/"):
+            return name
+    return None
+
+
+# HOOK-DEADLINE: Claude Code kill line (seconds) for the two hooks that block
+# the user. The CLI's own deadline (SMARTMEMORY_HOOK_DEADLINE, default 8 s)
+# fires first and exits cleanly; this only bounds interpreter start-up on top.
+# Written only when absent, so a user-chosen timeout always survives setup.
+HOOK_TIMEOUTS = {
+    "SessionStart": ("smartmemory-orient.sh", 15),
+    "UserPromptSubmit": ("smartmemory-recall.sh", 15),
+}
+
+
+def _get_hook_registrations(shell: str | None = None) -> dict:
     """Build hook registration entries using current Claude Code hooks format.
 
     Each event maps to a registration dict with matcher + hooks array.
     Paths point to the COPIED destination (~/.claude/hooks/), not the package
     source, so registrations are stable across package upgrades.
     """
+    shell = shell or _resolve_hook_shell()
     return {
         "SessionStart": {
             "matcher": "",
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-orient.sh'}",
+                    "command": _hook_command("smartmemory-orient.sh", shell),
+                    "timeout": HOOK_TIMEOUTS["SessionStart"][1],
                 }
             ],
         },
@@ -141,7 +249,8 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-recall.sh'}",
+                    "command": _hook_command("smartmemory-recall.sh", shell),
+                    "timeout": HOOK_TIMEOUTS["UserPromptSubmit"][1],
                 }
             ],
         },
@@ -150,7 +259,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-observe.sh'}",
+                    "command": _hook_command("smartmemory-observe.sh", shell),
                 }
             ],
         },
@@ -159,7 +268,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-distill.sh'}",
+                    "command": _hook_command("smartmemory-distill.sh", shell),
                 }
             ],
         },
@@ -168,7 +277,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-learn.sh'}",
+                    "command": _hook_command("smartmemory-learn.sh", shell),
                 }
             ],
         },
@@ -177,7 +286,7 @@ def _get_hook_registrations() -> dict:
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {HOOKS_DEST / 'smartmemory-persist.sh'}",
+                    "command": _hook_command("smartmemory-persist.sh", shell),
                 }
             ],
         },
@@ -186,7 +295,7 @@ def _get_hook_registrations() -> dict:
 
 # Module-level alias for external callers that need the structure at import time.
 # NOTE: frozen at import — prefer _get_hook_registrations() inside functions.
-HOOK_REGISTRATIONS = _get_hook_registrations()
+HOOK_REGISTRATIONS = _get_hook_registrations(shell="bash")
 
 
 # ── Setup command ─────────────────────────────────────────────────────────────
@@ -211,7 +320,15 @@ HOOK_REGISTRATIONS = _get_hook_registrations()
     default=None,
     help="Tool config (e.g. 'cursor'). Works in both modes.",
 )
-def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
+@click.option(
+    "--api-url", help="Remote service base URL (overrides SMARTMEMORY_API_URL)."
+)
+def setup(
+    mode: str | None,
+    api_key: str | None,
+    for_tool: str | None,
+    api_url: str | None = None,
+) -> None:
     """First-run questionnaire: configure local or remote mode.
 
     Three self-contained branches — each handles config, post-config, AND daemon
@@ -229,10 +346,17 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
     # writes a config. The TUI branch owns its own completion screen, so the
     # first-run line is echoed here for it; the click branch echoes its own.
     first_run = not config_path().exists()
+    if first_run:
+        from smartmemory_app.crash_reporter import enabled
+
+        if enabled():
+            click.echo(
+                "Automatic anonymous crash reports are on. Disable: SMARTMEMORY_CRASH_REPORTS=0"
+            )
     # Branch 1: Flags provided — use click flow directly
     # _setup_click() already handles daemon start for local mode internally
     if mode is not None:
-        _setup_click(mode, api_key)
+        _setup_click(mode, api_key, api_url)
         if for_tool:
             _setup_tool_config(for_tool)
         return
@@ -248,7 +372,7 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
                 return
             if result.mode == "remote":
                 # TUI only selected mode — hand off to click-based remote setup
-                _setup_remote(api_key)
+                _setup_remote(api_key, api_url)
                 click.echo("\nSetup complete.")
                 try:
                     from smartmemory_app.launch_metrics import emit as _lm_emit
@@ -277,15 +401,20 @@ def setup(mode: str | None, api_key: str | None, for_tool: str | None) -> None:
         except click.ClickException:
             raise
         except Exception as e:
-            click.echo(f"TUI unavailable ({e}), using text prompts.\n")
+            logger.warning("TUI setup failed, using text prompts", exc_info=True)
+            click.echo(
+                redact_credentials(f"TUI unavailable ({e}), using text prompts.\n")
+            )
 
     # Branch 3: Click fallback
-    _setup_click(None, api_key)
+    _setup_click(None, api_key, api_url)
     if for_tool:
         _setup_tool_config(for_tool)
 
 
-def _setup_click(mode: str | None, api_key: str | None) -> None:
+def _setup_click(
+    mode: str | None, api_key: str | None, api_url: str | None = None
+) -> None:
     """Click-based setup flow (non-TUI). Self-contained: config + post-config."""
     if mode is None:
         click.echo("Welcome to SmartMemory.\n")
@@ -296,7 +425,7 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
         mode = "local" if choice == "1" else "remote"
 
     if mode == "remote":
-        _setup_remote(api_key)
+        _setup_remote(api_key, api_url)
         click.echo("\nSetup complete.")
         try:
             from smartmemory_app.launch_metrics import emit as _lm_emit
@@ -325,6 +454,9 @@ def _setup_click(mode: str | None, api_key: str | None) -> None:
 
 def _can_run_tui() -> bool:
     """Check if we can launch a Textual TUI."""
+    if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
+        logger.debug("Skipping setup TUI on Windows, using text prompts")
+        return False
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return False
     if os.environ.get("TERM") == "dumb":
@@ -354,6 +486,13 @@ def _start_daemon_local(
         _upgrade_worker_agent()
         _retire_legacy_workers()
         launchd_ok = _install_launchd_plist()
+        if sys.platform == "win32":
+            message = (
+                "Warning: Windows login auto-start and automatic crash recovery are unavailable. "
+                "Run sm start after login or a crash."
+            )
+            logger.warning(message)
+            (on_log or click.echo)(message)
         if on_log is None:
             action = (
                 "Waiting for SmartMemory to start..."
@@ -475,7 +614,7 @@ def _read_env_from_profile(name: str) -> str:
     else:
         profile = Path.home() / ".profile"
     try:
-        for line in profile.read_text().splitlines():
+        for line in profile.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith(f"export {name}="):
                 # Extract value — handles export KEY="value" and export KEY=value
@@ -487,11 +626,30 @@ def _read_env_from_profile(name: str) -> str:
 
 
 def _persist_env_var(name: str, value: str) -> None:
-    """Write an export line to the user's shell profile so the key persists.
+    """Persist through Windows credentials or a UTF-8 shell profile.
 
-    If the key already exists in the profile, replaces the line.
-    Also sets os.environ so the current process picks it up immediately.
+    Also sets os.environ so this process and its children pick up the key.
     """
+    os.environ[name] = value
+    if sys.platform == "win32":
+        try:
+            import keyring
+
+            keyring.set_password("smartmemory", name, value)
+            click.echo("  Stored in Windows credential store for the daemon.")
+        except Exception as exc:
+            logger.warning(
+                "Credential persistence failed; key is only available in this setup process: %s",
+                redact_credentials(str(exc)),
+            )
+            click.echo(
+                "  Warning: credential storage failed. The key is only set for this setup session."
+            )
+        click.echo(
+            f'  For PowerShell CLI sessions, set $env:{name} = "<your API key>".\n'
+            f'  To persist it for future logins: [Environment]::SetEnvironmentVariable("{name}", "<your API key>", "User")'
+        )
+        return
     shell = os.environ.get("SHELL", "/bin/zsh")
     if "zsh" in shell:
         profile = Path.home() / ".zshrc"
@@ -503,7 +661,7 @@ def _persist_env_var(name: str, value: str) -> None:
     export_line = f'export {name}="{value}"'
 
     try:
-        existing = profile.read_text() if profile.exists() else ""
+        existing = profile.read_text(encoding="utf-8") if profile.exists() else ""
         lines = existing.splitlines()
 
         # Replace existing line or append
@@ -515,9 +673,9 @@ def _persist_env_var(name: str, value: str) -> None:
                 break
 
         if replaced:
-            profile.write_text("\n".join(lines) + "\n")
+            profile.write_text("\n".join(lines) + "\n", encoding="utf-8")
         else:
-            with open(profile, "a") as f:
+            with open(profile, "a", encoding="utf-8") as f:
                 f.write(f"\n{export_line}\n")
 
         click.echo(f"  Written to {profile}")
@@ -602,14 +760,18 @@ def _setup_local() -> bool:
             )
         if api_key.strip():
             _persist_env_var(key_envvar, api_key.strip())
-            # Also store in OS keychain so daemon can load it without sourcing shell
-            try:
-                import keyring
+            # Windows persistence and shell guidance are handled above.
+            if sys.platform != "win32":
+                try:
+                    import keyring
 
-                keyring.set_password("smartmemory", key_envvar, api_key.strip())
-                click.echo("  Also stored in OS keychain.")
-            except Exception:
-                pass  # keyring optional — shell profile is the primary store
+                    keyring.set_password("smartmemory", key_envvar, api_key.strip())
+                    click.echo("  Also stored in OS keychain.")
+                except Exception as exc:
+                    logger.warning(
+                        "OS credential store unavailable; using shell profile: %s",
+                        redact_credentials(str(exc)),
+                    )
 
     embedding = click.prompt(
         "Embedding provider? (local / openai / ollama)",
@@ -663,11 +825,32 @@ def _setup_local() -> bool:
     return was_first_run
 
 
-def _setup_remote(api_key: str | None) -> None:
+def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
     """Validate API key, store in OS keychain, write remote config."""
     import httpx
-    from smartmemory_app.config import SmartMemoryConfig, save_config, set_api_key
+    from smartmemory_app.config import (
+        SmartMemoryConfig,
+        load_config,
+        save_config,
+        set_api_key,
+    )
 
+    api_url = (api_url or load_config().api_url).rstrip("/")
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(api_url)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise click.ClickException(
+            "API URL must be an HTTP(S) base URL without credentials, query or fragment."
+        )
+
+    api_key = api_key or os.environ.get("SMARTMEMORY_API_KEY")
     if not api_key:
         api_key = click.prompt(
             "SmartMemory API key (stored in OS keychain, not config file)",
@@ -677,7 +860,7 @@ def _setup_remote(api_key: str | None) -> None:
     click.echo("Validating API key...")
     try:
         r = httpx.get(
-            "https://api.smartmemory.ai/auth/me",
+            f"{api_url}/auth/me",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
@@ -689,11 +872,14 @@ def _setup_remote(api_key: str | None) -> None:
         team_id = user.get("default_team_id") or ""
         click.echo(f"Authenticated as {user.get('email')}. Team: {team_id}")
     except Exception as e:
-        click.echo(f"ERROR: API key validation failed: {e}", err=True)
-        raise SystemExit(1)
+        raise click.ClickException(
+            redact_credentials(f"Remote authentication failed: {e}")
+        ) from e
 
     set_api_key(api_key)  # persist to OS keychain (warns if unavailable, never raises)
-    cfg = SmartMemoryConfig(mode="remote", api_key_set=True, team_id=team_id)
+    cfg = SmartMemoryConfig(
+        mode="remote", api_url=api_url, api_key_set=True, team_id=team_id
+    )
     save_config(cfg)
 
     # DIST-AGENT-HOOKS-1: Wire hooks for remote mode too.
@@ -759,11 +945,13 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
     from smartmemory.plugins.embedding import DEFAULT_LOCAL_MODEL, EmbeddingService
     from smartmemory.utils import hf_models
 
+    model = "configured embedding model"
     previous = os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER")
     previous_download = os.environ.get(hf_models.ALLOW_DOWNLOAD_ENV)
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = provider
     try:
         model = EmbeddingService().local_model_name()
+        log_download_start(logger, model, EmbeddingService().backend_name)
         note = _download_note(model)
         if missing:
             click.echo(f"Downloading local embedding model {model!r} ({note})...")
@@ -788,12 +976,15 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
                 raise MissingModelError(
                     f"Embedding model {model!r} could not be prepared. Run sm setup. Details: {exc}"
                 ) from exc
+        from smartmemory_app.warm import warm_models
+
+        warm_models(reranker=False, strict=True)
         if missing:
             click.echo(f"Downloaded local embedding model {model!r}.")
         else:
             click.echo(f"Local embedding model {model!r} ready.")
-    except MissingModelError as exc:
-        raise click.ClickException(str(exc)) from exc
+    except Exception as exc:
+        raise click.ClickException(download_failure(logger, model, exc)) from exc
     finally:
         if previous_download is None:
             os.environ.pop(hf_models.ALLOW_DOWNLOAD_ENV, None)
@@ -817,13 +1008,11 @@ def _ensure_lazy_models() -> None:
     )
     for model in models:
         try:
+            log_download_start(logger, model, "torch")
             hf_models.resolve_local_path(model, allow_download=True, backend="torch")
         except Exception as exc:
-            logger.warning(
-                "Could not prefetch lazy model %s; its runtime feature may be unavailable: %s",
-                model,
-                exc,
-            )
+            message = download_failure(logger, model, exc)
+            click.echo(f"{message} Its runtime feature may be unavailable.", err=True)
 
 
 # LITE-FIRSTRUN-SPACY-1: sizes for the one-line download notices (setup and sm add).
@@ -863,6 +1052,7 @@ def _ensure_spacy(
 
     try:
         for required_model in dict.fromkeys((model, "en_core_web_sm")):
+            log_download_start(logger, required_model, "spacy")
             downloading = not spacy.util.is_package(required_model)
             if downloading:
                 click.echo(
@@ -878,7 +1068,9 @@ def _ensure_spacy(
                 # On failure the installer's own output is the diagnosis.
                 if chatter.getvalue().strip():
                     if replay_on_failure:
-                        click.echo(chatter.getvalue().rstrip(), err=True)
+                        click.echo(
+                            redact_credentials(chatter.getvalue().rstrip()), err=True
+                        )
                     else:
                         logger.debug(
                             "spaCy installer output: %s", chatter.getvalue().strip()
@@ -895,7 +1087,9 @@ def _ensure_spacy(
             if downloading:
                 click.echo(f"Downloaded spaCy language model {required_model!r}.")
     except MissingModelError as exc:
-        raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            download_failure(logger, required_model, exc)
+        ) from exc
 
 
 def _copy_hooks() -> None:
@@ -917,65 +1111,77 @@ def _copy_skills() -> None:
 
 
 def _register_hooks() -> None:
+    shell = _resolve_hook_shell()
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    cfg = json.loads(SETTINGS.read_text()) if SETTINGS.exists() else {}
+    cfg = json.loads(SETTINGS.read_text(encoding="utf-8")) if SETTINGS.exists() else {}
     hooks = cfg.setdefault("hooks", {})
     changed = False
 
-    # Remove legacy registrations (old format + old filenames)
-    for event, legacy_entry in _LEGACY_HOOK_REGISTRATIONS.items():
-        existing = hooks.get(event, [])
-        if not isinstance(existing, list):
-            existing = [existing]
-        filtered = [h for h in existing if h != legacy_entry]
-        # Also remove old-format entries pointing to legacy filenames
-        filtered = [
-            h
-            for h in filtered
-            if not (
-                isinstance(h, dict)
-                and "command" in h
-                and "args" in h
-                and any(
-                    "session-start.sh" in str(a)
-                    or "session-end.sh" in str(a)
-                    or "post-tool-failure.sh" in str(a)
-                    for a in h.get("args", [])
-                )
-            )
-        ]
-        # Also remove new-format entries pointing to legacy (non-namespaced) filenames
-        filtered = [
-            h
-            for h in filtered
-            if not (
-                isinstance(h, dict)
-                and "hooks" in h
-                and any(
-                    "hooks/session-start.sh" in hh.get("command", "")
-                    or "hooks/session-end.sh" in hh.get("command", "")
-                    or "hooks/post-tool-failure.sh" in hh.get("command", "")
-                    for hh in h.get("hooks", [])
-                    if isinstance(hh, dict)
-                )
-            )
-        ]
-        if len(filtered) != len(existing):
-            hooks[event] = filtered
+    # Repair our commands in place, including mixed registrations. Foreign
+    # commands, matchers, timeouts and other settings survive unchanged.
+    for event, registrations in list(hooks.items()):
+        existing = registrations if isinstance(registrations, list) else [registrations]
+        repaired = []
+        for registration in existing:
+            entry = registration
+            owned = False
+            shared = False
+            if isinstance(entry, dict):
+                if entry.get("command") == "bash" and len(entry.get("args", [])) == 1:
+                    name = _installed_hook_name("bash " + str(entry["args"][0]))
+                    if name and name not in HOOK_NAMES:
+                        continue
+                if isinstance(entry.get("hooks"), list):
+                    commands = []
+                    for hook in entry["hooks"]:
+                        name = (
+                            _installed_hook_name(hook.get("command", ""))
+                            if isinstance(hook, dict) and hook.get("type") == "command"
+                            else None
+                        )
+                        if name in HOOK_NAMES:
+                            owned = True
+                            hook = {**hook, "command": _hook_command(name, shell)}
+                            default = HOOK_TIMEOUTS.get(event)
+                            if default and default[0] == name and "timeout" not in hook:
+                                hook["timeout"] = default[1]
+                        elif name:
+                            continue  # our obsolete filenames only
+                        else:
+                            shared = True
+                        commands.append(hook)
+                    if not commands and entry["hooks"]:
+                        continue
+                    entry = {**entry, "hooks": commands}
+            if not owned or shared or entry not in repaired:
+                repaired.append(entry)
+        if repaired != existing:
+            hooks[event] = repaired
             changed = True
 
-    # Add current registrations (namespaced, new format)
-    for event, entry in _get_hook_registrations().items():
+    # Add missing default registrations, without duplicating repaired entries
+    # that carry user-selected timeouts or share a registration with other tools.
+    for event, entry in _get_hook_registrations(shell).items():
         existing = hooks.get(event, [])
         if not isinstance(existing, list):
             existing = [existing]
-        if entry not in existing:
+        command = entry["hooks"][0]["command"]
+        present = any(
+            isinstance(h, dict)
+            and h.get("matcher", "") == entry["matcher"]
+            and any(
+                isinstance(hook, dict) and hook.get("command") == command
+                for hook in h.get("hooks", [])
+            )
+            for h in existing
+        )
+        if not present:
             existing.append(entry)
             hooks[event] = existing
             changed = True
 
     if changed:
-        SETTINGS.write_text(json.dumps(cfg, indent=2))
+        SETTINGS.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def _seed_data_dir(data_dir: str | None = None) -> None:
@@ -1196,7 +1402,7 @@ def _deregister_hooks() -> None:
     """Remove all SmartMemory hook entries from settings.json (current + legacy)."""
     if not SETTINGS.exists():
         return
-    cfg = json.loads(SETTINGS.read_text())
+    cfg = json.loads(SETTINGS.read_text(encoding="utf-8"))
     hooks = cfg.get("hooks", {})
     changed = False
 
@@ -1230,7 +1436,7 @@ def _deregister_hooks() -> None:
             changed = True
 
     if changed:
-        SETTINGS.write_text(json.dumps(cfg, indent=2))
+        SETTINGS.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def _remove_hooks() -> None:
@@ -1242,7 +1448,7 @@ def _remove_hooks() -> None:
     for src_name in _HOOK_FILE_MAP:
         path = HOOKS_DEST / src_name
         if path.exists():
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8")
             if "smartmemory_app" in content and content.count("\n") < 15:
                 path.unlink()
 

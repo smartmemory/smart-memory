@@ -3,7 +3,7 @@
 Single canonical config path: ~/.config/smartmemory/config.toml (XDG on Linux/macOS,
 %APPDATA%\\smartmemory\\config.toml on Windows). Written by `smartmemory setup`.
 
-API keys are stored in the OS keychain via `keyring`, never in the config file.
+API keys use the OS keychain via `keyring`, with a user-only Windows file fallback, never the config file.
 The config only stores `api_key_set = true` as a sentinel. The SMARTMEMORY_API_KEY
 env var bypasses the keychain entirely — the correct path for CI/Docker.
 """
@@ -11,6 +11,7 @@ env var bypasses the keychain entirely — the correct path for CI/Docker.
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 import warnings
 from dataclasses import dataclass
@@ -73,6 +74,7 @@ class SmartMemoryConfig:
     )
     daemon_port: int = 9014
     data_dir: str = "~/.smartmemory"
+    crash_reports: bool = True
 
 
 def config_path() -> Path:
@@ -112,6 +114,7 @@ def load_config() -> SmartMemoryConfig:
                     stacklevel=2,
                 )
                 file_mode = None
+            cfg.crash_reports = sm.get("crash_reports", True)
             cfg.mode = file_mode
             cfg.api_url = remote.get("api_url", cfg.api_url)
             cfg.api_key_set = remote.get("api_key_set", False)
@@ -157,6 +160,9 @@ def load_config() -> SmartMemoryConfig:
     if dp := os.environ.get("SMARTMEMORY_DAEMON_PORT"):
         cfg.daemon_port = int(dp)
 
+    if os.environ.get("SMARTMEMORY_CRASH_REPORTS") == "0":
+        cfg.crash_reports = False
+
     # Translate a local OpenAI-compatible provider into the env vars the core
     # extraction path already consumes. Done after file+env resolution so config
     # and env are fully merged first.
@@ -195,6 +201,7 @@ def save_config(cfg: SmartMemoryConfig) -> None:
     path = config_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     data: dict = {
+        "smartmemory": {"crash_reports": cfg.crash_reports},
         "local": {
             "coreference": cfg.coreference,
             "llm_provider": cfg.llm_provider,
@@ -211,10 +218,10 @@ def save_config(cfg: SmartMemoryConfig) -> None:
             "team_id": cfg.team_id,
         },
     }
-    # mode must be present at top level when set; omit the [smartmemory] table entirely
-    # when unconfigured so load_config() correctly returns mode=None
     if cfg.mode is not None:
-        data = {"smartmemory": {"mode": cfg.mode}, **data}
+        data["smartmemory"]["mode"] = cfg.mode
+    elif cfg.crash_reports:
+        del data["smartmemory"]
     path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 
@@ -250,6 +257,16 @@ def get_api_key() -> str:
         key = keyring.get_password("smartmemory", "api_key") or ""
     except Exception:
         key = ""
+    if not key and sys.platform == "win32":
+        from smartmemory_app.windows_credentials import read_key
+
+        try:
+            key = read_key()
+        except OSError as exc:
+            warnings.warn(
+                f"Protected credential file unavailable: {type(exc).__name__}",
+                stacklevel=2,
+            )
     if not key:
         # DIST-LITE-QUIET-1 (D1): only warn when a key is *expected* — i.e. remote mode.
         # The FREE/local default needs no key by design, so this warning was pure
@@ -281,6 +298,16 @@ def set_api_key(key: str) -> None:
 
         keyring.set_password("smartmemory", "api_key", key)
     except Exception:
+        if sys.platform == "win32":
+            from smartmemory_app.windows_credentials import store_key
+
+            # Failure to restrict the DACL is fatal. Never persist an exposed key.
+            store_key(key)
+            warnings.warn(
+                "OS keychain unavailable. API key stored in a user-only Windows credential file.",
+                stacklevel=2,
+            )
+            return
         warnings.warn(
             "OS keychain unavailable — API key not persisted. "
             "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",

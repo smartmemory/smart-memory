@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import os
 import threading
 import time
@@ -19,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 if TYPE_CHECKING:
     from smartmemory import SmartMemory
@@ -36,6 +37,22 @@ from smartmemory_app.config import (
 
 log = logging.getLogger(__name__)
 
+# Producer-owned fields. Shared with CLI validation so hosted writes cannot
+# bypass the property protection used by storage.ingest().
+RESERVED_INGEST_PROPERTIES = frozenset(
+    {
+        "memory_type",
+        "node_category",
+        "item_id",
+        "content",
+        "embedding",
+        "created_at",
+        "valid_from",
+        "valid_to",
+        "origin",
+    }
+)
+
 _memory: "SmartMemory | None" = None
 _data_path: Path | None = None  # resolved once on first init; reused by ingest()
 _init_lock = threading.Lock()
@@ -44,8 +61,22 @@ _remote_memory: "RemoteMemory | None" = None
 _remote_init_lock = threading.Lock()
 
 WRITE_LOCK_TIMEOUT = (
-    2.0  # seconds — daemon ingest only, worker uses SmartMemory.add() (no lock)
+    30.0  # seconds, override with SMARTMEMORY_WRITE_LOCK_TIMEOUT (0 < value <= 300)
 )
+
+
+class StoreBusyError(RuntimeError):
+    """Write ownership could not be acquired. No write has started."""
+
+
+class _StoreWriteLock(FileLock):
+    def acquire(self, *args, **kwargs):
+        try:
+            return super().acquire(*args, **kwargs)
+        except Timeout as exc:
+            raise StoreBusyError(
+                "Store busy. Try again after current writes finish, or start the daemon with sm start."
+            ) from exc
 
 
 # --- Directory & lock resolution -------------------------------------------------
@@ -59,7 +90,14 @@ def _resolve_data_dir(explicit: str | None = None) -> Path:
 
 
 def _get_lock_file(data_path: Path):
-    return FileLock(str(data_path / ".write.lock"), timeout=WRITE_LOCK_TIMEOUT)
+    timeout = float(
+        os.environ.get("SMARTMEMORY_WRITE_LOCK_TIMEOUT", WRITE_LOCK_TIMEOUT)
+    )
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ValueError(
+            "SMARTMEMORY_WRITE_LOCK_TIMEOUT must be greater than 0 and at most 300 seconds."
+        )
+    return _StoreWriteLock(str(data_path / ".write.lock"), timeout=timeout)
 
 
 # --- Singleton lifecycle ---------------------------------------------------------
@@ -320,8 +358,8 @@ def _shutdown() -> None:
 # --- Helpers -------------------------------------------------------------------
 
 
-def _normalize_ingest_result(result) -> str:
-    """Normalize SmartMemory.ingest() return value to a plain item_id string.
+def _normalize_ingest_result(result) -> str | dict:
+    """Preserve terminal holds, otherwise normalize to an item_id string.
 
     SmartMemory.ingest() returns Union[str, Dict[str, Any]]:
       str  — when sync=True (default in Lite mode): item_id directly
@@ -331,6 +369,8 @@ def _normalize_ingest_result(result) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, dict) and "schema_version" not in result:
+        if result.get("status") == "held":
+            return result
         return result.get("item_id") or str(result)
     # Receipt arm (N-02.activate.outer-readers): a save receipt reads as its subject id, never str(receipt).
     from smartmemory_app.save_return import resolve_save_return
@@ -390,7 +430,7 @@ def ingest(
               including item_id, entity_ids, queued and run_id, plus an optional
               warning when core cannot route LLM extraction.
         properties: Optional user-supplied key-value properties stored in metadata.
-        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by local write
+        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by write
             surfaces (CLI sm add → "cli:add"). Threaded into core ingest via context
             so the stored item is attributed instead of falling to origin='unknown'.
 
@@ -402,31 +442,16 @@ def ingest(
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
 
-    if isinstance(mem, RemoteMemory):
-        return mem.ingest(content, memory_type)  # TODO: pass properties to remote API
     # Reserved keys that user properties must not overwrite.
     # DIST-LITE-QUIET-1 (Codex review): "origin" is reserved — it drives tier visibility
     # AND precedence guards, so it must be set only by the producer (the explicit `origin`
     # param), never via user-supplied properties (which would let a caller claim a
     # privileged origin, e.g. import:vault, and bypass attribution/tiering).
-    _RESERVED = frozenset(
-        {
-            "memory_type",
-            "node_category",
-            "item_id",
-            "content",
-            "embedding",
-            "created_at",
-            "valid_from",
-            "valid_to",
-            "origin",
-        }
-    )
     ctx: dict = {"memory_type": memory_type}
     if origin:
         ctx["origin"] = origin
     if properties:
-        dropped = _RESERVED.intersection(properties)
+        dropped = RESERVED_INGEST_PROPERTIES.intersection(properties)
         if dropped:
             log.warning(
                 "Dropped reserved ingest properties: %s", ", ".join(sorted(dropped))
@@ -434,8 +459,10 @@ def ingest(
         # Flatten user properties into context so they become top-level node
         # properties (metadata keys merge into graph node properties dict).
         for k, v in properties.items():
-            if k not in _RESERVED:
+            if k not in RESERVED_INGEST_PROPERTIES:
                 ctx[k] = v
+    if isinstance(mem, RemoteMemory):
+        return mem.ingest(content, memory_type, context=ctx)
     # Local path — acquire write lock for cross-process coordination
     data_path = _data_path if _data_path is not None else _resolve_data_dir()
     lock = _get_lock_file(data_path)
@@ -445,6 +472,8 @@ def ingest(
             from smartmemory_app.save_return import ingest_dict
 
             result = ingest_dict(result, op="ingest")
+        if isinstance(result, dict) and result.get("status") == "held":
+            return result
         if not sync and isinstance(result, dict):
             # Initialization has applied the effective provider/model settings.
             # Use core's placement resolver, not the foreground extraction status:
@@ -663,6 +692,11 @@ def search(
                  callers/contract drift never raise TypeError here.
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
+    if search_kwargs.get("origin") is not None and load_config().mode == "remote":
+        raise NotImplementedError(
+            "--origin is not supported in remote mode: the hosted search API "
+            "does not accept origin filters. Use local mode or remove --origin."
+        )
     mem = get_memory()
     # Forward documented core options. Unknown extension keys still drop, while
     # the enumerating contract test prevents known facade parameters being lost.
@@ -710,6 +744,14 @@ def search(
             all_items = _core_wildcard_rows(mem, **core_kwargs)
         else:
             all_items = _list_all_memories(mem)
+        # F3: the wildcard shortcut bypasses core search visibility on the snapshot arm. Hide raw hooks on both arms.
+        all_items = [
+            r
+            for r in all_items
+            if not (
+                r.get("origin") or r.get("metadata", {}).get("origin") or ""
+            ).startswith(("hook:observe", "hook:learn"))
+        ]
         if filters:
             all_items = [
                 r
@@ -1014,6 +1056,27 @@ def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:
         return True
 
 
+def resolve_readonly_item_id(backend, item_id: str) -> str:
+    """Resolve only read-only get prefixes by exact persisted item_id comparison."""
+    import re
+
+    if backend.get_node(item_id) is not None:
+        return item_id
+    if not re.fullmatch(r"[0-9a-fA-F]{6,}", item_id):
+        return item_id
+    with backend._lock:
+        rows = backend._conn.execute(
+            "SELECT item_id FROM nodes WHERE substr(item_id, 1, ?) = ? COLLATE NOCASE ORDER BY item_id",
+            (len(item_id), item_id),
+        ).fetchall()
+    if len(rows) > 1:
+        raise ValueError(
+            "Ambiguous item ID prefix. Use a full ID: "
+            + ", ".join(row[0] for row in rows)
+        )
+    return rows[0][0] if rows else item_id
+
+
 def get(item_id: str) -> dict:
     """Get a single memory by item_id. Returns dict in both modes.
 
@@ -1024,5 +1087,21 @@ def get(item_id: str) -> dict:
 
     if isinstance(mem, RemoteMemory):
         return mem.get(item_id) or {}  # already a dict
-    item = mem.get(item_id)
+    item = mem.get(resolve_readonly_item_id(mem._graph.backend, item_id))
     return _result_dict(item) if item else {}
+
+
+def get_mirror_state(data_dir: str | None = None):
+    """Resolve the actual Lite root without opening memory or creating config.
+
+    A running local singleton's explicit data root wins unless a caller supplies
+    another explicit root. Config/namespace may live elsewhere.
+    """
+    from smartmemory_app.mirror_state import MirrorState
+
+    path = (
+        _resolve_data_dir(data_dir)
+        if data_dir is not None or _data_path is None
+        else _data_path
+    )
+    return MirrorState(path)

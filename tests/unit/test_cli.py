@@ -241,7 +241,14 @@ def test_get_cmd_daemon_http_error_surfaces(runner):
     assert "Not Implemented" in result.output
 
 
-def test_add_cmd_with_properties(runner):
+@pytest.mark.parametrize(
+    "options",
+    [
+        ["--project", "atlas", "--domain", "legal"],
+        ["--prop", "project=atlas", "--prop", "domain=legal"],
+    ],
+)
+def test_add_cmd_with_properties(runner, options):
     """add command passes extra --key value flags as properties."""
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
@@ -249,9 +256,7 @@ def test_add_cmd_with_properties(runner):
     ):
         from smartmemory_app.cli import cli
 
-        result = runner.invoke(
-            cli, ["add", "test text", "--project", "atlas", "--domain", "legal"]
-        )
+        result = runner.invoke(cli, ["add", "test text", *options])
 
     assert result.exit_code == 0
     assert "prop-id" in result.output

@@ -1,8 +1,44 @@
 # Changelog — smartmemory
 
+## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
+
+- README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.
+
+## Unreleased - HUB-DOCS-LINK-1 (2026-10-15)
+
+- README: Links section now lists the SmartMemory Hub (plugin and integration marketplace, hub.smartmemory.ai).
+
+## 1.5.26 — 2026-10-09
+
+- Hotfix: pins `smartmemory-core==1.5.26`, which bounds `tree-sitter<0.26`. With tree-sitter 0.26.0, `smartmemory code bundle` on a real TypeScript tree crashed with a segfault (exit 139).
+
+## Unreleased - CODE-BUNDLE-CLI-1 (2026-10-08)
+
+- Repo references renamed `smartmemory-*` -> `smart-memory-*` in docs, scripts and config (INFRA-REPO-RENAME-1).
+
+- Final bundle fixes: partial snapshots preserve collection failure paths with colon characters, Unicode names and filename-less errors. CLI regression coverage uses real audit-hook traversal failures. Core validates every declared nested record and reports unavailable membership inputs explicitly.
+- `smartmemory code bundle <path> --repo <id> --out <file> [--language ...] [--exclude ...] [--allow-partial] [--fields full|minimal]`: writes a store-free local snapshot of a checkout (entities with `item_id`, relations with `edge_state`, source identity, `resolution_dependencies`, completeness). It never calls `get_memory`, opens no graph, vector store or embedder, and uploads nothing. The file is written atomically (temp file in the `--out` directory, then `os.replace`); a refusal creates no file and leaves an existing `--out` untouched. `--allow-partial` keeps good files when others fail to parse (exit 0, `complete=false`, a `[code:bundle] warning: incomplete` line naming the failed paths). `--out` inside the checkout and not git-ignored prints a warning. There is no `--commit-hash` flag.
+- Fix round 1: the snapshot write refuses NaN/Infinity (`allow_nan=False`, prior file kept, no temp left), and `--fields` help names the forge/stratum code-graph consumer (STRAT-CODEGRAPH-1: minimal by default there, full opt-in). The CLI default stays `full`.
+- The wrapper now depends on `smartmemory-core[typescript]` (tree-sitter TS/JS grammars moved to that extra).
+
+## Unreleased - CODE-INDEXER-HARDEN-1 U5 (2026-10-08)
+
+- CODE-INDEXER-HARDEN-1 (F25, F28, F29): hosted `prepare_code_index` stamps dirty-aware provenance (`<HEAD>-dirty-<fingerprint>` for uncommitted or untracked changes, with a WARNING) and sends `repo_identity` so the service refuses a repo name owned by a different checkout. The hosted CLI reports the server's `embeddings_generated` instead of always warning that hosted indexes have no embeddings (the warning stays for older services).
+
+## Unreleased - CODE-CALLSITE-COVERAGE-1 build
+
+- Point user-facing links at https://www.smartmemory.ai (the web app had no app.smartmemory.ai DNS until 2026-10-08, and it now only redirects to www). Filed as PLAT-APP-SUBDOMAIN-1.
+- CORE-HOLD-RECEIPT-1 round 2: Preserve held receipts through local and hosted storage, daemon, CLI, lifecycle and tour consumers. Describe searches against existing memory when no tour seed was stored.
+
+- Show shared source call-site extraction status and resolved CALLS edges separately in local and hosted code-index summaries.
+
+- Integrated FRAMEWORK with Wave B, preserving scoped liveness and diagnostic evidence.
+
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
+
+- FORWARD-MERGE-1: main forward-merged into 2.0 (wrapper releases 1.5.17 to 1.5.26 and the Windows, remote-parity, diagnostics, code-bundle and hold-receipt fixes). Held ingest results and the hidden hook origins on wildcard search keep working beside the U4.32 and U5.22 receipt arms.
 
 - U4.32: prepares the local save return and work status for core's save receipt, with no switch and no change while core still returns an id string. `smartmemory_app.save_return` reads either arm: a legacy id string or dict (queued, held) is returned as it is and nothing is imported, and a receipt (object or wire dict) reads as its subject id, never `str(receipt)`, with a G98 "Saved, extraction skipped" summary. An admission rejection is a typed `SaveRejected` and an unreadable or non-save receipt a typed `SaveReturnRefused`, each with one WARNING, never an id. `storage.ingest` uses it on both return paths, so an async receipt becomes the usual `{item_id, queued, run_id}` dict plus a `receipt` key. `work_graph.get_local_status`, `open_local_status`, `project_local_status` and `local_status_capability` project core's live, retained and expired run status through the actor and workspace gate: an unseen, foreign, hidden or revoked run reads as one uniform unknown, and a core without the status adapter is `LocalStatusUnavailable` (explicit, with one WARNING), never an empty status. Nothing under the legacy save path calls them yet (the adapters lane wires the callers). First status read installs core's additive `wg_*` tables on the local `memory.db`.
 
@@ -13,6 +49,138 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - U4.32 review fix 3 (tests only, rule 4): the `storage.ingest` consumer census fails closed on the dynamic-import and module-registry surface. `importlib.import_module` and `__import__` are followed under any alias (`from x import y as z`, `import x as y`, `builtins`, as a call receiver) when the module name is a constant, and anything else raises AssertionError naming file:line: a name read at run time, a relative name, the loader or `importlib`/`sys`/`builtins` held as a value, `sys.modules` used other than by a constant key, a star import of those modules, or the module name as a bare string. The two packages keep copies of the helper, pinned to one hash.
 
 - U5.22: local `sm search "*"` (wildcard) now lists intake-only items and every wildcard row carries the extraction `read_status` when `sm2_search_visibility_gate` is ON (the snapshot scan could not see receipts). Recall lines add an `[extraction_pending]`-style tag only when a status is present. Gate OFF is unchanged. On the gate-ON arm the wildcard now returns core's own merged enumeration (membership, edit and tombstone precedence, origin filters, status on every row) instead of merging onto the graph snapshot; a full window at the cap, or a core page larger than the window it was asked for, raises `WildcardEnumerationOverflowError` with one WARNING. Every storage site that serializes a core result (search, grouped search, filtered search, get, wildcard) checks the carrier first (`_result_dict`), so a malformed `read_status` is a typed `MalformedReadStatusError` with one WARNING, never `to_dict()`'s raw error or a copied stateless dict.
+
+## [1.5.25] - 2026-10-09
+
+- Pins `smartmemory-core==1.5.25` (now with the `[typescript]` extra, which carries the tree-sitter TS/JS grammars).
+- New `smartmemory code bundle <path> --repo <id> --out <file>` writes a store-free local snapshot of a checkout (entities, relations, source identity, `resolution_dependencies`, completeness) without opening a memory store or uploading anything. `--fields minimal` gives the lean form, `--allow-partial` keeps good files when others fail to parse (CODE-BUNDLE-CLI-1).
+- Pins `smartmemory-mcp==1.5.21` (latest published MCP).
+- Core mirror rework (DIST-LITE-SYNC-1) ships closed by default: nothing changes for ordinary add, ingest or export.
+
+## [1.5.24] - 2026-10-08
+
+- Pins `smartmemory-core==1.5.24`: Lite (SQLite) memory never opens a Redis socket unless one is configured (CORE-LITE-REDIS-PROBE-1), plus the 2026-10-08 core security hotfixes.
+
+- `sm code index` now indexes every supported language present (Python and TypeScript/JavaScript, including `.mjs/.cjs/.mts/.cts`) by default instead of Python only; `--language` (alias `--languages`) narrows it (CODE-INDEXER-HARDEN-1 F32). Under the default, a TS/JS file that fails to extract is skipped with a warning instead of refusing the whole index; passing `--language typescript` makes such a failure refuse.
+- Prompt and session-start hooks no longer time out in Claude Code. `smartmemory lifecycle recall` and `lifecycle orient` now stop after 8 seconds (set `SMARTMEMORY_HOOK_DEADLINE` to change it). On overrun they add no context for that prompt, write a warning with per-phase timings to `hooks.log`, send at most one anonymous `hook_deadline_exceeded` event a day (no prompt text, no paths, honours `SMARTMEMORY_CRASH_REPORTS=0`) and exit cleanly. The prompt is still saved first, so the turn is remembered. The hooks also skip the daemon connection when no daemon is running, and wait at most 1.5 s to connect when one is. `smartmemory setup` now gives the SessionStart and UserPromptSubmit hooks a 15 s timeout when none is set, and keeps any timeout you chose.
+- Add a real SQLite lifecycle golden through the local API, verifying persisted rows, search, recall, clear and empty storage, with no network allowed. The four lite-mode Redis probes it catches are declared as a strict known gap (CORE-LITE-REDIS-PROBE-1).
+- Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
+- Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).
+- Verify hosted CLI bundles preserve framework kinds, export evidence and TS TESTS relations through the shared core parser (CODE-FRAMEWORK-SEMANTICS-1).
+
+- Hosted code upload bundles preserve lexical identity, source spans and call confidence, including unresolved source references (CODE-EDGE-CONFIDENCE-1).
+
+- CODE-INGEST-SURFACES-1: hosted code indexing uses core bundle preparation and complete dataclass serialization while preserving language selection and client-side parsing.
+
+- Mirror groundwork (DIST-LITE-SYNC-1): the packaged mirror contract schema now matches the current contract, including the per-item `schema_changed_during_write` report flag.
+
+## [1.5.23] - 2026-10-05
+
+- On Windows, `*` and `?` in arguments such as `sm search "*"` are passed through literally instead of being expanded to file names.
+
+## [1.5.22] - 2026-10-05
+
+- Default local search hides raw hook transcripts. Use --origin PREFIX to inspect a producer in direct or daemon mode. Hosted mode clearly refuses this unsupported filter before connecting.
+- Custom local embedding models warm successfully when their configured dimension is unavailable, with an explicit unverified-dimension warning. Runtime names now resolve the correct model files, while known dimension mismatches still fail startup.
+- Semantic-hop planner notices use the executing daemon's key status, or local key status for direct search, and appear only after a successful search.
+- Doctor treats verified healthy daemon and worker store owners as OK, retains contention and stale-owner warnings, and omits repair hints on healthy keyring and disk checks.
+- Doctor records separate probe timings and budgets, reuses a healthy daemon's verified embedding warmup for the configured store, and reports slow cold-start timeouts as incomplete checks.
+- Inline add accepts arbitrary property options before or after quoted text, including --key=value, while retaining reserved, duplicate and missing-value validation. Split text prompts users to quote it or use --all - stdin.
+- Search prints full IDs, offers --json with complete fields, marks truncated previews, and supports --full bodies. Local read-only get resolves unique ID prefixes of at least six hex characters and lists candidates on ambiguity. Remote get asks for the full ID.
+- sm help and sm help COMMAND forward to Click help. Keyless local semantic-hop searches show and log their heuristic-planner fallback.
+- Restart prints worker-stop, daemon-stop, start/spawn and ready timings, including partial failures. Detached daemon stdio defaults to UTF-8 while preserving a user-selected encoding.
+- Extractive `sm ask --reasoning` displays the returned graph relations using the same format as synthesized answers.
+- Local `sm ask` without an LLM key returns clearly labelled extractive memory excerpts with full IDs, types and dates. Empty results exit successfully. Configured LLM failures keep their existing errors.
+- Groundwork for Lite → hosted mirroring (DIST-LITE-SYNC-1 U2, no user command yet): a local mirror state store (`mirror.sqlite3`) holds the pairing, frozen pending snapshots, receipts and per-key baselines, refuses deletes after a database replacement or restore until an explicit re-pair, and lets only one mirror apply run at a time. `sm reset` now keeps `okf_namespace.json` and any mirror state.
+
+## [1.5.21] - 2026-10-04
+
+- Remote lifecycle hooks run the in-process engine directly, skipping the local daemon attempt while preserving local daemon acceleration and fail-open behaviour.
+- Remote `sm add --prop key=value` delivers user properties through hosted ingest context and refuses reserved producer/scope keys. Remote `sm search '*' --prop key=value` uses one exact list filter, with filtered pagination. Semantic property search and unsupported combinations remain explicit refusals.
+- Local `sm status` explains that memories live only on this machine, outside the cloud account, and reports the saved memory count even when the daemon is stopped or warming. `sm status --json` adds explicit local-only disclosure fields while preserving backend status fields.
+- Remote `sm start`, `stop` and `restart` disclose their local proxy/viewer scope, configured API and workspace. Proxy health and extraction messages distinguish local readiness from unchecked hosted connectivity and capability, with `sm status` as the hosted access check.
+- Remote lifecycle observe, distill and learn now deliver producer origin, requested memory type and properties through hosted ingest. Reserved property keys cannot override producer fields, and the service retains authority over workspace scope.
+- Remote `sm search '*'` lists scoped memories with `--top-k` page limits, `--offset` continuation and surfaced service errors.
+- Remote `sm code index` parses the checkout locally and uploads code entities and relations to the configured hosted workspace. Repo and request-size caps are explicit, failed replacements report uncertainty, and uploads never delete the previous index first. Incomplete directory traversal refuses replacement and reports failed paths, preserving the prior index. Hosted indexing reports that vector embeddings are unavailable.
+
+### Install troubleshooting
+
+- Handled setup, model warmup, store busy and reset failures use the anonymous crash reporter, shared opt-out and privacy filtering. User cancellations and ordinary usage errors are excluded. Failed setup prints bounded doctor guidance and a report ID or reporting status.
+- Hook shells record failed lifecycle commands without launching a reporter. The next CLI consumes each hook and exit code once per install per day. Doctor shows recent hook failures and repair guidance.
+- First-run checks validate the package's Python requirement and native vector/embedding imports, then cache successful checks per installed version. Failed native checks retry and report once.
+- Doctor inspects SQLite and vector snapshots without repairing them, checks dimensions/counts, detects active or stale locks, tests cached embeddings offline, and checks keyring, Git Bash, disk space and daemon port owners. Expensive probes run in a bounded child process.
+- Explicit `smartmemory warm` now returns an actionable failure when a loader fails instead of announcing successful warmup.
+- Reports go through a durable outbox: written (already privacy-filtered) before sending, removed only after confirmed delivery, retried at the next interactive command or daemon start, capped in size, with corrupt files quarantined. Opting out deletes queued reports unsent.
+- Redaction now also covers private API/proxy hosts (config, environment, OS proxy settings, URLs passed to setup), any user's profile path, and the current username, without altering report field names.
+- Lifecycle hooks never run diagnostics, flush the outbox or send reports. All six hooks write failure markers to `~/.smartmemory`, including installs with a custom data directory.
+- Doctor never sends, never consumes hook markers, never takes the store write lock, and shows pending hook failures and queued reports read-only.
+- Model warmup and setup report a real failure when the embedding or reranker loader fails.
+
+## [1.5.20] - 2026-10-04
+
+- Windows wrapper and standalone MCP environments now use the same canonical credential file and lock. A newer legacy credential migrates before its source is removed, so account rotations survive reads across environments.
+- Remote setup honors `--api-url` and the effective configured endpoint for validation and persistence. Unattended setup accepts `SMARTMEMORY_API_KEY`.
+- Windows setup and MCP login share one credential fallback. Credential updates lock writers and verify a protected current-SID-only temporary file before writing any key, preserving the previous key on ACL failure. Legacy MCP credentials migrate once and are removed.
+- Direct daemon startup retains its absolute lifecycle deadline. Git Bash executable and hook script paths both escape shell expansions.
+- Windows Claude hooks use a validated absolute Git Bash path and setup refuses missing or broken Git Bash.
+- Direct `get` emits ISO timestamps using the same JSON encoder as the API.
+- Direct writes wait up to 30 seconds (configurable), report busy stores clearly, and never replay a write after a dropped daemon response.
+- Store reset checks live owners and every file before mutation. Windows deletion holds exclusive handles and reports retained files as failure.
+- Windows detached launches request terminal-job breakaway and no console window, with an explicit warning if breakaway is denied.
+- Daemon startup rotates an oversized `daemon-output.log` before opening the child output handle (5 MiB default, one previous log).
+- Local diagnostics skip the SmartMemory API probe. Remote diagnostics use the effective configured API URL, including support zip.
+- Support exports redact raw, slash-separated and JSON-escaped Windows profile paths and omit absolute config paths.
+- Include lightweight Requests SOCKS support and document UTF-8 piping for PowerShell 5.1.
+
+## [1.5.19] - 2026-10-03
+
+- Pins smartmemory-core 1.5.19 and smartmemory-mcp 1.5.19 (MCP lists its tools without opening the local store).
+
+- Stop confirms that daemon health has disappeared before clearing its PID marker, and launchd shutdown polling leaves time for worker termination within the lifecycle deadline.
+- Windows daemon and legacy-worker liveness checks inspect processes without signalling them.
+- Stop verifies daemon and worker identity through portable process inspection and preserves markers when ownership cannot be established.
+- Daemon shutdown requests let the HTTP server drain and close storage before bounded termination, with a warning if forced shutdown cannot confirm the final flush.
+- Restart and stop retire orphan core workers even when the daemon is absent.
+- Session state updates replace existing files safely and serialize concurrent saves on Windows.
+- Codex MCP configuration escapes Windows executable paths and validates TOML before writing.
+- Clear reports retained storage files as a failure and skips reseeding and success events after a partial reset.
+- Piped memories and lifecycle JSON decode as UTF-8 independently of the Windows locale, with explicit invalid-input errors.
+- Claude settings and shell profiles use UTF-8 during setup and removal.
+- Workspace identity decodes Git repository roots as UTF-8, preserving Unicode paths.
+- Background daemon, core worker and capture launches use native Windows detachment flags and redirect stdin.
+- Diagnostic logs coordinate rotation across processes and release file handles between records. Daemon console output uses a separate file.
+- Windows setup explains that login startup and automatic crash recovery require manual `sm start`.
+- Windows API-key setup uses the credential store and provides PowerShell environment instructions, with a warning when persistence fails.
+- Doctor provides native Windows virtual-environment repair commands without shell activation.
+
+- Windows lifecycle hooks use quoted forward-slash paths and repair older registrations when setup is rerun. CLI and hook streams use UTF-8 so Unicode memory text and doctor status marks print safely.
+- Releases automatically update the exact MCP dependency pin to the latest published version before building, keeping installs reproducible and the MCP server current.
+
+- Remote `sm ask`, add, search, recall, get and status use the hosted service directly. Ask uses hosted LLM credentials, reports API and quota failures clearly, and also works through the remote viewer proxy. Local store maintenance commands explain their local-only scope.
+- Windows setup uses text prompts and the guided tour and graph explorer TUIs are skipped until fully tested. Set `SMARTMEMORY_FORCE_TUI=1` to test the TUIs.
+- Automatic anonymous crash reports cover CLI failures, daemon process and thread
+  failures, HTTP 500 errors and degraded warmup. Reports remove credentials, memory
+  bodies and home-directory names, with persistent deduplication and daily limits.
+  Disable with `SMARTMEMORY_CRASH_REPORTS=0` or config `crash_reports = false`.
+- `smartmemory report [MESSAGE] --send` previews the support upload and asks for
+  confirmation (`--yes` skips the prompt). Failed sends save a local support zip.
+  CLI crashes show the report ID, and first-run setup discloses automatic reporting.
+
+## [1.5.18] - 2026-10-03
+
+- CLI failures now save redacted tracebacks and command context to `cli-debug.log`
+  and show a short support instruction. `SMARTMEMORY_DEBUG=1` restores terminal tracebacks.
+- Setup logs model preparation context and gives timeout and mirror recovery guidance.
+  Daemon warm-up and uncaught process/thread failures retain redacted tracebacks in `daemon.log`.
+- `smartmemory doctor` checks network reachability, proxies, model cache, daemon health
+  and storage. `smartmemory report --zip [PATH]` creates one redacted local support file.
+
+## [1.5.17] - 2026-10-03
+
+- Pins `smartmemory-core==1.5.17`: **Windows saves work again.** Every `sm add` on Windows failed with `OSError: [Errno 9] Bad file descriptor` while flushing the vector index (a regression from 2026-09-26).
+- `sm tour` no longer crashes with `httpx.ReadTimeout` on a slow first start. It waits for the local server to finish warming up instead of treating the first health reply as ready, and reports a failed warmup in plain words.
+- Hook capture and lesson saves no longer try to fsync a directory on Windows, which Windows does not allow.
+- Model downloads during setup wait up to 300 s per read (`HF_HUB_DOWNLOAD_TIMEOUT`, was ~10 s) unless you set your own value.
 
 ## [1.5.16] - 2026-10-01
 
@@ -51,6 +219,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Pins `smartmemory-core==1.4.116` (decision listings keep `context_snapshot`: supersede/retract reason).
 
 ## Unreleased
+
+- Show unknown for hosted code counts and outcomes absent from the server response, including transport failures (CODE-PARSE-DIAGNOSTICS-1).
+
+- Retain hosted code-index failure bodies and print clean, partial and failed counts with the server publication outcome on CLI failures (CODE-PARSE-DIAGNOSTICS-1).
 
 ### Fixed
 

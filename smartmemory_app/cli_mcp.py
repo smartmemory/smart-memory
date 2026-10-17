@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import tomllib
 from pathlib import Path
 
 import click
+import tomli_w
 
 CLIENTS = ("claude-code", "cursor", "codex")
 
@@ -94,14 +96,16 @@ def _write_codex_toml(path: Path, *, dry_run: bool) -> str:
     """Codex stores MCP servers in ``~/.codex/config.toml`` under
     ``[mcp_servers.<name>]`` tables.
 
-    We use a minimal hand-rolled TOML emitter for the smartmemory block so we
-    do not pull in tomli-w as a hard dep. Any existing ``[mcp_servers.smartmemory]``
+    We use the existing tomli-w dependency to escape executable paths correctly.
+    Any existing ``[mcp_servers.smartmemory]``
     block is replaced; everything else in the file is preserved verbatim.
 
     Returns the full file contents that would be written.
     """
     cmd = _resolve_server_command()
-    new_block = f'[mcp_servers.{_SERVER_KEY}]\ncommand = "{cmd}"\nargs = []\n'
+    new_block = tomli_w.dumps(
+        {"mcp_servers": {_SERVER_KEY: {"command": cmd, "args": []}}}
+    )
 
     if path.exists():
         original = path.read_text(encoding="utf-8")
@@ -109,8 +113,8 @@ def _write_codex_toml(path: Path, *, dry_run: bool) -> str:
         import re
 
         pattern = re.compile(
-            rf"^\[mcp_servers\.{_SERVER_KEY}\][^\[]*",
-            flags=re.MULTILINE,
+            rf"^\[mcp_servers\.{_SERVER_KEY}\][^\n]*\n.*?(?=^\[|\Z)",
+            flags=re.MULTILINE | re.DOTALL,
         )
         cleaned = pattern.sub("", original).rstrip() + (
             "\n\n" if original.strip() else ""
@@ -119,6 +123,12 @@ def _write_codex_toml(path: Path, *, dry_run: bool) -> str:
         cleaned = ""
 
     new_contents = (cleaned + new_block).lstrip("\n")
+    try:
+        tomllib.loads(new_contents)
+    except tomllib.TOMLDecodeError as exc:
+        raise click.ClickException(
+            f"Refusing to overwrite invalid TOML at {path}: {exc}"
+        ) from exc
 
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,6 +202,7 @@ def mcp_install_cmd(client: str, dry_run: bool, override_path: str | None) -> No
 
     try:
         from smartmemory_app.launch_metrics import emit as _lm_emit
+
         _lm_emit("mcp.install", {"client": client, "dry_run": bool(dry_run)})
     except Exception:
         pass

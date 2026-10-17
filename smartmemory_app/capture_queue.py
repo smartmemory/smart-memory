@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 
 from filelock import FileLock
+from smartmemory.utils.process import spawn_detached
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +37,8 @@ def _append(root: Path, record: dict) -> dict:
         handle.flush()
         os.fsync(handle.fileno())
     temporary.rename(events / f"{name}.json")
-    for directory in (events, root, root.parent):
+    # Windows cannot open or fsync a directory; the rename is already durable there.
+    for directory in () if os.name == "nt" else (events, root, root.parent):
         fd = os.open(directory, os.O_RDONLY)
         try:
             os.fsync(fd)
@@ -94,12 +96,11 @@ def enqueue(
 def spawn_worker() -> None:
     root = capture_dir()
     with (root.parent / "hooks.log").open("a") as handle:
-        subprocess.Popen(
+        spawn_detached(
             [sys.executable, "-m", "smartmemory_app.capture_worker"],
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
             close_fds=True,
         )
 

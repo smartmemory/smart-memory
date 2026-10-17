@@ -472,7 +472,12 @@ def get_memory_item(memory_id: str) -> dict[str, Any]:
         return node
     with _rw_lock:
         backend = _get_backend()
-        node = backend.get_node(memory_id)
+        from smartmemory_app.storage import resolve_readonly_item_id
+
+        try:
+            node = backend.get_node(resolve_readonly_item_id(backend, memory_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     if node is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return node
@@ -488,27 +493,18 @@ def clear_all() -> dict:
     with _rw_lock:
         from smartmemory_app.storage import _resolve_data_dir, _shutdown
 
-        _shutdown()
-
         data_path = _resolve_data_dir()
-        removed = 0
-        if data_path.exists():
-            for pattern in [
-                "*.db",
-                "*.db-shm",
-                "*.db-wal",
-                "*.db-journal",
-                "*.usearch",
-                "*.json",
-                "*.jsonl",
-                ".write.lock",
-            ]:
-                for f in data_path.glob(pattern):
-                    try:
-                        f.unlink()
-                        removed += 1
-                    except OSError:
-                        pass
+        from smartmemory_app.store_reset import (
+            preflight_store_reset,
+            remove_store_files,
+        )
+
+        try:
+            preflight_store_reset(data_path)
+            _shutdown()
+            removed = remove_store_files(data_path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         # Re-seed patterns
         from smartmemory_app.setup import _seed_data_dir
@@ -790,6 +786,8 @@ def ingest_endpoint(body: IngestRequest) -> dict:
             raise HTTPException(
                 status_code=502, detail=f"Hosted SmartMemory API error: {exc}"
             ) from exc
+    if isinstance(result, dict) and result.get("status") == "held":
+        return result
     response = {"item_id": result["item_id"] if isinstance(result, dict) else result}
     if isinstance(result, dict) and result.get("warning"):
         response["warning"] = result["warning"]
@@ -797,6 +795,7 @@ def ingest_endpoint(body: IngestRequest) -> dict:
 
 
 class SearchRequest(BaseModel):
+    origin: str | None = None
     multi_hop: bool = False
     max_hops: int = 3
     hop_strategy: str | None = None
@@ -834,6 +833,7 @@ def _search_items(body: SearchRequest) -> list[dict]:
                 **{
                     k: v
                     for k, v in {
+                        "origin": body.origin,
                         "since": body.since,
                         "until": body.until,
                         "multi_hop": True if body.multi_hop else None,
@@ -880,6 +880,7 @@ def search_endpoint(body: SearchRequest) -> dict:
 class AskRequest(BaseModel):
     question: str
     limit: int = 5
+    reasoning: bool = True
 
 
 _STRUCTURAL_EDGE_TYPES = frozenset(
@@ -1040,12 +1041,36 @@ def _split_answer(text: str) -> tuple[str, str]:
 @api.post("/ask")
 def ask_endpoint(body: AskRequest) -> dict:
     """Answer a question from semantic memories plus their one-hop graph relations."""
+    from smartmemory_app.config import load_config
+    from smartmemory_app.remote_backend import RemoteBackendError
+    from smartmemory_app.storage import _get_remote_memory
+
+    cfg = load_config()
+    if cfg.mode == "remote":
+        try:
+            return _get_remote_memory(cfg).ask(
+                body.question, body.limit, reasoning=body.reasoning
+            )
+        except RemoteBackendError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     if not llm_key_present():
-        raise HTTPException(
-            status_code=503,
-            detail="`sm ask` requires a configured LLM key (for example GROQ_API_KEY). "
-            "Run `smartmemory setup` or set a supported provider key.",
+        log.warning(
+            "No LLM configured. Returning extractive memories without a written answer."
         )
+        with _rw_lock:
+            try:
+                return _get_mem().ask(
+                    body.question,
+                    body.limit,
+                    reasoning=body.reasoning,
+                    mode="extractive",
+                    search_fn=lambda question, limit: _search_items(
+                        SearchRequest(query=question, top_k=limit)
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
     evidence = [

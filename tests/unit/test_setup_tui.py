@@ -206,7 +206,7 @@ class TestSetupDispatch:
             runner = CliRunner()
             runner.invoke(cli, ["setup", "--mode", "local"])
 
-        mock_click.assert_called_once_with("local", None)
+        mock_click.assert_called_once_with("local", None, None)
 
     def test_mode_local_starts_daemon_exactly_once(self):
         """--mode local must not double-start the daemon."""
