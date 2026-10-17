@@ -27,6 +27,10 @@
 ## Unreleased - CLI-ENV-DETECT-1 (2026-10-17)
 
 - New `smartmemory_app.env_sources.inherited_vars()`: lists every `SMARTMEMORY_*` variable the process inherited, with the shell startup file and line that exported it (`~/.zshrc:42`) and this project's saved decision (`use`, `ignore`, `override` or undecided). Names only, it never reads or returns a value. `SMARTMEMORY_ENV_CHECK=0` is a meta switch and is never listed.
+- Every `smartmemory` command (setup and tour included) now checks for undecided inherited `SMARTMEMORY_*` variables. In a terminal it lists them (names and where they were exported, never values) and asks once: use them, ignore them for this project, or override them with a project value. Without a terminal it prints one WARNING line naming them and `smartmemory env`, and never prompts. Hook commands (`lifecycle`) and `doctor` stay quiet. `SMARTMEMORY_ENV_CHECK=0` turns the check off.
+- Decisions are stored per project (git top level, else the directory) in the existing user config file under `[projects."<path>"]`. `ignore` removes the variable for that project, `override` replaces it, `use` keeps it. New precedence: flag > project decision > environment > config file > default. Secrets (`*_KEY`, `*_TOKEN`) can be used or ignored but not stored as an override.
+- New `smartmemory env` (also `smartmemory config env`): list, `set NAME use|ignore|override [VALUE]`, `reset [NAME]`.
+- Fix: `smartmemory config KEY VALUE` and remote login no longer write inherited `SMARTMEMORY_*` values (team id, data dir, API URL) into the config file. `load_config(apply_env=False)` reads the file layer for read-change-save.
 
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 

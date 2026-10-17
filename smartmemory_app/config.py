@@ -90,13 +90,22 @@ def config_path() -> Path:
     return base / "smartmemory" / "config.toml"
 
 
-def load_config() -> SmartMemoryConfig:
+def load_config(apply_env: bool = True) -> SmartMemoryConfig:
     """Load config from file, apply env var overrides.
+
+    ``apply_env=False`` returns the file layer only. Use it to read, change and
+    save_config(): otherwise inherited SMARTMEMORY_* values get written into the
+    file for every project (CLI-ENV-DETECT-1).
 
     Missing file → SmartMemoryConfig(mode=None) (unconfigured).
     Invalid TOML → warns and returns unconfigured (never raises).
     Env vars are applied after file parse and always win.
     """
+    # CLI-ENV-DETECT-1: this project's ignore/override decisions about inherited
+    # SMARTMEMORY_* variables apply before any of them is read (env_pin).
+    from smartmemory_app.env_pin import ensure_applied
+
+    ensure_applied()
     path = config_path()
     cfg = SmartMemoryConfig()
 
@@ -132,6 +141,9 @@ def load_config() -> SmartMemoryConfig:
                 f"Failed to parse config at {path}: {exc} — treating as unconfigured.",
                 stacklevel=2,
             )
+
+    if not apply_env:
+        return cfg
 
     # Env vars always win — applied after file parse
     if mode := os.environ.get("SMARTMEMORY_MODE"):
@@ -222,11 +234,20 @@ def save_config(cfg: SmartMemoryConfig) -> None:
         data["smartmemory"]["mode"] = cfg.mode
     elif cfg.crash_reports:
         del data["smartmemory"]
+    # CLI-ENV-DETECT-1: keep tables other writers own (per-project env decisions).
+    from smartmemory_app.env_pin import carry_over_tables
+
+    carry_over_tables(path, data)
     path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 
 def is_configured() -> bool:
     """True if mode is set via env var or config file."""
+    # CLI-ENV-DETECT-1: this project's ignore/override decisions about inherited
+    # SMARTMEMORY_* variables apply before any of them is read (env_pin).
+    from smartmemory_app.env_pin import ensure_applied
+
+    ensure_applied()
     if os.environ.get("SMARTMEMORY_MODE"):
         return True
     return load_config().mode is not None
@@ -249,6 +270,11 @@ def get_api_key() -> str:
     Never raises — headless Linux (Docker, CI) has no usable keychain and
     keyring raises or returns None silently depending on version.
     """
+    # CLI-ENV-DETECT-1: this project's ignore/override decisions about inherited
+    # SMARTMEMORY_* variables apply before any of them is read (env_pin).
+    from smartmemory_app.env_pin import ensure_applied
+
+    ensure_applied()
     if key := os.environ.get("SMARTMEMORY_API_KEY"):
         return key
     try:

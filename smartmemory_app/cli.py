@@ -575,6 +575,16 @@ class _CLIGroup(click.Group):
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
     configure_console_encoding()
+    # CLI-ENV-DETECT-1: apply this project's decisions about inherited
+    # SMARTMEMORY_* variables, then ask (terminal) or warn once (no terminal).
+    try:
+        from smartmemory_app.env_pin import check_inherited
+
+        check_inherited(click.get_current_context().invoked_subcommand)
+    except click.Abort:
+        raise
+    except Exception as exc:
+        log.warning("Inherited environment check unavailable (%s)", type(exc).__name__)
     from smartmemory_app.bug_report import debug_log_path
     from smartmemory_app.hook_failures import consume_in_background, marker_directory
 
@@ -686,6 +696,11 @@ from smartmemory_app.cli_workspace import workspace_group as _workspace_group  #
 cli.add_command(_code_group, name="code")
 cli.add_command(_mcp_group, name="mcp")
 cli.add_command(_workspace_group, name="workspace")
+
+# `sm env`: inherited SMARTMEMORY_* settings, decided per project (CLI-ENV-DETECT-1)
+from smartmemory_app.env_pin import env_cmd as _env_cmd  # noqa: E402
+
+cli.add_command(_env_cmd, name="env")
 
 
 # ── `sm provenance …` — code-to-conversation provenance (CORE-CODE-PROVENANCE-1) ──
@@ -3338,8 +3353,13 @@ def config_cmd(key: str | None, value: str | None) -> None:
     smartmemory config                  Show all settings
     smartmemory config llm_provider     Show one setting
     smartmemory config llm_provider groq  Change a setting
+    smartmemory config env              Review inherited SMARTMEMORY_* settings
     """
     from smartmemory_app.config import load_config, save_config, config_path
+
+    if key == "env":  # `sm config env` is `sm env` (CLI-ENV-DETECT-1)
+        click.get_current_context().invoke(_env_cmd)
+        return
 
     cfg = load_config()
 
@@ -3413,6 +3433,7 @@ def config_cmd(key: str | None, value: str | None) -> None:
     elif key == "daemon_port":
         coerced = int(value)
 
+    cfg = load_config(apply_env=False)  # never persist inherited env values
     setattr(cfg, key, coerced)
     save_config(cfg)
     click.echo(f"{key} = {value}")

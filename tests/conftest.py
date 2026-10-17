@@ -7,6 +7,9 @@ import pytest
 
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
+# Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
+# (CLI-ENV-DETECT-1). test_env_pin.py removes this to test the check itself.
+os.environ["SMARTMEMORY_ENV_CHECK"] = "0"
 # Keep existing model files available without restoring access to the user's HOME.
 _REAL_HF_HOME = os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
 

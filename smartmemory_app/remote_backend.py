@@ -293,7 +293,7 @@ class RemoteMemory:
         # Persist team_id to config so next startup uses the correct workspace
         from smartmemory_app.config import load_config, save_config
 
-        cfg = load_config()
+        cfg = load_config(apply_env=False)  # file layer only, no env bleed
         cfg.team_id = self._team_id
         save_config(cfg)
         return f"Logged in. Team: {self._team_id}"
