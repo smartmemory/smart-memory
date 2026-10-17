@@ -169,7 +169,8 @@ def test_never_returns_or_prints_values(tmp_path, capsys, caplog):
     _write(tmp_path / ".zshrc", f'export SMARTMEMORY_MODE="{CANARY_RC}"\n')
     env = {"SHELL": "/bin/zsh", "SMARTMEMORY_MODE": CANARY_ENV}
     got = inherited_vars(env, tmp_path, tmp_path)
-    blob = repr(got) + capsys.readouterr().out + capsys.readouterr().err + caplog.text
+    cap = capsys.readouterr()
+    blob = repr(got) + cap.out + cap.err + caplog.text
     assert got == [InheritedVar("SMARTMEMORY_MODE", "~/.zshrc:1", None)]
     assert CANARY_ENV not in blob and CANARY_RC not in blob
 

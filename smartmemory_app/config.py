@@ -209,7 +209,11 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig) -> None:
 
 
 def save_config(cfg: SmartMemoryConfig) -> None:
-    """Write config to file. Creates directory with mode 0o700 (owner-read-only)."""
+    """Write config to file. Creates directory with mode 0o700 (owner-read-only).
+
+    Raises ConfigUnreadableError (writes nothing) when the file exists but cannot
+    be read or parsed: rewriting it would replace the user's settings with defaults.
+    """
     path = config_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     data: dict = {
@@ -351,5 +355,12 @@ def _detect_and_migrate() -> bool:
 
     Returns True if migration succeeded (local config written).
     """
-    save_config(SmartMemoryConfig(mode="local"))
+    from smartmemory_app.env_sources import ConfigUnreadableError
+
+    try:
+        save_config(SmartMemoryConfig(mode="local"))
+    except ConfigUnreadableError as exc:
+        # An unreadable config looks unconfigured. Never overwrite it with defaults.
+        warnings.warn(exc.format_message(), stacklevel=2)
+        return False
     return True

@@ -31,6 +31,7 @@
 - Decisions are stored per project (git top level, else the directory) in the existing user config file under `[projects."<path>"]`. `ignore` removes the variable for that project, `override` replaces it, `use` keeps it. New precedence: flag > project decision > environment > config file > default. Secrets (`*_KEY`, `*_TOKEN`) can be used or ignored but not stored as an override.
 - New `smartmemory env` (also `smartmemory config env`): list, `set NAME use|ignore|override [VALUE]`, `reset [NAME]`.
 - Fix: `smartmemory config KEY VALUE` and remote login no longer write inherited `SMARTMEMORY_*` values (team id, data dir, API URL) into the config file. `load_config(apply_env=False)` reads the file layer for read-change-save.
+- Fix: a config file that exists but cannot be read or parsed is never rewritten. `smartmemory env set/reset`, the first-command prompt, `save_config()` (setup, `config`, login) and first-run auto-config now stop with one line naming the file (`Cannot update <path>: it is not valid TOML (line N). Fix or remove it, then retry.`) instead of replacing the user's settings with defaults. The first-command prompt prints that line and your command still runs. Read-only paths are unchanged.
 
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 

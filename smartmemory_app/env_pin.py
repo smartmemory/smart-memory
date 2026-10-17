@@ -29,6 +29,7 @@ import tomli_w
 
 from smartmemory_app import env_sources
 from smartmemory_app.env_sources import (
+    ConfigUnreadableError,
     CHECK_SWITCH,
     DECISIONS,
     InheritedVar,
@@ -36,6 +37,7 @@ from smartmemory_app.env_sources import (
     project_entry,
     project_key,
     read_config_table,
+    read_config_table_strict,
 )
 
 log = logging.getLogger(__name__)
@@ -168,7 +170,7 @@ def set_decision(
         if err := override_error(name, value or ""):
             raise ValueError(err)
     path = path or _config_file()
-    raw = read_config_table(path) if path.exists() else {}
+    raw = read_config_table_strict(path)
     projects = raw.setdefault("projects", {})
     entry = projects.setdefault(project_key(project_dir), {})
     entry.setdefault("env", {})[name] = decision
@@ -187,7 +189,7 @@ def clear_decisions(
 ) -> list[str]:
     """Forget one (or every) decision for this project. Returns names removed."""
     path = path or _config_file()
-    raw = read_config_table(path)
+    raw = read_config_table_strict(path)
     key = project_key(project_dir)
     entry = project_entry(raw, key)
     env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
@@ -210,10 +212,12 @@ def clear_decisions(
 
 
 def carry_over_tables(path: Path, data: dict) -> None:
-    """Copy tables save_config() does not own (``projects``) from the existing file."""
-    if not path.exists():
-        return
-    for key, value in read_config_table(path).items():
+    """Copy tables save_config() does not own (``projects``) from the existing file.
+
+    Raises ConfigUnreadableError when the file exists but cannot be read, so
+    save_config() never replaces it with defaults.
+    """
+    for key, value in read_config_table_strict(path).items():
         if key not in _MANAGED_TABLES and key not in data:
             data[key] = value
 
@@ -250,7 +254,11 @@ def _ask_value(var: InheritedVar) -> str:
 
 
 def prompt_decisions(pending: list[InheritedVar], key: str) -> dict[str, str]:
-    """Ask once for ``pending`` and save the answers. Returns {name: decision}."""
+    """Ask once for ``pending`` and save the answers. Returns {name: decision}.
+
+    Raises ConfigUnreadableError before asking when the config file is broken.
+    """
+    read_config_table_strict(_config_file())
     echo = lambda msg="": click.echo(msg, err=True)  # noqa: E731
     width = max(len(v.name) for v in pending)
     echo("SmartMemory found settings inherited from your shell:")
@@ -310,7 +318,12 @@ def check_inherited(command: str | None, is_tty=None) -> None:
     if not (_stdin_is_tty() if is_tty is None else is_tty):
         click.echo(warning_line(pending), err=True)
         return
-    prompt_decisions(pending, project_key())
+    try:
+        prompt_decisions(pending, project_key())
+    except ConfigUnreadableError as exc:
+        # Never lose the user's command over a broken config: say why, carry on.
+        click.echo(exc.format_message(), err=True)
+        return
     apply_project_env()  # this command already runs with the new decisions
 
 

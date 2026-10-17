@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+import click
+
 log = logging.getLogger(__name__)
 
 PREFIX = "SMARTMEMORY_"
@@ -215,16 +217,44 @@ def config_file(
     return base / "smartmemory" / "config.toml"
 
 
-def read_config_table(path: Path) -> dict:
+class ConfigUnreadableError(click.ClickException):
+    """The config file exists but cannot be read or parsed, so it must not be rewritten."""
+
+    def __init__(self, path: Path, exc: Exception) -> None:
+        self.path = path
+        if isinstance(exc, OSError):
+            why = f"it cannot be read ({exc.strerror or type(exc).__name__})"
+        else:
+            found = re.search(r"line (\d+)", str(exc))
+            why = "it is not valid TOML" + (
+                f" (line {found.group(1)})" if found else ""
+            )
+        super().__init__(f"Cannot update {path}: {why}. Fix or remove it, then retry.")
+
+
+def read_config_table_strict(path: Path) -> dict:
+    """Like ``read_config_table``, but a file that exists and cannot be read raises.
+
+    A missing file is fine (``{}``). Every writer uses this one, so a broken file is
+    never replaced by a table that holds only what the caller knew.
+    """
     try:
         return tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, ValueError) as exc:  # ValueError: TOMLDecodeError, bad UTF-8
+        raise ConfigUnreadableError(path, exc) from exc
+
+
+def read_config_table(path: Path) -> dict:
+    """Read-only view: an unreadable file reads as empty (callers never write it)."""
+    try:
+        return read_config_table_strict(path)
+    except ConfigUnreadableError as exc:
         log.warning(
             "Config %s unreadable, project env decisions ignored (%s)",
             path,
-            type(exc).__name__,
+            type(exc.__cause__).__name__,
         )
         return {}
 
