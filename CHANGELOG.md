@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## 1.5.27 — 2026-10-17
+
+- Setup and first-run hardening from the 2026-10-17 demo feedback: pins `smartmemory-core==1.5.27` and `smartmemory-mcp==1.5.23`. Ships the `Unreleased` sections below: CLI-TENANT-1, LOCAL-DAEMON-1, TOUR-ASK-502-1, CLI-WORKSPACE-UX-1, CLI-ENV-DETECT-1, SETUP-DOCTOR-1, CLI-SETUP-UX-1, BENEFITS-WORDING-1, plus the SM-SETUP-BATCH-1 integration glue. The per-unit headings keep their `Unreleased` labels.
+
 ## Unreleased - CLI-TENANT-1 (2026-10-17)
 
 - `sm ask` in local mode with no LLM provider key now exits non-zero before any request. The error names the missing key (the configured provider's, or all supported ones), and gives `export <KEY>=...`, `sm restart` and `sm setup`. The keyless excerpt listing moved behind `sm ask --extractive`. A daemon that answers extractively although this shell has a key now says it needs `sm restart`.
