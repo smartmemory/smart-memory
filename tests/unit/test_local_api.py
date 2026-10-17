@@ -578,3 +578,23 @@ class TestIngestCorePlacement:
         assert fake.call_args.kwargs.get("sync") is False, (
             "sync=False preserves the core work-graph result dict"
         )
+
+
+class TestIngestWorkspaceStamp:
+    def test_stamped_workspace_beats_a_caller_property(self, client):
+        """CLI-WORKSPACE-UX-1 F-3: body.workspace_id wins over properties.workspace_id."""
+        fake = MagicMock(return_value={"item_id": "itm_ws", "entity_ids": {}})
+        with patch("smartmemory_app.storage.ingest", fake):
+            r = client.post(
+                "/ingest",
+                json={
+                    "content": "hello",
+                    "workspace_id": "ws_stamped000000",
+                    "properties": {"workspace_id": "ws_sneaky000001", "k": "v"},
+                },
+            )
+        assert r.status_code == 200
+        assert fake.call_args.kwargs["properties"] == {
+            "workspace_id": "ws_stamped000000",
+            "k": "v",
+        }

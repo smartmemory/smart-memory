@@ -483,6 +483,7 @@ def test_teardown_runs_on_early_quit_and_exception_mid_arc(tmp_path: Path) -> No
     with (
         patch("smartmemory_app.tour.TourDaemon", side_effect=fake_tour_daemon),
         patch.object(tour.TourApp, "run", return_value=None),
+        patch("smartmemory_app.console.interactive_terminal", return_value=True),
     ):
         assert tour.run_tour(no_viewer=True) is None
 

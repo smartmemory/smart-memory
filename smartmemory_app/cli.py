@@ -25,6 +25,7 @@ from smartmemory_app.daemon import (
 )
 from smartmemory_app.remote_cli import require_local
 from smartmemory_app.diagnostics import redact_credentials
+from smartmemory_app import scope_header as _scope_header
 from smartmemory_app.runtime_diagnostics import ConsoleFormatter, RedactingFormatter
 
 log = logging.getLogger(__name__)
@@ -256,6 +257,7 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
     import httpx
     import time
 
+    _scope_header.print_scope_header(path=path, kwargs=kwargs)
     url = f"{_daemon_url()}{path}"
     debug_enabled = log.isEnabledFor(logging.DEBUG)
     if debug_enabled:
@@ -342,6 +344,9 @@ def _memory_request(method: str, path: str, **kwargs):
     from smartmemory_app.remote_cli import request_memory
 
     cfg = load_config()
+    # CLI-WORKSPACE-UX-1: say which scope this touches, and send the pinned workspace.
+    _scope_header.print_scope_header(cfg, path=path, kwargs=kwargs)
+    kwargs = _scope_header.apply_local_pin(cfg, path, kwargs)
     if cfg.mode == "remote":
         return request_memory(cfg, method, path, **kwargs)
     if path == "/memory/ask":
@@ -560,9 +565,26 @@ class _CLIGroup(click.Group):
 
 @click.group(cls=_CLIGroup)
 @click.version_option(package_name="smartmemory", prog_name="smartmemory")
+@click.option(
+    "--quiet",
+    is_flag=True,
+    expose_value=False,
+    callback=_scope_header.set_quiet,
+    help="Hide the mode/tenant/workspace header line.",
+)
 def cli() -> None:
     """SmartMemory — persistent AI memory system."""
     configure_console_encoding()
+    # CLI-ENV-DETECT-1: apply this project's decisions about inherited
+    # SMARTMEMORY_* variables, then ask (terminal) or warn once (no terminal).
+    try:
+        from smartmemory_app.env_pin import check_inherited
+
+        check_inherited(click.get_current_context().invoked_subcommand)
+    except click.Abort:
+        raise
+    except Exception as exc:
+        log.warning("Inherited environment check unavailable (%s)", type(exc).__name__)
     from smartmemory_app.bug_report import debug_log_path
     from smartmemory_app.hook_failures import consume_in_background, marker_directory
 
@@ -669,8 +691,16 @@ cli.add_command(_uninstall_cmd, name="uninstall")
 from smartmemory_app.cli_code import code_group as _code_group  # noqa: E402
 from smartmemory_app.cli_mcp import mcp_group as _mcp_group  # noqa: E402
 
+from smartmemory_app.cli_workspace import workspace_group as _workspace_group  # noqa: E402
+
 cli.add_command(_code_group, name="code")
 cli.add_command(_mcp_group, name="mcp")
+cli.add_command(_workspace_group, name="workspace")
+
+# `sm env`: inherited SMARTMEMORY_* settings, decided per project (CLI-ENV-DETECT-1)
+from smartmemory_app.env_pin import env_cmd as _env_cmd  # noqa: E402
+
+cli.add_command(_env_cmd, name="env")
 
 
 # ── `sm provenance …` — code-to-conversation provenance (CORE-CODE-PROVENANCE-1) ──
@@ -1170,7 +1200,16 @@ def status_cmd(as_json: bool) -> None:
     _llm = info.get("llm_provider", "?")
     # Flag the silent-failure case: a provider is configured but no key is present,
     # so extraction is actually disabled despite the config saying otherwise.
-    if info.get("llm_key_present") is False and _llm not in ("none", "?"):
+    from smartmemory_app.config import (
+        NO_LOCAL_MODEL_OFF_LINE,
+        load_config,
+        local_llm_without_model,
+    )
+
+    if _llm not in ("none", "?") and local_llm_without_model(load_config()):
+        click.echo(f"  LLM:        {_llm} (no model chosen, extraction off)")
+        click.echo(f"  {NO_LOCAL_MODEL_OFF_LINE}")
+    elif info.get("llm_key_present") is False and _llm not in ("none", "?"):
         click.echo(f"  LLM:        {_llm} (no API key — extraction disabled)")
     else:
         click.echo(f"  LLM:        {_llm}")
@@ -1203,6 +1242,10 @@ def viewer_cmd(port: int | None) -> None:
 )
 def tour_cmd(keep: bool, code: bool, port: int | None, no_viewer: bool) -> None:
     """Run the guided SmartMemory onboarding tour."""
+    # SETUP-DOCTOR-1: before require_local, so an inherited mode is explained.
+    from smartmemory_app.doctor import require_healthy
+
+    require_healthy("tour")
     require_local("sm tour")
     from smartmemory_app import tour
 
@@ -1219,11 +1262,13 @@ def worker_cmd(ctx: click.Context, loop: bool) -> None:
     if load_config().mode == "remote":
         raise click.ClickException("Worker commands are only available in local mode.")
     if ctx.invoked_subcommand is None:
-        from smartmemory.pipeline.work_graph.worker import run_worker
         from smartmemory_app.storage import _resolve_data_dir
+        from smartmemory_app.worker_entry import run_configured_worker
 
         ctx.exit(
-            run_worker(_resolve_data_dir(), idle_exit=0 if loop else 0.2, lease=60)
+            run_configured_worker(
+                _resolve_data_dir(), idle_exit=0 if loop else 0.2, lease=60
+            )
         )
 
 
@@ -1485,10 +1530,10 @@ def add_cmd(
     Supports arbitrary property flags: --project atlas --domain legal
     """
     import sys
-    from smartmemory_app.storage import RESERVED_INGEST_PROPERTIES
+    from smartmemory_app.storage import USER_RESERVED_PROPERTIES
 
     props = _parse_extra_props(ctx.args, explicit_props)
-    reserved = RESERVED_INGEST_PROPERTIES.intersection(props)
+    reserved = USER_RESERVED_PROPERTIES.intersection(props)
     if reserved:
         from smartmemory_app.config import load_config
 
@@ -1497,7 +1542,12 @@ def add_cmd(
             if load_config().mode == "remote"
             else "Reserved properties"
         )
-        raise click.ClickException(f"{label}: {', '.join(sorted(reserved))}.")
+        hint = (
+            " Pick the workspace with `sm workspace switch`."
+            if "workspace_id" in reserved
+            else ""
+        )
+        raise click.ClickException(f"{label}: {', '.join(sorted(reserved))}.{hint}")
 
     if text == "-":
         if sys.stdin.isatty():
@@ -1545,7 +1595,10 @@ def add_cmd(
                 # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
                 try:
                     receipt = ingest(
-                        chunk, memory_type, properties=props, origin="cli:add"
+                        chunk,
+                        memory_type,
+                        properties=_scope_header.fallback_properties(body, props),
+                        origin="cli:add",
                     )
                     if isinstance(receipt, dict) and receipt.get("status") == "held":
                         click.echo(f"Held: {receipt.get('reason')}")
@@ -1590,7 +1643,12 @@ def add_cmd(
         _prepare_direct_access(download=True)
         # DIST-LITE-QUIET-1: attribute local CLI writes (else origin='unknown').
         try:
-            receipt = ingest(text, memory_type, properties=props, origin="cli:add")
+            receipt = ingest(
+                text,
+                memory_type,
+                properties=_scope_header.fallback_properties(body, props),
+                origin="cli:add",
+            )
             if isinstance(receipt, dict) and receipt.get("status") == "held":
                 click.echo(f"Held: {receipt.get('reason')}")
             else:
@@ -1648,7 +1706,8 @@ def recall_cmd(
             cwd,
             top_k,
             query=query,
-            workspace_id=workspace_id,
+            # CLI-WORKSPACE-UX-1: params carries the pin when the daemon is down.
+            workspace_id=params.get("workspace_id") or None,
             include_snapshot=not no_snapshot,
             strict=strict,
         )
@@ -2227,6 +2286,11 @@ def explore_cmd(target: str | None) -> None:
             "The graph explorer TUI is disabled on Windows while terminal support is tested. "
             "Try 'sm search' and 'sm get'. Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
         )
+        return
+    from smartmemory_app.console import NO_TERMINAL_MESSAGE, interactive_terminal
+
+    if not interactive_terminal():
+        click.echo(NO_TERMINAL_MESSAGE.format(name="The graph explorer"))
         return
     try:
         from smartmemory_app.tui.app import ExploreApp
@@ -3010,7 +3074,10 @@ def _venv_repair_commands() -> str:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Local output path for --bundle.",
 )
-def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Print the checks as JSON.")
+def doctor_cmd(
+    bundle: bool, url: str | None, out: Path | None, as_json: bool = False
+) -> None:
     """Diagnose a broken install (DIST-INSTALL-RESOLVE-1).
 
     Detects the pip-backtracked-wrapper trap: a fresh `pip install smartmemory`
@@ -3026,7 +3093,32 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         _download_diagnostics_bundle(url, out)
         return
 
+    # SETUP-DOCTOR-1: what the CLI will actually use, and which source won.
+    from smartmemory_app import doctor as _doctor
+
+    # Log lines printed while doctor runs are masked too (core logs some inputs).
+    click.get_current_context().with_resource(_doctor.masked_logging())
+    config_rows = _doctor.run_checks("doctor")
     status = check_installation()
+    if as_json:
+        click.echo(
+            _doctor.doctor_json(
+                config_rows,
+                {
+                    "ok": status.doctor_ok and not _doctor.failures(config_rows),
+                    "install": {
+                        "ok": status.doctor_ok,
+                        "python": ".".join(str(p) for p in status.python_version),
+                        "core_version": status.core_version,
+                    },
+                },
+            )
+        )
+        if not status.doctor_ok or _doctor.failures(config_rows):
+            raise SystemExit(1)
+        return
+    if config_rows:
+        click.echo(_doctor.render(config_rows) + "\n")
 
     # ── Python version ──────────────────────────────────────────────────────
     py_str = ".".join(str(part) for part in status.python_version)
@@ -3085,13 +3177,23 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
     try:
         rows = local_checks()
         for row in rows:
-            click.echo(row)
+            # Env-sourced values (API URL, data dir) print as $NAME (env).
+            click.echo(_doctor.mask_env_values(row))
     except Exception as exc:
         click.echo(
-            redact_credentials(f"Warning: local diagnostics unavailable ({exc})")
+            _doctor.mask_env_values(
+                redact_credentials(f"Warning: local diagnostics unavailable ({exc})")
+            )
         )
 
     if not status.doctor_ok:
+        raise SystemExit(1)
+    if _doctor.failures(config_rows):
+        click.echo(
+            f"\n{len(_doctor.failures(config_rows))} configuration check(s) failed. "
+            "Fix the FAIL rows at the top, then run sm doctor again.",
+            err=True,
+        )
         raise SystemExit(1)
     state_warnings = any(
         row.startswith(
@@ -3115,6 +3217,10 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         if state_warnings
         else "\nInstallation checks passed. Some local checks were not completed."
         if any(": not checked" in row for row in rows)
+        or any(  # a doctor row that could not read a source (keychain, profile, core config)
+            row.status == _doctor.WARN and "ot checked" in row.detail
+            for row in config_rows
+        )
         else "\nAll checks passed. Installation checks passed, network and state warnings are advisory."
     )
 
@@ -3307,8 +3413,13 @@ def config_cmd(key: str | None, value: str | None) -> None:
     smartmemory config                  Show all settings
     smartmemory config llm_provider     Show one setting
     smartmemory config llm_provider groq  Change a setting
+    smartmemory config env              Review inherited SMARTMEMORY_* settings
     """
     from smartmemory_app.config import load_config, save_config, config_path
+
+    if key == "env":  # `sm config env` is `sm env` (CLI-ENV-DETECT-1)
+        click.get_current_context().invoke(_env_cmd)
+        return
 
     cfg = load_config()
 
@@ -3382,6 +3493,7 @@ def config_cmd(key: str | None, value: str | None) -> None:
     elif key == "daemon_port":
         coerced = int(value)
 
+    cfg = load_config(apply_env=False)  # never persist inherited env values
     setattr(cfg, key, coerced)
     save_config(cfg)
     click.echo(f"{key} = {value}")
@@ -3462,7 +3574,10 @@ def import_cmd(
             MofNCompleteColumn,
         )
 
-        use_rich = True
+        from smartmemory_app.console import interactive_terminal
+
+        # The live bar redraws with escapes, so it needs a terminal on every stream.
+        use_rich = interactive_terminal()
     except ImportError:
         use_rich = False
 

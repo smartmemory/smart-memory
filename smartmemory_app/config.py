@@ -50,6 +50,30 @@ _LOCAL_OPENAI_PROVIDERS = {
 }
 
 
+# Providers where setup asks which local model to use. "none" saves an empty model.
+LOCAL_MODEL_PROVIDERS = ("ollama", "lmstudio")
+
+# Said at the end of setup and by `sm status` when a local provider has no model.
+NO_LOCAL_MODEL_OFF_LINE = (
+    "LLM extraction is off until you pick a model. "
+    "Turn it on with: sm config llm_model <model name>"
+)
+
+
+def local_llm_without_model(cfg) -> bool:
+    """True when a local LLM provider is configured with no model chosen.
+
+    ``cfg`` is anything with ``llm_provider`` and ``llm_model`` (config or setup result).
+
+    That is the "none" choice in setup: extraction is off. Core's
+    ``get_default_model()`` would otherwise fall through to ``gpt-4o-mini`` for an
+    empty name, so every gate below treats this state as "no LLM", not as "pick one".
+    """
+    return (
+        cfg.llm_provider or ""
+    ).lower() in LOCAL_MODEL_PROVIDERS and not cfg.llm_model
+
+
 class UnconfiguredError(RuntimeError):
     """Raised by storage.get_memory() when no config exists and auto-migration fails.
 
@@ -90,13 +114,22 @@ def config_path() -> Path:
     return base / "smartmemory" / "config.toml"
 
 
-def load_config() -> SmartMemoryConfig:
+def load_config(apply_env: bool = True) -> SmartMemoryConfig:
     """Load config from file, apply env var overrides.
+
+    ``apply_env=False`` returns the file layer only. Use it to read, change and
+    save_config(): otherwise inherited SMARTMEMORY_* values get written into the
+    file for every project (CLI-ENV-DETECT-1).
 
     Missing file → SmartMemoryConfig(mode=None) (unconfigured).
     Invalid TOML → warns and returns unconfigured (never raises).
     Env vars are applied after file parse and always win.
     """
+    # CLI-ENV-DETECT-1: this project's ignore/override decisions about inherited
+    # SMARTMEMORY_* variables apply before any of them is read (env_pin).
+    from smartmemory_app.env_pin import ensure_applied
+
+    ensure_applied()
     path = config_path()
     cfg = SmartMemoryConfig()
 
@@ -132,6 +165,9 @@ def load_config() -> SmartMemoryConfig:
                 f"Failed to parse config at {path}: {exc} — treating as unconfigured.",
                 stacklevel=2,
             )
+
+    if not apply_env:
+        return cfg
 
     # Env vars always win — applied after file parse
     if mode := os.environ.get("SMARTMEMORY_MODE"):
@@ -171,7 +207,7 @@ def load_config() -> SmartMemoryConfig:
     return cfg
 
 
-def _apply_local_llm_env(cfg: SmartMemoryConfig) -> None:
+def _apply_local_llm_env(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]:
     """Route a local OpenAI-compatible ``llm_provider`` to the standard OpenAI env
     vars, so local LLMs need no bespoke integration — an OpenAI-compatible URL *is*
     the OpenAI path.
@@ -186,18 +222,69 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig) -> None:
 
     Child processes (the Tier-2 enrichment worker) inherit these vars. No-op for
     cloud providers / "none" — those users supply real provider keys themselves.
+
+    ``environ`` defaults to os.environ. Returns ``{name: origin}`` for every name
+    it set, so sm doctor can run the same translation on a copy (SETUP-DOCTOR-1).
+
+    A local provider with no model chosen sets nothing: each of the three vars is a
+    route to core's ``llm_route_available()`` (an explicit endpoint alone is one), and
+    that resolver, not ``llm_key_present()``, decides whether a Lite save queues LLM
+    extraction. ``storage.apply_runtime_config`` holds the resolver off for that state.
     """
     default_base = _LOCAL_OPENAI_PROVIDERS.get((cfg.llm_provider or "").lower())
-    if not default_base:
-        return
-    os.environ.setdefault("OPENAI_BASE_URL", cfg.llm_base_url or default_base)
-    os.environ.setdefault("OPENAI_API_KEY", "local-llm-no-key")
+    if not default_base or local_llm_without_model(cfg):
+        return {}
+    env = os.environ if environ is None else environ
+    derived: dict[str, str] = {}
+    if cfg.llm_base_url:
+        set_derived_env(
+            env, "OPENAI_BASE_URL", cfg.llm_base_url, "llm_base_url", derived
+        )
+    else:
+        set_derived_env(
+            env, "OPENAI_BASE_URL", default_base, "provider default", derived
+        )
+    set_derived_env(
+        env, "OPENAI_API_KEY", "local-llm-no-key", "local placeholder", derived
+    )
     if cfg.llm_model:
-        os.environ.setdefault("SMARTMEMORY_LLM_MODEL", cfg.llm_model)
+        set_derived_env(
+            env, "SMARTMEMORY_LLM_MODEL", cfg.llm_model, "llm_model", derived
+        )
+    return derived
+
+
+# Env names that SmartMemory itself put into os.environ from a config setting,
+# never inherited from the shell: {name: (the setting it came from, value)}. sm
+# doctor reads it so a translated value is not reported as "from env"
+# (SETUP-DOCTOR-1). Values here are config values or fixed placeholders.
+DERIVED_ENV: dict[str, tuple[str, str]] = {}
+
+
+def set_derived_env(
+    environ, name: str, value: str, origin: str, record: dict | None = None
+) -> bool:
+    """``environ.setdefault(name, value)`` that remembers it set the name.
+
+    Returns True when it set the value. A name already present is left alone,
+    exactly like setdefault, and is not recorded.
+    """
+    if name in environ:
+        return False
+    environ[name] = value
+    if record is not None:
+        record[name] = origin
+    if environ is os.environ:
+        DERIVED_ENV[name] = (origin, value)
+    return True
 
 
 def save_config(cfg: SmartMemoryConfig) -> None:
-    """Write config to file. Creates directory with mode 0o700 (owner-read-only)."""
+    """Write config to file. Creates directory with mode 0o700 (owner-read-only).
+
+    Raises ConfigUnreadableError (writes nothing) when the file exists but cannot
+    be read or parsed: rewriting it would replace the user's settings with defaults.
+    """
     path = config_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     data: dict = {
@@ -222,11 +309,20 @@ def save_config(cfg: SmartMemoryConfig) -> None:
         data["smartmemory"]["mode"] = cfg.mode
     elif cfg.crash_reports:
         del data["smartmemory"]
+    # CLI-ENV-DETECT-1: keep tables other writers own (per-project env decisions).
+    from smartmemory_app.env_pin import carry_over_tables
+
+    carry_over_tables(path, data)
     path.write_text(tomli_w.dumps(data), encoding="utf-8")
 
 
 def is_configured() -> bool:
     """True if mode is set via env var or config file."""
+    # CLI-ENV-DETECT-1: this project's ignore/override decisions about inherited
+    # SMARTMEMORY_* variables apply before any of them is read (env_pin).
+    from smartmemory_app.env_pin import ensure_applied
+
+    ensure_applied()
     if os.environ.get("SMARTMEMORY_MODE"):
         return True
     return load_config().mode is not None
@@ -235,11 +331,17 @@ def is_configured() -> bool:
 def llm_key_present() -> bool:
     """True if any supported LLM provider key is set in the environment.
 
-    Single source of truth for "can Tier-2 LLM extraction run?". Used by the
-    daemon worker-start gate, the ingest endpoint's Tier-2 enqueue, the daemon
-    boot banner, and `smartmemory status`. Checks all of LLM_KEY_ENV_VARS, so a
+    Used by health (and so `sm status`), the search disclosure and `ask`. It is not
+    the queue gate: Lite saves and the core worker ask core's
+    ``llm_route_available()``, which ``storage.apply_runtime_config`` holds off when
+    a local provider has no model. Checks all of LLM_KEY_ENV_VARS, so a
     user configured with Anthropic or DeepSeek is recognised — not just GROQ/OpenAI.
     """
+    try:
+        if local_llm_without_model(load_config()):
+            return False
+    except Exception:
+        pass  # an unreadable config falls through to the key check, as before
     return any(os.environ.get(k) for k in LLM_KEY_ENV_VARS)
 
 
@@ -249,6 +351,11 @@ def get_api_key() -> str:
     Never raises — headless Linux (Docker, CI) has no usable keychain and
     keyring raises or returns None silently depending on version.
     """
+    # CLI-ENV-DETECT-1: this project's ignore/override decisions about inherited
+    # SMARTMEMORY_* variables apply before any of them is read (env_pin).
+    from smartmemory_app.env_pin import ensure_applied
+
+    ensure_applied()
     if key := os.environ.get("SMARTMEMORY_API_KEY"):
         return key
     try:
@@ -325,5 +432,12 @@ def _detect_and_migrate() -> bool:
 
     Returns True if migration succeeded (local config written).
     """
-    save_config(SmartMemoryConfig(mode="local"))
+    from smartmemory_app.env_sources import ConfigUnreadableError
+
+    try:
+        save_config(SmartMemoryConfig(mode="local"))
+    except ConfigUnreadableError as exc:
+        # An unreadable config looks unconfigured. Never overwrite it with defaults.
+        warnings.warn(exc.format_message(), stacklevel=2)
+        return False
     return True

@@ -274,8 +274,11 @@ def test_ollama_never_clobbers_user_env(monkeypatch):
 
 
 def test_llm_base_url_override_wins_over_default(monkeypatch):
-    """A configured llm_base_url (e.g. remote ollama host) overrides the localhost default."""
+    """A configured llm_base_url (e.g. remote ollama host) overrides the localhost default.
+
+    Needs a model: with none chosen the local provider sets no endpoint (CLI-SETUP-UX-1)."""
     monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("SMARTMEMORY_LLM_MODEL", "llama3.2")
     monkeypatch.setenv("SMARTMEMORY_LLM_BASE_URL", "http://gpu-box.lan:11434/v1")
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("OPENAI_BASE_URL", None)

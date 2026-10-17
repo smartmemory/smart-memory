@@ -27,11 +27,14 @@ if TYPE_CHECKING:
     from smartmemory_app.remote_backend import RemoteMemory
 
 from smartmemory_app.config import (
+    NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
     UnconfiguredError,
     _detect_and_migrate,
     is_configured,
     load_config,
+    local_llm_without_model,
+    set_derived_env,
 )
 
 
@@ -52,6 +55,12 @@ RESERVED_INGEST_PROPERTIES = frozenset(
         "origin",
     }
 )
+
+# What a user may not set through `sm add --prop`: the producer-owned fields plus
+# `workspace_id`. Not part of RESERVED_INGEST_PROPERTIES itself, because ingest()
+# receives the stamped workspace_id as a property (daemon stamp, `sm add` fallback,
+# lifecycle hooks) and must keep it.
+USER_RESERVED_PROPERTIES = RESERVED_INGEST_PROPERTIES | {"workspace_id"}
 
 _memory: "SmartMemory | None" = None
 _data_path: Path | None = None  # resolved once on first init; reused by ingest()
@@ -182,7 +191,20 @@ def apply_runtime_config() -> SmartMemoryConfig:
     cfg = load_config()
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
+    pin_llm_model(cfg)
+    if local_llm_without_model(cfg):
+        _hold_llm_route_off()
+    return cfg
 
+
+def pin_llm_model(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]:
+    """Pin SMARTMEMORY_LLM_MODEL from config. Returns ``{name: origin}`` it set.
+
+    ``environ`` defaults to os.environ. sm doctor runs it on a copy so it reports
+    the model every command will use (SETUP-DOCTOR-1).
+    """
+    env = os.environ if environ is None else environ
+    derived: dict[str, str] = {}
     # CORE-LLM-GEMINI-1 (review finding 2): pin the LLM model from config so the
     # configured provider is honored. An explicit cfg.llm_model is respected for
     # any provider (previously ignored entirely); a gemini provider with no explicit
@@ -190,13 +212,84 @@ def apply_runtime_config() -> SmartMemoryConfig:
     # key-presence and (without this) never selected Gemini, so a gemini selection
     # silently routed elsewhere. Mirrors the embedding pin; an explicit
     # SMARTMEMORY_LLM_MODEL env var still wins.
-    if not os.environ.get("SMARTMEMORY_LLM_MODEL"):
-        _llm_model = cfg.llm_model or (
-            "gemini/gemini-2.0-flash" if cfg.llm_provider == "gemini" else None
-        )
-        if _llm_model:
-            os.environ["SMARTMEMORY_LLM_MODEL"] = _llm_model
-    return cfg
+    #
+    # TOUR-ASK-502-1: the same gap hit groq and openai. get_default_model() ranks
+    # the Claude Agent SDK above every provider key whenever `claude_agent_sdk` is
+    # importable. smartmemory does not depend on it, but a shared interpreter
+    # (e.g. a conda base) may carry it, so a "groq" setup sent every call_llm
+    # (ask, Tier-2 extraction) to the `claude` CLI, which exits 1 when it is not
+    # logged in under this HOME: `sm ask` returned 502 "Command failed with exit
+    # code 1". Only "claude-agent" (and "none") keep core's own default.
+    # Pinning the model, not core's LLM_PROVIDER: that pin also rewrites key and
+    # endpoint resolution for every call in the process, and "openai" as a pin
+    # does not change get_default_model() at all.
+    if not env.get("SMARTMEMORY_LLM_MODEL"):
+        env.pop("SMARTMEMORY_LLM_MODEL", None)  # an empty value counts as unset
+        if cfg.llm_model:
+            set_derived_env(
+                env, "SMARTMEMORY_LLM_MODEL", cfg.llm_model, "llm_model", derived
+            )
+        else:
+            provider_model = _provider_default_model(cfg.llm_provider, env)
+            if provider_model:
+                set_derived_env(
+                    env,
+                    "SMARTMEMORY_LLM_MODEL",
+                    provider_model,
+                    f"{(cfg.llm_provider or '').lower()} provider default",
+                    derived,
+                )
+    return derived
+
+
+def _provider_default_model(provider: str | None, environ=None) -> str | None:
+    """The model a configured cloud provider means when the config names none.
+
+    ``environ`` is the env the pin writes to (os.environ when None), so OPENAI_MODEL
+    is read from the same place the result lands.
+    """
+    env = os.environ if environ is None else environ
+    provider = (provider or "").lower()
+    if provider == "gemini":
+        return "gemini/gemini-2.0-flash"
+    if provider == "groq":
+        return "openai/gpt-oss-120b"  # core's Groq default (is_groq_model routes it)
+    if provider == "openai":
+        return env.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
+    return None
+
+
+def _hold_llm_route_off() -> None:
+    """Make core's LLM route resolver answer no while a local provider has no model.
+
+    Core has no "off" value for its route: with no model it still accepts an ambient
+    provider key, an ``OPENAI_BASE_URL`` or the Claude Agent SDK, and the Lite save
+    queues LLM extraction on that answer. Every core reader (Lite save placement,
+    the work-graph worker, re-extraction, ``PipelineConfig.lite``,
+    ``create_lite_memory``) imports ``llm_route_available`` from its module at call
+    time, so replacing the module attribute reaches all of them in this process.
+    Worker processes call ``apply_runtime_config`` and install it themselves. The
+    hold re-reads the config on each call, so picking a model turns the route back on.
+    """
+    from smartmemory.utils import llm as core_llm
+
+    if getattr(core_llm.llm_route_available, "_no_local_model_hold", False):
+        return
+    resolve = core_llm.llm_route_available
+
+    def llm_route_available() -> tuple[bool, str]:
+        try:
+            off = local_llm_without_model(load_config())
+        except Exception:
+            off = False  # an unreadable config falls through to core, as before
+        if off:
+            return False, NO_LOCAL_MODEL_OFF_LINE
+        return resolve()
+
+    llm_route_available._no_local_model_hold = True
+    llm_route_available.__wrapped__ = resolve
+    core_llm.llm_route_available = llm_route_available
+    log.info("LLM route held off: the local LLM provider has no model chosen")
 
 
 def _get_local_memory(
@@ -228,7 +321,9 @@ def _get_local_memory(
 
         # Core owns lite defaults and deferred placement. The wrapper only applies
         # its explicit coreference preference; ground/evolve remain opt-in.
-        profile = PipelineConfig.lite()
+        profile = PipelineConfig.lite(
+            llm_enabled=False if local_llm_without_model(cfg) else None
+        )
         profile.coreference.enabled = cfg.coreference
         profile.extraction.entity_ruler.spacy_model = cfg.spacy_model
         profile.extraction.relation_ruler.spacy_model = cfg.spacy_model
@@ -403,6 +498,8 @@ def llm_extraction_warning() -> str | None:
     """
     from smartmemory.utils.llm import llm_route_available
 
+    if local_llm_without_model(load_config()):
+        return NO_LOCAL_MODEL_OFF_LINE
     available, _ = llm_route_available()
     if available:
         return None

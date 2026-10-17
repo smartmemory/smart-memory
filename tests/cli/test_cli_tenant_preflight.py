@@ -224,11 +224,14 @@ def test_mismatch_keeps_json_stdout_parseable(hosted):
 
 
 def test_same_workspace_is_silent(hosted):
+    """No mismatch warning. The one-line scope header (CLI-WORKSPACE-UX-1) is the only stderr."""
     state, _ = hosted
     state["me"] = {"default_team_id": CLI_TEAM, "tenant_id": TENANT}
     result = run(["search", "web"])
     assert result.exit_code == 0, result.output
-    assert result.stderr == ""
+    lines = result.stderr.strip().splitlines()
+    assert len(lines) == 1 and lines[0].startswith("[smartmemory] mode=remote")
+    assert "defaults to workspace" not in result.stderr
     assert result.stdout.strip() == "No results."
 
 

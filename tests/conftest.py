@@ -7,6 +7,9 @@ import pytest
 
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
+# Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
+# (CLI-ENV-DETECT-1). test_env_pin.py removes this to test the check itself.
+os.environ["SMARTMEMORY_ENV_CHECK"] = "0"
 # Keep existing model files available without restoring access to the user's HOME.
 _REAL_HF_HOME = os.environ.get("HF_HOME", str(Path.home() / ".cache" / "huggingface"))
 
@@ -61,6 +64,11 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
         install_check, "run_native_checks", lambda: ["Native libraries: OK"]
     )
     monkeypatch.setattr(diagnostic_process, "offline_checks", lambda task, **kwargs: [])
+    # SETUP-DOCTOR-1: the setup/tour/doctor table probes the daemon, keychain and
+    # hosted API. tests/unit/test_setup_doctor.py drives it with injected fakes.
+    from smartmemory_app import doctor
+
+    monkeypatch.setattr(doctor, "run_checks", lambda context="doctor": [])
 
     # Detached-entry tests also install global handlers/hooks. Restore them per test.
     import logging
@@ -83,6 +91,26 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
         handler.setFormatter(formatter)
     sys.excepthook, threading.excepthook = process_hook, thread_hook
     sys.stdout, sys.stderr = stdout, stderr
+
+
+@pytest.fixture(autouse=True)
+def restore_smartmemory_env():
+    """Undo SMARTMEMORY_* changes a test's code made straight to os.environ.
+
+    env_pin (CLI-ENV-DETECT-1) applies a project's ignore/override decisions to
+    os.environ once per process. monkeypatch cannot undo a write it did not make,
+    so an override applied in one test leaked into every later test.
+    """
+    from smartmemory_app import env_pin, env_sources
+
+    before = {k: v for k, v in os.environ.items() if k.startswith("SMARTMEMORY_")}
+    state = (env_pin._applied, env_sources._pre_pin_names)
+    yield
+    for name in [k for k in os.environ if k.startswith("SMARTMEMORY_")]:
+        if name not in before:
+            del os.environ[name]
+    os.environ.update(before)
+    env_pin._applied, env_sources._pre_pin_names = state
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -58,6 +58,21 @@ class RemoteBackendError(RuntimeError):
             self.result = result
 
 
+def resolve_team_id(team_id: str, me: Any) -> str:
+    """The X-Workspace-Id the CLI sends when a call names no workspace.
+
+    ``team_id`` is the resolved config value (env SMARTMEMORY_TEAM_ID over the
+    config file, see config.load_config). Empty falls back to the account's
+    ``default_team_id`` from ``GET /auth/me``. sm doctor calls this too, so its
+    workspace row cannot drift from the header (SETUP-DOCTOR-1).
+    """
+    if team_id:
+        return team_id
+    if isinstance(me, dict):
+        return me.get("default_team_id") or ""
+    return ""
+
+
 class RemoteMemory:
     """Thin httpx client with the same interface as local SmartMemory for MCP tools,
     plus graph methods matching local_api.py response shapes for the viewer."""
@@ -97,8 +112,7 @@ class RemoteMemory:
                 user = r.json()
                 self.web_default_team_id = user.get("default_team_id") or ""
                 self.web_tenant_id = user.get("tenant_id") or ""
-                if not self._team_id:
-                    self._team_id = self.web_default_team_id
+                self._team_id = resolve_team_id(self._team_id, user)
         except Exception:
             pass  # bootstrap is best-effort; real errors surface on tool calls
 
@@ -182,6 +196,11 @@ class RemoteMemory:
                 message = (
                     "SmartMemory hosted LLM is unavailable. No answer was generated."
                 )
+                # TOUR-ASK-502-1: a 502 carries the provider's failure reason; show
+                # it. A 503 means the SERVICE has no provider key, and its detail
+                # names server env vars a remote user cannot set, so it stays hidden.
+                if status == 502 and detail:
+                    message += f" Service said: {detail}"
             else:
                 message = (
                     f"SmartMemory service error (HTTP {status}): {detail}"
@@ -288,7 +307,7 @@ class RemoteMemory:
         # Persist team_id to config so next startup uses the correct workspace
         from smartmemory_app.config import load_config, save_config
 
-        cfg = load_config()
+        cfg = load_config(apply_env=False)  # file layer only, no env bleed
         cfg.team_id = self._team_id
         save_config(cfg)
         return f"Logged in. Team: {self._team_id}"

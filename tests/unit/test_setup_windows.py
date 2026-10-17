@@ -29,6 +29,7 @@ def test_setup_tui_platform_gate(monkeypatch, caplog, platform, force, expected)
     monkeypatch.setattr("sys.platform", platform)
     monkeypatch.setattr("sys.stdin", Mock(isatty=lambda: True))
     monkeypatch.setattr("sys.stdout", Mock(isatty=lambda: True))
+    monkeypatch.setattr("sys.stderr", Mock(isatty=lambda: True))
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.delenv("SMARTMEMORY_FORCE_TUI", raising=False)
@@ -147,6 +148,7 @@ def test_first_run_tour_windows_gate(monkeypatch, capsys, force):
     monkeypatch.setattr(tour, "TourSessionRunner", factory)
     app = Mock()
     monkeypatch.setattr(tour, "TourApp", Mock(return_value=app))
+    monkeypatch.setattr("smartmemory_app.console.interactive_terminal", lambda: True)
     tour.run_tour()
     if force:
         factory.assert_called_once()
@@ -171,6 +173,7 @@ def test_setup_first_run_explorer_windows_gate(monkeypatch, capsys, caplog, forc
     explorer = Mock()
     app_factory = Mock(return_value=explorer)
     monkeypatch.setattr(app, "ExploreApp", app_factory)
+    monkeypatch.setattr("smartmemory_app.console.interactive_terminal", lambda: True)
     with caplog.at_level(logging.DEBUG, logger=cli.__name__):
         cli.explore_cmd.callback(None)
     if force:
