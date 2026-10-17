@@ -325,9 +325,25 @@ def without_caller_workspace(properties: Optional[dict]) -> dict:
     The destination workspace is picked by the request scope (explicit workspace,
     cwd, pin), never by a property the caller sends. Every local entry that takes
     caller properties drops the key here and then stamps its own resolved value.
+
+    The key is dropped at every level of the ``metadata`` chain too: core lifts a
+    ``metadata`` dict (and ``metadata`` inside ``metadata``, to any depth) onto the
+    node root before it writes (``crud.py::_lift_metadata_to_root``), so a nested
+    ``workspace_id`` lands exactly where a flat one does.
     """
-    cleaned = dict(properties or {})
-    if cleaned.pop("workspace_id", None) is not None:
+    dropped = False
+
+    def clean(layer: dict) -> dict:
+        nonlocal dropped
+        out = dict(layer)
+        if out.pop("workspace_id", None) is not None:
+            dropped = True
+        if isinstance(out.get("metadata"), dict):
+            out["metadata"] = clean(out["metadata"])
+        return out
+
+    cleaned = clean(properties or {})
+    if dropped:
         log.warning(
             "Dropped caller property workspace_id: the workspace comes from the "
             "request scope, not a property"
