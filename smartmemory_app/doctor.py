@@ -209,6 +209,10 @@ class Context:
     daemon_expected: Callable[[], bool] = _default_daemon_expected
     api_key: Callable[[], str] = _default_api_key
     detect: Optional[Callable[..., list]] = field(default_factory=_default_detector)
+    # True when ``environ`` is this process's own environment. The detector then
+    # reads the names the shell passed in, including ones a per-project "ignore"
+    # decision removed (CLI-ENV-DETECT-1 env_pin), which ``environ`` no longer has.
+    from_process: bool = False
     _cache: dict = field(default_factory=dict, repr=False)
 
     def cached(self, key: str, compute: Callable[[], Any]) -> Any:
@@ -252,9 +256,8 @@ def _inherited(ctx: Context) -> Optional[dict]:
         return None
 
     def run():
-        found = ctx.detect(
-            environ=dict(ctx.environ), home=ctx.home, project_dir=ctx.cwd
-        )
+        environ = None if ctx.from_process else dict(ctx.environ)
+        found = ctx.detect(environ=environ, home=ctx.home, project_dir=ctx.cwd)
         return {var.name: var for var in found}
 
     return ctx.cached("inherited", run)
@@ -271,6 +274,18 @@ def _env_source(ctx: Context, name: str) -> str:
     if var is not None and var.source:
         label += f", exported at {var.source}"
     return label
+
+
+def _shown(ctx: Context, name: str, text: str, env_text: Optional[str] = None) -> str:
+    """``text``, or ``$NAME`` when the setting came from that env variable.
+
+    Doctor never prints a SMARTMEMORY_* value. The only exceptions are values it
+    has checked against a closed set: SMARTMEMORY_MODE (local or remote),
+    SMARTMEMORY_DAEMON_PORT (a whole number) and a known LLM provider name.
+    """
+    if ctx.environ.get(name):
+        return env_text if env_text is not None else f"${name}"
+    return text
 
 
 def _env_decision(ctx: Context, name: str) -> Optional[str]:
@@ -448,7 +463,11 @@ def check_mode(ctx: Context, context: str = "doctor") -> Row:
 
 
 def check_inherited(ctx: Context) -> Row:
-    present = sorted(name for name in ctx.environ if name.startswith("SMARTMEMORY_"))
+    present = sorted(
+        name
+        for name in ctx.environ
+        if name.startswith("SMARTMEMORY_") and name != "SMARTMEMORY_ENV_CHECK"
+    )
     if ctx.detect is None:
         names = ", ".join(present) if present else "none set in this shell"
         return Row(
@@ -483,7 +502,7 @@ def check_inherited(ctx: Context) -> Row:
     listing = ", ".join(
         label(var) for var in sorted(found.values(), key=lambda v: v.name)
     )
-    fix = "Unset them where they are exported, or run sm setup to choose use, ignore or override for this project."
+    fix = "Unset them where they are exported, or run: sm env (choose use, ignore or override for this project)"
     if steering:
         return Row(
             "Inherited SMARTMEMORY_* vars",
@@ -538,7 +557,7 @@ def check_tenant(ctx: Context) -> Row:
             return Row(
                 "Tenant and workspace",
                 WARN,
-                f"local store, no tenant. Recall workspace {recall_ws} comes from "
+                "local store, no tenant. Recall workspace $SMARTMEMORY_WORKSPACE_ID comes from "
                 f"{_env_source(ctx, 'SMARTMEMORY_WORKSPACE_ID')}, not from this folder.",
                 "Unset SMARTMEMORY_WORKSPACE_ID to scope recall by the current project.",
             )
@@ -548,6 +567,7 @@ def check_tenant(ctx: Context) -> Row:
             "local store, no tenant. Recall workspace comes from the current project folder.",
         )
     workspace, where = _workspace_source(ctx, cfg)
+    ws_label = _shown(ctx, "SMARTMEMORY_TEAM_ID", workspace) if workspace else ""
     try:
         source = _api_key_source(ctx)
     except CheckUnavailable as exc:
@@ -560,10 +580,13 @@ def check_tenant(ctx: Context) -> Row:
             "Tenant and workspace",
             WARN,
             f"not checked: no API key{' (' + unread + ' unreadable)' if unread else ''}, "
-            f"so the account behind the CLI is unknown. Workspace: {workspace or 'account default'} (from {where}).",
+            f"so the account behind the CLI is unknown. Workspace: {ws_label or 'account default'} (from {where}).",
             "Run: sm setup --mode remote --api-key KEY",
         )
     url = f"{_api_url(ctx)}/auth/me"
+    url_label = _shown(
+        ctx, "SMARTMEMORY_API_URL", _safe_url(url), "$SMARTMEMORY_API_URL/auth/me"
+    )
     try:
         status, body = ctx.cached(
             "auth_me",
@@ -577,8 +600,8 @@ def check_tenant(ctx: Context) -> Row:
         return Row(
             "Tenant and workspace",
             WARN,
-            f"not checked: {_safe_url(url)} unreachable ({type(exc).__name__}). "
-            f"Workspace: {workspace or 'account default'} (from {where}).",
+            f"not checked: {url_label} unreachable ({type(exc).__name__}). "
+            f"Workspace: {ws_label or 'account default'} (from {where}).",
             "Check your network, then run: sm doctor",
         )
     if status == 401:
@@ -592,14 +615,14 @@ def check_tenant(ctx: Context) -> Row:
         return Row(
             "Tenant and workspace",
             WARN,
-            f"not checked: {_safe_url(url)} answered HTTP {status}. "
-            f"Workspace: {workspace or 'account default'} (from {where}).",
+            f"not checked: {url_label} answered HTTP {status}. "
+            f"Workspace: {ws_label or 'account default'} (from {where}).",
             "Run sm doctor again. If it persists, run: sm report",
         )
     account = body.get("email") or body.get("id") or "unknown account"
     tenant = body.get("tenant_id") or "unknown"
     console_ws = body.get("active_workspace_id") or body.get("default_workspace_id")
-    effective = workspace or console_ws or "unknown"
+    effective = ws_label or console_ws or "unknown"
     detail = f"account {account}, tenant {tenant}, workspace {effective} (from {where})"
     if workspace and console_ws and workspace != console_ws:
         return Row(
@@ -668,6 +691,7 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
 
     if provider in _LOCAL_OPENAI_PROVIDERS:
         base = (cfg.llm_base_url or _LOCAL_OPENAI_PROVIDERS[provider]).rstrip("/")
+        base_label = _shown(ctx, "SMARTMEMORY_LLM_BASE_URL", _safe_url(base))
         try:
             status, _ = ctx.cached(
                 f"llm_{provider}", lambda: ctx.http_get(f"{base}/models", timeout=2.0)
@@ -676,14 +700,14 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
             return Row(
                 "LLM",
                 FAIL,
-                f"{provider} (from {prov_src}) is not answering at {_safe_url(base)} ({type(exc).__name__})",
+                f"{provider} (from {prov_src}) is not answering at {base_label} ({type(exc).__name__})",
                 f"Start {provider}, or run: sm config llm_provider none",
             )
         if status >= 400:
             return Row(
                 "LLM",
                 FAIL,
-                f"{provider} (from {prov_src}) answered HTTP {status} at {_safe_url(base)}",
+                f"{provider} (from {prov_src}) answered HTTP {status} at {base_label}",
                 f"Check {provider} is serving its OpenAI-compatible API, then run: sm doctor",
             )
         return Row(
@@ -711,7 +735,7 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
         return Row(
             "LLM",
             WARN,
-            f"provider {provider} (from {prov_src}) is not one doctor knows how to check. Keys: {keys_text}.",
+            f"provider {_shown(ctx, 'SMARTMEMORY_LLM_PROVIDER', provider)} (from {prov_src}) is not one doctor knows how to check. Keys: {keys_text}.",
             "Run: sm config llm_provider to see the supported values.",
         )
     elif not where_keys:
@@ -772,7 +796,13 @@ def _check_daemon(ctx: Context) -> Row:
                 f"should be running but is not answering on {port}",
                 "Run: sm restart",
             )
-        return Row("Local daemon", FAIL, f"not running ({port})", "Run: sm start")
+        # Not expected to run: the CLI falls back to an in-process engine.
+        return Row(
+            "Local daemon",
+            WARN,
+            f"not running on {port}. Commands still work, but each one loads the models itself, so they are slower.",
+            "Run: sm start",
+        )
     status = info.get("status", "unknown")
     daemon_mode = info.get("mode")
     if daemon_mode == "remote":
@@ -805,27 +835,25 @@ def _check_daemon(ctx: Context) -> Row:
 
 
 def _check_hosted_service(ctx: Context) -> Row:
-    url = _api_url(ctx)
+    url = _shown(ctx, "SMARTMEMORY_API_URL", _safe_url(_api_url(ctx)))
     try:
         status, body = _ready(ctx)
     except Exception as exc:
         return Row(
             "SmartMemory service",
             FAIL,
-            f"{_safe_url(url)} unreachable ({type(exc).__name__})",
+            f"{url} unreachable ({type(exc).__name__})",
             "Check your network and SMARTMEMORY_API_URL, then run: sm doctor",
         )
     body = body if isinstance(body, dict) else {}
     version = body.get("version", "unknown")
     if status == 200 and body.get("status") == "ready":
-        return Row(
-            "SmartMemory service", PASS, f"{_safe_url(url)} ready, version {version}"
-        )
+        return Row("SmartMemory service", PASS, f"{url} ready, version {version}")
     failed = [c.get("name", "?") for c in body.get("checks", []) if not c.get("ok")]
     return Row(
         "SmartMemory service",
         FAIL,
-        f"{_safe_url(url)} not ready (HTTP {status}"
+        f"{url} not ready (HTTP {status}"
         + (f", failing: {', '.join(failed)}" if failed else "")
         + ")",
         "The hosted service is having trouble. Try again in a few minutes.",
@@ -874,18 +902,22 @@ def check_graph(ctx: Context) -> Row:
     data_dir = Path(raw_dir) if raw_dir else ctx.home / ".smartmemory"
     where = _env_source(ctx, "SMARTMEMORY_DATA_DIR") if raw_dir else "default"
     db = data_dir.expanduser() / "memory.db"
+    db_label = "$SMARTMEMORY_DATA_DIR/memory.db" if raw_dir else str(db)
     ignored = ""
     try:
         cfg_dir = _file_settings(ctx).get("local", {}).get("data_dir")
     except Exception:
         cfg_dir = None
     if cfg_dir and Path(cfg_dir).expanduser() != data_dir.expanduser():
-        ignored = f" The config file data_dir ({cfg_dir}) is not used by the store."
+        ignored = (
+            f" The config file data_dir ({cfg_dir}) is not used by sm commands run from"
+            " this shell. Only the login auto-start daemon reads it."
+        )
     if not db.exists():
         return Row(
             "Graph backend",
             WARN,
-            f"SQLite store {db} (from {where}) does not exist yet. It is created on the first sm add.{ignored}",
+            f"SQLite store {db_label} (from {where}) does not exist yet. It is created on the first sm add.{ignored}",
             "Run: sm add 'hello' to create it",
         )
     try:
@@ -898,14 +930,14 @@ def check_graph(ctx: Context) -> Row:
         return Row(
             "Graph backend",
             FAIL,
-            f"SQLite store {db} (from {where}) cannot be opened ({type(exc).__name__})",
+            f"SQLite store {db_label} (from {where}) cannot be opened ({type(exc).__name__})",
             "Run: sm stop, then sm doctor. If it persists, run: sm report",
         )
     status = WARN if ignored else PASS
     return Row(
         "Graph backend",
         status,
-        f"SQLite store {db} (from {where}), {tables} schema objects.{ignored}",
+        f"SQLite store {db_label} (from {where}), {tables} schema objects.{ignored}",
         "Set SMARTMEMORY_DATA_DIR to use another store. The config data_dir is not read."
         if ignored
         else "",
@@ -971,7 +1003,13 @@ def collect(ctx: Context, context: str = "doctor") -> list[Row]:
 
 def run_checks(context: str = "doctor") -> list[Row]:
     """The runtime entry point. Tests patch this to keep unrelated suites offline."""
-    return collect(Context(), context)
+    try:  # this project's ignore/override decisions first (CLI-ENV-DETECT-1)
+        from smartmemory_app.env_pin import ensure_applied
+
+        ensure_applied()
+    except ImportError:
+        pass
+    return collect(Context(from_process=True), context)
 
 
 def failures(rows: list[Row]) -> list[Row]:

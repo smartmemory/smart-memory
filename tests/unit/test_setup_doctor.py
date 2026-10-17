@@ -312,7 +312,7 @@ CASES = [
         {"environ": {"SMARTMEMORY_WORKSPACE_ID": "ws_other"}},
         "tenant",
         WARN,
-        "Recall workspace ws_other comes from env SMARTMEMORY_WORKSPACE_ID",
+        "Recall workspace $SMARTMEMORY_WORKSPACE_ID comes from env SMARTMEMORY_WORKSPACE_ID",
     ),
     (
         "tenant-remote-no-key",
@@ -444,7 +444,7 @@ CASES = [
         PASS,
         "running on port 9014 (from default), pid 7",
     ),
-    ("service-daemon-stopped", {}, "service", FAIL, "not running"),
+    ("service-daemon-stopped", {}, "service", WARN, "Commands still work"),
     (
         "service-daemon-not-answering",
         {"expected": True},
@@ -527,7 +527,7 @@ CASES = [
         },
         "graph",
         WARN,
-        "data_dir (/nowhere/store) is not used by the store",
+        "data_dir (/nowhere/store) is not used by sm commands run from this shell",
     ),
     (
         "graph-remote-ok",
@@ -628,33 +628,81 @@ def test_crashing_check_is_warn_not_silent(monkeypatch, tmp_path, caplog):
     assert "doctor check graph could not run" in caplog.text
 
 
+def test_real_detector_names_the_exporting_file(monkeypatch, tmp_path):
+    """CLI-ENV-DETECT-1's detector, unfaked: the row FAILs and names ~/.zshrc:N."""
+    from smartmemory_app.env_sources import inherited_vars
+
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={"SHELL": "/bin/zsh", "SMARTMEMORY_MODE": "remote"},
+    )
+    (ctx.home / ".zshrc").write_text("alias ll=ls\nexport SMARTMEMORY_MODE=remote\n")
+    ctx.detect = inherited_vars
+    got = doctor.check_inherited(ctx)
+    assert got.status == FAIL and "SMARTMEMORY_MODE (~/.zshrc:2)" in got.detail
+    assert "sm env" in got.fix
+
+
+def test_process_env_lets_detector_see_ignored_names(monkeypatch, tmp_path):
+    """From the real process the detector gets environ=None, so it reads the names
+    the shell passed in, not the ones left after an "ignore" decision removed them."""
+    ctx = build(monkeypatch, tmp_path)
+    seen = []
+    ctx.detect = lambda **kw: seen.append(kw["environ"]) or []
+    doctor.check_inherited(ctx)
+    ctx.from_process, ctx._cache = True, {}
+    doctor.check_inherited(ctx)
+    assert seen[0] is not None and seen[1] is None
+
+
 CANARY = "CANARY-7f3a-SECRET"
 
 
-def test_no_secret_value_is_ever_printed(monkeypatch, tmp_path):
+# Every free-form SMARTMEMORY_* setting plus every key, set to the canary. Two
+# environments: the first keeps the hosted API answering (tenant, service and
+# graph rows reach their PASS arms), the second moves the URLs and data dir.
+_KEYS = {
+    "SMARTMEMORY_API_KEY": CANARY,
+    "SMARTMEMORY_SYNC_TOKEN": CANARY,
+    "SMARTMEMORY_CRASH_REPORT_KEY": CANARY,
+    "SMARTMEMORY_SOME_TOGGLE": CANARY,
+    "GROQ_API_KEY": CANARY,
+    "OPENAI_API_KEY": CANARY,
+    "ANTHROPIC_API_KEY": CANARY,
+    "DEEPSEEK_API_KEY": CANARY,
+    "GEMINI_API_KEY": CANARY,
+    "SMARTMEMORY_TEAM_ID": CANARY,
+    "SMARTMEMORY_WORKSPACE_ID": CANARY,
+    "SMARTMEMORY_LLM_MODEL": CANARY,
+}
+CANARY_ENVS = [
+    _KEYS,
+    {
+        **_KEYS,
+        "SMARTMEMORY_API_URL": f"https://{CANARY}.example",
+        "SMARTMEMORY_DATA_DIR": f"data-{CANARY}",
+        "SMARTMEMORY_LLM_PROVIDER": "ollama",
+        "SMARTMEMORY_LLM_BASE_URL": f"http://{CANARY}:11434/v1",
+    },
+    {**_KEYS, "SMARTMEMORY_LLM_PROVIDER": CANARY},
+]
+
+
+@pytest.mark.parametrize("environ", CANARY_ENVS, ids=["api-up", "moved", "provider"])
+def test_no_secret_value_is_ever_printed(environ, monkeypatch, tmp_path):
     from smartmemory_app.cli import cli
 
-    secret_env = {
-        "SMARTMEMORY_API_KEY": CANARY,
-        "SMARTMEMORY_SYNC_TOKEN": CANARY,
-        "SMARTMEMORY_CRASH_REPORT_KEY": CANARY,
-        "SMARTMEMORY_SOME_TOGGLE": CANARY,
-        "GROQ_API_KEY": CANARY,
-        "OPENAI_API_KEY": CANARY,
-        "ANTHROPIC_API_KEY": CANARY,
-        "DEEPSEEK_API_KEY": CANARY,
-        "GEMINI_API_KEY": CANARY,
-    }
     detect = [
         FakeVar(name, "~/.zshrc:1", None)
-        for name in secret_env
+        for name in environ
         if name.startswith("SMARTMEMORY_")
     ]
     for config in (REMOTE_CFG, LOCAL_CFG):
         ctx = build(
             monkeypatch,
             tmp_path,
-            environ=secret_env,
+            environ=environ,
             config=config,
             http={f"{API}/auth/me": (200, ME_OK), f"{API}/ready": (200, READY_OK)},
             daemon=OK_DAEMON,
@@ -670,7 +718,16 @@ def test_no_secret_value_is_ever_printed(monkeypatch, tmp_path):
         )
         for args in (["doctor"], ["doctor", "--json"]):
             out = CliRunner().invoke(cli, args)
-            assert CANARY not in out.output
+            leaked = [line for line in out.output.splitlines() if CANARY in line]
+            # The older network probe line (support_diagnostics, not owned here)
+            # names the effective API URL so support can see a LAN override. It
+            # redacts credentials. Nothing else may carry the value.
+            allowed = "SMARTMEMORY_API_URL" in environ
+            assert [
+                line
+                for line in leaked
+                if not (allowed and line.startswith(f"Network https://{CANARY}"))
+            ] == []
             assert "SMARTMEMORY_API_KEY" in out.output  # names are shown
 
 

@@ -93,6 +93,26 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
     sys.stdout, sys.stderr = stdout, stderr
 
 
+@pytest.fixture(autouse=True)
+def restore_smartmemory_env():
+    """Undo SMARTMEMORY_* changes a test's code made straight to os.environ.
+
+    env_pin (CLI-ENV-DETECT-1) applies a project's ignore/override decisions to
+    os.environ once per process. monkeypatch cannot undo a write it did not make,
+    so an override applied in one test leaked into every later test.
+    """
+    from smartmemory_app import env_pin, env_sources
+
+    before = {k: v for k, v in os.environ.items() if k.startswith("SMARTMEMORY_")}
+    state = (env_pin._applied, env_sources._pre_pin_names)
+    yield
+    for name in [k for k in os.environ if k.startswith("SMARTMEMORY_")]:
+        if name not in before:
+            del os.environ[name]
+    os.environ.update(before)
+    env_pin._applied, env_sources._pre_pin_names = state
+
+
 @pytest.fixture(scope="session", autouse=True)
 def real_home_report_leak_gate():
     """Fail if a CLI or shell test adds reporting content to the real profile."""
