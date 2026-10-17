@@ -135,6 +135,7 @@ class TestApplySetupResult:
             "Config written",
             "spaCy model ready",
             "Embedding model ready",
+            "Helper models ready",  # CLI-SETUP-UX-1: counted as its own step
             "Hooks installed",
             "Skills installed",
             "Hooks registered",

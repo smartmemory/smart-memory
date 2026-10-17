@@ -38,6 +38,24 @@ class _DownloadBar:
     def close(self) -> None:
         self._reporter._changed(self)
 
+    # CLI-SETUP-UX-1: huggingface_hub's Xet reporter also calls these tqdm display
+    # methods (the missing set_postfix_str printed a traceback during setup). Text
+    # decoration has no meaning for a byte counter, so they accept and ignore it.
+    pos = 0
+
+    def set_postfix_str(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    set_transfer_postfix_str = set_description = set_postfix_str
+
+    def refresh(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    clear = refresh
+
+    def update_transfer(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
     def __enter__(self) -> "_DownloadBar":
         return self
 

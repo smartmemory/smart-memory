@@ -421,8 +421,8 @@ def _setup_click(
     if mode is None:
         click.echo("Welcome to SmartMemory.\n")
         click.echo("Where do you want to store memories?")
-        click.echo("  1. Local  — on this machine, no account needed")
-        click.echo("  2. Remote — SmartMemory hosted service (api.smartmemory.ai)")
+        click.echo("  1. Local:  on this machine, no account needed")
+        click.echo("  2. Remote: SmartMemory hosted service (api.smartmemory.ai)")
         choice = click.prompt(">", type=click.Choice(["1", "2"]), default="1")
         mode = "local" if choice == "1" else "remote"
 
@@ -436,8 +436,12 @@ def _setup_click(
         except Exception:
             pass
     else:
-        first_run = _setup_local()
-        daemon_status = _start_daemon_local()
+        from smartmemory_app.setup_steps import StepTracker
+
+        tracker = StepTracker()
+        first_run = _setup_local(tracker)
+        with tracker.step("SmartMemory started", live=False):
+            daemon_status = _start_daemon_local()
         if daemon_status and daemon_status.get("status") == "ok":
             if first_run:
                 click.echo("All done. Run 'sm tour' if this is your first time.")
@@ -570,7 +574,9 @@ def _daemon_setup_error(
 
 
 def _apply_setup_result(
-    result: SetupResult, on_step: Callable[[str], None] | None = None
+    result: SetupResult,
+    on_step: Callable[[str], None] | None = None,
+    on_log: Callable[[str], None] | None = None,
 ) -> None:
     """Apply a SetupResult from TUI. Saves config + runs post-config steps.
 
@@ -578,7 +584,10 @@ def _apply_setup_result(
         result: Collected answers from the TUI.
         on_step: Optional callback called with step name after each step completes.
                  Used by ProgressScreen for per-step UI updates.
+        on_log: Optional sink for newline-only model download progress lines.
     """
+    from smartmemory_app.setup_steps import model_download_progress
+
     from smartmemory_app.config import SmartMemoryConfig, save_config
 
     data_dir = str(Path(result.data_dir).expanduser())
@@ -600,10 +609,15 @@ def _apply_setup_result(
     if on_step:
         on_step("spaCy model ready")
 
-    _ensure_embedding_model(cfg.embedding_provider)
-    _ensure_lazy_models()
+    with model_download_progress(on_log):
+        _ensure_embedding_model(cfg.embedding_provider)
     if on_step and cfg.embedding_provider == "local":
         on_step("Embedding model ready")
+
+    with model_download_progress(on_log):
+        _ensure_lazy_models()
+    if on_step:
+        on_step("Helper models ready")
 
     _copy_hooks()
     if on_step:
@@ -728,8 +742,27 @@ def _persist_env_var(name: str, value: str) -> None:
     os.environ[name] = value
 
 
-def _setup_local() -> bool:
+_LOCAL_MODEL_PROVIDERS = ("ollama", "lmstudio")
+
+# Shown wherever the local model choice is made (click prompt and TUI model screen).
+NO_LOCAL_MODEL_NOTE = (
+    "No local model chosen: SmartMemory will not use your local model for extraction "
+    "until you add one. Add it later with: sm config llm_model <model name>"
+)
+
+
+def _prompt_local_model(provider: str) -> str:
+    """Ask which local model to use. The default is none, stored as an empty name."""
+    click.echo(f"\nWhich {provider} model should SmartMemory use? Default: none.")
+    click.echo(f"  {NO_LOCAL_MODEL_NOTE}")
+    choice = click.prompt("Local model name", default="none").strip()
+    return "" if choice.lower() == "none" else choice
+
+
+def _setup_local(tracker=None) -> bool:
     """Ask pipeline questions, write config, wire Claude Code hooks.
+
+    ``tracker`` is the run's ``StepTracker`` (the daemon step is counted by the caller).
 
     All local deps (smartmemory-core, spaCy, usearch, filelock) are already
     installed as part of `pip install smartmemory` — no extra install step needed.
@@ -745,14 +778,14 @@ def _setup_local() -> bool:
         default=False,
     )
     click.echo("\nSmartMemory needs an LLM to extract entities and relationships.")
-    click.echo("  groq         — free tier, fast inference (recommended)")
-    click.echo("  claude-agent — Claude Agent SDK, OAuth (no API key)")
-    click.echo("  anthropic    — Anthropic API (ANTHROPIC_API_KEY)")
-    click.echo("  openai       — OpenAI API (OPENAI_API_KEY)")
-    click.echo("  gemini       — Google Gemini API (GEMINI_API_KEY)")
-    click.echo("  ollama       — free, local (llama3.1, mistral)")
-    click.echo("  lmstudio     — local, OpenAI-compatible endpoint")
-    click.echo("  none         — EntityRuler only (very limited)")
+    click.echo("  groq         free tier, fast inference (recommended)")
+    click.echo("  claude-agent Claude Agent SDK, OAuth (no API key)")
+    click.echo("  anthropic    Anthropic API (ANTHROPIC_API_KEY)")
+    click.echo("  openai       OpenAI API (OPENAI_API_KEY)")
+    click.echo("  gemini       Google Gemini API (GEMINI_API_KEY)")
+    click.echo("  ollama       free, local (llama3.1, mistral)")
+    click.echo("  lmstudio     local, OpenAI-compatible endpoint")
+    click.echo("  none         EntityRuler only (very limited)")
     llm = click.prompt(
         "LLM provider",
         default="groq",
@@ -766,6 +799,9 @@ def _setup_local() -> bool:
         "deepseek": "DEEPSEEK_API_KEY",
         "gemini": "GEMINI_API_KEY",
     }
+    llm_model = ""
+    if llm in _LOCAL_MODEL_PROVIDERS:
+        llm_model = _prompt_local_model(llm)
     key_envvar = _LLM_KEY_ENVVAR.get(llm)
     if key_envvar:
         # Check env, then keychain, then shell profile
@@ -820,9 +856,9 @@ def _setup_local() -> bool:
     )
 
     click.echo("\nspaCy model (used for entity extraction):")
-    click.echo("  sm  — 15MB, fast, good for most use cases")
-    click.echo("  md  — 45MB, better NER accuracy")
-    click.echo("  lg  — 590MB, best accuracy, slower to download")
+    click.echo("  sm  15MB, fast, good for most use cases")
+    click.echo("  md  45MB, better NER accuracy")
+    click.echo("  lg  590MB, best accuracy, slower to download")
     spacy_size = click.prompt(
         "Which size?",
         type=click.Choice(["sm", "md", "lg"], case_sensitive=False),
@@ -836,31 +872,51 @@ def _setup_local() -> bool:
         mode="local",
         coreference=coref,
         llm_provider=llm,
+        llm_model=llm_model,
         embedding_provider=embedding,
         spacy_model=spacy_model,
         data_dir=data_dir,
     )
-    save_config(cfg)
+    from smartmemory_app.daemon import is_running, stop_daemon
+    from smartmemory_app.setup_steps import (
+        StepTracker,
+        local_setup_plan,
+        model_download_progress,
+    )
+
+    restart = is_running(require_healthy=False)
+    if tracker is None:
+        tracker = StepTracker()
+    tracker.set_plan(local_setup_plan(cfg.embedding_provider, restart=restart))
+    click.echo("")
+
+    with tracker.step("Config written", live=False):
+        save_config(cfg)
 
     # Wire Claude Code hooks (preserved from original setup.py)
-    _ensure_spacy(spacy_model)
-    _ensure_embedding_model(cfg.embedding_provider)
-    _ensure_lazy_models()
-    _copy_hooks()
-    _copy_skills()
-    _register_hooks()
-    _seed_data_dir()
+    with tracker.step("spaCy model ready"):
+        _ensure_spacy(spacy_model)
+    if cfg.embedding_provider == "local":
+        with tracker.step("Embedding model ready") as log:
+            with model_download_progress(log):
+                _ensure_embedding_model(cfg.embedding_provider)
+    with tracker.step("Helper models ready") as log:
+        with model_download_progress(log):
+            _ensure_lazy_models()
+    with tracker.step("Hooks installed", live=False):
+        _copy_hooks()
+    with tracker.step("Skills installed", live=False):
+        _copy_skills()
+    with tracker.step("Hooks registered", live=False):
+        _register_hooks()
+    with tracker.step("Patterns seeded", live=False):
+        _seed_data_dir()
 
     # Stop a live daemon so the lifecycle owner can restart it with the new config.
-    from smartmemory_app.daemon import is_running, stop_daemon
-
-    if is_running(require_healthy=False):
-        click.echo("\nRestarting SmartMemory with the new settings...")
+    if restart:
         import time
 
-        from smartmemory_app.progress import startup_progress
-
-        with startup_progress("Restarting SmartMemory", emit=click.echo):
+        with tracker.step("SmartMemory stopped"):
             stop_daemon()
             time.sleep(2)
     return was_first_run

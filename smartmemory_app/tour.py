@@ -41,6 +41,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical, VerticalScroll
+from textual.markup import escape
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
@@ -1048,7 +1049,7 @@ class TourApp(App):
         if screen is None:
             return
         screen.query_one("#tour-title", Static).update(
-            f"[bold]Step {event.step}: {event.title}[/bold]"
+            f"[bold]{tour_step_label(event.step)} {event.title}[/bold]"
         )
         # Shell commands render with a prompt marker; labels/URLs render as-is.
         cmd = event.command
@@ -1056,6 +1057,17 @@ class TourApp(App):
             cmd = f"$ {cmd}"
         screen.query_one("#tour-command", Static).update(cmd)
         screen.query_one("#tour-output", Static).update(event.body)
+
+
+# CLI-SETUP-UX-1: the arc emits steps 1 to 7; step 0 is the intro before the arc starts.
+TOUR_STEP_COUNT = 7
+
+
+def tour_step_label(step: int) -> str:
+    """The same ``[n/N]`` counter setup prints. Escaped so TUI markup keeps it literal."""
+    if step <= 0:
+        return "Getting ready:"
+    return escape(f"[{step}/{TOUR_STEP_COUNT}]") + ":"
 
 
 def run_tour(

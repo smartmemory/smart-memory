@@ -45,6 +45,15 @@
 - `sm doctor` now starts with a pass/warn/fail table of what the CLI will actually use: Python and venv, config path, active mode and which source won, inherited `SMARTMEMORY_*` variables (names and the file that exports them, never values), API key presence, tenant and workspace against the web identity (`/auth/me`), LLM provider and key presence, daemon or service health and version, and graph backend. Each failing row has a one-line fix. `--json` prints the same rows. Exit code 1 on any FAIL. A check that cannot run is a WARN naming what was not checked.
 - `sm setup` runs the table at the end, and `sm tour` runs it before starting. A FAIL stops the tour and prints the fix.
 
+## Unreleased - CLI-SETUP-UX-1 (2026-10-17)
+
+- `smartmemory setup` numbers every step: `[n/N] <step> ... (about <estimate>)` before it runs, then a done or failed line with the elapsed time. Estimates are constants in the new `smartmemory_app/setup_steps.py`, measured in a clean venv with an empty cache (spaCy model about 70 s, embedding model about 2 min, helper models about 5 min). Output is plain lines, so pipes and CI logs get no control characters. On a terminal long steps also show the existing spinner.
+- Model downloads in setup now print throttled newline progress lines (`Downloading the local AI model: 12.0 MB of 86.2 MB (14%)`) by reusing `hf_progress.py`. The helper models (search and reranker) are now their own counted step instead of being folded into the embedding step.
+- The setup TUI progress screen shows the same counter, estimate and elapsed time per row. The tour title shows `[n/7]`.
+- The local model choice (ollama, lmstudio) now defaults to none, in the text prompt and as the first, highlighted row of the TUI model screen, with one line saying what you lose and how to add one later (`sm config llm_model <model name>`). The TUI Skip button is gone because none replaces it.
+- Fix: `hf_progress._DownloadBar` lacked the tqdm display methods the Hugging Face Xet reporter calls, which printed an `AttributeError` traceback during downloads.
+- Setup choice lists and TUI choice text no longer use em dashes or semicolons.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.
