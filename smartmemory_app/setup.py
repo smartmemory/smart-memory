@@ -1369,21 +1369,39 @@ def _installed_plist_key(name: str) -> str:
     return ""
 
 
+# Schemes a proxy URL may carry. Anything before the last "@" of a proxy value is
+# its login, and a prefix that is not one of these schemes is part of that login.
+_PROXY_SCHEMES = re.compile(r"(?i)(?:https?|socks4a?|socks5h?)://")
+
+
 def _plist_env_value(name: str, value: str) -> str:
     """The form of an env value that may be copied into a launchd plist.
 
-    A plist is a plaintext file in LaunchAgents, so a login embedded in a URL-shaped
-    value (``http://user:pass@host``, or ``user:pass@host`` with no scheme) is
-    dropped and a WARNING names the variable, never the value.
+    A plist is a plaintext file in LaunchAgents, so the copy rule comes from the
+    VARIABLE, never from what its value looks like:
+
+    - ``*_PROXY`` and ``ALL_PROXY`` (any case) hold one proxy URL. Its login is
+      dropped whatever characters the password holds (``,``, ``/``, ``@``, ``:``,
+      ``%``-escapes), with or without a scheme, and a WARNING names the variable.
+    - ``NO_PROXY`` (any case) is a host list and ``HOME`` a path. Neither holds a
+      login, so both are copied as they are.
+
+    Any other name raises, so a new env-to-plist copy has to state its rule here.
     """
-    scheme, sep, rest = value.partition("://")
-    # A path (HOME) or a NO_PROXY list is not a URL, whatever characters it holds.
-    url_shaped = bool(sep) or not (value.startswith("/") or "," in value)
-    if "@" not in value or not url_shaped:
+    upper = name.upper()
+    if upper == "NO_PROXY" or name == "HOME":
         return value
-    if not sep:
-        scheme, rest = "", value
-    stripped = f"{scheme}{sep}{rest.rsplit('@', 1)[1]}"
+    if upper.endswith("_PROXY"):
+        return _proxy_without_login(name, value)
+    raise ValueError(f"no launchd plist copy rule for {name}")
+
+
+def _proxy_without_login(name: str, value: str) -> str:
+    """``value`` parsed as one proxy URL, with everything before its last ``@`` dropped."""
+    if "@" not in value:
+        return value
+    scheme = _PROXY_SCHEMES.match(value)
+    stripped = (scheme.group(0) if scheme else "") + value.rsplit("@", 1)[1]
     logger.warning(
         "%s holds a proxy login (user and password). It was left out of the "
         "launchd plist so the login is not stored in a plaintext file",

@@ -192,6 +192,127 @@ def test_login_free_proxy_and_no_proxy_list_are_copied_unchanged(
     assert "holds a login" not in output and "proxy login" not in caplog.text
 
 
+# Review r2 H1, verbatim: a comma in a scheme-less proxy password.
+def test_proxy_password_with_comma(monkeypatch, plist_env, caplog):
+    home, agents, store, run = plist_env
+    password = "Canary,Comma73"
+    monkeypatch.setenv("HTTPS_PROXY", f"probe:{password}@127.0.0.1:9")
+    run(caplog)
+    leaked = bool(_home_hits(home, password.encode()))
+    assert not leaked, "proxy password survives in generated plist files"
+
+
+_PROXY_HOST = "proxy.example.test:3128"
+# id -> (variable, value, expected plist value). The copy rule comes from the variable:
+# a *_PROXY / ALL_PROXY value is one URL whose login is dropped, whatever the password
+# holds. NO_PROXY and HOME never hold a login and are copied as they are. Every login
+# here contains "Canary" or "probe-user", and neither may reach a file.
+_PROXY_RULE_ROWS = {
+    "with-scheme": (
+        "HTTPS_PROXY",
+        f"http://probe-user:PwCanary@{_PROXY_HOST}",
+        f"http://{_PROXY_HOST}",
+    ),
+    "no-scheme": ("https_proxy", f"probe-user:PwCanary@{_PROXY_HOST}", _PROXY_HOST),
+    "slash": (
+        "HTTP_PROXY",
+        f"http://probe-user:Pw/Canary@{_PROXY_HOST}",
+        f"http://{_PROXY_HOST}",
+    ),
+    "comma-no-scheme": (
+        "http_proxy",
+        f"probe-user:Pw,Canary@{_PROXY_HOST}",
+        _PROXY_HOST,
+    ),
+    "comma-scheme": (
+        "ALL_PROXY",
+        f"socks5h://probe-user:Pw,Canary@{_PROXY_HOST}",
+        f"socks5h://{_PROXY_HOST}",
+    ),
+    "at-sign": (
+        "all_proxy",
+        f"http://probe-user:Pw@Canary@{_PROXY_HOST}",
+        f"http://{_PROXY_HOST}",
+    ),
+    "colon": (
+        "HTTPS_PROXY",
+        f"https://probe-user:Pw:Canary@{_PROXY_HOST}",
+        f"https://{_PROXY_HOST}",
+    ),
+    "percent-escaped": (
+        "HTTPS_PROXY",
+        f"http://probe-user:Pw%2CCanary%40x@{_PROXY_HOST}",
+        f"http://{_PROXY_HOST}",
+    ),
+    "user-only": (
+        "HTTPS_PROXY",
+        f"http://probe-userCanary@{_PROXY_HOST}",
+        f"http://{_PROXY_HOST}",
+    ),
+    "scheme-inside-login": (
+        "https_proxy",
+        f"probe-user:pa://Canary@{_PROXY_HOST}",
+        _PROXY_HOST,
+    ),
+    "path-and-query": (
+        "HTTP_PROXY",
+        f"http://probe-user:PwCanary@{_PROXY_HOST}/p?a=1&b=2",
+        f"http://{_PROXY_HOST}/p?a=1&b=2",
+    ),
+    "no-login": ("HTTPS_PROXY", f"http://{_PROXY_HOST}", f"http://{_PROXY_HOST}"),
+    "no-proxy-upper": (
+        "NO_PROXY",
+        "localhost,127.0.0.1,user@corp.example.test",
+        "localhost,127.0.0.1,user@corp.example.test",
+    ),
+    "no-proxy-lower": (
+        "no_proxy",
+        "localhost,*.corp.example.test",
+        "localhost,*.corp.example.test",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_PROXY_RULE_ROWS))
+def test_plist_env_copy_rule_comes_from_the_variable(
+    case, monkeypatch, plist_env, caplog
+):
+    home, agents, _store, run = plist_env
+    from smartmemory_app import setup
+
+    var, value, expected = _PROXY_RULE_ROWS[case]
+    monkeypatch.setenv(var, value)
+    output = run(caplog)
+    for plist in (setup.PLIST_NAME, setup.WORKER_PLIST_NAME):
+        assert _plist_env(agents, plist)[var] == expected
+    assert not _home_hits(home, b"Canary") and not _home_hits(home, b"probe-user")
+    for text in (caplog.text, output):
+        assert "Canary" not in text and "probe-user" not in text
+    has_login = expected != value
+    assert (var in caplog.text) is has_login and (
+        "holds a login" in output
+    ) is has_login
+
+
+def test_home_path_is_copied_as_it_is(monkeypatch, plist_env, caplog):
+    """HOME is a path: an "@" or "," in it is not a login."""
+    home, agents, _store, run = plist_env
+    from smartmemory_app import setup
+
+    odd_home = f"{home}/user@corp,x"
+    monkeypatch.setenv("HOME", odd_home)
+    output = run(caplog)
+    assert _plist_env(agents, setup.PLIST_NAME)["HOME"] == odd_home
+    assert "holds a login" not in output
+
+
+def test_a_variable_without_a_plist_copy_rule_is_refused():
+    from smartmemory_app.setup import _plist_env_value
+
+    with pytest.raises(ValueError, match="SOME_TOKEN"):
+        _plist_env_value("SOME_TOKEN", "value")
+
+
 def _old_plist(agents, *names, key=KEY):
     for name in names:
         (agents / name).write_bytes(
