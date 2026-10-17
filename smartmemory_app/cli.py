@@ -1502,10 +1502,10 @@ def add_cmd(
     Supports arbitrary property flags: --project atlas --domain legal
     """
     import sys
-    from smartmemory_app.storage import RESERVED_INGEST_PROPERTIES
+    from smartmemory_app.storage import USER_RESERVED_PROPERTIES
 
     props = _parse_extra_props(ctx.args, explicit_props)
-    reserved = RESERVED_INGEST_PROPERTIES.intersection(props)
+    reserved = USER_RESERVED_PROPERTIES.intersection(props)
     if reserved:
         from smartmemory_app.config import load_config
 
@@ -1514,7 +1514,12 @@ def add_cmd(
             if load_config().mode == "remote"
             else "Reserved properties"
         )
-        raise click.ClickException(f"{label}: {', '.join(sorted(reserved))}.")
+        hint = (
+            " Pick the workspace with `sm workspace switch`."
+            if "workspace_id" in reserved
+            else ""
+        )
+        raise click.ClickException(f"{label}: {', '.join(sorted(reserved))}.{hint}")
 
     if text == "-":
         if sys.stdin.isatty():

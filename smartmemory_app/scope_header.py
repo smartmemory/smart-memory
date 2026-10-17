@@ -202,6 +202,23 @@ def folder_workspace(cwd: Optional[str]) -> Optional[str]:
             os.environ[ENV_WORKSPACE] = saved
 
 
+def local_override(
+    registry: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[str], str]:
+    """(workspace_id, source) the CLI itself chose: the env var first, then the pin.
+
+    The one place both the header and the request sender read. The daemon is a
+    separate process, so whatever the header names here must also be sent.
+    """
+    env = os.environ.get(ENV_WORKSPACE)
+    if env:
+        return env, f"{ENV_WORKSPACE} env var"
+    pinned = local_pin(registry)
+    if pinned:
+        return pinned, "pinned by sm workspace switch"
+    return None, ""
+
+
 def resolve_local_workspace(
     path: Optional[str],
     kwargs: Optional[dict],
@@ -215,12 +232,9 @@ def resolve_local_workspace(
     explicit, cwd = _request_scope_inputs(path, kwargs)
     if explicit:
         return explicit, "explicit --workspace"
-    env = os.environ.get(ENV_WORKSPACE)
-    if env:
-        return env, f"{ENV_WORKSPACE} env var"
-    pinned = local_pin(registry)
-    if pinned:
-        return pinned, "pinned by sm workspace switch"
+    chosen, source = local_override(registry)
+    if chosen:
+        return chosen, source
     if cwd:
         root, kind = folder_root(cwd)
         return folder_workspace(cwd), f"auto from {kind} {root}"
@@ -282,19 +296,18 @@ def resolve_scope(
 
 
 def apply_local_pin(cfg, path: str, kwargs: dict) -> dict:
-    """Send the pinned workspace explicitly, since the daemon cannot read the pin.
+    """Send the workspace the header names, since the daemon cannot read the CLI's env or pin.
 
-    Only local mode, only the two scoped paths, and never over an explicit value or
-    the env var (the env var wins everywhere else in config.py, so it wins here too).
-    The body or params dict is updated in place, so the caller's own copy carries
-    the pin too and its daemon-down fallback can honor it.
+    Only local mode and the two scoped paths. An explicit value in the request wins
+    (that is what the header reports). Otherwise the CLI's own choice from
+    ``local_override`` (env var first, then the pin) goes out as the explicit
+    ``workspace_id``. The body or params dict is updated in place, so the caller's
+    own copy carries it too and its daemon-down fallback stores the same workspace.
     """
     if cfg.mode == "remote" or path not in LOCAL_SCOPED_PATHS:
         return kwargs
-    if os.environ.get(ENV_WORKSPACE):
-        return kwargs
-    pinned = local_pin()
-    if not pinned:
+    chosen, _ = local_override()
+    if not chosen:
         return kwargs
     container = "json" if path == "/memory/ingest" else "params"
     payload = kwargs.get(container)
@@ -302,20 +315,20 @@ def apply_local_pin(cfg, path: str, kwargs: dict) -> dict:
         payload = {}
         kwargs = {**kwargs, container: payload}
     if not payload.get("workspace_id"):
-        payload["workspace_id"] = pinned
+        payload["workspace_id"] = chosen
     return kwargs
 
 
 def fallback_properties(body: dict, props: Optional[dict]) -> Optional[dict]:
     """Properties for the in-process ingest fallback, stamped like the daemon does.
 
-    local_api stamps ``properties["workspace_id"]`` from the request body. The
-    daemon-down path must do the same, or the header says "pinned" while the item
-    lands untagged.
+    local_api stamps ``properties["workspace_id"]`` from the request body, and the
+    stamp wins over a caller property. The daemon-down path must do the same, or the
+    header says "pinned" while the item lands untagged or elsewhere.
     """
     merged = dict(props or {})
     workspace_id = (body or {}).get("workspace_id")
-    if workspace_id and "workspace_id" not in merged:
+    if workspace_id:
         merged["workspace_id"] = workspace_id
     return merged or None
 

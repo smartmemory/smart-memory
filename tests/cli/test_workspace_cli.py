@@ -637,13 +637,15 @@ PIN_ROWS = [
         "expect": "ws_explicit00000",
     },
     {
-        "id": "env-var-blocks-pin",
+        # CLI-WORKSPACE-UX-1 fix 1 (F-1): the env var beats the pin AND is sent, because the
+        # daemon is another process and never sees the CLI's environment.
+        "id": "env-var-beats-pin-and-is-sent",
         "pre": [["workspace", "create", "demo", "--switch"]],
         "env": {"SMARTMEMORY_WORKSPACE_ID": "ws_fromenv000000"},
         "args": ["recall", "--top-k", "1"],
         "path": "/memory/recall",
         "field": ("params", "workspace_id"),
-        "expect": "",
+        "expect": "ws_fromenv000000",
     },
     {
         "id": "unpinned-sends-nothing",
@@ -731,3 +733,151 @@ def test_local_pin_injection(local, monkeypatch, row):
     if expected == "pin":
         expected = registry()["local"]["pinned"]
     assert sent == expected, (sent, expected)
+
+
+# ── The header and the request name the same workspace (F-1, F-3) ───────────
+
+ENV_WS = "ws_fromenv000000"
+EXPLICIT_WS = "ws_explicit00000"
+
+# command x arm. The arms are the ones the resolver has for a local request: nothing,
+# the env var, the pin, env plus pin (env wins), and recall's --workspace (add has no
+# explicit flag). Each combination exists in `resolve_local_workspace`.
+SAME_WS_ARMS = [
+    ("none", {}, False, None),
+    ("env", {"SMARTMEMORY_WORKSPACE_ID": ENV_WS}, False, ENV_WS),
+    ("pin", {}, True, "pin"),
+    ("env+pin", {"SMARTMEMORY_WORKSPACE_ID": ENV_WS}, True, ENV_WS),
+]
+SAME_WS_COMMANDS = {
+    "add": (["add", "hello"], "ingest", "/memory/ingest", ("json", "workspace_id")),
+    "recall": (
+        ["recall", "--top-k", "1"],
+        "recall",
+        "/memory/recall",
+        ("params", "workspace_id"),
+    ),
+}
+SAME_WS_ROWS = [
+    {"id": f"{cmd}-{where}-{arm[0]}", "cmd": cmd, "where": where, "arm": arm}
+    for cmd in SAME_WS_COMMANDS
+    for where in ("daemon", "fallback")
+    for arm in SAME_WS_ARMS
+] + [
+    {
+        "id": f"recall-{where}-explicit",
+        "cmd": "recall",
+        "where": where,
+        "arm": ("explicit", {}, True, EXPLICIT_WS),
+        "extra": ["--workspace", EXPLICIT_WS],
+    }
+    for where in ("daemon", "fallback")
+]
+
+
+def _header_ids(err: str) -> set[str]:
+    import re
+
+    line = next(ln for ln in err.splitlines() if ln.startswith(HEADER))
+    return set(re.findall(r"ws_[0-9a-z]+", line))
+
+
+@pytest.mark.parametrize("row", SAME_WS_ROWS, ids=[r["id"] for r in SAME_WS_ROWS])
+def test_header_workspace_equals_request_workspace(isolated, monkeypatch, row):
+    """Whatever workspace the header names is what the request carries, on both paths.
+
+    daemon: the body or query the daemon receives. fallback: the daemon is down, so
+    the in-process store call gets it. An untagged header means nothing is sent.
+    """
+    arm, env, pinned, expected = row["arm"]
+    args, store_fn, path, (container, key) = SAME_WS_COMMANDS[row["cmd"]]
+    args = args + row.get("extra", [])
+    monkeypatch.setenv("SMARTMEMORY_MODE", "local")
+    if pinned:
+        assert invoke(["workspace", "create", "demo", "--switch"]).exit_code == 0
+    if expected == "pin":
+        expected = registry()["local"]["pinned"]
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    seen: dict = {}
+    if row["where"] == "daemon":
+
+        def daemon(method, p, timeout=120, **kwargs):
+            if p == path:
+                seen["sent"] = (kwargs.get(container) or {}).get(key) or None
+            return (
+                {"context": "recalled"} if p == "/memory/recall" else {"item_id": "i"}
+            )
+
+        monkeypatch.setattr(cli_module, "_daemon_request", daemon)
+    else:
+        monkeypatch.setattr(cli_module, "_daemon_request", lambda *a, **k: None)
+        monkeypatch.setattr(cli_module, "_prepare_direct_access", lambda *a, **k: None)
+
+        def fake_ingest(content, memory_type, properties=None, origin=None, **kw):
+            seen["sent"] = (properties or {}).get("workspace_id")
+            return "item_fallback"
+
+        def fake_recall(cwd, top_k, query=None, workspace_id=None, **kw):
+            seen["sent"] = workspace_id
+            return "recalled"
+
+        monkeypatch.setattr(storage, "ingest", fake_ingest)
+        monkeypatch.setattr(storage, "recall", fake_recall)
+    result = invoke(args)
+    assert result.exit_code == 0, result.output + stderr_of(result)
+    assert seen.get("sent") == expected, (seen, expected)
+    err = stderr_of(result)
+    if expected is None:
+        assert "untagged" in err and not _header_ids(err), err
+    else:
+        assert _header_ids(err) == {expected}, (expected, err)
+
+
+# F-3: the stamped workspace is the only way to set the workspace. A caller property
+# cannot override it, on the CLI, in the daemon, or in the daemon-down fallback.
+USER_PROP_ROWS = [
+    {
+        "id": "prop-flag-pinned",
+        "args": ["--prop", "workspace_id=ws_sneaky000001"],
+        "pin": True,
+    },
+    {
+        "id": "prop-flag-unpinned",
+        "args": ["--prop", "workspace_id=ws_sneaky000001"],
+        "pin": False,
+    },
+    {
+        "id": "free-flag-pinned",
+        "args": ["--workspace_id", "ws_sneaky000001"],
+        "pin": True,
+    },
+]
+
+
+@pytest.mark.parametrize("row", USER_PROP_ROWS, ids=[r["id"] for r in USER_PROP_ROWS])
+def test_user_cannot_set_workspace_through_properties(local, monkeypatch, row):
+    if row["pin"]:
+        assert invoke(["workspace", "create", "demo", "--switch"]).exit_code == 0
+    result = invoke(["add", "hello", *row["args"]])
+    assert result.exit_code != 0
+    assert "Reserved properties: workspace_id" in result.output + stderr_of(result)
+    assert not [c for c in local if c[1] == "/memory/ingest"], (
+        "nothing reaches the daemon"
+    )
+
+
+def test_fallback_stamp_beats_a_caller_property():
+    body = {"workspace_id": "ws_stamped000000"}
+    merged = scope_header.fallback_properties(
+        body, {"workspace_id": "ws_caller0000000"}
+    )
+    assert merged == {"workspace_id": "ws_stamped000000"}
+    assert scope_header.fallback_properties({}, {"a": "1"}) == {"a": "1"}
+
+
+def test_workspace_id_is_user_reserved_but_still_ingestable():
+    """Lifecycle hooks, the daemon stamp and the fallback pass workspace_id to ingest()."""
+    assert "workspace_id" in storage.USER_RESERVED_PROPERTIES
+    assert storage.RESERVED_INGEST_PROPERTIES <= storage.USER_RESERVED_PROPERTIES
+    assert "workspace_id" not in storage.RESERVED_INGEST_PROPERTIES

@@ -52,6 +52,12 @@ RESERVED_INGEST_PROPERTIES = frozenset(
     }
 )
 
+# What a user may not set through `sm add --prop`: the producer-owned fields plus
+# `workspace_id`. Not part of RESERVED_INGEST_PROPERTIES itself, because ingest()
+# receives the stamped workspace_id as a property (daemon stamp, `sm add` fallback,
+# lifecycle hooks) and must keep it.
+USER_RESERVED_PROPERTIES = RESERVED_INGEST_PROPERTIES | {"workspace_id"}
+
 _memory: "SmartMemory | None" = None
 _data_path: Path | None = None  # resolved once on first init; reused by ingest()
 _init_lock = threading.Lock()

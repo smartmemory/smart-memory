@@ -779,7 +779,9 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     # Auto-stamp workspace_id so this item is filterable in scoped recall.
     workspace_id = body.workspace_id or derive_workspace_id(body.cwd)
     properties = dict(body.properties or {})
-    if workspace_id and "workspace_id" not in properties:
+    # The stamped workspace wins: a caller property must not move an item out of the
+    # workspace the request (and the CLI's scope header) named.
+    if workspace_id:
         properties["workspace_id"] = workspace_id
 
     # DIST-LITE-QUIET-1: the daemon is a generic local HTTP surface, not CLI-private —
