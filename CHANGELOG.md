@@ -30,6 +30,10 @@
 - The `sm report` support archive now masks a short supplied id or secret that sits right after an escape sequence, in every member. In JSON-escaped text a newline before the id is written as a backslash and the letter `n`, and the letter used to hide the id from the whole-token match, so the id survived in `message.txt` and in JSON log lines. A backslash escape (`\n`, `\t`, `\r`, `\b`, `\f`, `\uXXXX`, `\xXX`) or a URL `%XX` escape now counts as a token boundary, in one matcher shared by `sm doctor` and both archive passes. An id that is part of a longer word (`xabcx`, `abcdef`) still stays visible. (CLI-FU-SWEEP-1a r3 H3)
 - `sm doctor` now warns that no model is chosen for a local provider (Ollama or LM Studio) even when `OPENAI_BASE_URL`, a provider key or a pinned provider is set, instead of showing PASS. An explicit endpoint is still probed first.
 
+### CLI-FU-SWEEP-1b (2026-10-17)
+
+- TOUR-ASK-FU-H1: the capture worker is now an explicit exemption in the LLM entry-point guard (`tests/unit/test_llm_entry_points.py`). Its Groq pin is product policy, so it never applies the configured provider. Test-only, no product change.
+
 ## 1.5.27 — 2026-10-17
 
 - Setup and first-run hardening from the 2026-10-17 demo feedback: pins `smartmemory-core==1.5.27` and `smartmemory-mcp==1.5.23`. Ships the `Unreleased` sections below: CLI-TENANT-1, LOCAL-DAEMON-1, TOUR-ASK-502-1, CLI-WORKSPACE-UX-1, CLI-ENV-DETECT-1, SETUP-DOCTOR-1, CLI-SETUP-UX-1, BENEFITS-WORDING-1, plus the SM-SETUP-BATCH-1 integration glue. The per-unit headings keep their `Unreleased` labels.

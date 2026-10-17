@@ -167,11 +167,6 @@ ENTRY_ROWS = [
     ("worker_entry.main", "worker_entry", _worker_entry_main),
     ("viewer_server.main", "viewer_server", _viewer_server_main),
     ("storage.get_memory (add, ingest, hooks, MCP)", "storage", _library_get_memory),
-    (
-        "capture_worker (pins its own Groq route)",
-        "capture_worker",
-        _capture_worker_memory,
-    ),
 ]
 
 # Entry modules that never reach an LLM, each with the reason.
@@ -180,6 +175,11 @@ EXEMPT = {
     "diagnostic_worker": "offline store diagnostics, no LLM call",
     "enrichment_worker": "retired consumer, only logs a warning",
     "setup": "wizard: no call_llm; its first-run helper applies the config itself",
+    # TOUR-ASK-FU-H1: never calls apply_runtime_config() and overwrites
+    # SMARTMEMORY_LLM_MODEL (capture_worker.py), on purpose. Product policy since
+    # DEMO-CC-UPLIFT-1 6a017f4: production capture is pinned to Groq, never to
+    # subscription billing, whatever provider the user configured.
+    "capture_worker": "deliberate Groq pin, not the configured provider (policy)",
 }
 
 
@@ -190,6 +190,17 @@ def test_entry_point_pins_configured_provider(seen, monkeypatch, driver):
     driver(seen, monkeypatch)
 
     assert seen == [GROQ_DEFAULT]  # never "sonnet", the Agent SDK route
+
+
+def test_capture_worker_exemption_is_the_groq_pin(seen, monkeypatch):
+    """The exemption holds only while the worker really pins Groq itself."""
+    assert "Groq pin" in EXEMPT["capture_worker"]
+    assert "capture_worker" not in {row[1] for row in ENTRY_ROWS}
+    monkeypatch.setenv("SMARTMEMORY_LLM_MODEL", "user-picked-model")
+
+    _capture_worker_memory(seen, monkeypatch)
+
+    assert seen == [GROQ_DEFAULT]  # overwritten, config never applied
 
 
 # ---------------------------------------------------------------------------
