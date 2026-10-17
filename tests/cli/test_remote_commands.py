@@ -136,7 +136,8 @@ def test_remote_ask_hosted_contract_and_rendering(hosted, reasoning):
         (
             502,
             {"detail": "provider failed"},
-            ["hosted LLM is unavailable", "No answer was generated"],
+            # TOUR-ASK-502-1: a 502 shows the provider's failure reason.
+            ["hosted LLM is unavailable", "No answer was generated", "provider failed"],
         ),
         (
             503,
@@ -155,6 +156,8 @@ def test_remote_ask_http_errors(hosted, status, body, expected):
         assert text in result.output
     assert ANSWER["answer"] not in result.output
     assert "GROQ_API_KEY" not in result.output
+    if status == 503:  # the 503 detail names server env vars; it stays hidden
+        assert "server key missing" not in result.output
     assert len([r for r in calls if r.url.path.endswith("/memory/ask")]) == 1
 
 

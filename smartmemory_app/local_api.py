@@ -25,8 +25,11 @@ import threading
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from smartmemory.errors import MissingModelError
 from smartmemory_app.config import UnconfiguredError, llm_key_present
@@ -40,6 +43,25 @@ log = logging.getLogger(__name__)
 _rw_lock = threading.RLock()
 
 api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
+
+
+# TOUR-ASK-502-1: this app is MOUNTED under /memory. An unhandled route error
+# propagates to the parent app, whose Exception handler (viewer_server._build_app)
+# reports it. A route that converts a failure into HTTPException(5xx) is answered
+# here and never reaches the parent, so those handled 5xx are reported here,
+# gated by crash_reporter.enabled(). The original exception rides along as
+# __context__/__cause__ in the report.
+@api.exception_handler(StarletteHTTPException)
+async def _report_handled_5xx(request: Request, exc: StarletteHTTPException):
+    # 501 is a by-design "not available in remote-proxy mode" answer, not a failure.
+    if exc.status_code >= 500 and exc.status_code != 501:
+        from smartmemory_app.crash_reporter import report_in_background
+
+        await run_in_threadpool(
+            report_in_background, exc, source="daemon", handled=True
+        )
+    return await http_exception_handler(request, exc)
+
 
 # Fields that normalizeAPIResponse reads at top level (normalize.js:38,46).
 # Also includes entity-detection fields (normalize.js:38): node_category, entity_type.
@@ -1097,7 +1119,9 @@ def ask_endpoint(body: AskRequest) -> dict:
         )
     except Exception as exc:
         log.exception("sm ask LLM request failed")
-        detail = f"Unable to answer with the configured LLM: {exc}"
+        detail = (
+            f"Unable to answer with the configured LLM: {type(exc).__name__}: {exc}"
+        )
         if isinstance(exc, ImportError) and (
             exc.name == "openai" or str(exc) == "openai package is required"
         ):

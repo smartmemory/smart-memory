@@ -182,6 +182,11 @@ class RemoteMemory:
                 message = (
                     "SmartMemory hosted LLM is unavailable. No answer was generated."
                 )
+                # TOUR-ASK-502-1: a 502 carries the provider's failure reason; show
+                # it. A 503 means the SERVICE has no provider key, and its detail
+                # names server env vars a remote user cannot set, so it stays hidden.
+                if status == 502 and detail:
+                    message += f" Service said: {detail}"
             else:
                 message = (
                     f"SmartMemory service error (HTTP {status}): {detail}"

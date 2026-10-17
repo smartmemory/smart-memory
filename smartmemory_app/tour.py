@@ -180,6 +180,63 @@ def compute_token_receipt(
     )
 
 
+class TourRequestError(httpx.HTTPStatusError):
+    """A tour daemon call failed; the message carries the server's own detail.
+
+    TOUR-ASK-502-1: ``raise_for_status()`` text names only the status and URL,
+    so the tour screen said "502 Bad Gateway" while the daemon's ``detail`` held
+    the real reason. Subclassing HTTPStatusError keeps existing handlers working.
+    """
+
+
+def _http_error_reason(response: httpx.Response) -> str:
+    """``HTTP <code>: <server detail>``; falls back to the body, then the reason phrase."""
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        detail = None
+    if detail and not isinstance(detail, str):
+        detail = json.dumps(detail)
+    if not detail:
+        detail = (response.text or "").strip()[:500] or response.reason_phrase
+    return f"HTTP {response.status_code}: {detail}"
+
+
+def _checked_json(response: httpx.Response) -> Any:
+    if response.is_error:
+        raise TourRequestError(
+            _http_error_reason(response),
+            request=response.request,
+            response=response,
+        )
+    return response.json()
+
+
+def _report_degraded(step: str, reason: str, exc: BaseException | None = None) -> None:
+    """Report a handled tour degradation (TOUR-ASK-502-1).
+
+    Gated by ``crash_reporter.enabled()``; never raises into the tour. An
+    exception goes out with its cause chain, a degradation without one as a
+    deduplicated ``tour_degraded`` event.
+    """
+    try:
+        from smartmemory_app import crash_reporter
+
+        if exc is not None:
+            crash_reporter.report_in_background(exc, source="tour", handled=True)
+        else:
+            crash_reporter.report_event(
+                "tour_degraded",
+                {"tour_step": step, "reason": reason},
+                dedupe_key=f"tour_degraded:{step}",
+            )
+    except Exception as error:
+        logger.warning(
+            "SmartMemory tour: degradation report unavailable (%s)",
+            type(error).__name__,
+        )
+
+
 class TourHttpClient:
     """Small daemon HTTP client for the tour arc."""
 
@@ -200,16 +257,14 @@ class TourHttpClient:
                 "properties": {"tour": "DIST-TOUR-1"},
             },
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def search(self, query: str, top_k: int = 5) -> dict:
         response = self._client.post(
             "/memory/search",
             json={"query": query, "top_k": top_k},
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def recall(
         self, cwd: str | None = None, top_k: int = 8, query: str | None = None
@@ -224,16 +279,14 @@ class TourHttpClient:
                 "strict": "false",
             },
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def ask(self, question: str, limit: int = 5) -> dict:
         response = self._client.post(
             "/memory/ask",
             json={"question": question, "limit": limit},
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def close(self) -> None:
         self._client.close()
@@ -321,6 +374,7 @@ class TourArcDriver:
         )
         if degraded_reason:
             logger.warning("SmartMemory tour degraded: %s", degraded_reason)
+            _report_degraded("seeded_content", degraded_reason)
             self._emit(
                 emit,
                 3,
@@ -473,10 +527,12 @@ class TourArcDriver:
             logger.warning(
                 "SmartMemory tour: sm ask failed (%s); showing the command only.", exc
             )
+            _report_degraded("ask", str(exc), exc)
             return f"(ask unavailable: {exc})"
         answer = response.get("answer") if isinstance(response, dict) else None
         if not isinstance(answer, str) or not answer.strip():
             logger.warning("SmartMemory tour: sm ask returned no answer.")
+            _report_degraded("ask", "ask returned no answer")
             return "(ask returned no answer)"
         return answer.strip()
 
@@ -951,6 +1007,8 @@ class TourApp(App):
             result = self.runner.run(emit=emit)
             self.call_from_thread(self._finish, result)
         except BaseException as exc:
+            if isinstance(exc, Exception):
+                _report_degraded("run", str(exc), exc)
             self.call_from_thread(
                 self._show_event,
                 TourEvent(

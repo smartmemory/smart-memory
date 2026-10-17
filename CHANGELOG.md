@@ -11,6 +11,12 @@
 - `daemon.daemon_health()` returns `(ok, detail, fix)` for the doctor's daemon row. It is read-only and never raises. The logic lives in the new `daemon_diagnosis.py`.
 - `start_daemon` removes a leftover `daemon.pid` (or `.daemon.stop-<pid>` request) only when its recorded process is gone by exact pid check, and never while a daemon is answering.
 
+## Unreleased - TOUR-ASK-502-1 (2026-10-17)
+
+- `sm ask` (and the tour's ask step) no longer fails with "502 Bad Gateway" when the Claude Agent SDK happens to be installed in the same Python. A `groq` or `openai` setup now pins its own default model (`openai/gpt-oss-120b`, `OPENAI_MODEL` or `gpt-4o-mini`), as `gemini` already did, so core no longer prefers the `claude` CLI, which exits 1 when it is not logged in. `claude-agent` and `none` keep core's default. An explicit `SMARTMEMORY_LLM_MODEL` still wins.
+- Ask failures show their reason. The daemon's 502 detail names the error type. The tour shows `HTTP <code>: <server detail>` instead of the bare status line. The hosted `sm ask` shows the service's 502 detail (503 stays hidden, it names server settings).
+- Handled failures are reported (when crash reports are on): every daemon route that answers 5xx through `HTTPException` (except the by-design 501 of remote-proxy mode), the tour's ask failure and empty answer, the tour's "seeded content not returned" degradation, and a tour run that fails.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.

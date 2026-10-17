@@ -189,13 +189,34 @@ def apply_runtime_config() -> SmartMemoryConfig:
     # key-presence and (without this) never selected Gemini, so a gemini selection
     # silently routed elsewhere. Mirrors the embedding pin; an explicit
     # SMARTMEMORY_LLM_MODEL env var still wins.
+    #
+    # TOUR-ASK-502-1: the same gap hit groq and openai. get_default_model() ranks
+    # the Claude Agent SDK above every provider key whenever `claude_agent_sdk` is
+    # importable. smartmemory does not depend on it, but a shared interpreter
+    # (e.g. a conda base) may carry it, so a "groq" setup sent every call_llm
+    # (ask, Tier-2 extraction) to the `claude` CLI, which exits 1 when it is not
+    # logged in under this HOME: `sm ask` returned 502 "Command failed with exit
+    # code 1". Only "claude-agent" (and "none") keep core's own default.
+    # Pinning the model, not core's LLM_PROVIDER: that pin also rewrites key and
+    # endpoint resolution for every call in the process, and "openai" as a pin
+    # does not change get_default_model() at all.
     if not os.environ.get("SMARTMEMORY_LLM_MODEL"):
-        _llm_model = cfg.llm_model or (
-            "gemini/gemini-2.0-flash" if cfg.llm_provider == "gemini" else None
-        )
+        _llm_model = cfg.llm_model or _provider_default_model(cfg.llm_provider)
         if _llm_model:
             os.environ["SMARTMEMORY_LLM_MODEL"] = _llm_model
     return cfg
+
+
+def _provider_default_model(provider: str | None) -> str | None:
+    """The model a configured cloud provider means when the config names none."""
+    provider = (provider or "").lower()
+    if provider == "gemini":
+        return "gemini/gemini-2.0-flash"
+    if provider == "groq":
+        return "openai/gpt-oss-120b"  # core's Groq default (is_groq_model routes it)
+    if provider == "openai":
+        return os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
+    return None
 
 
 def _get_local_memory(
