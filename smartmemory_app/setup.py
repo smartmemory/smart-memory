@@ -518,12 +518,16 @@ def _start_daemon_local(
         reason = status.get("degraded_reason") or (
             f"Daemon health status: {status.get('status', 'unknown')}."
         )
-        raise _daemon_setup_error(reason)
+        raise _daemon_setup_error(reason, status)
 
     if status.get("status") == "warming":
         (on_log or click.echo)(_SETUP_WARMING_WARNING)
     elif on_log is None:
-        click.echo("SmartMemory is running.")
+        from smartmemory_app.daemon import _port
+
+        click.echo(
+            f"SmartMemory is running (daemon running at http://127.0.0.1:{_port()})."
+        )
     if status.get("reextract_offer"):
         (on_log or click.echo)(status["reextract_offer"])
     return status
@@ -536,16 +540,31 @@ _SETUP_WARMING_WARNING = (
 )
 
 
-def _daemon_setup_error(reason: str) -> click.ClickException:
-    """Name the failed setup step and point to the daemon's actual log location."""
+def _daemon_setup_error(
+    reason: str, status: dict | None = None
+) -> click.ClickException:
+    """Name the failed setup step, its one-line fix, and the daemon's log location."""
     from smartmemory_app.daemon import _data_dir
 
-    return click.ClickException(
-        "Setup failed: SmartMemory daemon did not start or become ready.\n"
-        f"Problem: {reason}\n"
-        f"Log: {_data_dir() / 'daemon.log'}\n"
-        "Next step: run sm doctor, then sm start --wait."
-    )
+    problem, fix = reason, None
+    try:
+        from smartmemory_app.daemon_diagnosis import collect_facts, diagnose
+
+        found = diagnose(collect_facts(status))
+        # A healthy daemon contradicts the failure, so keep the raw reason alone.
+        if not found.ok:
+            problem, fix = found.detail, found.fix
+    except Exception:
+        logger.warning("Daemon failure diagnosis unavailable", exc_info=True)
+    lines = ["Setup failed: SmartMemory daemon did not start or become ready."]
+    lines.append(f"Problem: {problem}")
+    if fix:
+        lines.append(f"Fix: {fix}")
+    if problem != reason:
+        lines.append(f"Detail: {reason}")
+    lines.append(f"Log: {_data_dir() / 'daemon.log'}")
+    lines.append("Next step: run sm doctor, then sm start --wait.")
+    return click.ClickException("\n".join(lines))
 
 
 def _apply_setup_result(

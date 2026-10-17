@@ -430,6 +430,8 @@ def start_daemon(
     _upgrade_worker_agent()
     legacy_retired = _retire_legacy_workers()
     existing = get_status()
+    if existing is None:
+        clean_stale_markers()
     if existing is not None and legacy_retired:
         _start_workers(num_workers)
     if existing is not None and (
@@ -958,6 +960,54 @@ def stop_daemon() -> None:
         pf.unlink(missing_ok=True)
     finally:
         request.unlink(missing_ok=True)
+
+
+def clean_stale_markers() -> list[str]:
+    """Remove daemon markers whose recorded process is dead. Returns what was removed.
+
+    Only an exact pid check decides: ``daemon.pid`` goes when its pid is gone or
+    the file holds no pid, and a ``.daemon.stop-<pid>`` request goes when that pid
+    is gone. A live pid keeps its files, whatever the process is. A healthy daemon
+    is never touched. The OS releases the lock files, so they need no cleanup.
+    """
+    if is_running(require_healthy=False):
+        return []
+    removed = []
+    marker = _pid_file()
+    if marker.exists():
+        try:
+            pid = int(marker.read_text(encoding="utf-8").strip())
+            stale = pid <= 0 or not _pid_alive(pid)
+        except (OSError, ValueError):
+            pid, stale = None, True
+        if stale:
+            log.warning(
+                "Removed stale daemon.pid (%s): the recorded process is gone",
+                f"process {pid}" if pid else "no valid pid",
+            )
+            marker.unlink(missing_ok=True)
+            removed.append(marker.name)
+    for request in _data_dir().glob(".daemon.stop-*"):
+        try:
+            gone = not _pid_alive(int(request.name.rsplit("-", 1)[1]))
+        except ValueError:
+            continue
+        if gone:
+            request.unlink(missing_ok=True)
+            removed.append(request.name)
+    return removed
+
+
+def daemon_health() -> tuple[bool, str, str | None]:
+    """(ok, detail, fix) for the doctor's daemon row. Read-only and never raises."""
+    from smartmemory_app.daemon_diagnosis import collect_facts, diagnose
+
+    try:
+        result = diagnose(collect_facts())
+    except Exception as exc:
+        log.warning("Daemon health check failed: %s", exc, exc_info=True)
+        return False, f"daemon health check failed: {exc}", "Run: sm status"
+    return result.ok, result.detail, result.fix
 
 
 def get_status() -> dict | None:
