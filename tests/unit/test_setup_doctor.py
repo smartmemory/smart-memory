@@ -8,6 +8,8 @@ keychain, daemon or network.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import sqlite3
 from dataclasses import dataclass
 
@@ -35,6 +37,7 @@ ME_OK = {
     "tenant_id": "tenant_1",
     "default_workspace_id": "ws_default",
     "active_workspace_id": "ws_default",
+    "default_team_id": "ws_default",
 }
 READY_OK = {
     "status": "ready",
@@ -351,7 +354,8 @@ CASES = [
         },
         "tenant",
         PASS,
-        "account dev@example.test, tenant tenant_1, workspace ws_default (from account default)",
+        "The CLI sends workspace ws_default (from account default_team_id from /auth/me), "
+        "the same workspace the web console opens",
     ),
     (
         "tenant-remote-team-mismatch",
@@ -362,7 +366,7 @@ CASES = [
         },
         "tenant",
         WARN,
-        "web console opens, is ws_default",
+        "but the web console opens workspace ws_default",
     ),
     # LLM
     ("llm-remote", {"config": REMOTE_CFG}, "llm", PASS, "hosted"),
@@ -396,11 +400,11 @@ CASES = [
         "llm-keychain-unreadable",
         {
             "environ": {"GROQ_API_KEY": "g"},
-            "keyring": {"GROQ_API_KEY": CheckUnavailable("kc")},
+            "keyring": {"GROQ_API_KEY": CheckUnavailable("OS keychain (KeyringError)")},
         },
         "llm",
-        PASS,
-        "Not checked: OS keychain",
+        WARN,
+        "Not checked: OS keychain (KeyringError)",
     ),
     (
         "llm-ollama-up",
@@ -417,7 +421,7 @@ CASES = [
         {"config": LOCAL_CFG + '[local]\nllm_provider = "ollama"\n'},
         "llm",
         FAIL,
-        "not answering at http://localhost:11434/v1",
+        "endpoint http://localhost:11434/v1 (from provider default for llm_provider ollama), not answering",
     ),
     (
         "llm-claude-agent",
@@ -718,16 +722,7 @@ def test_no_secret_value_is_ever_printed(environ, monkeypatch, tmp_path):
         )
         for args in (["doctor"], ["doctor", "--json"]):
             out = CliRunner().invoke(cli, args)
-            leaked = [line for line in out.output.splitlines() if CANARY in line]
-            # The older network probe line (support_diagnostics, not owned here)
-            # names the effective API URL so support can see a LAN override. It
-            # redacts credentials. Nothing else may carry the value.
-            allowed = "SMARTMEMORY_API_URL" in environ
-            assert [
-                line
-                for line in leaked
-                if not (allowed and line.startswith(f"Network https://{CANARY}"))
-            ] == []
+            assert CANARY not in out.output, out.output
             assert "SMARTMEMORY_API_KEY" in out.output  # names are shown
 
 
@@ -813,3 +808,394 @@ def test_tour_stops_on_fail_before_starting(monkeypatch):
     )
     out = CliRunner().invoke(cli, ["tour"])
     assert seen == ["tour"] and len(started) == 1, out.output
+
+
+# ── Fix round 1 probes (review-r1 H1-H5) ──────────────────────────────────────
+# One row per probe. Each row runs the CLI's real resolver and sm doctor on the
+# same inputs and asserts they agree. No live network: H1 uses a local HTTP fake,
+# the LLM rows capture what core call_llm would send instead of sending it.
+
+
+class _FakeService:
+    """A local /auth/me and /memory/search that records the X-Workspace-Id it gets."""
+
+    def __init__(self, me):
+        import http.server
+        import threading
+
+        seen = self.headers = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _answer(self, body):
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self._answer(me if self.path == "/auth/me" else {})
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                seen.append(self.headers.get("X-Workspace-Id"))
+                self._answer({"results": []})
+
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def _core_route(monkeypatch, ctx):
+    """What core call_llm would send for a Tier-2 extraction, captured, never sent."""
+    from smartmemory.plugins.extractors.llm_single import LLMSingleExtractor
+    from smartmemory.utils import llm as core_llm
+
+    from smartmemory_app.config import _apply_local_llm_env
+    from smartmemory_app.storage import pin_llm_model
+
+    sent = {}
+
+    class Sent(Exception):
+        pass
+
+    def capture(endpoint):
+        def fake(*args, **kwargs):
+            sent.update(model=kwargs.get("model"), endpoint=endpoint(kwargs))
+            raise Sent
+
+        return fake
+
+    monkeypatch.setattr(
+        core_llm,
+        "call_openai_chat",
+        capture(
+            lambda kw: kw.get("api_base")
+            or os.environ.get("OPENAI_BASE_URL")
+            or "https://api.openai.com/v1"
+        ),
+    )
+    monkeypatch.setattr(core_llm, "_call_claude_agent", capture(lambda kw: ""))
+    monkeypatch.setattr(
+        core_llm, "_call_bedrock_converse", capture(lambda kw: "AWS Bedrock")
+    )
+    env = doctor._shell_env(ctx)
+    cfg = doctor._config(ctx)
+    _apply_local_llm_env(cfg, env)
+    pin_llm_model(cfg, env)
+    with doctor._patched_environ(env):
+        try:
+            core_llm.call_llm(
+                user_content="x", api_base=LLMSingleExtractor()._resolve_api_base()
+            )
+        except Sent:
+            pass
+    return sent
+
+
+def _probe_h1(monkeypatch, tmp_path):
+    from smartmemory_app import storage
+    from smartmemory_app.cli import cli
+
+    service = _FakeService(
+        {
+            **ME_OK,
+            "default_team_id": "actual-team",
+            "default_workspace_id": "console-workspace",
+            "active_workspace_id": "console-workspace",
+        }
+    )
+    try:
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        ctx = build(
+            monkeypatch,
+            tmp_path,
+            environ=KEY,
+            config=f'[smartmemory]\nmode = "remote"\n[remote]\napi_url = "{service.url}"\n',
+        )
+        ctx.http_get = doctor._default_http_get
+        got = doctor.check_tenant(ctx)
+        monkeypatch.setattr(storage, "_remote_memory", None)
+        CliRunner().invoke(cli, ["search", "anything"])
+    finally:
+        service.close()
+    assert got.status == WARN, got
+    assert "The CLI sends workspace actual-team" in got.detail, got
+    assert "web console opens workspace console-workspace" in got.detail, got
+    assert service.headers == ["actual-team"], service.headers  # what sm search sent
+    return got
+
+
+def _probe_h2(decision):
+    def probe(monkeypatch, tmp_path):
+        from smartmemory_app import env_pin
+        from smartmemory_app.env_sources import inherited_vars
+        from smartmemory_app.recall_format import derive_workspace_id
+
+        ctx = build(
+            monkeypatch,
+            tmp_path,
+            environ={"SMARTMEMORY_WORKSPACE_ID": "ws_shellvalue1"},
+        )
+        monkeypatch.chdir(tmp_path)
+        value = "ws_override77" if decision == "override" else None
+        env_pin.set_decision(
+            "SMARTMEMORY_WORKSPACE_ID", decision, value, project_dir=tmp_path
+        )
+        monkeypatch.setattr(env_pin, "_applied", False)
+        env_pin.ensure_applied()  # what run_checks and every sm command do first
+        import os
+
+        ctx.environ, ctx.from_process, ctx.detect = (
+            dict(os.environ),
+            True,
+            inherited_vars,
+        )
+        real = derive_workspace_id(str(tmp_path))
+        got = doctor.check_tenant(ctx)
+        assert got.status == PASS, got
+        assert "ws_shellvalue1" not in got.detail and "ws_override77" not in got.detail
+        expected = {
+            "use": "SMARTMEMORY_WORKSPACE_ID (env, accepted for this project)",
+            "override": "the project override of SMARTMEMORY_WORKSPACE_ID (sm env)",
+            "ignore": f"Recall workspace {real} comes from the current project folder",
+        }[decision]
+        assert expected in got.detail, got
+        assert real == {
+            "use": "ws_shellvalue1",
+            "override": "ws_override77",
+        }.get(decision, real)
+        assert (
+            decision != "ignore" or real.startswith("ws_") and real != "ws_shellvalue1"
+        )
+        return got
+
+    return probe
+
+
+def _probe_llm(kwargs, provider, model, model_src, endpoint_src, probe_url=None):
+    """Doctor's route equals core call_llm's route, and doctor names the winner."""
+
+    def probe(monkeypatch, tmp_path):
+        from smartmemory.utils import llm as core_llm
+
+        monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: False)
+        monkeypatch.chdir(tmp_path)  # no ./config.json for core get_config
+        seen = []
+        ctx = build(monkeypatch, tmp_path, **kwargs)
+        inner = ctx.http_get
+        ctx.http_get = lambda url, **kw: seen.append(url) or inner(url, **kw)
+        route = doctor._llm_route(ctx, doctor._config(ctx))
+        core = _core_route(monkeypatch, ctx)
+        assert route.provider == provider, route
+        assert core["endpoint"] == route.probe_url, (core, route)
+        assert core["model"] in (route.model_value, route.model_value.split("/")[-1])
+        assert (route.model_value, route.model_src) == model, route
+        assert route.model_src == model_src and route.endpoint_src == endpoint_src
+        got = doctor.check_llm(ctx)
+        if probe_url:
+            assert seen == [f"{probe_url}/models"], seen
+        return got
+
+    return probe
+
+
+_CANARY_SKIP = {
+    "SMARTMEMORY_MODE": "set per arm (local, remote) or to the canary in the invalid arm",
+    "SMARTMEMORY_DAEMON_PORT": "a non-number blocks every config row, so only the invalid arm sets it",
+    "SMARTMEMORY_CRASH_REPORTS": "conftest keeps crash reports off",
+}
+
+
+def _canary_env():
+    import re
+    from pathlib import Path
+
+    import smartmemory_app
+
+    names = set()
+    for path in Path(smartmemory_app.__file__).parent.rglob("*.py"):
+        names |= set(re.findall(r"SMARTMEMORY_[A-Z0-9_]+", path.read_text()))
+    names |= {
+        "GROQ_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+    }
+    return {n: f"DR1CANARY_{n}" for n in sorted(names - set(_CANARY_SKIP))}
+
+
+def _probe_h4(monkeypatch, tmp_path):
+    from smartmemory_app import support_diagnostics
+    from smartmemory_app.cli import cli
+
+    from smartmemory_app import bug_report
+
+    canaries = _canary_env()
+    url = "https://dr1canary-smartmemory-api-url.example"
+    # conftest pins the debug log to tmp_path. Restore the real data_dir lookup
+    # so the Storage line prints SMARTMEMORY_DATA_DIR (a tmp path here).
+    monkeypatch.setattr(
+        bug_report,
+        "debug_log_path",
+        lambda: Path(os.environ["SMARTMEMORY_DATA_DIR"]) / "cli-debug.log",
+    )
+    monkeypatch.setattr(
+        support_diagnostics, "_daemon_status", lambda: "Daemon: stopped (fake)"
+    )
+    arms = []
+    for mode in ("local", "remote", "invalid"):
+        environ = {
+            **canaries,
+            "SMARTMEMORY_API_URL": url,
+            "SMARTMEMORY_DATA_DIR": f"DR1CANARY_SMARTMEMORY_DATA_DIR-{mode}",
+            "SMARTMEMORY_MODE": "DR1CANARY_SMARTMEMORY_MODE"
+            if mode == "invalid"
+            else mode,
+        }
+        if mode == "invalid":
+            environ["SMARTMEMORY_DAEMON_PORT"] = "DR1CANARY_SMARTMEMORY_DAEMON_PORT"
+        ctx = build(
+            monkeypatch,
+            tmp_path / mode,
+            environ={**environ, "SHELL": "/bin/zsh"},
+            config=LOCAL_CFG + '[local]\nllm_provider = "ollama"\n',
+            keyring={"GROQ_API_KEY": True, "api_key": True},
+            http={
+                f"{url}/auth/me": (200, ME_OK),
+                f"{url}/ready": (200, READY_OK),
+            },
+            daemon=OK_DAEMON,
+            detect=[
+                FakeVar(n, "~/.zshrc:1", None) for n in environ if "SMARTMEMORY_" in n
+            ],
+            store="ok",
+        )
+        monkeypatch.setenv("HOME", str(ctx.home))
+        (ctx.home / ".zshrc").write_text(
+            "".join(f"export {n}=DR1CANARY_PROFILE_{n}\n" for n in canaries)
+        )
+        ctx.profile_has = doctor._default_profile_has
+        ctx.api_key = lambda: "DR1CANARY_KEYCHAIN_API_KEY"
+        monkeypatch.setattr(
+            doctor,
+            "run_checks",
+            lambda context="doctor", ctx=ctx: doctor.collect(ctx, context),
+        )
+        for args in (["doctor"], ["doctor", "--json"]):
+            out = CliRunner().invoke(cli, args)
+            text = out.output + (getattr(out, "stderr", "") or "")
+            assert "DR1CANARY_" not in text, (mode, args, text)
+            assert "SMARTMEMORY_" in text, text  # names, never values
+            if mode != "invalid" and "--json" not in args:  # masked lines really render
+                assert "Data directory: $SMARTMEMORY_DATA_DIR (env)" in text, text
+            if mode == "remote" and "--json" not in args:
+                assert "Network $SMARTMEMORY_API_URL (env)" in text, text
+            arms.append(f"{mode} {' '.join(args)}: exit {out.exit_code}, 0 canaries")
+    return "\n".join(arms)
+
+
+def _probe_h5(kind):
+    def probe(monkeypatch, tmp_path):
+        ctx = build(
+            monkeypatch,
+            tmp_path,
+            environ={"GROQ_API_KEY": "g", "SHELL": "/bin/zsh"},
+            config=LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+            keyring={
+                "GROQ_API_KEY": CheckUnavailable("OS keychain (KeyringError)")
+                if kind == "keychain"
+                else False
+            },
+        )
+        if kind == "profile":
+            monkeypatch.setenv("HOME", str(ctx.home))
+            (ctx.home / ".zshrc").mkdir()
+            ctx.profile_has = doctor._default_profile_has
+        got = doctor.check_llm(ctx)
+        named = {
+            "keychain": "OS keychain (KeyringError)",
+            "profile": "shell profile ~/.zshrc (IsADirectoryError)",
+        }[kind]
+        assert got.status == WARN, got
+        assert f"Not checked: {named}" in got.detail and named in got.fix, got
+        return got
+
+    return probe
+
+
+_OLLAMA = LOCAL_CFG + '[local]\nllm_provider = "ollama"\n'
+PROBES = [
+    ("H1", _probe_h1),
+    ("H2-use", _probe_h2("use")),
+    ("H2-override", _probe_h2("override")),
+    ("H2-ignore", _probe_h2("ignore")),
+    (
+        "H3-url",
+        _probe_llm(
+            {
+                "config": _OLLAMA + 'llm_base_url = "http://configured.test:1/v1"\n',
+                "environ": {"OPENAI_BASE_URL": "http://different.test:2/v1"},
+                "http": {"http://different.test:2/v1/models": (200, {})},
+            },
+            "ollama",
+            ("gpt-4o-mini", "core default"),
+            "core default",
+            "env OPENAI_BASE_URL",
+            probe_url="http://different.test:2/v1",
+        ),
+    ),
+    (
+        "H3-core",
+        _probe_llm(
+            {"environ": {"LLM_PROVIDER": "gemini", "LLM_API_KEY": "dummy"}},
+            "gemini",
+            ("gemini-2.0-flash", "default for LLM_PROVIDER gemini"),
+            "default for LLM_PROVIDER gemini",
+            "LLM_PROVIDER gemini",
+        ),
+    ),
+    (
+        "H3-model-env",
+        _probe_llm(
+            {
+                "config": _OLLAMA + 'llm_model = "file-model"\n',
+                "environ": {"SMARTMEMORY_LLM_MODEL": "env-model"},
+            },
+            "ollama",
+            ("env-model", "env SMARTMEMORY_LLM_MODEL"),
+            "env SMARTMEMORY_LLM_MODEL",
+            "provider default for llm_provider ollama",
+        ),
+    ),
+    (
+        "H3-model-file",
+        _probe_llm(
+            {"config": _OLLAMA + 'llm_model = "file-model"\n'},
+            "ollama",
+            ("file-model", "config file llm_model"),
+            "config file llm_model",
+            "provider default for llm_provider ollama",
+        ),
+    ),
+    ("H4", _probe_h4),
+    ("H5-keychain", _probe_h5("keychain")),
+    ("H5-profile", _probe_h5("profile")),
+]
+
+
+@pytest.mark.parametrize("probe", PROBES, ids=[p[0] for p in PROBES])
+def test_fix_r1_probe(probe, monkeypatch, tmp_path, capsys):
+    _id, run = probe
+    got = run(monkeypatch, tmp_path)
+    with capsys.disabled():
+        print(f"\nPROBE {_id}: {got}")

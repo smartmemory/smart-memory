@@ -183,7 +183,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
     return cfg
 
 
-def _apply_local_llm_env(cfg: SmartMemoryConfig) -> None:
+def _apply_local_llm_env(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]:
     """Route a local OpenAI-compatible ``llm_provider`` to the standard OpenAI env
     vars, so local LLMs need no bespoke integration — an OpenAI-compatible URL *is*
     the OpenAI path.
@@ -198,14 +198,56 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig) -> None:
 
     Child processes (the Tier-2 enrichment worker) inherit these vars. No-op for
     cloud providers / "none" — those users supply real provider keys themselves.
+
+    ``environ`` defaults to os.environ. Returns ``{name: origin}`` for every name
+    it set, so sm doctor can run the same translation on a copy (SETUP-DOCTOR-1).
     """
     default_base = _LOCAL_OPENAI_PROVIDERS.get((cfg.llm_provider or "").lower())
     if not default_base:
-        return
-    os.environ.setdefault("OPENAI_BASE_URL", cfg.llm_base_url or default_base)
-    os.environ.setdefault("OPENAI_API_KEY", "local-llm-no-key")
+        return {}
+    env = os.environ if environ is None else environ
+    derived: dict[str, str] = {}
+    if cfg.llm_base_url:
+        set_derived_env(
+            env, "OPENAI_BASE_URL", cfg.llm_base_url, "llm_base_url", derived
+        )
+    else:
+        set_derived_env(
+            env, "OPENAI_BASE_URL", default_base, "provider default", derived
+        )
+    set_derived_env(
+        env, "OPENAI_API_KEY", "local-llm-no-key", "local placeholder", derived
+    )
     if cfg.llm_model:
-        os.environ.setdefault("SMARTMEMORY_LLM_MODEL", cfg.llm_model)
+        set_derived_env(
+            env, "SMARTMEMORY_LLM_MODEL", cfg.llm_model, "llm_model", derived
+        )
+    return derived
+
+
+# Env names that SmartMemory itself put into os.environ from a config setting,
+# never inherited from the shell: {name: (the setting it came from, value)}. sm
+# doctor reads it so a translated value is not reported as "from env"
+# (SETUP-DOCTOR-1). Values here are config values or fixed placeholders.
+DERIVED_ENV: dict[str, tuple[str, str]] = {}
+
+
+def set_derived_env(
+    environ, name: str, value: str, origin: str, record: dict | None = None
+) -> bool:
+    """``environ.setdefault(name, value)`` that remembers it set the name.
+
+    Returns True when it set the value. A name already present is left alone,
+    exactly like setdefault, and is not recorded.
+    """
+    if name in environ:
+        return False
+    environ[name] = value
+    if record is not None:
+        record[name] = origin
+    if environ is os.environ:
+        DERIVED_ENV[name] = (origin, value)
+    return True
 
 
 def save_config(cfg: SmartMemoryConfig) -> None:

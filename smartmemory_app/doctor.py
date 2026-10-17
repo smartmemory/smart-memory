@@ -4,21 +4,24 @@ Every row names the setting the CLI resolved, the source that won (flag, env var
 config file, keychain, default) and a one-line fix when it is not PASS. A row
 that cannot be checked is WARN naming what was not checked, never silent.
 
-Precedence mirrored here (verified against the code, see the unit report):
-  mode           SMARTMEMORY_MODE > config [smartmemory].mode > unconfigured
-                 (storage.get_memory then writes a local config on first use)
-  API URL        SMARTMEMORY_API_URL > config [remote].api_url > default
-  API key        SMARTMEMORY_API_KEY > OS keychain > Windows credential file
-  workspace      SMARTMEMORY_TEAM_ID > config [remote].team_id > hosted default
-  data dir       SMARTMEMORY_DATA_DIR > ~/.smartmemory (config data_dir is not read)
-  daemon port    SMARTMEMORY_DAEMON_PORT > config [local].daemon_port > 9014
-  LLM provider   SMARTMEMORY_LLM_PROVIDER > config [local].llm_provider > none
-  LLM keys       env > OS keychain > shell profile export (daemon start only)
+Where a resolver exists, doctor calls it instead of re-deriving the answer
+(fix round 1 of the unit review):
+  mode, API URL, team, data dir, port, LLM settings   config.load_config
+  hosted X-Workspace-Id   remote_backend.resolve_team_id (RemoteMemory uses it)
+  local recall workspace  recall_format.derive_workspace_id
+  LLM env translation     config._apply_local_llm_env, storage.pin_llm_model
+  LLM provider and model  core llm.provider_pin, get_default_model and the
+                          extractor config call_llm reads
+  LLM endpoint            LLMSingleExtractor._resolve_api_base, then call_llm's
+                          own order (core has no single endpoint function)
+  API key                 SMARTMEMORY_API_KEY > OS keychain > Windows credential file
+  LLM keys                env > OS keychain > shell profile export (daemon start only)
 
-Secrets are never printed: rows show key NAMES and yes/no only. The
-inherited-variable row shows variable names and where they are exported, never
-their values. Non-secret effective settings (mode, URL host, workspace id, data
-dir, port) are printed because they are what this command exists to show.
+No env value is ever printed: a setting that came from an env variable is shown
+as ``$NAME``, and ``mask_env_values`` scrubs every line ``sm doctor`` prints.
+Rows show key NAMES and yes/no only. Values that come from the config file or
+the account (workspace id, URL host, data dir, port) are printed because they
+are what this command exists to show.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ import os
 import sqlite3
 import sys
 import tomllib
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
@@ -153,9 +157,13 @@ def _default_keyring_has(service: str, name: str) -> bool:
 
 
 def _default_profile_has(name: str) -> bool:
-    from smartmemory_app.setup import _read_env_from_profile
+    """The same profile lookup the daemon start uses, keeping "unreadable" apart from "absent"."""
+    from smartmemory_app.setup import _profile_lookup
 
-    return bool(_read_env_from_profile(name))
+    found = _profile_lookup(name)
+    if found.error:
+        raise CheckUnavailable(f"shell profile {found.profile} ({found.error})")
+    return bool(found.value)
 
 
 def _default_daemon_status():
@@ -240,6 +248,126 @@ def _safe_url(url: str) -> str:
         return f"{parts.scheme}://{host}{port}{parts.path.rstrip('/')}"
     except Exception:
         return "<invalid URL>"
+
+
+def _shell_env(ctx: Context) -> dict:
+    """The environment as the shell passed it, after this project's sm env
+    decisions but before SmartMemory translated config settings into env names
+    (config.DERIVED_ENV). Resolvers then run that translation again on a copy."""
+    env = dict(ctx.environ)
+    if ctx.from_process:
+        from smartmemory_app.config import DERIVED_ENV
+
+        for name, (_origin, value) in DERIVED_ENV.items():
+            if env.get(name) == value:
+                env.pop(name)
+    return env
+
+
+@contextmanager
+def _patched_environ(env: Mapping[str, str]):
+    """Run a resolver that reads os.environ against ``env``, then restore it.
+
+    Core's LLM resolvers take no environ argument. Doctor runs in the CLI's main
+    thread before any engine starts, so nothing else reads os.environ meanwhile.
+    """
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+# Env names whose values ``mask_env_values`` replaces. Every SMARTMEMORY_* name
+# is masked as well. These are the non-prefixed inputs the CLI and core read.
+_MASKED_NAMES = (
+    "GROQ_API_KEY",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "LLM_API_KEY",
+    "LLM_PROVIDER",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "BEDROCK_MODEL_ID",
+)
+# Values doctor checked against a closed set may be printed: they say nothing
+# about the user beyond the choice itself, and masking them would garble text
+# ("local" mode, a port number, a provider name).
+_CLOSED_VALUES = frozenset(
+    {
+        "local",
+        "remote",
+        "none",
+        "true",
+        "false",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "groq",
+        "openai",
+        "anthropic",
+        "gemini",
+        "deepseek",
+        "ollama",
+        "lmstudio",
+        "localai",
+        "bedrock",
+        "claude-agent",
+    }
+)
+
+
+def _value_forms(value: str) -> set[str]:
+    """``value`` plus the forms the CLI prints it in (trimmed, expanded, resolved, URL host)."""
+    forms = {value, value.rstrip("/")}
+    try:
+        expanded = os.path.expanduser(value)
+        forms |= {expanded, os.path.realpath(expanded), os.path.abspath(expanded)}
+    except (OSError, ValueError):
+        pass
+    if "://" in value:
+        safe = _safe_url(value)
+        forms.add(safe)
+        try:
+            parts = urlsplit(value)
+            if parts.hostname:
+                forms.add(parts.hostname)
+                if parts.port:
+                    forms.add(f"{parts.hostname}:{parts.port}")
+        except ValueError:
+            pass
+    return {form for form in forms if len(form) >= 4}
+
+
+def mask_env_values(text: str, environ: Optional[Mapping[str, str]] = None) -> str:
+    """Replace every env-sourced value in ``text`` with ``$NAME (env)``.
+
+    Covers every SMARTMEMORY_* name and the LLM inputs in ``_MASKED_NAMES``.
+    Names SmartMemory itself derived from the config file (config.DERIVED_ENV)
+    are config values, not env values, and stay visible.
+    """
+    from smartmemory_app.config import DERIVED_ENV
+
+    env = os.environ if environ is None else environ
+    pairs = []
+    for name, value in env.items():
+        if not (name.startswith("SMARTMEMORY_") or name in _MASKED_NAMES):
+            continue
+        derived = DERIVED_ENV.get(name)
+        if not value or (derived and derived[1] == value):
+            continue
+        if value.strip().lower() in _CLOSED_VALUES or value.strip().isdigit():
+            continue
+        pairs += [(form, f"${name} (env)") for form in _value_forms(value)]
+    for form, label in sorted(pairs, key=lambda pair: -len(pair[0])):
+        text = text.replace(form, label)
+    return text
 
 
 def _file_settings(ctx: Context) -> dict:
@@ -537,37 +665,66 @@ def check_credentials(ctx: Context) -> Row:
     return Row("API key", PASS, f"present (from {source})")
 
 
-def _workspace_source(ctx: Context, cfg) -> tuple[str, str]:
-    """(workspace id or '', where it came from) for the hosted X-Workspace-Id."""
+def _decided_env_label(ctx: Context, name: str) -> Optional[str]:
+    """How an sm env decision labels a value the CLI took from ``name``, or None when undecided."""
+    decision = _env_decision(ctx, name)
+    if decision == "use":
+        return f"{name} (env, accepted for this project)"
+    if decision == "override":
+        return f"the project override of {name} (sm env)"
+    return None
+
+
+def _team_source(ctx: Context, cfg) -> tuple[str, str]:
+    """(configured team id or '', where it came from). load_config merges env over file."""
+    if not cfg.team_id:
+        return "", ""
     if ctx.environ.get("SMARTMEMORY_TEAM_ID"):
-        return cfg.team_id, _env_source(ctx, "SMARTMEMORY_TEAM_ID")
-    if cfg.team_id:
-        return cfg.team_id, "config file team_id"
-    return "", "account default"
+        label = _decided_env_label(ctx, "SMARTMEMORY_TEAM_ID")
+        return "$SMARTMEMORY_TEAM_ID", label or _env_source(ctx, "SMARTMEMORY_TEAM_ID")
+    return cfg.team_id, "config file team_id"
 
 
-def check_tenant(ctx: Context) -> Row:
-    cfg = _config(ctx)
-    if cfg.mode != "remote":
-        recall_ws = ctx.environ.get("SMARTMEMORY_WORKSPACE_ID")
-        if recall_ws and _env_decision(ctx, "SMARTMEMORY_WORKSPACE_ID") not in (
-            "use",
-            "override",
-        ):
-            return Row(
-                "Tenant and workspace",
-                WARN,
-                "local store, no tenant. Recall workspace $SMARTMEMORY_WORKSPACE_ID comes from "
-                f"{_env_source(ctx, 'SMARTMEMORY_WORKSPACE_ID')}, not from this folder.",
-                "Unset SMARTMEMORY_WORKSPACE_ID to scope recall by the current project.",
-            )
+def _local_workspace(ctx: Context) -> Row:
+    """Ask recall_format.derive_workspace_id, the resolver recall uses, and name its source."""
+    from smartmemory_app.recall_format import derive_workspace_id
+
+    with _patched_environ(ctx.environ):
+        workspace = derive_workspace_id(str(ctx.cwd))
+    env_value = ctx.environ.get("SMARTMEMORY_WORKSPACE_ID")
+    if not (env_value and workspace == env_value):
         return Row(
             "Tenant and workspace",
             PASS,
-            "local store, no tenant. Recall workspace comes from the current project folder.",
+            f"local store, no tenant. Recall workspace {workspace} comes from the current project folder.",
         )
-    workspace, where = _workspace_source(ctx, cfg)
-    ws_label = _shown(ctx, "SMARTMEMORY_TEAM_ID", workspace) if workspace else ""
+    label = _decided_env_label(ctx, "SMARTMEMORY_WORKSPACE_ID")
+    if label:
+        return Row(
+            "Tenant and workspace",
+            PASS,
+            f"local store, no tenant. Recall workspace comes from {label}, not from this folder.",
+        )
+    return Row(
+        "Tenant and workspace",
+        WARN,
+        "local store, no tenant. Recall workspace $SMARTMEMORY_WORKSPACE_ID comes from "
+        f"{_env_source(ctx, 'SMARTMEMORY_WORKSPACE_ID')}, not from this folder.",
+        "Unset SMARTMEMORY_WORKSPACE_ID to scope recall by the current project, or run: sm env",
+    )
+
+
+def check_tenant(ctx: Context) -> Row:
+    from smartmemory_app.remote_backend import resolve_team_id
+
+    cfg = _config(ctx)
+    if cfg.mode != "remote":
+        return _local_workspace(ctx)
+    team_label, team_where = _team_source(ctx, cfg)
+    if team_label:
+        ws_text = f"the CLI sends workspace {team_label} (from {team_where})"
+    else:
+        ws_text = "the CLI sends the account's default team from /auth/me"
     try:
         source = _api_key_source(ctx)
     except CheckUnavailable as exc:
@@ -580,7 +737,7 @@ def check_tenant(ctx: Context) -> Row:
             "Tenant and workspace",
             WARN,
             f"not checked: no API key{' (' + unread + ' unreadable)' if unread else ''}, "
-            f"so the account behind the CLI is unknown. Workspace: {ws_label or 'account default'} (from {where}).",
+            f"so the account behind the CLI is unknown. Workspace: {ws_text}.",
             "Run: sm setup --mode remote --api-key KEY",
         )
     url = f"{_api_url(ctx)}/auth/me"
@@ -601,7 +758,7 @@ def check_tenant(ctx: Context) -> Row:
             "Tenant and workspace",
             WARN,
             f"not checked: {url_label} unreachable ({type(exc).__name__}). "
-            f"Workspace: {ws_label or 'account default'} (from {where}).",
+            f"Workspace: {ws_text}.",
             "Check your network, then run: sm doctor",
         )
     if status == 401:
@@ -616,66 +773,275 @@ def check_tenant(ctx: Context) -> Row:
             "Tenant and workspace",
             WARN,
             f"not checked: {url_label} answered HTTP {status}. "
-            f"Workspace: {ws_label or 'account default'} (from {where}).",
+            f"Workspace: {ws_text}, which needs /auth/me when no team is set.",
             "Run sm doctor again. If it persists, run: sm report",
         )
     account = body.get("email") or body.get("id") or "unknown account"
     tenant = body.get("tenant_id") or "unknown"
-    console_ws = body.get("active_workspace_id") or body.get("default_workspace_id")
-    effective = ws_label or console_ws or "unknown"
-    detail = f"account {account}, tenant {tenant}, workspace {effective} (from {where})"
-    if workspace and console_ws and workspace != console_ws:
+    # The same resolver RemoteMemory uses for the X-Workspace-Id header.
+    sent = resolve_team_id(cfg.team_id, body)
+    if not team_label:
+        team_label, team_where = sent, "account default_team_id from /auth/me"
+    detail = f"account {account}, tenant {tenant}"
+    if not sent:
         return Row(
             "Tenant and workspace",
             WARN,
-            f"{detail}. Your account's default workspace, which the web console opens, is {console_ws}.",
-            "To match the console, unset SMARTMEMORY_TEAM_ID or remove team_id from "
-            f"{ctx.config_path()}.",
+            f"{detail}. The CLI sends no workspace: no team is set and the account has no default team.",
+            f"Set team_id in {ctx.config_path()}, or set SMARTMEMORY_TEAM_ID for this shell.",
+        )
+    detail += f". The CLI sends workspace {team_label} (from {team_where})"
+    console_ws = body.get("active_workspace_id") or body.get("default_workspace_id")
+    if console_ws and sent != console_ws:
+        return Row(
+            "Tenant and workspace",
+            WARN,
+            f"{detail}, but the web console opens workspace {console_ws}, so the CLI and the console show different memories.",
+            f"To use the console's workspace from the CLI, set team_id = {console_ws} under [remote] in "
+            f"{ctx.config_path()} (an env SMARTMEMORY_TEAM_ID still wins over it).",
         )
     return Row(
         "Tenant and workspace",
         PASS,
-        f"{detail}. Compare with the workspace shown in the web console.",
+        f"{detail}, the same workspace the web console opens."
+        if console_ws
+        else f"{detail}. Compare with the workspace shown in the web console.",
     )
 
 
 def _llm_key_sources(ctx: Context, name: str) -> tuple[list[str], list[str]]:
-    """(sources holding the key, sources that could not be read). Never values."""
+    """(sources holding the key, sources that could not be read, named). Never values."""
     found, unread = [], []
     if ctx.environ.get(name):
         found.append("env")
     try:
         if ctx.keyring_has("smartmemory", name):
             found.append("OS keychain")
-    except CheckUnavailable:
-        unread.append("OS keychain")
+    except CheckUnavailable as exc:
+        unread.append(str(exc) or "OS keychain")
     try:
         if ctx.profile_has(name):
             found.append("shell profile")
-    except Exception:
-        unread.append("shell profile")
+    except CheckUnavailable as exc:
+        unread.append(str(exc) or "shell profile")
+    except Exception as exc:
+        unread.append(f"shell profile ({type(exc).__name__})")
     return found, unread
 
 
+@dataclass(frozen=True)
+class LlmRoute:
+    """Provider, model and endpoint the CLI's LLM calls use, each with its source."""
+
+    provider: str
+    provider_src: str
+    model: str  # display form: a value from env is shown as $NAME
+    model_src: str
+    endpoint: str  # display form, "" for the Claude Agent SDK
+    endpoint_src: str
+    probe_url: str  # the real URL, for probing a local server. Never rendered.
+    pin: Optional[str]  # core LLM_PROVIDER pin
+    from_base_url: bool  # endpoint is an explicit OpenAI-compatible base URL
+    model_value: str = ""  # the real model id, for tests. Never rendered.
+
+    def text(self) -> str:
+        endpoint = (
+            f"endpoint {self.endpoint} (from {self.endpoint_src})"
+            if self.endpoint
+            else f"no HTTP endpoint ({self.endpoint_src})"
+        )
+        return (
+            f"provider {self.provider} (from {self.provider_src}), "
+            f"model {self.model} (from {self.model_src}), {endpoint}"
+        )
+
+
+def _env_label(ctx: Context, shell: Mapping[str, str], name: str) -> str:
+    label = _decided_env_label(ctx, name) if name.startswith("SMARTMEMORY_") else None
+    return label or _env_source(ctx, name)
+
+
+def _llm_route(ctx: Context, cfg) -> LlmRoute:
+    """Resolve the LLM route with the code every LLM call runs.
+
+    1. The env the shell passed (``_shell_env``), then SmartMemory's own
+       translation of the config into env names on a copy:
+       config._apply_local_llm_env (load_config) and storage.pin_llm_model
+       (apply_runtime_config, run before every local engine starts).
+    2. Under that env: core provider_pin, the extractor config model call_llm
+       reads first, get_default_model, and LLMSingleExtractor._resolve_api_base.
+    3. The endpoint follows call_llm's order (core utils/llm.py): a Bedrock pin
+       returns first, then an explicit base URL (the extractor's or
+       OPENAI_BASE_URL), the Claude Agent SDK, the pin's base, Groq and Gemini
+       model names, and the OpenAI client default.
+    """
+    from smartmemory.plugins.extractors.llm_single import LLMSingleExtractor
+    from smartmemory.utils import get_config
+    from smartmemory.utils import llm as core_llm
+
+    from smartmemory_app.config import _LOCAL_OPENAI_PROVIDERS, _apply_local_llm_env
+    from smartmemory_app.storage import pin_llm_model
+
+    shell = _shell_env(ctx)
+    env = dict(shell)
+    derived = {**_apply_local_llm_env(cfg, env), **pin_llm_model(cfg, env)}
+    with _patched_environ(env):
+        pin = core_llm.provider_pin()
+        try:  # call_llm reads the core extractor config first (utils/llm.py)
+            section = get_config("extractor")
+            llm_cfg = section.get("llm") if hasattr(section, "get") else None
+            core_model = (
+                (llm_cfg.get("model_name") or llm_cfg.get("model"))
+                if isinstance(llm_cfg, dict)
+                else None
+            )
+        except Exception:
+            core_model = None  # call_llm skips an unreadable core config the same way
+        model = core_model or core_llm.get_default_model()
+        extractor_base = LLMSingleExtractor()._resolve_api_base()
+        base_url = os.environ.get("OPENAI_BASE_URL")
+        agent = (
+            core_llm._is_claude_agent_model(model)
+            and core_llm._claude_agent_sdk_available()
+        )
+        pinned = core_llm._PINNED_PROVIDERS
+        groq_model = core_llm.is_groq_model(model)
+
+    def origin(name: str) -> str:
+        """Where an env name the resolvers read came from."""
+        if name in derived:
+            setting = derived[name]
+            if setting in ("llm_base_url", "llm_model"):
+                env_name = f"SMARTMEMORY_{setting.upper()}"
+                if shell.get(env_name):
+                    return _env_label(ctx, shell, env_name)
+                return f"config file {setting}"
+            return f"{setting} for llm_provider {cfg.llm_provider}"
+        return _env_label(ctx, shell, name)
+
+    def shown(name: str, value: str) -> str:
+        """A value is printed only when it did not come from an env variable."""
+        if name in derived and derived[name] in ("llm_model", "llm_base_url"):
+            env_name = f"SMARTMEMORY_{derived[name].upper()}"
+            return f"${env_name}" if shell.get(env_name) else value
+        if name in derived:
+            return value  # a provider default
+        return f"${name}"
+
+    # Model, in get_default_model's order (core utils/llm.py).
+    if core_model:
+        model_label, model_src = core_model, "core config extractor.llm.model_name"
+    elif env.get("SMARTMEMORY_LLM_MODEL"):
+        model_label = shown("SMARTMEMORY_LLM_MODEL", model)
+        model_src = origin("SMARTMEMORY_LLM_MODEL")
+    elif pin == "bedrock":
+        model_label = "$BEDROCK_MODEL_ID" if env.get("BEDROCK_MODEL_ID") else "none"
+        model_src = _env_label(ctx, shell, "BEDROCK_MODEL_ID")
+    elif pin in pinned:
+        model_label, model_src = model, f"default for LLM_PROVIDER {pin}"
+    elif model == "sonnet" and agent:
+        model_label, model_src = model, "Claude Agent SDK default"
+    elif env.get("GROQ_API_KEY") and groq_model:
+        model_label, model_src = model, "default when GROQ_API_KEY is set"
+    elif env.get("GEMINI_API_KEY") and model.startswith("gemini"):
+        model_label, model_src = model, "default when GEMINI_API_KEY is set"
+    elif env.get("OPENAI_MODEL"):
+        model_label, model_src = "$OPENAI_MODEL", _env_label(ctx, shell, "OPENAI_MODEL")
+    else:
+        model_label, model_src = model, "core default"
+
+    # Endpoint, in call_llm's order.
+    probe_url, from_base_url = "", False
+    if pin == "bedrock":
+        endpoint, endpoint_src = "AWS Bedrock", _env_label(ctx, shell, "LLM_PROVIDER")
+    elif extractor_base:
+        endpoint = probe_url = extractor_base
+        endpoint_src = "the extractor's Groq route, GROQ_API_KEY is set"
+    elif base_url:
+        probe_url, from_base_url = base_url, True
+        endpoint = (
+            _safe_url(base_url)
+            if shown("OPENAI_BASE_URL", base_url) == base_url
+            else shown("OPENAI_BASE_URL", base_url)
+        )
+        endpoint_src = origin("OPENAI_BASE_URL")
+    elif agent:
+        endpoint, endpoint_src = "", "Claude Agent SDK, uses your Claude Code sign-in"
+    elif pin in pinned:
+        endpoint = probe_url = pinned[pin][0]
+        endpoint_src = f"LLM_PROVIDER {pin}"
+    elif groq_model:
+        endpoint = probe_url = "https://api.groq.com/openai/v1"
+        endpoint_src = "a Groq model name"
+    elif model.lower().startswith("gemini"):
+        endpoint = probe_url = (
+            "https://generativelanguage.googleapis.com/v1beta/openai/"
+        )
+        endpoint_src = "a Gemini model name"
+    else:
+        endpoint = probe_url = "https://api.openai.com/v1"
+        endpoint_src = "the OpenAI client default"
+
+    # Provider: a core pin routes every call. Otherwise the CLI's llm_provider.
+    app_provider = (cfg.llm_provider or "none").lower()
+    if pin:
+        provider, provider_src = pin, _env_label(ctx, shell, "LLM_PROVIDER")
+        if app_provider not in ("none", pin):
+            provider_src += f", which overrides llm_provider {app_provider}"
+    else:
+        provider = app_provider
+        provider_src = (
+            _env_label(ctx, shell, "SMARTMEMORY_LLM_PROVIDER")
+            if shell.get("SMARTMEMORY_LLM_PROVIDER")
+            else "config file"
+            if cfg.llm_provider
+            else "default"
+        )
+        if provider not in _LOCAL_OPENAI_PROVIDERS and provider not in (
+            "none",
+            "claude-agent",
+            *_PROVIDER_KEYS,
+        ):
+            provider = _shown(ctx, "SMARTMEMORY_LLM_PROVIDER", provider)
+    return LlmRoute(
+        provider,
+        provider_src,
+        model_label,
+        model_src,
+        endpoint,
+        endpoint_src,
+        probe_url,
+        pin,
+        from_base_url,
+        model,
+    )
+
+
 def check_llm(ctx: Context, context: str = "doctor") -> Row:
-    from smartmemory_app.config import LLM_KEY_ENV_VARS
+    from smartmemory_app.config import LLM_KEY_ENV_VARS, _LOCAL_OPENAI_PROVIDERS
 
     cfg = _config(ctx)
     if cfg.mode == "remote":
         return Row("LLM", PASS, "hosted: the SmartMemory service supplies the LLM")
-    provider = (cfg.llm_provider or "none").lower()
-    prov_src = (
-        _env_source(ctx, "SMARTMEMORY_LLM_PROVIDER")
-        if ctx.environ.get("SMARTMEMORY_LLM_PROVIDER")
-        else "config file"
-    )
-    where_keys = {}
+    try:
+        route = _llm_route(ctx, cfg)
+    except Exception as exc:
+        log.warning("doctor could not resolve the LLM route: %s", type(exc).__name__)
+        return Row(
+            "LLM",
+            WARN,
+            f"not checked: the LLM provider, model and endpoint could not be resolved ({type(exc).__name__})",
+            "Run: sm report to send the details.",
+        )
+    where_keys: dict[str, list[str]] = {}
     unread_all: set[str] = set()
     for name in LLM_KEY_ENV_VARS:
         found, unread = _llm_key_sources(ctx, name)
         unread_all.update(unread)
         if found:
             where_keys[name] = found
+    if ctx.environ.get("LLM_API_KEY"):  # core's key for a pinned provider
+        where_keys["LLM_API_KEY"] = ["env"]
     keys_text = (
         ", ".join(
             f"{name} yes ({' + '.join(srcs)})" for name, srcs in where_keys.items()
@@ -686,79 +1052,115 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
         f" Not checked: {', '.join(sorted(unread_all))}." if unread_all else ""
     )
     ask_off = "sm ask" + (" in the tour" if context == "tour" else "")
+    route_text = route.text()
 
-    from smartmemory_app.config import _LOCAL_OPENAI_PROVIDERS
+    def row(status: str, detail: str, fix: str = "") -> Row:
+        # A source that could not be read never leaves the row at PASS (H5).
+        if unread_all:
+            detail += not_checked
+            if status == PASS:
+                status = WARN
+                fix = (
+                    f"Make {', '.join(sorted(unread_all))} readable (unlock the keychain, "
+                    "or fix the file), then run: sm doctor"
+                )
+        return Row("LLM", status, detail, fix)
 
-    if provider in _LOCAL_OPENAI_PROVIDERS:
-        base = (cfg.llm_base_url or _LOCAL_OPENAI_PROVIDERS[provider]).rstrip("/")
-        base_label = _shown(ctx, "SMARTMEMORY_LLM_BASE_URL", _safe_url(base))
+    provider = route.provider
+    app_provider = (cfg.llm_provider or "none").lower()
+    # An explicit base URL wins over a pin too (call_llm skips the pin then).
+    if app_provider in _LOCAL_OPENAI_PROVIDERS and (
+        not route.pin or route.from_base_url
+    ):
+        if not route.from_base_url:
+            return row(
+                WARN,
+                f"{route_text}. llm_provider {app_provider} is set, but LLM calls do not go to it.",
+                "Unset GROQ_API_KEY or SMARTMEMORY_LLM_MODEL if you meant the local server, then run: sm doctor",
+            )
         try:
             status, _ = ctx.cached(
-                f"llm_{provider}", lambda: ctx.http_get(f"{base}/models", timeout=2.0)
+                f"llm_{route.probe_url}",
+                lambda: ctx.http_get(
+                    f"{route.probe_url.rstrip('/')}/models", timeout=2.0
+                ),
             )
         except Exception as exc:
-            return Row(
-                "LLM",
+            return row(
                 FAIL,
-                f"{provider} (from {prov_src}) is not answering at {base_label} ({type(exc).__name__})",
-                f"Start {provider}, or run: sm config llm_provider none",
+                f"{route_text}, not answering ({type(exc).__name__})",
+                f"Start {app_provider} at that endpoint, or run: sm config llm_provider none",
             )
         if status >= 400:
-            return Row(
-                "LLM",
+            return row(
                 FAIL,
-                f"{provider} (from {prov_src}) answered HTTP {status} at {base_label}",
-                f"Check {provider} is serving its OpenAI-compatible API, then run: sm doctor",
+                f"{route_text}, answered HTTP {status}",
+                f"Check {app_provider} is serving its OpenAI-compatible API, then run: sm doctor",
             )
-        return Row(
-            "LLM",
-            PASS,
-            f"{provider} (from {prov_src}), server answering, no key needed",
-        )
-    if provider == "claude-agent":
-        return Row(
-            "LLM",
+        return row(PASS, f"{route_text}, server answering, no key needed")
+    if not route.pin and app_provider == "claude-agent":
+        return row(
             WARN,
-            f"claude-agent (from {prov_src}) uses your Claude Code sign-in, which is not checked here",
+            f"claude-agent (from {route.provider_src}) uses your Claude Code sign-in, which is not checked here. {route_text}.",
             "Run claude once to sign in, then: sm doctor",
         )
-    if provider in _PROVIDER_KEYS:
+    if route.pin == "bedrock":
+        return row(
+            WARN,
+            f"{route_text}. AWS credentials and the Bedrock model allowlist are not checked here.",
+            "Check AWS_REGION, BEDROCK_ENABLED and BEDROCK_MODEL_ID, then run: sm doctor",
+        )
+    if route.pin:
+        from smartmemory.utils.llm import _PINNED_PROVIDERS
+
+        needed = _PINNED_PROVIDERS.get(route.pin, ("", ("OPENAI_API_KEY",), ""))[1]
+        if not any(name in where_keys for name in needed):
+            return row(
+                FAIL,
+                f"{route_text}, but none of {', '.join(needed)} is set, so {ask_off} and LLM extraction fail.",
+                f"Set {needed[-1]}, or unset LLM_PROVIDER, then run: sm restart",
+            )
+    elif provider in _PROVIDER_KEYS:
         name = _PROVIDER_KEYS[provider]
         if name not in where_keys:
-            return Row(
-                "LLM",
+            return row(
                 FAIL,
-                f"{provider} (from {prov_src}) but {name} is missing, so {ask_off} and LLM extraction fail.{not_checked}",
+                f"{route_text}, but {name} is missing, so {ask_off} and LLM extraction fail.",
                 f"Set {name}, then run: sm restart",
             )
     elif provider != "none":
-        return Row(
-            "LLM",
+        return row(
             WARN,
-            f"provider {_shown(ctx, 'SMARTMEMORY_LLM_PROVIDER', provider)} (from {prov_src}) is not one doctor knows how to check. Keys: {keys_text}.",
+            f"{route_text}. That provider is not one doctor knows how to check. Keys: {keys_text}.",
             "Run: sm config llm_provider to see the supported values.",
         )
     elif not where_keys:
-        return Row(
-            "LLM",
+        return row(
             WARN,
-            f"no LLM key ({', '.join(LLM_KEY_ENV_VARS)} all absent), so {ask_off} and LLM extraction are off.{not_checked}",
+            f"no LLM key ({', '.join(LLM_KEY_ENV_VARS)} all absent), so {ask_off} and LLM extraction are off.",
             "Set GROQ_API_KEY (or another provider key), run sm config llm_provider groq, then sm restart",
         )
-    detail = f"provider {provider} (from {prov_src}). Keys: {keys_text}.{not_checked}"
+    if not any(name in where_keys for name in LLM_KEY_ENV_VARS):
+        # config.llm_key_present gates the daemon worker and Tier-2 enqueue on these names.
+        return row(
+            WARN,
+            f"{route_text}. Keys: {keys_text}. LLM extraction stays off: the CLI starts it only when one of "
+            f"{', '.join(LLM_KEY_ENV_VARS)} is set.",
+            f"Set the provider's own key ({', '.join(LLM_KEY_ENV_VARS)}), then run: sm restart",
+        )
+    detail = f"{route_text}. Keys: {keys_text}."
     if context != "tour":
         try:
             info = ctx.cached("daemon", ctx.daemon_status)
         except Exception:
             info = None
         if isinstance(info, dict) and info.get("llm_key_present") is False:
-            return Row(
-                "LLM",
+            return row(
                 WARN,
                 f"{detail} The running daemon started without a key, so it is not using one.",
                 "Run: sm restart",
             )
-    return Row("LLM", PASS, detail)
+    return row(PASS, detail)
 
 
 def _port_source(ctx: Context, cfg) -> str:
@@ -898,8 +1300,12 @@ def check_graph(ctx: Context) -> Row:
             "the hosted graph store is down",
             "The hosted service is having trouble. Try again in a few minutes.",
         )
+    from smartmemory_app.storage import _resolve_data_dir
+
+    # The resolver every local sm command opens the store with (storage.py).
+    with _patched_environ({**ctx.environ, "HOME": str(ctx.home)}):
+        data_dir = _resolve_data_dir()
     raw_dir = ctx.environ.get("SMARTMEMORY_DATA_DIR")
-    data_dir = Path(raw_dir) if raw_dir else ctx.home / ".smartmemory"
     where = _env_source(ctx, "SMARTMEMORY_DATA_DIR") if raw_dir else "default"
     db = data_dir.expanduser() / "memory.db"
     db_label = "$SMARTMEMORY_DATA_DIR/memory.db" if raw_dir else str(db)
@@ -1016,9 +1422,16 @@ def failures(rows: list[Row]) -> list[Row]:
     return [row for row in rows if row.status == FAIL]
 
 
+def _masked(row: Row) -> Row:
+    return Row(
+        row.check, row.status, mask_env_values(row.detail), mask_env_values(row.fix)
+    )
+
+
 def render(rows: list[Row]) -> str:
     if not rows:
         return ""
+    rows = [_masked(row) for row in rows]
     width = max(len(row.check) for row in rows)
     lines = ["What the CLI will use:"]
     for row in rows:
@@ -1029,7 +1442,7 @@ def render(rows: list[Row]) -> str:
 
 
 def to_json(rows: list[Row]) -> list[dict]:
-    return [asdict(row) for row in rows]
+    return [asdict(_masked(row)) for row in rows]
 
 
 def require_healthy(context: str) -> list[Row]:

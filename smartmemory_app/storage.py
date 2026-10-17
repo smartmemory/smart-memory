@@ -32,6 +32,7 @@ from smartmemory_app.config import (
     _detect_and_migrate,
     is_configured,
     load_config,
+    set_derived_env,
 )
 
 log = logging.getLogger(__name__)
@@ -187,7 +188,18 @@ def apply_runtime_config() -> SmartMemoryConfig:
     cfg = load_config()
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
+    pin_llm_model(cfg)
+    return cfg
 
+
+def pin_llm_model(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]:
+    """Pin SMARTMEMORY_LLM_MODEL from config. Returns ``{name: origin}`` it set.
+
+    ``environ`` defaults to os.environ. sm doctor runs it on a copy so it reports
+    the model every command will use (SETUP-DOCTOR-1).
+    """
+    env = os.environ if environ is None else environ
+    derived: dict[str, str] = {}
     # CORE-LLM-GEMINI-1 (review finding 2): pin the LLM model from config so the
     # configured provider is honored. An explicit cfg.llm_model is respected for
     # any provider (previously ignored entirely); a gemini provider with no explicit
@@ -206,22 +218,39 @@ def apply_runtime_config() -> SmartMemoryConfig:
     # Pinning the model, not core's LLM_PROVIDER: that pin also rewrites key and
     # endpoint resolution for every call in the process, and "openai" as a pin
     # does not change get_default_model() at all.
-    if not os.environ.get("SMARTMEMORY_LLM_MODEL"):
-        _llm_model = cfg.llm_model or _provider_default_model(cfg.llm_provider)
-        if _llm_model:
-            os.environ["SMARTMEMORY_LLM_MODEL"] = _llm_model
-    return cfg
+    if not env.get("SMARTMEMORY_LLM_MODEL"):
+        env.pop("SMARTMEMORY_LLM_MODEL", None)  # an empty value counts as unset
+        if cfg.llm_model:
+            set_derived_env(
+                env, "SMARTMEMORY_LLM_MODEL", cfg.llm_model, "llm_model", derived
+            )
+        else:
+            provider_model = _provider_default_model(cfg.llm_provider, env)
+            if provider_model:
+                set_derived_env(
+                    env,
+                    "SMARTMEMORY_LLM_MODEL",
+                    provider_model,
+                    f"{(cfg.llm_provider or '').lower()} provider default",
+                    derived,
+                )
+    return derived
 
 
-def _provider_default_model(provider: str | None) -> str | None:
-    """The model a configured cloud provider means when the config names none."""
+def _provider_default_model(provider: str | None, environ=None) -> str | None:
+    """The model a configured cloud provider means when the config names none.
+
+    ``environ`` is the env the pin writes to (os.environ when None), so OPENAI_MODEL
+    is read from the same place the result lands.
+    """
+    env = os.environ if environ is None else environ
     provider = (provider or "").lower()
     if provider == "gemini":
         return "gemini/gemini-2.0-flash"
     if provider == "groq":
         return "openai/gpt-oss-120b"  # core's Groq default (is_groq_model routes it)
     if provider == "openai":
-        return os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
+        return env.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
     return None
 
 

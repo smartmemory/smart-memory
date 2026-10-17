@@ -58,6 +58,21 @@ class RemoteBackendError(RuntimeError):
             self.result = result
 
 
+def resolve_team_id(team_id: str, me: Any) -> str:
+    """The X-Workspace-Id the CLI sends when a call names no workspace.
+
+    ``team_id`` is the resolved config value (env SMARTMEMORY_TEAM_ID over the
+    config file, see config.load_config). Empty falls back to the account's
+    ``default_team_id`` from ``GET /auth/me``. sm doctor calls this too, so its
+    workspace row cannot drift from the header (SETUP-DOCTOR-1).
+    """
+    if team_id:
+        return team_id
+    if isinstance(me, dict):
+        return me.get("default_team_id") or ""
+    return ""
+
+
 class RemoteMemory:
     """Thin httpx client with the same interface as local SmartMemory for MCP tools,
     plus graph methods matching local_api.py response shapes for the viewer."""
@@ -97,8 +112,7 @@ class RemoteMemory:
                 user = r.json()
                 self.web_default_team_id = user.get("default_team_id") or ""
                 self.web_tenant_id = user.get("tenant_id") or ""
-                if not self._team_id:
-                    self._team_id = self.web_default_team_id
+                self._team_id = resolve_team_id(self._team_id, user)
         except Exception:
             pass  # bootstrap is best-effort; real errors surface on tool calls
 

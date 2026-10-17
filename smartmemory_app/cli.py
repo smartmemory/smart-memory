@@ -3161,10 +3161,13 @@ def doctor_cmd(
     try:
         rows = local_checks()
         for row in rows:
-            click.echo(row)
+            # Env-sourced values (API URL, data dir) print as $NAME (env).
+            click.echo(_doctor.mask_env_values(row))
     except Exception as exc:
         click.echo(
-            redact_credentials(f"Warning: local diagnostics unavailable ({exc})")
+            _doctor.mask_env_values(
+                redact_credentials(f"Warning: local diagnostics unavailable ({exc})")
+            )
         )
 
     if not status.doctor_ok:

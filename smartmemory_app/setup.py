@@ -625,25 +625,45 @@ def _apply_setup_result(
 # ── Mode setup helpers ────────────────────────────────────────────────────────
 
 
-def _read_env_from_profile(name: str) -> str:
-    """Try to read an export value from the user's shell profile."""
+@dataclass(frozen=True)
+class ProfileLookup:
+    """One shell-profile lookup. ``error`` is set when the profile exists but could
+    not be read, so a caller can tell "unreadable" from "not exported there"."""
+
+    profile: str  # display form, e.g. ~/.zshrc
+    value: str = ""
+    error: str = ""  # exception class name when unreadable
+
+
+def _profile_lookup(name: str) -> ProfileLookup:
+    """Read ``export NAME=...`` from the user's shell profile (SETUP-DOCTOR-1)."""
     shell = os.environ.get("SHELL", "/bin/zsh")
     if "zsh" in shell:
-        profile = Path.home() / ".zshrc"
+        rel = ".zshrc"
     elif "bash" in shell:
-        profile = Path.home() / ".bashrc"
+        rel = ".bashrc"
     else:
-        profile = Path.home() / ".profile"
+        rel = ".profile"
+    profile = Path.home() / rel
+    shown = f"~/{rel}"
     try:
-        for line in profile.read_text(encoding="utf-8").splitlines():
-            stripped = line.strip()
-            if stripped.startswith(f"export {name}="):
-                # Extract value — handles export KEY="value" and export KEY=value
-                val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
-                return val
-    except Exception:
-        pass
-    return ""
+        text = profile.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ProfileLookup(shown)
+    except Exception as exc:
+        return ProfileLookup(shown, error=type(exc).__name__)
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f"export {name}="):
+            # Extract value — handles export KEY="value" and export KEY=value
+            val = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+            return ProfileLookup(shown, value=val)
+    return ProfileLookup(shown)
+
+
+def _read_env_from_profile(name: str) -> str:
+    """Try to read an export value from the user's shell profile ("" when absent or unreadable)."""
+    return _profile_lookup(name).value
 
 
 def _persist_env_var(name: str, value: str) -> None:
