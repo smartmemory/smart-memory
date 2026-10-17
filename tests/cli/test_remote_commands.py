@@ -7,7 +7,7 @@ import pytest
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
-from smartmemory_app import cli as cli_module, config, storage
+from smartmemory_app import cli as cli_module, config, preflight, storage
 
 
 ANSWER = {
@@ -58,7 +58,11 @@ def hosted(monkeypatch, tmp_path):
         assert str(request.url).startswith("https://test-remote.invalid/api/")
         assert request.headers["Authorization"] == "Bearer test_remote_key"
         if request.url.path.endswith("/auth/me"):
-            return httpx.Response(200, json={"default_team_id": "test_discovered_team"})
+            # The login default matches the CLI workspace unless a test overrides it,
+            # so CLI-TENANT-1's mismatch warning stays out of unrelated output checks.
+            return httpx.Response(
+                200, json={"default_team_id": reply.get("team", "test_remote_team")}
+            )
         assert request.headers["X-Workspace-Id"] == reply.get(
             "team", "test_remote_team"
         )
@@ -211,6 +215,8 @@ def test_remote_ask_invalid_success_is_not_an_answer(hosted, body):
 
 def test_local_ask_unchanged(hosted, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_MODE", "local")
+    # Hermetic: without this the result depends on the machine's keychain or shell key (review-r1 M1).
+    monkeypatch.setattr(preflight, "_stored_llm_key_present", lambda: True)
     calls = []
 
     def daemon(method, path, **kwargs):

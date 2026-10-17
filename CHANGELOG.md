@@ -1,5 +1,16 @@
 # Changelog — smartmemory
 
+## Unreleased - CLI-TENANT-1 (2026-10-17)
+
+- `sm ask` in local mode with no LLM provider key now exits non-zero before any request. The error names the missing key (the configured provider's, or all supported ones), and gives `export <KEY>=...`, `sm restart` and `sm setup`. The keyless excerpt listing moved behind `sm ask --extractive`. A daemon that answers extractively although this shell has a key now says it needs `sm restart`.
+- Remote mode: when the workspace the CLI sends (`SMARTMEMORY_TEAM_ID` or the config file) differs from the default workspace of the API key's login (`/auth/me`), every remote command prints, once per run on stderr, both workspaces, the tenant, the API URL and how to switch. An empty search, list or recall result from such a workspace says so instead of reading as "no memories". New module `smartmemory_app/preflight.py`.
+
+## Unreleased - LOCAL-DAEMON-1 (2026-10-17)
+
+- `sm setup` (local) now names what is wrong when the daemon does not come up, with a one-line fix per case: port taken by another program (names the process), daemon crashed and left `daemon.pid`, auto-start pointing at a Python that no longer exists, required model files missing, daemon up but degraded. The raw reason stays in a `Detail:` line. On success it prints `daemon running at http://127.0.0.1:<port>`.
+- `daemon.daemon_health()` returns `(ok, detail, fix)` for the doctor's daemon row. It is read-only and never raises. The logic lives in the new `daemon_diagnosis.py`.
+- `start_daemon` removes a leftover `daemon.pid` (or `.daemon.stop-<pid>` request) only when its recorded process is gone by exact pid check, and never while a daemon is answering.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.

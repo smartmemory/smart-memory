@@ -71,6 +71,9 @@ class RemoteMemory:
         self._team_id = team_id
         self._access_token = get_api_key()
         self._bootstrapped = False
+        # What /auth/me says the login resolves to, for the CLI-TENANT-1 workspace check.
+        self.web_default_team_id = ""
+        self.web_tenant_id = ""
         if self._access_token:
             self._bootstrap()
 
@@ -92,8 +95,10 @@ class RemoteMemory:
             )
             if r.status_code == 200:
                 user = r.json()
+                self.web_default_team_id = user.get("default_team_id") or ""
+                self.web_tenant_id = user.get("tenant_id") or ""
                 if not self._team_id:
-                    self._team_id = user.get("default_team_id") or ""
+                    self._team_id = self.web_default_team_id
         except Exception:
             pass  # bootstrap is best-effort; real errors surface on tool calls
 

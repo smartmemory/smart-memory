@@ -66,7 +66,8 @@ def test_no_key_route_and_cli_return_real_evidence(local_ask, caplog):
     assert "No LLM configured" in caplog.text
     for flags in ([], ["--reasoning"]):
         result = CliRunner().invoke(
-            cli_module.cli, ["ask", "MochiOS boot timing", "--limit", "1", *flags]
+            cli_module.cli,
+            ["ask", "MochiOS boot timing", "--limit", "1", "--extractive", *flags],
         )
         assert result.exit_code == 0, result.output
         assert "Extractive" in result.output
@@ -112,7 +113,8 @@ def test_no_key_cli_shows_graph_relations_only_with_reasoning(local_ask, reasoni
     ]
     flags = ["--reasoning"] if reasoning else []
     result = CliRunner().invoke(
-        cli_module.cli, ["ask", "MochiOS boot cache", "--limit", "1", *flags]
+        cli_module.cli,
+        ["ask", "MochiOS boot cache", "--limit", "1", "--extractive", *flags],
     )
     assert result.exit_code == 0, result.output
     assert "Extractive" in result.output
@@ -125,7 +127,9 @@ def test_no_key_empty_store_exits_zero(local_ask):
     response = client.post("/ask", json={"question": "MochiOS boot timing"})
     assert response.status_code == 200, response.text
     assert response.json()["evidence"] == []
-    result = CliRunner().invoke(cli_module.cli, ["ask", "MochiOS boot timing"])
+    result = CliRunner().invoke(
+        cli_module.cli, ["ask", "MochiOS boot timing", "--extractive"]
+    )
     assert result.exit_code == 0, result.output
     assert "Nothing relevant found." in result.output
     assert "smartmemory setup" in result.output
