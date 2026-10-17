@@ -409,7 +409,8 @@ CASES = [
     (
         "llm-ollama-up",
         {
-            "config": LOCAL_CFG + '[local]\nllm_provider = "ollama"\n',
+            "config": LOCAL_CFG
+            + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n',
             "http": {"http://localhost:11434/v1/models": (200, {})},
         },
         "llm",
@@ -418,10 +419,21 @@ CASES = [
     ),
     (
         "llm-ollama-down",
-        {"config": LOCAL_CFG + '[local]\nllm_provider = "ollama"\n'},
+        {
+            "config": LOCAL_CFG
+            + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
+        },
         "llm",
         FAIL,
         "endpoint http://localhost:11434/v1 (from provider default for llm_provider ollama), not answering",
+    ),
+    (
+        # CLI-SETUP-UX-1 x SETUP-DOCTOR-1: no model chosen means extraction is held off.
+        "llm-ollama-no-model",
+        {"config": LOCAL_CFG + '[local]\nllm_provider = "ollama"\n'},
+        "llm",
+        WARN,
+        "LLM extraction is off until you pick a model",
     ),
     (
         "llm-claude-agent",
@@ -1210,7 +1222,13 @@ def _probe_r2_h2a(monkeypatch, tmp_path):
         core,
         route,
     )
-    assert route.model == "sonnet, sent as claude-sonnet-4-6-20250627", route
+    # Core before 3f99a10b rewrites the alias inside call_llm, so doctor shows both names.
+    # From BYOK-COVERAGE-2 (core 3f99a10b) it expands the alias before the route is
+    # recorded, so the one name shown is the one sent. Either way the sent model is exact.
+    assert route.model in (
+        "sonnet, sent as claude-sonnet-4-6-20250627",
+        "claude-sonnet-4-6-20250627",
+    ), route
     assert route.model_src == "config file llm_model", route
     assert core["endpoint"] == route.probe_url, (core, route)
     return route.text()

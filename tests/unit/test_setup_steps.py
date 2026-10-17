@@ -540,10 +540,11 @@ def test_no_local_model_queues_no_llm_extraction(
         # and core, asked without the hold, finds none either unless one is ambient.
         assert unheld_route is bool(ambient or agent_sdk)
     else:
+        # A cloud provider pins its default model (TOUR-ASK-502-1), no endpoint or key.
         assert wrapper_env == {
             "OPENAI_BASE_URL": None,
             "OPENAI_API_KEY": None,
-            "SMARTMEMORY_LLM_MODEL": None,
+            "SMARTMEMORY_LLM_MODEL": "openai/gpt-oss-120b",
         }
 
 

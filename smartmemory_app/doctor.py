@@ -1333,7 +1333,12 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
 
 
 def check_llm(ctx: Context, context: str = "doctor") -> Row:
-    from smartmemory_app.config import LLM_KEY_ENV_VARS, _LOCAL_OPENAI_PROVIDERS
+    from smartmemory_app.config import (
+        LLM_KEY_ENV_VARS,
+        NO_LOCAL_MODEL_OFF_LINE,
+        _LOCAL_OPENAI_PROVIDERS,
+        local_llm_without_model,
+    )
 
     cfg = _config(ctx)
     if cfg.mode == "remote":
@@ -1389,6 +1394,14 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
         not route.pin or route.from_base_url
     ):
         if not route.from_base_url:
+            if local_llm_without_model(cfg):
+                # storage.apply_runtime_config holds core's route off for this state
+                # (CLI-SETUP-UX-1), so the row says that, not "calls do not go to it".
+                return row(
+                    WARN,
+                    f"provider {app_provider} has no model chosen. {NO_LOCAL_MODEL_OFF_LINE}",
+                    "Run: sm config llm_model <model name>, then sm restart",
+                )
             return row(
                 WARN,
                 f"{route_text}. llm_provider {app_provider} is set, but LLM calls do not go to it.",
