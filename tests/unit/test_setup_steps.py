@@ -350,6 +350,118 @@ def test_download_bar_accepts_the_tqdm_display_calls_hf_xet_makes():
     assert bar.pos == 0 and "50%" in lines[-1]
 
 
+# CLI-SETUP-UX-FU-F2: every progress event huggingface_hub sends to a bar either moves
+# the shown bytes or carries speed text the log line keeps. One row per event kind.
+# (id, calls on a 1000-byte bar, text the last log line holds, text it must not hold)
+_XET_EVENTS = [
+    ("transfer-only", [("update_transfer", 80)], "80 bytes of 1000 bytes (8%)", "B/s"),
+    (
+        "transfer-ahead-of-reconstruction",
+        [("update_transfer", 800), ("update", 50)],
+        "800 bytes of 1000 bytes (80%)",
+        "",
+    ),
+    (
+        "reconstruction-finishes",
+        [("update_transfer", 800), ("update", 1000)],
+        "(100%)",
+        "",
+    ),
+    # a plain HTTP download reports the same bytes through both calls: never summed
+    (
+        "http-same-bytes-twice",
+        [("update", 100), ("update_transfer", 100)],
+        "100 bytes of 1000 bytes (10%)",
+        "200 bytes",
+    ),
+    (
+        "transfer-speed-kept",
+        [("set_transfer_postfix_str", "  1.5MB/s  "), ("update_transfer", 80)],
+        "(8%), 1.5MB/s",
+        "",
+    ),
+    (
+        "reconstruction-speed-kept",
+        [("set_postfix_str", "  2.0MB/s  "), ("update", 10)],
+        "(1%), 2.0MB/s",
+        "",
+    ),
+    (
+        "transfer-speed-wins",
+        [
+            ("set_transfer_postfix_str", "1.5MB/s"),
+            ("set_postfix_str", "9.9MB/s"),
+            ("update_transfer", 80),
+        ],
+        ", 1.5MB/s",
+        "9.9MB/s",
+    ),
+    (
+        "unknown-speed-dropped",
+        [("set_transfer_postfix_str", "???B/s"), ("update_transfer", 80)],
+        "(8%)",
+        "?",
+    ),
+    (
+        "display-only-calls-change-nothing",
+        [("update", 10), ("set_description", "x"), ("refresh",), ("clear",)],
+        "10 bytes of 1000 bytes (1%)",
+        "B/s",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _XET_EVENTS, ids=[c[0] for c in _XET_EVENTS])
+def test_download_bar_counts_every_progress_event(case):
+    from smartmemory_app.hf_progress import DownloadProgressReporter
+
+    _id, calls, holds, lacks = case
+    lines = []
+    bar = DownloadProgressReporter(lines.append, interval=0).new_bar(total=1000)
+    for method, *args in calls:
+        getattr(bar, method)(*args)
+    assert holds in lines[-1], lines
+    assert not lacks or lacks not in lines[-1], lines
+
+
+def test_real_xet_reporter_transfer_update_shows_progress():
+    """The reviewer's probe P5: the installed Xet reporter, transfer bytes only."""
+    import logging
+    from types import SimpleNamespace
+
+    from huggingface_hub.utils._xet_progress_reporting import (
+        XetDownloadProgressReporter,
+    )
+
+    from smartmemory_app.hf_progress import DownloadProgressReporter
+
+    lines = []
+    bar = DownloadProgressReporter(lines.append, interval=0).new_bar(total=1000)
+    xet = XetDownloadProgressReporter(
+        reconstruction_desc="model",
+        log_level=logging.INFO,
+        external_reconstruction_bar=bar,
+    )
+
+    def report(transferred):
+        xet.update_progress(
+            SimpleNamespace(
+                total_bytes_completed=0,
+                total_transfer_bytes_completed=transferred,
+                total_bytes=1000,
+                total_bytes_completion_rate=None,
+                total_transfer_bytes_completion_rate=1.5e6,
+            )
+        )
+
+    before = len(lines)
+    report(80)
+    assert len(lines) > before and "80 bytes" in lines[-1], lines
+    # Xet sends the speed text after the byte update, so it shows on the next line.
+    report(160)
+    assert "160 bytes" in lines[-1] and "B/s" in lines[-1], lines
+
+
 # ── fix round 1: setup promises only what it measured and does what the user chose ──
 
 CLEAN_ENV_KEYS = (
