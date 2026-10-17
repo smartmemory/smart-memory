@@ -34,6 +34,7 @@
 
 - TOUR-ASK-FU-H1: the capture worker is now an explicit exemption in the LLM entry-point guard (`tests/unit/test_llm_entry_points.py`). Its Groq pin is product policy, so it never applies the configured provider. Test-only, no product change.
 - TOUR-ASK-FU-M1: the LLM entry-point guard now checks every Click command, not every module. A new command that reaches core's LLM (directly, through a same-module helper or a wrapper helper) without `apply_runtime_config()` fails the guard unless it is listed with a reason. Test-only, no product change.
+- WORKSPACE-PROP-BOUNDARY-1 (smart-memory arms): the local daemon's `POST /memory/ingest` and `PATCH /memory/{id}`, and the `sm add` daemon-down fallback, no longer let a caller property choose the workspace. A caller `workspace_id` is dropped with a warning, and the workspace stamped from the request scope still applies. Importing an OKF or JSONL file with `--mode direct` and the MCP `memory_add` tool are not covered: they live in the core and MCP repos.
 
 ## 1.5.27 — 2026-10-17
 

@@ -778,9 +778,12 @@ def ingest_endpoint(body: IngestRequest) -> dict:
 
     # Auto-stamp workspace_id so this item is filterable in scoped recall.
     workspace_id = body.workspace_id or derive_workspace_id(body.cwd)
-    properties = dict(body.properties or {})
-    # The stamped workspace wins: a caller property must not move an item out of the
-    # workspace the request (and the CLI's scope header) named.
+    from smartmemory_app.scope_header import without_caller_workspace
+
+    # A caller property never picks the workspace: with a resolved workspace the
+    # stamp replaces it, and with none (the untagged arm) it is dropped, so the item
+    # stays untagged instead of landing wherever the caller wrote.
+    properties = without_caller_workspace(body.properties)
     if workspace_id:
         properties["workspace_id"] = workspace_id
 
@@ -1254,13 +1257,16 @@ def update_memory_item(memory_id: str, body: UpdateRequest) -> dict:
         )
     with _rw_lock:
         # CORE-CRUD-UPDATE-1: properties wins over content/metadata conveniences
-        props = dict(body.properties or {})
+        # WORKSPACE-PROP-BOUNDARY-1: an update never moves an item to another workspace.
+        from smartmemory_app.scope_header import without_caller_workspace
+
+        props = without_caller_workspace(body.properties)
         if body.content is not None and "content" not in props:
             props["content"] = body.content
         if body.metadata is not None:
             # Flat-merge metadata into properties; deep-merge happens on the
             # service side, but daemon's storage is single-level by convention.
-            for k, v in body.metadata.items():
+            for k, v in without_caller_workspace(body.metadata).items():
                 props.setdefault(k, v)
         try:
             mem.update_properties(

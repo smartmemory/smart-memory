@@ -319,14 +319,31 @@ def apply_local_pin(cfg, path: str, kwargs: dict) -> dict:
     return kwargs
 
 
+def without_caller_workspace(properties: Optional[dict]) -> dict:
+    """``properties`` minus a caller-chosen ``workspace_id`` (WORKSPACE-PROP-BOUNDARY-1).
+
+    The destination workspace is picked by the request scope (explicit workspace,
+    cwd, pin), never by a property the caller sends. Every local entry that takes
+    caller properties drops the key here and then stamps its own resolved value.
+    """
+    cleaned = dict(properties or {})
+    if cleaned.pop("workspace_id", None) is not None:
+        log.warning(
+            "Dropped caller property workspace_id: the workspace comes from the "
+            "request scope, not a property"
+        )
+    return cleaned
+
+
 def fallback_properties(body: dict, props: Optional[dict]) -> Optional[dict]:
     """Properties for the in-process ingest fallback, stamped like the daemon does.
 
     local_api stamps ``properties["workspace_id"]`` from the request body, and the
     stamp wins over a caller property. The daemon-down path must do the same, or the
-    header says "pinned" while the item lands untagged or elsewhere.
+    header says "pinned" while the item lands untagged or elsewhere. With no stamp,
+    a caller ``workspace_id`` is dropped, as on the daemon's untagged arm.
     """
-    merged = dict(props or {})
+    merged = without_caller_workspace(props)
     workspace_id = (body or {}).get("workspace_id")
     if workspace_id:
         merged["workspace_id"] = workspace_id
