@@ -186,6 +186,7 @@ def test_ask_renders_answer_evidence_and_relations(monkeypatch) -> None:
         return payload
 
     monkeypatch.setattr(cli_module, "_daemon_request", daemon_request)
+    monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
 
     result = CliRunner().invoke(
         cli_module.cli,
@@ -228,6 +229,7 @@ def test_ask_hides_reasoning_by_default(monkeypatch) -> None:
         "relations": [{"source": "Zed", "type": "distrusts", "target": "Xavier"}],
     }
     monkeypatch.setattr(cli_module, "_daemon_request", lambda *a, **k: payload)
+    monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
 
     result = CliRunner().invoke(cli_module.cli, ["ask", "Does Zed believe it?"])
 

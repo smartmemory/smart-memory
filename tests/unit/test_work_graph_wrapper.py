@@ -263,6 +263,7 @@ extraction_worker._run_llm_extraction = lambda content: {"status": "ok", "extrac
         == "llm_enriched"
     )
     route_cli(monkeypatch, client)
+    monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
     result = CliRunner().invoke(cli, ["get", item_id])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["extraction_status"] == "llm_enriched"

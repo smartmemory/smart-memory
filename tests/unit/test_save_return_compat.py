@@ -972,7 +972,7 @@ def test_daemon_ingest_route_reads_the_id_on_both_arms(lite_ingest, result, expe
     [row[1:] for row in CONSUMER_ARMS],
     ids=[row[0] for row in CONSUMER_ARMS],
 )
-def test_cli_add_prints_the_id_on_both_arms(lite_ingest, result, expected):
+def test_cli_add_prints_the_id_on_both_arms(lite_ingest, result, expected, monkeypatch):
     from unittest.mock import patch
 
     from click.testing import CliRunner
@@ -980,6 +980,7 @@ def test_cli_add_prints_the_id_on_both_arms(lite_ingest, result, expected):
     from smartmemory_app.cli import cli
 
     lite_ingest(result)
+    monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
     with (
         patch("smartmemory_app.cli._daemon_request", return_value=None),
         patch("smartmemory_app.cli._prepare_direct_access"),

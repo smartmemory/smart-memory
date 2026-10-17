@@ -323,6 +323,7 @@ def test_explore_refuses_clearly_when_the_daemon_is_down(monkeypatch):
             raise client_module.ExploreUnavailable("connection refused")
 
     monkeypatch.setattr(client_module, "ExploreClient", Dead)
+    monkeypatch.setattr("smartmemory_app.console.interactive_terminal", lambda: True)
     result = CliRunner().invoke(cli, ["explore"])
     assert result.exit_code != 0
     assert "daemon is not running" in result.output
