@@ -420,6 +420,133 @@ def test_no_local_model_means_no_llm_at_runtime(
         )
 
 
+# (provider, saved model, ambient route, Agent SDK installed, extraction on). One row per
+# case of review r2 H2: the off flag is not enough, core's route resolver decides whether a
+# Lite save queues LLM extraction. Both local providers with none, an ambient key and the
+# Agent SDK (neither is a model choice), then a named model and a cloud provider, which
+# must behave as at 8a45ca4.
+NO_MODEL_RUNTIME_ROWS = [
+    ("ollama", "", None, False, False),
+    ("lmstudio", "", None, False, False),
+    ("ollama", "", "OPENAI_API_KEY", False, False),
+    ("lmstudio", "", None, True, False),
+    ("ollama", "llama3.2", None, False, True),
+    ("groq", "", "GROQ_API_KEY", False, True),
+]
+
+
+@pytest.mark.parametrize(
+    "provider,model,ambient,agent_sdk,enabled", NO_MODEL_RUNTIME_ROWS
+)
+def test_no_local_model_queues_no_llm_extraction(
+    tmp_path, monkeypatch, capsys, provider, model, ambient, agent_sdk, enabled
+):
+    import os
+    import socket
+    import sqlite3
+
+    from smartmemory.pipeline.config import PipelineConfig
+    from smartmemory.pipeline.state import PipelineState
+    from smartmemory.pipeline.work_graph.lite_save import save_to_work_graph
+    from smartmemory.pipeline.work_graph.sqlite_store import SQLiteWorkGraph
+    from smartmemory.scope_provider import DefaultScopeProvider
+    from smartmemory.utils import llm as core_llm
+
+    from smartmemory_app import config, storage, viewer_server
+
+    # Teardown restores core's resolver, so the hold never outlives this test.
+    monkeypatch.setattr(core_llm, "llm_route_available", core_llm.llm_route_available)
+    unheld = getattr(
+        core_llm.llm_route_available, "__wrapped__", core_llm.llm_route_available
+    )
+    monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: agent_sdk)
+    attempts = []
+
+    def no_network(sock, address):
+        attempts.append(address)
+        raise OSError("network blocked in this test")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    class ForegroundRunner:
+        def run_to(self, **kwargs):
+            return PipelineState(item_id="test_setupux_none", text="t", entity_ids={})
+
+    with patch.dict(os.environ):
+        for name in CLEAN_ENV_KEYS + ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_MODEL"):
+            os.environ.pop(name, None)
+        if ambient:
+            os.environ[ambient] = "synthetic-test-key"
+        with (
+            patch("smartmemory_app.setup._ensure_spacy"),
+            patch("smartmemory_app.setup._ensure_embedding_model"),
+            patch("smartmemory_app.setup._ensure_lazy_models"),
+            patch("smartmemory_app.setup._copy_hooks"),
+            patch("smartmemory_app.setup._copy_skills"),
+            patch("smartmemory_app.setup._register_hooks"),
+            patch("smartmemory_app.setup._seed_data_dir"),
+        ):
+            setup._apply_setup_result(
+                setup.SetupResult(
+                    llm_provider=provider,
+                    llm_model=model,
+                    data_dir=str(tmp_path / "data"),
+                )
+            )
+        storage.apply_runtime_config()
+        route_on = core_llm.llm_route_available()[0]
+        capsys.readouterr()
+        viewer_server._print_llm_extraction_status()
+        boot = capsys.readouterr().out
+        db = tmp_path / "test_setupux_work.db"
+        _, result = save_to_work_graph(
+            ForegroundRunner(),
+            text="t",
+            config=PipelineConfig.lite(),
+            metadata={},
+            work_graph=SQLiteWorkGraph(str(db)),
+            data_dir=None,
+            scope_provider=DefaultScopeProvider(single_tenant=True),
+            enable_ontology=False,
+        )
+        with sqlite3.connect(db) as conn:
+            kinds = {row[0] for row in conn.execute("SELECT kind FROM work_nodes")}
+        wrapper_env = {
+            name: os.environ.get(name)
+            for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "SMARTMEMORY_LLM_MODEL")
+        }
+        unheld_route = unheld()[0]
+
+    assert route_on is enabled
+    assert ("extract" in kinds) is enabled
+    assert ("LLM extraction: enabled (deferred)" in boot) is enabled
+    assert (config.NO_LOCAL_MODEL_OFF_LINE in boot) is not enabled
+    assert attempts == []
+    if provider == "ollama" and model:
+        assert wrapper_env == {
+            "OPENAI_BASE_URL": "http://localhost:11434/v1",
+            "OPENAI_API_KEY": "local-llm-no-key",
+            "SMARTMEMORY_LLM_MODEL": model,
+        }
+    elif not enabled:
+        # Nothing the wrapper set is a route: no endpoint, no placeholder, no model.
+        assert wrapper_env["OPENAI_BASE_URL"] is None
+        assert wrapper_env["SMARTMEMORY_LLM_MODEL"] is None
+        assert wrapper_env["OPENAI_API_KEY"] == (
+            "synthetic-test-key" if ambient == "OPENAI_API_KEY" else None
+        )
+        # and core, asked without the hold, finds none either unless one is ambient.
+        assert unheld_route is bool(ambient or agent_sdk)
+    else:
+        assert wrapper_env == {
+            "OPENAI_BASE_URL": None,
+            "OPENAI_API_KEY": None,
+            "SMARTMEMORY_LLM_MODEL": None,
+        }
+
+
 def test_click_setup_ends_with_the_how_to_turn_it_on_line(tmp_path, capsys):
     from contextlib import ExitStack
 

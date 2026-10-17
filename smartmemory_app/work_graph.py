@@ -42,12 +42,17 @@ def blocked_work_warning(work: dict) -> str | None:
 
 def get_reextract_offer() -> str | None:
     from smartmemory.pipeline.work_graph.reextract import reextract_offer
-    from smartmemory.utils.llm import llm_route_available
     from smartmemory_app.config import load_config
-    from smartmemory_app.storage import get_memory
+    from smartmemory_app.storage import apply_runtime_config, get_memory
 
     if load_config().mode == "remote":
         return None
+    # Apply the saved provider settings before asking core for a route, as the
+    # memory below would, so a local provider with no model answers no here too.
+    # Import the resolver after that: the hold replaces the module attribute.
+    apply_runtime_config()
+    from smartmemory.utils.llm import llm_route_available
+
     graph = get_work_graph()
     if graph.get_meta("reextract_decision") is not None or not llm_route_available()[0]:
         return None

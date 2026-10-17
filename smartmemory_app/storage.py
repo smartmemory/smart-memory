@@ -27,11 +27,13 @@ if TYPE_CHECKING:
     from smartmemory_app.remote_backend import RemoteMemory
 
 from smartmemory_app.config import (
+    NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
     UnconfiguredError,
     _detect_and_migrate,
     is_configured,
     load_config,
+    local_llm_without_model,
     set_derived_env,
 )
 
@@ -189,6 +191,8 @@ def apply_runtime_config() -> SmartMemoryConfig:
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
     pin_llm_model(cfg)
+    if local_llm_without_model(cfg):
+        _hold_llm_route_off()
     return cfg
 
 
@@ -254,6 +258,39 @@ def _provider_default_model(provider: str | None, environ=None) -> str | None:
     return None
 
 
+def _hold_llm_route_off() -> None:
+    """Make core's LLM route resolver answer no while a local provider has no model.
+
+    Core has no "off" value for its route: with no model it still accepts an ambient
+    provider key, an ``OPENAI_BASE_URL`` or the Claude Agent SDK, and the Lite save
+    queues LLM extraction on that answer. Every core reader (Lite save placement,
+    the work-graph worker, re-extraction, ``PipelineConfig.lite``,
+    ``create_lite_memory``) imports ``llm_route_available`` from its module at call
+    time, so replacing the module attribute reaches all of them in this process.
+    Worker processes call ``apply_runtime_config`` and install it themselves. The
+    hold re-reads the config on each call, so picking a model turns the route back on.
+    """
+    from smartmemory.utils import llm as core_llm
+
+    if getattr(core_llm.llm_route_available, "_no_local_model_hold", False):
+        return
+    resolve = core_llm.llm_route_available
+
+    def llm_route_available() -> tuple[bool, str]:
+        try:
+            off = local_llm_without_model(load_config())
+        except Exception:
+            off = False  # an unreadable config falls through to core, as before
+        if off:
+            return False, NO_LOCAL_MODEL_OFF_LINE
+        return resolve()
+
+    llm_route_available._no_local_model_hold = True
+    llm_route_available.__wrapped__ = resolve
+    core_llm.llm_route_available = llm_route_available
+    log.info("LLM route held off: the local LLM provider has no model chosen")
+
+
 def _get_local_memory(
     data_dir: str | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -283,7 +320,9 @@ def _get_local_memory(
 
         # Core owns lite defaults and deferred placement. The wrapper only applies
         # its explicit coreference preference; ground/evolve remain opt-in.
-        profile = PipelineConfig.lite()
+        profile = PipelineConfig.lite(
+            llm_enabled=False if local_llm_without_model(cfg) else None
+        )
         profile.coreference.enabled = cfg.coreference
         profile.extraction.entity_ruler.spacy_model = cfg.spacy_model
         profile.extraction.relation_ruler.spacy_model = cfg.spacy_model
@@ -454,6 +493,8 @@ def llm_extraction_warning() -> str | None:
     """
     from smartmemory.utils.llm import llm_route_available
 
+    if local_llm_without_model(load_config()):
+        return NO_LOCAL_MODEL_OFF_LINE
     available, _ = llm_route_available()
     if available:
         return None

@@ -225,9 +225,14 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]
 
     ``environ`` defaults to os.environ. Returns ``{name: origin}`` for every name
     it set, so sm doctor can run the same translation on a copy (SETUP-DOCTOR-1).
+
+    A local provider with no model chosen sets nothing: each of the three vars is a
+    route to core's ``llm_route_available()`` (an explicit endpoint alone is one), and
+    that resolver, not ``llm_key_present()``, decides whether a Lite save queues LLM
+    extraction. ``storage.apply_runtime_config`` holds the resolver off for that state.
     """
     default_base = _LOCAL_OPENAI_PROVIDERS.get((cfg.llm_provider or "").lower())
-    if not default_base:
+    if not default_base or local_llm_without_model(cfg):
         return {}
     env = os.environ if environ is None else environ
     derived: dict[str, str] = {}
@@ -239,9 +244,6 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]
         set_derived_env(
             env, "OPENAI_BASE_URL", default_base, "provider default", derived
         )
-    if local_llm_without_model(cfg):
-        # No model chosen: do not mint the placeholder key that switches extraction on.
-        return derived
     set_derived_env(
         env, "OPENAI_API_KEY", "local-llm-no-key", "local placeholder", derived
     )
@@ -329,9 +331,10 @@ def is_configured() -> bool:
 def llm_key_present() -> bool:
     """True if any supported LLM provider key is set in the environment.
 
-    Single source of truth for "can Tier-2 LLM extraction run?". Used by the
-    daemon worker-start gate, the ingest endpoint's Tier-2 enqueue, the daemon
-    boot banner, and `smartmemory status`. Checks all of LLM_KEY_ENV_VARS, so a
+    Used by health (and so `sm status`), the search disclosure and `ask`. It is not
+    the queue gate: Lite saves and the core worker ask core's
+    ``llm_route_available()``, which ``storage.apply_runtime_config`` holds off when
+    a local provider has no model. Checks all of LLM_KEY_ENV_VARS, so a
     user configured with Anthropic or DeepSeek is recognised — not just GROQ/OpenAI.
     """
     try:
