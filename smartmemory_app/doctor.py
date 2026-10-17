@@ -30,6 +30,7 @@ import functools
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import tomllib
@@ -323,6 +324,15 @@ _CLOSED_VALUES = frozenset(
 )
 
 
+# Name prefixes whose values are masked. EXTRACTOR_* are core's config leaf
+# overrides for the extractor section (configuration/environment.py), which
+# call_llm reads for the model.
+_MASKED_PREFIXES = ("SMARTMEMORY_", "EXTRACTOR_")
+# Env names doctor found supplying a value core read (a config leaf override
+# under another prefix, for example a namespace overlay). Filled while doctor runs.
+_ATTRIBUTED: set[str] = set()
+
+
 def _value_forms(value: str) -> set[str]:
     """``value`` plus the forms the CLI prints it in (trimmed, expanded, resolved, URL host)."""
     forms = {value, value.rstrip("/")}
@@ -345,29 +355,110 @@ def _value_forms(value: str) -> set[str]:
     return {form for form in forms if len(form) >= 4}
 
 
+def _value_patterns(value: str) -> list[str]:
+    """Regexes for every printed form of ``value``, matched case-insensitively.
+
+    Forms of 4+ characters match anywhere. A shorter value matches as a whole
+    token when it holds a digit or symbol, and only quoted or after ``=`` when it
+    is plain letters, so masking a value like ``abc`` never eats ordinary words
+    (core logs a bad value as ``NAME='abc'``).
+    """
+    patterns = [re.escape(form) for form in _value_forms(value)]
+    for short in {value, value.strip(), value.rstrip("/")}:
+        if not 0 < len(short) < 4:
+            continue
+        escaped = re.escape(short)
+        if short.isalpha():
+            patterns.append(rf"(?<=['\"=]){escaped}(?=['\"]|[\s,.)]|$)")
+        else:
+            patterns.append(rf"(?<!\w){escaped}(?!\w)")
+    return patterns
+
+
+def _masked_name(name: str) -> bool:
+    return (
+        name.startswith(_MASKED_PREFIXES)
+        or name in _MASKED_NAMES
+        or name in _ATTRIBUTED
+    )
+
+
 def mask_env_values(text: str, environ: Optional[Mapping[str, str]] = None) -> str:
     """Replace every env-sourced value in ``text`` with ``$NAME (env)``.
 
-    Covers every SMARTMEMORY_* name and the LLM inputs in ``_MASKED_NAMES``.
-    Names SmartMemory itself derived from the config file (config.DERIVED_ENV)
-    are config values, not env values, and stay visible.
+    Covers every SMARTMEMORY_* and EXTRACTOR_* name, the LLM inputs in
+    ``_MASKED_NAMES`` and any name doctor attributed a core value to, whatever
+    the value's length or letter case. Names SmartMemory itself derived from the
+    config file (config.DERIVED_ENV) are config values, not env values, and stay
+    visible.
     """
     from smartmemory_app.config import DERIVED_ENV
 
     env = os.environ if environ is None else environ
     pairs = []
     for name, value in env.items():
-        if not (name.startswith("SMARTMEMORY_") or name in _MASKED_NAMES):
+        if not _masked_name(name):
             continue
         derived = DERIVED_ENV.get(name)
         if not value or (derived and derived[1] == value):
             continue
         if value.strip().lower() in _CLOSED_VALUES or value.strip().isdigit():
             continue
-        pairs += [(form, f"${name} (env)") for form in _value_forms(value)]
-    for form, label in sorted(pairs, key=lambda pair: -len(pair[0])):
-        text = text.replace(form, label)
+        pairs += [(pattern, f"${name} (env)") for pattern in _value_patterns(value)]
+    for pattern, label in sorted(pairs, key=lambda pair: -len(pair[0])):
+        text = re.sub(pattern, lambda _m, label=label: label, text, flags=re.IGNORECASE)
     return text
+
+
+class _MaskingFilter(logging.Filter):
+    """Masks env values in every log record a handler emits while doctor runs.
+
+    Core logs some inputs verbatim (an unknown LLM_PROVIDER pin, a config read
+    error naming the path), so masking only the finished rows is not enough.
+    """
+
+    def __init__(self, environs: list[Mapping[str, str]]):
+        super().__init__()
+        self._environs = environs
+
+    def _mask(self, text: str) -> str:
+        for environ in [*self._environs, os.environ]:
+            text = mask_env_values(text, environ)
+        return text
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = str(record.msg)
+        masked = self._mask(message)
+        if masked != message:
+            record.msg, record.args = masked, ()
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = self._mask(record.exc_text)
+        if record.stack_info:
+            record.stack_info = self._mask(record.stack_info)
+        return True
+
+
+@contextmanager
+def masked_logging():
+    """Mask env values in every log line any handler prints until the block ends."""
+    mask = _MaskingFilter([dict(os.environ)])
+    handlers = set(logging.getLogger().handlers)
+    for logger in list(logging.Logger.manager.loggerDict.values()):
+        handlers.update(getattr(logger, "handlers", ()))
+    if logging.lastResort is not None:
+        handlers.add(logging.lastResort)
+    for handler in handlers:
+        handler.addFilter(mask)
+    try:
+        yield
+    finally:
+        for handler in handlers:
+            handler.removeFilter(mask)
 
 
 def _file_settings(ctx: Context) -> dict:
@@ -842,7 +933,9 @@ class LlmRoute:
     probe_url: str  # the real URL, for probing a local server. Never rendered.
     pin: Optional[str]  # core LLM_PROVIDER pin
     from_base_url: bool  # endpoint is an explicit OpenAI-compatible base URL
-    model_value: str = ""  # the real model id, for tests. Never rendered.
+    model_value: str = ""  # the model core sends, for tests. Never rendered.
+    unread: tuple = ()  # core sources that could not be read, named
+    refusal: str = ""  # why core would not send the call with this env
 
     def text(self) -> str:
         endpoint = (
@@ -861,6 +954,207 @@ def _env_label(ctx: Context, shell: Mapping[str, str], name: str) -> str:
     return label or _env_source(ctx, name)
 
 
+class _DryRunStop(Exception):
+    """Raised where core would send the provider request, so doctor never sends it."""
+
+
+@dataclass
+class _CoreCall:
+    """What core's own LLM code decided for one Tier-2 extraction call."""
+
+    route: str = ""  # openai, claude-agent, bedrock, or "" when core sent nothing
+    chosen: str = ""  # the model call_llm picked, before its route step rewrote it
+    model: str = ""  # the model core sends
+    api_base: Optional[str] = None
+    refusal: str = ""
+    config_path: str = ""
+    config_llm: dict = field(default_factory=dict)
+    unread: list = field(default_factory=list)
+
+
+class _Records(logging.Handler):
+    def __init__(self, level: int):
+        super().__init__(level)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextmanager
+def _captured(name: str, level: int):
+    """Collect the records ``name`` logs at ``level`` or above, whatever its configured level."""
+    logger = logging.getLogger(name)
+    handler = _Records(level)
+    saved = (logger.level, logger.disabled)
+    if logger.getEffectiveLevel() > level:
+        logger.setLevel(level)
+    logger.disabled = False
+    logger.addHandler(handler)
+    try:
+        yield handler.records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(saved[0])
+        logger.disabled = saved[1]
+
+
+@contextmanager
+def _fresh_core_config():
+    """Empty core's get_config cache for the block, so core reads its config file
+    now, under the patched env, and doctor sees that read. Restored after."""
+    from smartmemory import utils as core_utils
+
+    with core_utils._config_lock:
+        saved = dict(core_utils._config_cache)
+        core_utils._config_cache.clear()
+        try:
+            yield
+        finally:
+            core_utils._config_cache.clear()
+            core_utils._config_cache.update(saved)
+
+
+@contextmanager
+def _no_network():
+    """In this thread, any socket connect or DNS lookup raises instead of leaving the machine.
+
+    The dry run replaces core's three provider calls. If a newer core adds a
+    route doctor does not know, its request stops here and is never sent.
+    """
+    import socket
+    import threading
+
+    owner = threading.get_ident()
+    saved = {
+        "connect": socket.socket.connect,
+        "connect_ex": socket.socket.connect_ex,
+    }
+    real_getaddrinfo = socket.getaddrinfo
+
+    def guard(real):
+        def refuse(*args, **kwargs):
+            if threading.get_ident() == owner:
+                raise _DryRunStop("network")
+            return real(*args, **kwargs)
+
+        return refuse
+
+    socket.socket.connect = guard(saved["connect"])
+    socket.socket.connect_ex = guard(saved["connect_ex"])
+    socket.getaddrinfo = guard(real_getaddrinfo)
+    try:
+        yield
+    finally:
+        socket.socket.connect = saved["connect"]
+        socket.socket.connect_ex = saved["connect_ex"]
+        socket.getaddrinfo = real_getaddrinfo
+
+
+def _core_model(llm_cfg: Mapping) -> str:
+    return (llm_cfg.get("model_name") or llm_cfg.get("model") or "") if llm_cfg else ""
+
+
+def _core_extractor_llm() -> dict:
+    from smartmemory.utils import get_config
+
+    section = get_config("extractor")
+    llm_cfg = section.get("llm") if hasattr(section, "get") else None
+    return dict(llm_cfg) if isinstance(llm_cfg, Mapping) else {}
+
+
+def _core_dry_run() -> _CoreCall:
+    """Run core's real Tier-2 extraction call with the provider request replaced.
+
+    LLMSingleExtractor._extract_impl -> call_llm runs unchanged: model choice,
+    alias expansion, pin and key checks, endpoint choice. The three functions
+    that would send (call_openai_chat, _call_claude_agent, _call_bedrock_converse)
+    record their arguments and stop. Core's config file is read fresh, and a
+    read core logs and swallows is recorded as unread. Run under _patched_environ.
+    """
+    from smartmemory.configuration.environment import EnvironmentHandler
+    from smartmemory.plugins.extractors.llm_single import LLMSingleExtractor
+    from smartmemory.utils import llm as core_llm
+
+    call = _CoreCall()
+    real_key_for = core_llm.request_api_key_for_model
+
+    def key_for(model, api_base=None):  # call_llm calls it once, with its chosen model
+        call.chosen = call.chosen or (model or "")
+        return real_key_for(model, api_base)
+
+    def terminal(route: str):
+        def stop(*args, **kwargs):
+            call.route, call.model = route, kwargs.get("model") or ""
+            call.api_base = kwargs.get("api_base")
+            raise _DryRunStop(route)
+
+        return stop
+
+    patches = {
+        "request_api_key_for_model": key_for,
+        "call_openai_chat": terminal("openai"),
+        "_call_claude_agent": terminal("claude-agent"),
+        "_call_bedrock_converse": terminal("bedrock"),
+    }
+    saved = {name: getattr(core_llm, name) for name in patches}
+    call.config_path = EnvironmentHandler.resolve_config_path(
+        os.environ.get("SMARTMEMORY_CONFIG", "config.json")
+    )
+    with (
+        _fresh_core_config(),
+        _captured("smartmemory.configuration.manager", logging.ERROR) as failed,
+        _no_network(),
+    ):
+        for name, fake in patches.items():
+            setattr(core_llm, name, fake)
+        try:
+            LLMSingleExtractor()._extract_impl("doctor dry run")
+        except _DryRunStop as stop:
+            if str(stop) == "network":
+                call.route = ""
+                call.refusal = (
+                    "core tried a route doctor does not know, nothing was sent"
+                )
+        except (ValueError, RuntimeError) as exc:
+            call.refusal = f"{type(exc).__name__}: {exc}"
+        finally:
+            for name, real in saved.items():
+                setattr(core_llm, name, real)
+        try:  # the same cached load call_llm used, so no second read
+            call.config_llm = _core_extractor_llm()
+        except Exception as exc:
+            call.unread.append(f"core config {call.config_path} ({type(exc).__name__})")
+    if failed and not call.unread:
+        call.unread.append(
+            f"core config {call.config_path} (core logged a read error and used an empty config)"
+        )
+    if call.route == "bedrock":
+        call.chosen = call.chosen or call.model
+    return call
+
+
+def _leaf_override(env: Mapping[str, str], model: str) -> Optional[str]:
+    """The env name core's config loader took ``model`` from, or None.
+
+    Core applies env leaf overrides inside get_config (EXTRACTOR_LLM_MODEL_NAME
+    over extractor.llm.model_name). Rather than rebuild its naming, doctor
+    reloads core config without each env name holding that value and keeps the
+    one whose removal changes the model.
+    """
+    for name, value in env.items():
+        if value != model:
+            continue
+        without = {key: val for key, val in env.items() if key != name}
+        try:
+            with _patched_environ(without), _fresh_core_config():
+                if _core_model(_core_extractor_llm()) != model:
+                    return name
+        except Exception:
+            continue
+    return None
+
+
 def _llm_route(ctx: Context, cfg) -> LlmRoute:
     """Resolve the LLM route with the code every LLM call runs.
 
@@ -868,15 +1162,15 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
        translation of the config into env names on a copy:
        config._apply_local_llm_env (load_config) and storage.pin_llm_model
        (apply_runtime_config, run before every local engine starts).
-    2. Under that env: core provider_pin, the extractor config model call_llm
-       reads first, get_default_model, and LLMSingleExtractor._resolve_api_base.
-    3. The endpoint follows call_llm's order (core utils/llm.py): a Bedrock pin
-       returns first, then an explicit base URL (the extractor's or
-       OPENAI_BASE_URL), the Claude Agent SDK, the pin's base, Groq and Gemini
-       model names, and the OpenAI client default.
+    2. Under that env, core's real extraction call runs with its provider
+       request replaced (``_core_dry_run``). The model, the model sent (after
+       alias expansion and prefix stripping) and the endpoint are what core
+       decided, never re-derived here.
+    3. The labels below only say which input produced core's answer. They follow
+       call_llm's order (core utils/llm.py). When core refuses the call (no key),
+       nothing is sent and the labels give the route it would take with a key.
     """
     from smartmemory.plugins.extractors.llm_single import LLMSingleExtractor
-    from smartmemory.utils import get_config
     from smartmemory.utils import llm as core_llm
 
     from smartmemory_app.config import _LOCAL_OPENAI_PROVIDERS, _apply_local_llm_env
@@ -886,26 +1180,20 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
     env = dict(shell)
     derived = {**_apply_local_llm_env(cfg, env), **pin_llm_model(cfg, env)}
     with _patched_environ(env):
+        core = _core_dry_run()
         pin = core_llm.provider_pin()
-        try:  # call_llm reads the core extractor config first (utils/llm.py)
-            section = get_config("extractor")
-            llm_cfg = section.get("llm") if hasattr(section, "get") else None
-            core_model = (
-                (llm_cfg.get("model_name") or llm_cfg.get("model"))
-                if isinstance(llm_cfg, dict)
-                else None
-            )
-        except Exception:
-            core_model = None  # call_llm skips an unreadable core config the same way
-        model = core_model or core_llm.get_default_model()
+        core_model = _core_model(core.config_llm)
+        model = core.chosen or core_model or core_llm.get_default_model()
         extractor_base = LLMSingleExtractor()._resolve_api_base()
         base_url = os.environ.get("OPENAI_BASE_URL")
-        agent = (
-            core_llm._is_claude_agent_model(model)
+        agent = core.route == "claude-agent" or (
+            not core.route
+            and core_llm._is_claude_agent_model(model)
             and core_llm._claude_agent_sdk_available()
         )
         pinned = core_llm._PINNED_PROVIDERS
         groq_model = core_llm.is_groq_model(model)
+    leaf = _leaf_override(env, model) if core_model and core_model == model else None
 
     def origin(name: str) -> str:
         """Where an env name the resolvers read came from."""
@@ -928,9 +1216,13 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
             return value  # a provider default
         return f"${name}"
 
-    # Model, in get_default_model's order (core utils/llm.py).
-    if core_model:
-        model_label, model_src = core_model, "core config extractor.llm.model_name"
+    # Model, in call_llm's order: core config first, then get_default_model's.
+    if leaf:
+        _ATTRIBUTED.add(leaf)
+        model_label, model_src = f"${leaf}", _env_label(ctx, shell, leaf)
+    elif core_model and core_model == model:
+        model_label = core_model
+        model_src = f"extractor.llm.model_name in core config {core.config_path}"
     elif env.get("SMARTMEMORY_LLM_MODEL"):
         model_label = shown("SMARTMEMORY_LLM_MODEL", model)
         model_src = origin("SMARTMEMORY_LLM_MODEL")
@@ -949,38 +1241,59 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
         model_label, model_src = "$OPENAI_MODEL", _env_label(ctx, shell, "OPENAI_MODEL")
     else:
         model_label, model_src = model, "core default"
-
-    # Endpoint, in call_llm's order.
-    probe_url, from_base_url = "", False
-    if pin == "bedrock":
-        endpoint, endpoint_src = "AWS Bedrock", _env_label(ctx, shell, "LLM_PROVIDER")
-    elif extractor_base:
-        endpoint = probe_url = extractor_base
-        endpoint_src = "the extractor's Groq route, GROQ_API_KEY is set"
-    elif base_url:
-        probe_url, from_base_url = base_url, True
-        endpoint = (
-            _safe_url(base_url)
-            if shown("OPENAI_BASE_URL", base_url) == base_url
-            else shown("OPENAI_BASE_URL", base_url)
+    sent = core.model or model
+    if core.route and sent != model:  # alias expansion or a provider prefix strip
+        model_label += (
+            ", which core rewrites before sending"
+            if model_label.startswith("$")
+            else f", sent as {sent}"
         )
-        endpoint_src = origin("OPENAI_BASE_URL")
+
+    # Endpoint: where core sent the request. Labels name the input that chose it.
+    probe_url, from_base_url = "", False
+    groq_url = "https://api.groq.com/openai/v1"
+    gemini_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    if core.route == "bedrock" or (not core.route and pin == "bedrock"):
+        endpoint, endpoint_src = "AWS Bedrock", _env_label(ctx, shell, "LLM_PROVIDER")
     elif agent:
         endpoint, endpoint_src = "", "Claude Agent SDK, uses your Claude Code sign-in"
-    elif pin in pinned:
-        endpoint = probe_url = pinned[pin][0]
-        endpoint_src = f"LLM_PROVIDER {pin}"
-    elif groq_model:
-        endpoint = probe_url = "https://api.groq.com/openai/v1"
-        endpoint_src = "a Groq model name"
-    elif model.lower().startswith("gemini"):
-        endpoint = probe_url = (
-            "https://generativelanguage.googleapis.com/v1beta/openai/"
-        )
-        endpoint_src = "a Gemini model name"
     else:
-        endpoint = probe_url = "https://api.openai.com/v1"
-        endpoint_src = "the OpenAI client default"
+        api_base = core.api_base if core.route else None
+        if not core.route:  # core refused: the route it takes once a key is set
+            api_base = extractor_base or (
+                None
+                if base_url
+                else pinned[pin][0]
+                if pin in pinned
+                else groq_url
+                if groq_model
+                else gemini_url
+                if model.lower().startswith("gemini")
+                else None
+            )
+        if api_base:
+            endpoint = probe_url = api_base
+            if api_base == extractor_base:
+                endpoint_src = "the extractor's Groq route, GROQ_API_KEY is set"
+            elif pin in pinned and api_base == pinned[pin][0]:
+                endpoint_src = f"LLM_PROVIDER {pin}"
+            elif api_base == groq_url:
+                endpoint_src = "a Groq model name"
+            elif api_base == gemini_url:
+                endpoint_src = "a Gemini model name"
+            else:
+                endpoint_src = "core's extractor route"
+        elif base_url:  # the OpenAI client reads OPENAI_BASE_URL itself
+            probe_url, from_base_url = base_url, True
+            endpoint = (
+                _safe_url(base_url)
+                if shown("OPENAI_BASE_URL", base_url) == base_url
+                else shown("OPENAI_BASE_URL", base_url)
+            )
+            endpoint_src = origin("OPENAI_BASE_URL")
+        else:
+            endpoint = probe_url = "https://api.openai.com/v1"
+            endpoint_src = "the OpenAI client default"
 
     # Provider: a core pin routes every call. Otherwise the CLI's llm_provider.
     app_provider = (cfg.llm_provider or "none").lower()
@@ -1013,7 +1326,9 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
         probe_url,
         pin,
         from_base_url,
-        model,
+        sent,
+        tuple(core.unread),
+        core.refusal,
     )
 
 
@@ -1042,6 +1357,7 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
             where_keys[name] = found
     if ctx.environ.get("LLM_API_KEY"):  # core's key for a pinned provider
         where_keys["LLM_API_KEY"] = ["env"]
+    unread_all.update(route.unread)  # a core config read core swallowed (R2-H3)
     keys_text = (
         ", ".join(
             f"{name} yes ({' + '.join(srcs)})" for name, srcs in where_keys.items()
@@ -1160,6 +1476,13 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
                 f"{detail} The running daemon started without a key, so it is not using one.",
                 "Run: sm restart",
             )
+    env_only = all(srcs == ["env"] for srcs in where_keys.values())
+    if route.refusal and env_only:
+        return row(
+            WARN,
+            f"{detail} Core would not send the call with these settings ({route.refusal}).",
+            "Set the key the message names, then run: sm restart",
+        )
     return row(PASS, detail)
 
 
@@ -1449,7 +1772,8 @@ def require_healthy(context: str) -> list[Row]:
     """Print the table; raise a ClickException naming the fix when a row FAILs."""
     import click
 
-    rows = run_checks(context)
+    with masked_logging():
+        rows = run_checks(context)
     text = render(rows)
     if text:
         click.echo(text)

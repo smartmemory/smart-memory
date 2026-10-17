@@ -3082,6 +3082,8 @@ def doctor_cmd(
     # SETUP-DOCTOR-1: what the CLI will actually use, and which source won.
     from smartmemory_app import doctor as _doctor
 
+    # Log lines printed while doctor runs are masked too (core logs some inputs).
+    click.get_current_context().with_resource(_doctor.masked_logging())
     config_rows = _doctor.run_checks("doctor")
     status = check_installation()
     if as_json:
@@ -3201,6 +3203,10 @@ def doctor_cmd(
         if state_warnings
         else "\nInstallation checks passed. Some local checks were not completed."
         if any(": not checked" in row for row in rows)
+        or any(  # a doctor row that could not read a source (keychain, profile, core config)
+            row.status == _doctor.WARN and "ot checked" in row.detail
+            for row in config_rows
+        )
         else "\nAll checks passed. Installation checks passed, network and state warnings are advisory."
     )
 

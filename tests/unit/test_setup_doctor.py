@@ -1101,6 +1101,10 @@ def _probe_h4(monkeypatch, tmp_path):
             if mode == "remote" and "--json" not in args:
                 assert "Network $SMARTMEMORY_API_URL (env)" in text, text
             arms.append(f"{mode} {' '.join(args)}: exit {out.exit_code}, 0 canaries")
+    # F1: the older canary test may not exempt any line again (2596b91 let the
+    # Network line through). The needle is split so this file does not hold it.
+    exemption = "line.startswith(f" + '"Network https://{CANARY}")'
+    assert exemption not in Path(__file__).read_text(), "leak check has an exemption"
     return "\n".join(arms)
 
 
@@ -1131,6 +1135,144 @@ def _probe_h5(kind):
         return got
 
     return probe
+
+
+def _cli_text(monkeypatch, ctx, args):
+    """Real `sm doctor` output plus every log line any handler printed meanwhile."""
+    import io
+    import logging
+
+    from smartmemory_app.cli import cli
+
+    monkeypatch.setattr(
+        doctor, "run_checks", lambda context="doctor": doctor.collect(ctx, context)
+    )
+    buf = io.StringIO()
+    handler = logging.StreamHandler(buf)
+    handler.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(handler)
+    try:
+        out = CliRunner().invoke(cli, args)
+    finally:
+        logging.getLogger().removeHandler(handler)
+    return out.output + (getattr(out, "stderr", "") or "") + buf.getvalue()
+
+
+def _probe_r2_h1a(monkeypatch, tmp_path):
+    canary = "R2_UNKNOWN_PROVIDER_CANARY"
+    monkeypatch.chdir(tmp_path)
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={"LLM_PROVIDER": canary, "OPENAI_API_KEY": "sk-synthetic"},
+        config=LOCAL_CFG + '[local]\nllm_provider = "none"\n',
+    )
+    seen = []
+    for args in (["doctor"], ["doctor", "--json"]):
+        text = _cli_text(monkeypatch, ctx, args)
+        assert canary.lower() not in text.lower(), text
+        assert "is not a recognized provider" in text, (
+            text
+        )  # the core record was printed
+        seen.append(f"{' '.join(args)}: 0 canaries, core warning printed masked")
+    return "; ".join(seen)
+
+
+def _probe_r2_h1b(monkeypatch, tmp_path):
+    ctx = build(monkeypatch, tmp_path, environ={"SMARTMEMORY_MODE": "z9x"})
+    text = _cli_text(monkeypatch, ctx, ["doctor"])
+    assert "z9x" not in text.lower(), text
+    mode = row(ctx, "mode")
+    assert mode.status == FAIL and "env SMARTMEMORY_MODE is invalid" in mode.detail
+    assert "Invalid SMARTMEMORY_MODE='$SMARTMEMORY_MODE (env)'" in text, text
+    # Short plain words are masked only quoted or after =, never inside prose.
+    assert doctor.mask_env_values("an abc of 'abc'", {"SMARTMEMORY_X": "abc"}) == (
+        "an abc of '$SMARTMEMORY_X (env)'"
+    )
+    return mode
+
+
+def _probe_r2_h2a(monkeypatch, tmp_path):
+    from smartmemory.utils import llm as core_llm
+
+    monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: False)
+    monkeypatch.chdir(tmp_path)
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={"ANTHROPIC_API_KEY": "sk-ant-synthetic"},
+        config=LOCAL_CFG
+        + '[local]\nllm_provider = "anthropic"\nllm_model = "sonnet"\n',
+    )
+    route = doctor._llm_route(ctx, doctor._config(ctx))
+    core = _core_route(monkeypatch, ctx)
+    assert core["model"] == route.model_value == "claude-sonnet-4-6-20250627", (
+        core,
+        route,
+    )
+    assert route.model == "sonnet, sent as claude-sonnet-4-6-20250627", route
+    assert route.model_src == "config file llm_model", route
+    assert core["endpoint"] == route.probe_url, (core, route)
+    return route.text()
+
+
+def _probe_r2_h2b(monkeypatch, tmp_path):
+    canary = "R2_LEAF_MODEL_CANARY"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"extractor": {"llm": {"model_name": "file-model"}}})
+    )
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={"EXTRACTOR_LLM_MODEL_NAME": canary, "OPENAI_API_KEY": "sk-synthetic"},
+        config=LOCAL_CFG,
+    )
+    route = doctor._llm_route(ctx, doctor._config(ctx))
+    core = _core_route(monkeypatch, ctx)
+    assert core["model"] == route.model_value == canary, (core, route)
+    assert route.model_src == "env EXTRACTOR_LLM_MODEL_NAME", route
+    rows = doctor.collect(ctx)
+    assert canary.lower() not in doctor.render(rows).lower()
+    assert canary.lower() not in json.dumps(doctor.to_json(rows)).lower()
+    for args in (["doctor"], ["doctor", "--json"]):
+        assert canary.lower() not in _cli_text(monkeypatch, ctx, args).lower()
+    return doctor.check_llm(ctx)
+
+
+def _probe_r2_h3(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").mkdir()
+    ctx = build(monkeypatch, tmp_path, environ={"OPENAI_API_KEY": "sk-synthetic"})
+    got = doctor.check_llm(ctx)
+    named = f"core config {tmp_path / 'config.json'}"
+    assert got.status == WARN, got
+    assert f"Not checked: {named}" in got.detail and named in got.fix, got
+    text = _cli_text(monkeypatch, ctx, ["doctor"])
+    assert "Some local checks were not completed" in text or "warnings above" in text
+    return got
+
+
+def _probe_api_env(monkeypatch, tmp_path):
+    """Review r2's own row: env API URL over a different config URL, remote mode."""
+    env_url = "https://r2-api-env-canary.example"
+    seen = []
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={**KEY, "SMARTMEMORY_API_URL": env_url},
+        config=REMOTE_CFG,
+        http={f"{env_url}/auth/me": (200, ME_OK), f"{env_url}/ready": (200, READY_OK)},
+    )
+    inner = ctx.http_get
+    ctx.http_get = lambda url, **kw: seen.append(url) or inner(url, **kw)
+    assert doctor._config(ctx).api_url.rstrip("/") == env_url  # what the CLI sends to
+    got = row(ctx, "service")
+    assert got.status == PASS and "$SMARTMEMORY_API_URL" in got.detail, got
+    assert seen and all(url.startswith(env_url) for url in seen), seen
+    for args in (["doctor"], ["doctor", "--json"]):
+        assert "r2-api-env-canary" not in _cli_text(monkeypatch, ctx, args)
+    return got
 
 
 _OLLAMA = LOCAL_CFG + '[local]\nllm_provider = "ollama"\n'
@@ -1190,6 +1332,12 @@ PROBES = [
     ("H4", _probe_h4),
     ("H5-keychain", _probe_h5("keychain")),
     ("H5-profile", _probe_h5("profile")),
+    ("R2-H1a", _probe_r2_h1a),
+    ("R2-H1b", _probe_r2_h1b),
+    ("R2-H2a", _probe_r2_h2a),
+    ("R2-H2b", _probe_r2_h2b),
+    ("R2-H3", _probe_r2_h3),
+    ("API-env", _probe_api_env),
 ]
 
 
