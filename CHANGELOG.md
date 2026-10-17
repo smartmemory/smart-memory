@@ -6,6 +6,10 @@
 
 - Tests no longer leak provider variables into each other. Session-lesson tests called code that sets `LLM_PROVIDER`, `LLM_API_KEY` and `OPENAI_BASE_URL` straight in the process environment, which made 7 `test_setup_doctor.py` rows read `provider groq (from env LLM_PROVIDER)` when run after them. Those tests now use the new `provider_pin_isolated` fixture, and an autouse guard in `tests/conftest.py` fails any test that leaves a provider, model or key variable changed (names only, never values) and undoes the change. Test-only, no shipped code changed.
 
+### CLI-GUARD-RESOLVE-1 (2026-10-18)
+
+- The LLM entry-point guard (`tests/unit/test_llm_entry_points.py`, test-only, no product code) now refuses instead of resolving wherever a name might not be the trusted applier. A wildcard import in reach of a command makes the command an offender. Module identity is the full dotted path, so `smartmemory_app.untrusted.storage` no longer counts as `smartmemory_app.storage`. Every definition has its own identity, so a name defined twice in one scope earns applier credit only when each definition does. New row table `RESOLVE_ROWS` covers the reviewer's eight r3 variants plus `global`, `nonlocal` and nested-scope rows and the controls.
+
 ### SETUP-FRESH-CI-1 (2026-10-17)
 
 - New fresh-install check for the `sm` CLI: `scripts/fresh_install_check.py` and `.github/workflows/fresh-install.yml`. It installs the built wheel into a clean venv with a throwaway `HOME`, then checks a keyless local `sm setup`, `sm doctor`, an add, search and decision round trip, the inherited `SMARTMEMORY_*` detection with poisoned variables, and a remote-mode setup against a local fake server. It prints `STEP <name> PASS|FAIL|SKIP` lines and needs no secrets. No product code changed.

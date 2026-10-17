@@ -370,6 +370,7 @@ class _Scope:
         self.declared: dict[str, _Scope] = {}  # global / nonlocal name -> owner
         self.nodes: list[ast.AST] = []
         self.children: list[_Scope] = []
+        self.star = False  # ``from m import *`` binds names no one can list
 
     def bind(self, name: str, spec: tuple) -> None:
         owner = self.declared.get(name, self)
@@ -388,21 +389,37 @@ class _Scope:
         return None
 
 
+def _app_path(node: ast.ImportFrom) -> str | None:
+    """The dotted path under ``smartmemory_app`` that a from-import names (``""`` for
+    the package itself), or None when it leaves the package. Every scanned module
+    sits directly in the package, so ``.x`` is ``smartmemory_app.x``."""
+    mod = node.module or ""
+    if node.level == 0:
+        head, _, rest = mod.partition(".")
+        return rest if head == "smartmemory_app" else None
+    return mod if node.level == 1 else None
+
+
 def _import_specs(node: ast.AST, modules: set[str]) -> list[tuple[str, tuple]]:
     """``(bound name, spec)`` for every name an import statement binds."""
     out = []
     if isinstance(node, ast.ImportFrom):
-        mod = node.module or ""
+        rel = _app_path(node)
         for alias in node.names:
             if alias.name == "*":
-                continue
+                continue  # no name to bind: ``_Scope.star`` makes the command refuse
             bound = alias.asname or alias.name
-            if node.level == 0 and mod.split(".")[0] != "smartmemory_app":
-                spec = ("ext", f"{mod}.{alias.name}")
-            elif mod in ("", "smartmemory_app"):
+            if rel is None:
+                dots = "." * node.level
+                spec = ("ext", f"{dots}{node.module or ''}.{alias.name}")
+            elif rel == "":
                 spec = ("pkgattr", alias.name)
+            elif "." in rel:
+                # A sub-package is never a scanned module: it has no identity and
+                # earns no credit, however its last component is spelled.
+                spec = ("ext", f"smartmemory_app.{rel}.{alias.name}")
             else:
-                spec = ("func", mod.rsplit(".", 1)[-1], alias.name)
+                spec = ("func", rel, alias.name)
             out.append((bound, spec))
     elif isinstance(node, ast.Import):
         for alias in node.names:
@@ -428,6 +445,10 @@ def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
     if kind == "function":
         funcs[(module, qual)] = scope
     scope.nodes = _scope_nodes(body)
+    scope.star = any(
+        isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names)
+        for n in scope.nodes
+    )
     for stmt in scope.nodes:
         if isinstance(stmt, ast.Global):
             root = scope
@@ -456,12 +477,24 @@ def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
             if isinstance(stmt, ast.NamedExpr):
                 walrus.add(id(stmt.target))
     prefix = f"{qual}." if qual else ""
+    defined: dict[str, int] = {}
+    for stmt in scope.nodes:
+        if isinstance(stmt, (*_DEFS, ast.ClassDef)):
+            defined[stmt.name] = defined.get(stmt.name, 0) + 1
+
+    def own_qual(stmt) -> str:
+        """Each definition has its own identity: a name defined more than once in a
+        scope is told apart by line, so no body replaces another's."""
+        return (
+            prefix + stmt.name + (f"@L{stmt.lineno}" if defined[stmt.name] > 1 else "")
+        )
+
     for stmt in scope.nodes:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             for bound, spec in _import_specs(stmt, modules):
                 scope.bind(bound, spec)
         elif isinstance(stmt, _DEFS):
-            scope.bind(stmt.name, ("def", module, prefix + stmt.name))
+            scope.bind(stmt.name, ("def", module, own_qual(stmt)))
         elif isinstance(stmt, ast.ClassDef):
             scope.bind(stmt.name, ("opaque",))
         elif isinstance(stmt, ast.Name) and isinstance(stmt.ctx, (ast.Store, ast.Del)):
@@ -483,9 +516,7 @@ def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
                 ast.Lambda: "lambda",
                 ast.ClassDef: "class",
             }.get(type(stmt), "comp")
-            child_qual = (
-                prefix + stmt.name if child_kind in ("function", "class") else qual
-            )
+            child_qual = own_qual(stmt) if child_kind in ("function", "class") else qual
             _build_scope(
                 child_kind,
                 module,
@@ -590,9 +621,15 @@ def _is_click_command(fn: ast.AST, scope: _Scope, resolver: _Resolver) -> bool:
     return False
 
 
+def _star_in(scope: _Scope) -> bool:
+    """A wildcard import in ``scope`` or in any scope below it."""
+    return scope.star or any(_star_in(child) for child in scope.children)
+
+
 class _CallGraph:
     """Per wrapper function: sinks it names, appliers it calls (by resolved
-    identity), resolved call targets, and its call and reference edges."""
+    identity), resolved call targets, its call and reference edges, and whether a
+    wildcard import in reach makes its names unresolvable (``wild``)."""
 
     def __init__(self, sources: dict[str, str]):
         modules = set(sources)
@@ -613,9 +650,15 @@ class _CallGraph:
         self.appliers = {key: set() for key in self.funcs}
         self.calls = {key: set() for key in self.funcs}
         self.call_edges = {key: set() for key in self.funcs}
+        self.call_groups = {key: [] for key in self.funcs}
         self.ref_edges = {key: set() for key in self.funcs}
+        self.wild = {}
         for key, scope in self.funcs.items():
             self._facts(key, scope, runs=True)
+            up = scope
+            while up is not None and not up.star:
+                up = up.parent
+            self.wild[key] = up is not None or _star_in(scope)
 
     def _facts(self, key, scope, runs):
         """Facts of ``scope`` charged to function ``key``. ``runs`` is False inside
@@ -631,9 +674,13 @@ class _CallGraph:
                     self.calls[key] |= idents
                 if runs and all(_is_applier(i) for i in idents):
                     self.appliers[key] |= {i[1:] for i in idents}
-                # A name bound two ways donates sinks from both, appliers from none.
-                edges = self.call_edges if runs and len(idents) == 1 else self.ref_edges
-                edges[key] |= hits
+                if runs and hits and len(hits) == len(idents):
+                    # A name bound several ways donates sinks from every binding,
+                    # and applier credit only for what every one of them earns.
+                    self.call_edges[key] |= hits
+                    self.call_groups[key].append(frozenset(hits))
+                else:
+                    self.ref_edges[key] |= hits
             elif isinstance(node, (ast.Name, ast.Attribute)):
                 idents = resolve(node, scope)
                 spelled = node.id if isinstance(node, ast.Name) else node.attr
@@ -650,11 +697,13 @@ class _CallGraph:
             else:
                 self._facts(key, child, runs and child.kind != "lambda")
 
-    def reachable(self) -> tuple[dict, dict]:
-        """Sinks and appliers per function after following the edges to a fixed
-        point: sinks along call and reference edges, appliers along calls only."""
+    def reachable(self) -> tuple[dict, dict, dict]:
+        """Sinks, appliers and the wildcard flag per function after following the
+        edges to a fixed point: sinks and the flag along call and reference edges,
+        appliers along calls only (what every binding of the called name earns)."""
         sinks = {k: set(v) for k, v in self.sinks.items()}
         appliers = {k: set(v) for k, v in self.appliers.items()}
+        wild = dict(self.wild)
         changed = True
         while changed:
             changed = False
@@ -663,13 +712,14 @@ class _CallGraph:
                     if not sinks[hit] <= sinks[key]:
                         sinks[key] |= sinks[hit]
                         changed = True
-                    if (
-                        hit in self.call_edges[key]
-                        and not appliers[hit] <= appliers[key]
-                    ):
-                        appliers[key] |= appliers[hit]
+                    if wild[hit] and not wild[key]:
+                        wild[key] = changed = True
+                for group in self.call_groups[key]:
+                    earned = set.intersection(*(appliers[hit] for hit in group))
+                    if not earned <= appliers[key]:
+                        appliers[key] |= earned
                         changed = True
-        return sinks, appliers
+        return sinks, appliers, wild
 
 
 def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
@@ -684,6 +734,12 @@ def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     import f as g``, ``m.f()`` and an aliased module ``h.f()``, and a name
     imported from a wrapper module follows what that module binds it to.
 
+    A module is its full dotted path: ``smartmemory_app.untrusted.storage`` is not
+    ``smartmemory_app.storage``. Every definition is its own identity, so a name
+    defined twice in a scope is bound two ways and earns credit only if each
+    definition does. A wildcard import in reach (the command's scopes, or a wrapper
+    it reaches) makes the command an offender: it can rebind any name.
+
     A call earns applier credit only when its name resolves to a member of
     ``CONFIG_APPLIERS``, every way it is bound. A call that resolves to a sink is
     a sink call whatever it is spelled, and a name with no binding earns nothing.
@@ -697,11 +753,12 @@ def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     inside one command (an applier after the sink still passes).
     """
     graph = _CallGraph(sources)
-    sinks, appliers = graph.reachable()
+    sinks, appliers, wild = graph.reachable()
     return [
         f"{module}:{name}"
         for module, name in graph.commands
-        if sinks[(module, name)] and not appliers[(module, name)]
+        if wild[(module, name)]
+        or (sinks[(module, name)] and not appliers[(module, name)])
     ]
 
 
@@ -1153,4 +1210,203 @@ ALIAS_ROWS = [
     ids=[row[0] for row in ALIAS_ROWS],
 )
 def test_applier_credit_follows_the_binding_not_the_spelling(sources, expected):
+    assert _unconfigured_llm_commands(sources) == expected
+
+
+# r3 HIGH (CLI-GUARD-RESOLVE-1): where a name does not provably resolve to a trusted
+# applier, the guard refuses instead of resolving. Rows 1 to 8 are the reviewer's
+# r3 repro; the rest pin the same rule for global, nonlocal and nested scopes and
+# the controls that must still pass.
+_TRUSTED = {
+    "storage": (
+        "def apply_runtime_config():\n    pass\n"
+        "def get_memory():\n    apply_runtime_config()\n"
+    ),
+    "worker_entry": (
+        "from smartmemory_app.storage import apply_runtime_config\n"
+        "def run_configured_worker():\n    apply_runtime_config()\n"
+    ),
+}
+_LLM_IMPORT = "from smartmemory.utils.llm import call_llm\n"
+_STAR_HELPER = (
+    '__all__ = ["get_memory", "apply_runtime_config", "run_configured_worker"]\n'
+    "from smartmemory.utils.llm import call_llm as get_memory, "
+    "call_llm as apply_runtime_config, call_llm as run_configured_worker\n"
+)
+
+
+def _resolve(body: str, header: str = "", **modules: str) -> dict[str, str]:
+    return {**_TRUSTED, **_cli(body, header), **modules}
+
+
+# (id, module sources, offending commands expected)
+RESOLVE_ROWS = [
+    (
+        "wildcard-shadows-get_memory",
+        _resolve(
+            "get_memory()\n    " + _SINK,
+            _MODULE_GET_MEMORY + "from smartmemory_app.helper import *\n",
+            helper=_STAR_HELPER,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "wildcard-shadows-apply_runtime_config",
+        _resolve(
+            "apply_runtime_config()\n    " + _SINK,
+            "from smartmemory_app.storage import apply_runtime_config\n"
+            "from smartmemory_app.helper import *\n",
+            helper=_STAR_HELPER,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "wildcard-shadows-run_configured_worker",
+        _resolve(
+            "run_configured_worker()\n    " + _SINK,
+            "from smartmemory_app.worker_entry import run_configured_worker\n"
+            "from smartmemory_app.helper import *\n",
+            helper=_STAR_HELPER,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "other-package-get_memory",
+        _resolve(
+            "from smartmemory_app.untrusted.storage import get_memory\n"
+            "    get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "other-package-apply_runtime_config",
+        _resolve(
+            "from smartmemory_app.untrusted.storage import apply_runtime_config\n"
+            "    apply_runtime_config()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "other-package-run_configured_worker",
+        _resolve(
+            "from smartmemory_app.untrusted.worker_entry import run_configured_worker\n"
+            "    run_configured_worker()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "repeated-module-helper",  # the later def wins at runtime
+        _resolve(
+            "helper()\n    " + _SINK,
+            _MODULE_GET_MEMORY
+            + _LLM_IMPORT
+            + "def helper():\n    get_memory()\n"
+            + "def helper():\n    call_llm()\n",
+        ),
+        _OFFENDER,
+    ),
+    (
+        "repeated-nested-helper",
+        _resolve(
+            "def helper():\n        get_memory()\n"
+            "    def helper():\n        call_llm()\n"
+            "    helper()\n    " + _SINK,
+            _MODULE_GET_MEMORY + _LLM_IMPORT,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "global-def-rebinds-applier",
+        _resolve(
+            "_swap()\n    get_memory()",
+            _MODULE_GET_MEMORY + _LLM_IMPORT + "def _swap():\n    global get_memory\n"
+            "    def get_memory():\n        call_llm()\n",
+        ),
+        _OFFENDER,
+    ),
+    (
+        "nonlocal-import-rebinds-applier",
+        _resolve(
+            "from smartmemory_app.storage import get_memory\n"
+            "    def swap():\n        nonlocal get_memory\n"
+            "        from smartmemory.utils.llm import call_llm as get_memory\n"
+            "    swap()\n    get_memory()"
+        ),
+        _OFFENDER,
+    ),
+    (
+        "nested-scope-reaches-repeated-helper",
+        _resolve(
+            "def helper():\n        get_memory()\n"
+            "    def helper():\n        call_llm()\n"
+            "    def inner():\n        helper()\n"
+            "    inner()\n    " + _SINK,
+            _MODULE_GET_MEMORY + _LLM_IMPORT,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "relative-import-of-another-package",
+        _resolve(
+            "from .untrusted.storage import get_memory\n    get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "wildcard-in-a-reached-wrapper",
+        _resolve(
+            "from smartmemory_app.helper import invoke\n    invoke()",
+            helper=_MODULE_GET_MEMORY
+            + "from smartmemory_app.other import *\n"
+            + _LLM_IMPORT
+            + "def invoke():\n    get_memory()\n    call_llm()\n",
+        ),
+        _OFFENDER,
+    ),
+    (
+        "wildcard-in-a-command-module-without-a-sink",
+        _resolve("print('hi')", "from smartmemory_app.helper import *\n"),
+        _OFFENDER,
+    ),
+    (
+        "control-from-import-of-trusted-applier",  # r3 control
+        _resolve(
+            "from smartmemory_app.storage import get_memory\n    get_memory()\n    "
+            + _SINK
+        ),
+        [],
+    ),
+    (
+        "control-relative-import-of-trusted-applier",
+        _resolve("from .storage import get_memory\n    get_memory()\n    " + _SINK),
+        [],
+    ),
+    (
+        "control-every-repeated-def-applies",
+        _resolve(
+            "helper()\n    " + _SINK,
+            _MODULE_GET_MEMORY
+            + "def helper():\n    get_memory()\n"
+            + "def helper():\n    get_memory()\n",
+        ),
+        [],
+    ),
+    (
+        "control-wildcard-in-a-module-nothing-reaches",
+        _resolve(
+            "from smartmemory_app.storage import get_memory\n    get_memory()\n    "
+            + _SINK,
+            lonely="from smartmemory_app.other import *\n",
+        ),
+        [],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "sources, expected",
+    [row[1:] for row in RESOLVE_ROWS],
+    ids=[row[0] for row in RESOLVE_ROWS],
+)
+def test_guard_refuses_where_resolution_is_ambiguous(sources, expected):
     assert _unconfigured_llm_commands(sources) == expected
