@@ -13,6 +13,7 @@
 
 - `sm report --zip` and `sm report --send` no longer put env-sourced values (team id, LLM provider and model, embedding provider, data directory, workspace id) in the support archive. Every member (doctor, environment, config, both log tails) now prints them as `$NAME (env)`, the same masking `sm doctor` uses. Your own message text is left as you wrote it. (SUPPORT-BUNDLE-REDACT-1)
 - The launchd auto-start files (`ai.smartmemory.daemon.plist`, `ai.smartmemory.worker.plist`) no longer contain your Groq key in plain text. The daemon and the worker read it from the OS keychain (or your shell profile) when they start. `sm setup` copies a key that only lives in your shell into the keychain, and says so when it cannot, instead of claiming the worker is enabled. Re-run `sm setup` to rewrite an existing plist without the key. (SETUP-PLIST-PLAINTEXT-KEY-1)
+- `sm doctor` now reports WARN, not FAIL, when it could not get an answer for a reason on your side: an unreadable config file, the hosted service not answering (offline), a non-local LLM endpoint not answering, or the local SQLite store being locked by another process. Each row starts with `not checked:`. A definite bad answer (invalid TOML, service reports not ready, local LLM server refusing, corrupt store) is still FAIL. So `sm setup` no longer stops on these. (DOCTOR-CANNOT-CHECK-WARN-1)
 
 ## Unreleased - CLI-TENANT-1 (2026-10-17)
 

@@ -27,6 +27,7 @@ are what this command exists to show.
 from __future__ import annotations
 
 import functools
+import ipaddress
 import json
 import logging
 import os
@@ -588,6 +589,20 @@ def check_python(ctx: Context) -> Row:
     return Row("Python", PASS, f"{version}, {where}")
 
 
+def _is_loopback(url: str) -> bool:
+    """True for a URL on this machine (localhost or a loopback address)."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def check_config(ctx: Context) -> Row:
     path = ctx.config_path()
     if ctx.platform == "win32":
@@ -605,10 +620,11 @@ def check_config(ctx: Context) -> Row:
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
+        # Cannot check: an unreadable file says nothing about what is in it.
         return Row(
             "Config file",
-            FAIL,
-            f"{where} cannot be read ({type(exc).__name__})",
+            WARN,
+            f"not checked: {where} cannot be read ({type(exc).__name__})",
             f"Fix the permissions on {path}, then run: sm doctor",
         )
     except tomllib.TOMLDecodeError:
@@ -1415,6 +1431,13 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
                 ),
             )
         except Exception as exc:
+            if not _is_loopback(route.probe_url):
+                # Cannot check: a remote endpoint may be unreachable only from here.
+                return row(
+                    WARN,
+                    f"not checked: {route_text}, not answering ({type(exc).__name__})",
+                    "Check your network and the endpoint, then run: sm doctor",
+                )
             return row(
                 FAIL,
                 f"{route_text}, not answering ({type(exc).__name__})",
@@ -1577,10 +1600,11 @@ def _check_hosted_service(ctx: Context) -> Row:
     try:
         status, body = _ready(ctx)
     except Exception as exc:
+        # Cannot check: no answer may mean this machine is offline, not that the service is down.
         return Row(
             "SmartMemory service",
-            FAIL,
-            f"{url} unreachable ({type(exc).__name__})",
+            WARN,
+            f"not checked: {url} unreachable ({type(exc).__name__})",
             "Check your network and SMARTMEMORY_API_URL, then run: sm doctor",
         )
     body = body if isinstance(body, dict) else {}
@@ -1669,6 +1693,17 @@ def check_graph(ctx: Context) -> Row:
         finally:
             conn.close()
     except sqlite3.Error as exc:
+        locked = isinstance(exc, sqlite3.OperationalError) and any(
+            word in str(exc).lower() for word in ("locked", "busy")
+        )
+        if locked:
+            # Cannot check: another process holds the store, which is normal while it runs.
+            return Row(
+                "Graph backend",
+                WARN,
+                f"not checked: SQLite store {db_label} (from {where}) is in use by another process ({type(exc).__name__})",
+                "Run: sm stop, then sm doctor",
+            )
         return Row(
             "Graph backend",
             FAIL,

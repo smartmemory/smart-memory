@@ -92,7 +92,11 @@ def build(
     env = {"XDG_CONFIG_HOME": str(cfg_root), **(environ or {})}
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    if config is not None:
+    if (
+        config == "unreadable"
+    ):  # a directory where the file should be: read_text raises OSError
+        (cfg_root / "smartmemory" / "config.toml").mkdir(parents=True, exist_ok=True)
+    elif config is not None:
         (cfg_root / "smartmemory").mkdir(parents=True, exist_ok=True)
         (cfg_root / "smartmemory" / "config.toml").write_text(config)
     data_dir = (
@@ -511,11 +515,12 @@ CASES = [
         "ready, version 9.9.9",
     ),
     (
+        # DOCTOR-CANNOT-CHECK-WARN-1: no answer is "not checked" (was FAIL).
         "service-remote-unreachable",
         {"config": REMOTE_CFG},
         "service",
-        FAIL,
-        "api.example.test unreachable",
+        WARN,
+        "not checked: https://api.example.test unreachable",
     ),
     (
         "service-remote-not-ready",
@@ -587,6 +592,83 @@ def test_doctor_row(case, monkeypatch, tmp_path):
     assert text in result.detail, result
     if status != PASS:
         assert result.fix or key == "inherited", result
+
+
+def _store_locked(monkeypatch):
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(doctor.sqlite3, "connect", locked)
+
+
+# DOCTOR-CANNOT-CHECK-WARN-1: the class is "the probe could not get an answer for a
+# reason that belongs to this machine" (permission, offline, lock). One row per
+# probe boundary doctor has, each paired with the row that must stay FAIL when
+# the same boundary gives a definite answer.
+_OLLAMA = LOCAL_CFG + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
+CANNOT_CHECK = [
+    # (id, build kwargs, row key, patch, status, text)
+    (
+        "config-unreadable",
+        {"config": "unreadable"},
+        "config",
+        None,
+        WARN,
+        "not checked:",
+    ),
+    (
+        "config-unreadable-text",
+        {"config": "unreadable"},
+        "config",
+        None,
+        WARN,
+        "cannot be read (IsADirectoryError)",
+    ),
+    ("service-offline", {"config": REMOTE_CFG}, "service", None, WARN, "not checked:"),
+    (
+        "llm-remote-endpoint-offline",
+        {
+            "config": _OLLAMA,
+            "environ": {"OPENAI_BASE_URL": "http://llm.example.test:11434/v1"},
+        },
+        "llm",
+        None,
+        WARN,
+        "not checked:",
+    ),
+    ("store-locked", {"store": "ok"}, "graph", _store_locked, WARN, "not checked:"),
+    # definite answers stay FAIL
+    (
+        "config-bad-toml",
+        {"config": "mode = = ="},
+        "config",
+        None,
+        FAIL,
+        "not valid TOML",
+    ),
+    (
+        "service-not-ready",
+        {"config": REMOTE_CFG, "http": {f"{API}/ready": (503, READY_GRAPH_DOWN)}},
+        "service",
+        None,
+        FAIL,
+        "not ready",
+    ),
+    ("llm-loopback-down", {"config": _OLLAMA}, "llm", None, FAIL, "not answering"),
+    ("store-corrupt", {"store": "corrupt"}, "graph", None, FAIL, "cannot be opened"),
+]
+
+
+@pytest.mark.parametrize("case", CANNOT_CHECK, ids=[c[0] for c in CANNOT_CHECK])
+def test_cannot_check_is_warn_and_definite_failure_is_fail(case, monkeypatch, tmp_path):
+    _id, kwargs, key, patch, status, text = case
+    ctx = build(monkeypatch, tmp_path, **kwargs)
+    if patch:
+        patch(monkeypatch)
+    result = row(ctx, key)
+    assert result.status == status, result
+    assert text in result.detail, result
+    assert result.fix, result
 
 
 def test_tour_context_rows(monkeypatch, tmp_path):
