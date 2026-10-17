@@ -638,11 +638,32 @@ def ingest_callers(root, allowed_dynamic=()):
 #: One row per consumer. A new caller of ``storage.ingest`` fails this table until its reading of the return is
 #: stated: it either discards the value, or reads it as an id string, or reads ``["item_id"]`` of the dict.
 INGEST_CONSUMER_ROWS = [
-    ("cli.py", "add_cmd", "argument of click.echo", "reads an id string (sync)"),
-    ("cli.py", "add_cmd", "argument of ids.append", "reads an id string (sync)"),
-    ("lifecycle.py", "observe", "discarded", "discards the value"),
-    ("lifecycle.py", "distill", "discarded", "discards the value"),
-    ("lifecycle.py", "learn", "discarded", "discards the value"),
+    # CORE-HOLD-RECEIPT-1 (forward-merged from main): every site assigns the return to ``receipt`` and checks for a
+    # held dict (``status == "held"``) before using it, so a terminal hold is never read as an id.
+    (
+        "cli.py",
+        "add_cmd",
+        "assigned to receipt",
+        "reads a held dict's status first, else an id string (sync)",
+    ),
+    (
+        "lifecycle.py",
+        "observe",
+        "assigned to receipt",
+        "reads a held dict's status first, else discards the value",
+    ),
+    (
+        "lifecycle.py",
+        "distill",
+        "assigned to receipt",
+        "reads a held dict's status first, else discards the value",
+    ),
+    (
+        "lifecycle.py",
+        "learn",
+        "assigned to receipt",
+        "reads a held dict's status first, else discards the value",
+    ),
     (
         "local_api.py",
         "ingest_endpoint",
@@ -658,6 +679,9 @@ INGEST_CONSUMER_ROWS = [
 DYNAMIC_IMPORT_ALLOWED = {
     ("work_graph.py", "<module>"),
     ("work_graph.py", "_core_names"),
+    # Forward-merged from main (FORWARD-MERGE-1): imports the fixed native libraries ``usearch.index`` and ``numpy`` by
+    # loop variable, never the wrapper.
+    ("install_check.py", "native_library_checks"),
 }
 
 
