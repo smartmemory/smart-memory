@@ -3,6 +3,7 @@
 import json
 import ntpath
 import os
+import re
 import tempfile
 import threading
 import time
@@ -242,6 +243,52 @@ def local_checks(*, budget: float | None = None) -> list[str]:
     return rows
 
 
+_SECRET_NAME = re.compile(
+    r"(?:^|_)(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD)(?:_|$)"
+)
+_SECRET_FIELD = ("key", "token", "password", "secret")
+
+
+def supplied_values(environ=None) -> list[tuple[str, str]]:
+    """Every exact secret and identifier value this machine supplied, with its label.
+
+    Secrets are provider keys and any env value named like a key, token, secret or
+    password, plus the same kind of config field. Identifiers are team, workspace and
+    tenant ids from the environment and the effective config. They are masked by
+    value, so a key of any length, a purely numeric id and a JSON-escaped id all go.
+    """
+    from smartmemory_app.config import LLM_KEY_ENV_VARS, load_config
+    from smartmemory_app.doctor import is_identifier_name
+
+    env = os.environ if environ is None else environ
+    pairs = []
+    for name, value in env.items():
+        if is_identifier_name(name):
+            pairs.append((value, f"${name} (env)"))
+        elif name in LLM_KEY_ENV_VARS or _SECRET_NAME.search(name.upper()):
+            # A bare number under a key-like name (a token budget) is a setting.
+            if not value.strip().isdigit():
+                pairs.append((value, "<redacted>"))
+    try:
+        fields = asdict(load_config())
+    except Exception:
+        fields = {}
+    for key, value in fields.items():
+        if not isinstance(value, str):
+            continue
+        if is_identifier_name(key):
+            pairs.append((value, f"<{key}>"))
+        elif any(word in key.lower() for word in _SECRET_FIELD):
+            pairs.append((value, "<redacted>"))
+    return pairs
+
+
+def mask_supplied_values(text: str) -> str:
+    from smartmemory_app.doctor import mask_exact_values
+
+    return mask_exact_values(text, supplied_values())
+
+
 def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
     """Build shared, privacy-filtered archive and upload content."""
     from smartmemory_app.bug_report import (
@@ -294,11 +341,13 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
             or "Log unavailable or empty"
         )
     # Every member leaves the machine, so env-sourced values print as $NAME (env),
-    # the same contract `sm doctor` follows. The user's own message is theirs to word.
+    # the same contract `sm doctor` follows. The user's own message is theirs to
+    # word, but a key or an id typed into it is still a supplied value, so the exact
+    # secret and identifier masking runs over every member, message.txt included.
     texts = {name: mask_env_values(value) for name, value in texts.items()}
     if message:
         texts["message.txt"] = private_text(message)
-    return texts
+    return {name: mask_supplied_values(value) for name, value in texts.items()}
 
 
 def write_support_bundle(
@@ -322,7 +371,7 @@ def write_support_bundle(
             temp_path, "w", compression=zipfile.ZIP_DEFLATED
         ) as archive:
             for name, value in texts.items():
-                archive.writestr(name, redact_credentials(value))
+                archive.writestr(name, mask_supplied_values(redact_credentials(value)))
         temp_path.replace(path)
         return path
     finally:

@@ -38,8 +38,8 @@ import tomllib
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
-from urllib.parse import urlsplit
+from typing import Any, Callable, Iterable, Mapping, Optional
+from urllib.parse import quote, urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -353,6 +353,10 @@ def _value_forms(value: str) -> set[str]:
                     forms.add(f"{parts.hostname}:{parts.port}")
         except ValueError:
             pass
+    # A value inside a JSON record, a repr or a URL is printed escaped, and the
+    # escaped text no longer contains the raw value.
+    for form in list(forms):
+        forms |= {json.dumps(form)[1:-1], repr(form)[1:-1], quote(form, safe="")}
     return {form for form in forms if len(form) >= 4}
 
 
@@ -374,6 +378,16 @@ def _value_patterns(value: str) -> list[str]:
         else:
             patterns.append(rf"(?<!\w){escaped}(?!\w)")
     return patterns
+
+
+# An identifier (team, workspace, tenant id) names who the user is, so a purely
+# numeric one is masked like any other. A bare number in other env values (a port)
+# says nothing about the user and stays visible.
+_IDENTIFIER_NAME = re.compile(r"(?:TEAM|WORKSPACE|TENANT)_ID$", re.IGNORECASE)
+
+
+def is_identifier_name(name: str) -> bool:
+    return bool(_IDENTIFIER_NAME.search(name))
 
 
 def _masked_name(name: str) -> bool:
@@ -403,9 +417,26 @@ def mask_env_values(text: str, environ: Optional[Mapping[str, str]] = None) -> s
         derived = DERIVED_ENV.get(name)
         if not value or (derived and derived[1] == value):
             continue
-        if value.strip().lower() in _CLOSED_VALUES or value.strip().isdigit():
+        if value.strip().lower() in _CLOSED_VALUES or (
+            value.strip().isdigit() and not is_identifier_name(name)
+        ):
             continue
-        pairs += [(pattern, f"${name} (env)") for pattern in _value_patterns(value)]
+        pairs.append((value, f"${name} (env)"))
+    return mask_exact_values(text, pairs)
+
+
+def mask_exact_values(text: str, labelled: Iterable[tuple[str, str]]) -> str:
+    """Replace every printed form of each ``(value, label)`` in ``text`` with its label.
+
+    Matching is by the exact supplied value, whatever its length, letter case or
+    escaping (JSON, repr, URL), never by a pattern that guesses what a secret looks like.
+    """
+    pairs = [
+        (pattern, label)
+        for value, label in labelled
+        if value and value.strip()
+        for pattern in _value_patterns(value)
+    ]
     for pattern, label in sorted(pairs, key=lambda pair: -len(pair[0])):
         text = re.sub(pattern, lambda _m, label=label: label, text, flags=re.IGNORECASE)
     return text

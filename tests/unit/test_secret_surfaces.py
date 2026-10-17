@@ -7,9 +7,12 @@ launchctl process boundary is replaced.
 
 import contextlib
 import io
+import json
 import os
 import plistlib
 import subprocess
+import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -254,3 +257,118 @@ def test_key_that_cannot_be_migrated_keeps_the_old_plists(
     assert {n: (agents / n).read_bytes() for n in before} == before
     assert "left as they are" in output.getvalue()
     assert KEY not in output.getvalue()
+
+
+_BASE_IDS = {
+    "SMARTMEMORY_TEAM_ID": "ReviewTeamCanary73",
+    "SMARTMEMORY_LLM_PROVIDER": "ReviewProviderCanary73",
+    "SMARTMEMORY_LLM_MODEL": "ReviewModelCanary73",
+    "SMARTMEMORY_EMBEDDING_PROVIDER": "ReviewEmbedCanary73",
+    "SMARTMEMORY_WORKSPACE_ID": "ReviewWorkspaceCanary73",
+    "OPENAI_MODEL": "ReviewOpenaiModelCanary73",
+    "GROQ_API_KEY": KEY,
+}
+# case -> (env overrides, member the value is planted in besides doctor and logs).
+# message-key, message-id and numeric-id are the review's failing rows. The rest cover
+# the class: a key of any length, a config-only id, escaped and non-ASCII ids, a
+# tenant id, a key-named variable the LLM list does not know.
+_ZIP_ROWS = {
+    "ordinary": {},
+    "message-key": {"message": "key"},
+    "message-id": {"message": "team"},
+    "json-log": {"env": {"SMARTMEMORY_TEAM_ID": 'ReviewTeam"Canary\\73'}, "json": True},
+    "numeric-id": {"env": {"SMARTMEMORY_TEAM_ID": "8319472056"}},
+    "numeric-id-short": {"env": {"SMARTMEMORY_TEAM_ID": "4412"}, "message": "team"},
+    "short-key": {"env": {"GROQ_API_KEY": "k9Zq"}, "message": "key"},
+    "three-char-key": {"env": {"GROQ_API_KEY": "k9Z"}, "message": "key"},
+    "config-only-id": {
+        "env": {"SMARTMEMORY_TEAM_ID": ""},
+        "cfg_team": "CfgTeamCanary73",
+    },
+    "non-ascii-json-log": {
+        "env": {"SMARTMEMORY_TEAM_ID": "\u00c9quipeCanary73"},
+        "json": True,
+    },
+    "tenant-id": {"env": {"TENANT_ID": "ReviewTenantCanary73"}, "message": "tenant"},
+    "other-key-name": {
+        "env": {"VENDOR_API_TOKEN": "vendor-token-Canary73"},
+        "message": "vendor",
+    },
+}
+
+
+def _decoded_strings(text):
+    found = []
+    for line in text.splitlines():
+        if "INFO {" in line:
+            try:
+                found += [
+                    str(v) for v in json.loads(line.split("INFO ", 1)[1]).values()
+                ]
+            except ValueError:
+                pass
+    return found
+
+
+@pytest.mark.parametrize("case", sorted(_ZIP_ROWS))
+def test_zip_paths(case, monkeypatch, isolate):
+    from smartmemory_app import bug_report, config
+    from smartmemory_app import support_diagnostics as support
+
+    home, row = isolate, _ZIP_ROWS[case]
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: home / "cli-debug.log")
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: SimpleNamespace(browser_info="probe environment"),
+    )
+    vals = {**_BASE_IDS, **row.get("env", {})}
+    for name, value in vals.items():
+        monkeypatch.setenv(name, value)
+    team = row.get("cfg_team") or vals["SMARTMEMORY_TEAM_ID"]
+    cfg = config.SmartMemoryConfig(
+        team_id=team,
+        llm_model=vals["SMARTMEMORY_LLM_MODEL"],
+        llm_provider=vals["SMARTMEMORY_LLM_PROVIDER"],
+        embedding_provider=vals["SMARTMEMORY_EMBEDDING_PROVIDER"],
+    )
+    monkeypatch.setattr(config, "load_config", lambda: cfg)
+    planted = {n: v for n, v in vals.items() if v}
+    if row.get("cfg_team"):
+        planted["config team_id"] = team
+    payload = {"team_id": team, "api": vals["GROQ_API_KEY"]}
+    log = "2026-10-17 12:00:00 INFO " + (
+        json.dumps(payload) if row.get("json") else " ".join(planted.values())
+    )
+    for name in ("cli-debug.log", "daemon.log"):
+        (home / name).write_text(log)
+    message = {
+        "key": vals["GROQ_API_KEY"],
+        "team": team,
+        "tenant": vals.get("TENANT_ID", ""),
+        "vendor": vals.get("VENDOR_API_TOKEN", ""),
+    }.get(row.get("message"), "probe message")
+    path = support.write_support_bundle(
+        home / "support.zip", "probe " + " ".join(planted.values()), message=message
+    )
+    extracted = home / "unzipped"
+    with zipfile.ZipFile(path) as z:
+        z.extractall(extracted)
+    assert {p.name for p in extracted.iterdir()} >= {
+        "doctor.txt",
+        "config.txt",
+        "daemon.log",
+    }
+    leaks = []
+    for member in extracted.iterdir():
+        text = member.read_text()
+        decoded = _decoded_strings(text)
+        for name, value in planted.items():
+            if name in ("SMARTMEMORY_LLM_PROVIDER",) and value.lower() in ("none",):
+                continue
+            escaped = json.dumps(value)[1:-1]
+            if value in text or escaped in text or any(value in d for d in decoded):
+                leaks.append((member.name, name))
+    assert not leaks, f"raw identifier or secret in extracted zip: {leaks}"
+    if row.get("message"):
+        assert (extracted / "message.txt").read_text() != message
