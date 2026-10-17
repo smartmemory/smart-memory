@@ -293,81 +293,174 @@ def _is_click_command(fn: ast.AST) -> bool:
     return False
 
 
+def _dotted(node: ast.AST) -> list[str] | None:
+    """``['a', 'b', 'c']`` for a plain ``a.b.c`` Name/Attribute chain, else None."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return [node.id, *reversed(parts)]
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _scope_nodes(body: list) -> list[ast.AST]:
+    """Nodes of one scope: ``body`` without descending into nested defs or classes."""
+    out: list[ast.AST] = []
+    stack = list(body)
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        if not isinstance(node, _SCOPES):
+            stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _local_names(fn: ast.AST) -> set[str]:
+    """Names a function binds itself (arguments, assignments, nested defs)."""
+    names = {a.arg for a in ast.walk(fn.args) if isinstance(a, ast.arg)}
+    for node in _scope_nodes(fn.body):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+    return names
+
+
+def _app_bindings(nodes, modules: set[str]) -> dict[str, tuple]:
+    """Names ``nodes`` bind to wrapper code: ``("func", module, name)``,
+    ``("module", module)`` or ``("package",)`` (``import smartmemory_app``).
+
+    An import is only a binding. Nothing here says the bound name is ever called.
+    """
+    env: dict[str, tuple] = {}
+    for node in nodes:
+        if isinstance(node, ast.ImportFrom):
+            top = (node.module or "").split(".")[0]
+            if node.level == 0 and top != "smartmemory_app":
+                continue
+            origin = (node.module or "").rsplit(".", 1)[-1]
+            package_level = not node.module or node.module == "smartmemory_app"
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if not package_level:
+                    env[bound] = ("func", origin, alias.name)
+                elif alias.name in modules:
+                    env[bound] = ("module", alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] != "smartmemory_app":
+                    continue
+                if alias.asname:
+                    if len(parts) == 2 and parts[1] in modules:
+                        env[alias.asname] = ("module", parts[1])
+                else:
+                    env["smartmemory_app"] = ("package",)
+    return env
+
+
 def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     """``module:command`` for every Click command whose reachable code starts an LLM
     sink and never calls a config applier.
 
-    Reachable means the command body plus the module-level functions it calls by
-    bare name, in its own module or imported from ``smartmemory_app``. Appliers are
-    not expanded (storage.get_memory is a real sink holder, and is checked below).
+    Reachable means the command body plus the wrapper functions it calls or names
+    statically: a bare name in its own module, a name imported from a
+    ``smartmemory_app`` module, or a module-qualified call through ``from
+    smartmemory_app import helper``, ``import smartmemory_app.helper as h`` or
+    ``import smartmemory_app.helper``. A sink counts when it is named at all, so a
+    sink that is merely referenced still flags. An applier counts only when it is
+    CALLED, here or in a function reached through a call: an import is a binding,
+    not execution, and a helper that is only named does not run. Appliers are not
+    expanded (storage.get_memory is a real sink holder, and is checked below).
+    Names resolve per scope: module-level imports, shadowed by what the function
+    assigns or takes as an argument (a local ``search`` is not ``storage.search``),
+    plus the function's own imports. A command's decorators are not read.
     Blind spots: method calls on objects, calls through containers, and call order
     inside one command (an applier after the sink still passes).
     """
+    modules = set(sources)
     funcs: dict[tuple[str, str], ast.AST] = {}
-    imports: dict[str, dict[str, tuple[str, str]]] = {}
+    module_env: dict[str, dict[str, tuple]] = {}
     commands = []
     for module, source in sources.items():
         tree = ast.parse(source)
-        imports[module] = {}
+        module_env[module] = _app_bindings(_scope_nodes(tree.body), modules)
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
-                "smartmemory_app"
-            ):
-                origin = node.module.rsplit(".", 1)[-1]
-                for alias in node.names:
-                    imports[module][alias.asname or alias.name] = (origin, alias.name)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 funcs.setdefault((module, node.name), node)
                 if _is_click_command(node):
                     commands.append((module, node.name))
 
-    def reach(module, name, seen):
-        if (module, name) in seen or (module, name) not in funcs:
-            return set(), set()
-        seen.add((module, name))
-        fn = funcs[(module, name)]
-        sinks, appliers, follow = set(), set(), set()
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Name):
-                label = node.id
-            elif isinstance(node, ast.Attribute):
-                label = node.attr
-            elif isinstance(node, ast.ImportFrom):
-                for alias in node.names:
-                    if alias.name in LLM_SINKS:
-                        sinks.add(alias.name)
-                    if alias.name in CONFIG_APPLIERS:
-                        appliers.add(alias.name)
-                    follow.add(alias.name)
-                continue
-            else:
-                continue
-            if label in LLM_SINKS:
-                sinks.add(label)
-            if isinstance(node, ast.Name):
-                follow.add(label)
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Call):
-                callee = node.func
-                label = getattr(callee, "id", None) or getattr(callee, "attr", None)
-                if label in CONFIG_APPLIERS:
-                    appliers.add(label)
-        for label in follow - LLM_SINKS - CONFIG_APPLIERS:
-            target = (module, label) if (module, label) in funcs else None
-            if target is None and label in imports[module]:
-                target = imports[module][label]
-            if target:
-                more_sinks, more_appliers = reach(*target, seen)
-                sinks |= more_sinks
-                appliers |= more_appliers
-        return sinks, appliers
+    def target(node, module, env):
+        parts = _dotted(node)
+        if parts is None:
+            return None
+        if len(parts) == 1:
+            if (module, parts[0]) in funcs:
+                return (module, parts[0])
+            bound = env.get(parts[0])
+            return (bound[1], bound[2]) if bound and bound[0] == "func" else None
+        bound = env.get(parts[0])
+        if bound and bound[0] == "module" and len(parts) == 2:
+            return (bound[1], parts[1])
+        if bound and bound[0] == "package" and len(parts) == 3:
+            return (parts[1], parts[2])
+        return None
 
-    offenders = []
-    for module, name in sorted(commands):
-        sinks, appliers = reach(module, name, set())
-        if sinks and not appliers:
-            offenders.append(f"{module}:{name}")
-    return offenders
+    # Direct facts per function, then propagate along the edges to a fixed point.
+    sinks: dict[tuple[str, str], set] = {}
+    appliers: dict[tuple[str, str], set] = {}
+    call_edges: dict[tuple[str, str], set] = {}
+    ref_edges: dict[tuple[str, str], set] = {}
+    for key, fn in funcs.items():
+        module = key[0]
+        body = [n for stmt in fn.body for n in ast.walk(stmt)]
+        # Module-level imports, minus names this function rebinds, plus its own
+        # imports. Decorators (``@group.command``) name the parent group, they do
+        # not run it, so only the body is read.
+        local = _local_names(fn)
+        env = {k: v for k, v in module_env[module].items() if k not in local}
+        env.update(_app_bindings(body, modules))
+        sinks[key], appliers[key] = set(), set()
+        call_edges[key], ref_edges[key] = set(), set()
+        for node in body:
+            if isinstance(node, ast.ImportFrom):
+                sinks[key] |= {a.name for a in node.names} & LLM_SINKS
+            elif isinstance(node, ast.Call):
+                label = (_dotted(node.func) or [None])[-1]
+                if label in CONFIG_APPLIERS:
+                    appliers[key].add(label)
+                if (hit := target(node.func, module, env)) is not None:
+                    call_edges[key].add(hit)
+            elif isinstance(node, (ast.Name, ast.Attribute)):
+                label = node.id if isinstance(node, ast.Name) else node.attr
+                if label in LLM_SINKS:
+                    sinks[key].add(label)
+                if (hit := target(node, module, env)) is not None:
+                    ref_edges[key].add(hit)
+    changed = True
+    while changed:
+        changed = False
+        for key in funcs:
+            for hit in call_edges[key] | ref_edges[key]:
+                if hit not in funcs:
+                    continue
+                if not sinks[hit] <= sinks[key]:
+                    sinks[key] |= sinks[hit]
+                    changed = True
+                if hit in call_edges[key] and not appliers[hit] <= appliers[key]:
+                    appliers[key] |= appliers[hit]
+                    changed = True
+
+    return [
+        f"{module}:{name}"
+        for module, name in sorted(commands)
+        if sinks[(module, name)] and not appliers[(module, name)]
+    ]
 
 
 def test_every_llm_command_applies_config_or_is_exempt():
@@ -494,3 +587,149 @@ def test_command_guard_catches_a_new_command_in_an_existing_module(
     found = set(_unconfigured_llm_commands(sources)) - set(COMMAND_EXEMPT)
 
     assert found == set(expected)
+
+
+# r1 HIGH-2: imports are bindings, not execution, and module-qualified calls resolve.
+_CMD = '@cli.command("review")\ndef review_command():\n    {body}\n'
+_SINK_HELPER = (
+    "from smartmemory.utils.llm import call_llm\ndef invoke():\n    call_llm()\n"
+)
+_APPLYING_HELPER = (
+    "from smartmemory_app.storage import apply_runtime_config\n"
+    "from smartmemory.utils.llm import call_llm\n"
+    "def invoke():\n    apply_runtime_config()\n    call_llm()\n"
+)
+_SINK = "from smartmemory.utils.llm import call_llm\n    call_llm()"
+_OFFENDER = ["cli:review_command"]
+
+# (id, command body, {helper module sources}, offending commands expected)
+QUALIFIED_ROWS = [
+    ("direct-control", _SINK, {}, _OFFENDER),
+    (
+        "unused-applier-import",  # reviewer's r1 row
+        "from smartmemory_app.storage import get_memory\n    " + _SINK,
+        {},
+        _OFFENDER,
+    ),
+    (
+        "unused-applier-import-qualified",
+        "from smartmemory_app import storage\n    " + _SINK,
+        {"storage": "def get_memory():\n    pass\n"},
+        _OFFENDER,
+    ),
+    (
+        "applier-named-not-called",
+        "from smartmemory_app.storage import get_memory\n    get_memory\n    " + _SINK,
+        {},
+        _OFFENDER,
+    ),
+    (
+        "qualified-wrapper-helper",  # reviewer's r1 row
+        "from smartmemory_app import helper\n    helper.invoke()",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "aliased-module-call",
+        "import smartmemory_app.helper as h\n    h.invoke()",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "from-import-aliased-module-call",
+        "from smartmemory_app import helper as h\n    h.invoke()",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "dotted-package-call",
+        "import smartmemory_app.helper\n    smartmemory_app.helper.invoke()",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "from-import-call",
+        "from smartmemory_app.helper import invoke\n    invoke()",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "from-import-renamed-call",
+        "from smartmemory_app.helper import invoke as go\n    go()",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "sink-helper-only-named",
+        "from smartmemory_app import helper\n    helper.invoke",
+        {"helper": _SINK_HELPER},
+        _OFFENDER,
+    ),
+    (
+        "control-applier-called",
+        "from smartmemory_app.storage import get_memory\n    get_memory()\n    "
+        + _SINK,
+        {},
+        [],
+    ),
+    (
+        "control-qualified-helper-applies-config",
+        "from smartmemory_app import helper\n    helper.invoke()",
+        {"helper": _APPLYING_HELPER},
+        [],
+    ),
+    (
+        "control-aliased-helper-applies-config",
+        "import smartmemory_app.helper as h\n    h.invoke()",
+        {"helper": _APPLYING_HELPER},
+        [],
+    ),
+    (
+        "control-decorator-names-a-sink-group",
+        "",
+        {
+            "cli": "from smartmemory.utils.llm import call_llm\n"
+            "def parent():\n    call_llm()\n"
+            '@parent.command("review")\ndef review_command():\n    print("hi")\n'
+        },
+        [],
+    ),
+    (
+        "control-local-name-shadows-an-import",
+        "",
+        {
+            "cli": "from smartmemory_app.helper import invoke\n"
+            '@cli.command("review")\ndef review_command():\n'
+            "    invoke = 1\n    print(invoke)\n",
+            "helper": _SINK_HELPER,
+        },
+        [],
+    ),
+    (
+        "unshadowed-import-is-called",
+        "",
+        {
+            "cli": "from smartmemory_app.helper import invoke\n"
+            '@cli.command("review")\ndef review_command():\n    invoke()\n',
+            "helper": _SINK_HELPER,
+        },
+        _OFFENDER,
+    ),
+    (
+        "applying-helper-only-named",
+        "from smartmemory_app import helper\n    helper.invoke\n    " + _SINK,
+        {"helper": _APPLYING_HELPER},
+        _OFFENDER,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "body, helpers, expected",
+    [row[1:] for row in QUALIFIED_ROWS],
+    ids=[row[0] for row in QUALIFIED_ROWS],
+)
+def test_every_unconfigured_click_command_is_detected(body, helpers, expected):
+    sources = {"cli": _CMD.format(body=body), **helpers}
+
+    assert _unconfigured_llm_commands(sources) == expected
