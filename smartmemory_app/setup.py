@@ -1340,6 +1340,35 @@ def _daemon_can_read_key(name: str, value: str) -> bool:
     return _read_env_from_profile(name) == value
 
 
+def _plist_env_value(name: str, value: str) -> str:
+    """The form of an env value that may be copied into a launchd plist.
+
+    A plist is a plaintext file in LaunchAgents, so a login embedded in a URL-shaped
+    value (``http://user:pass@host``, or ``user:pass@host`` with no scheme) is
+    dropped and a WARNING names the variable, never the value.
+    """
+    scheme, sep, rest = value.partition("://")
+    # A path (HOME) or a NO_PROXY list is not a URL, whatever characters it holds.
+    url_shaped = bool(sep) or not (value.startswith("/") or "," in value)
+    if "@" not in value or not url_shaped:
+        return value
+    if not sep:
+        scheme, rest = "", value
+    stripped = f"{scheme}{sep}{rest.rsplit('@', 1)[1]}"
+    logger.warning(
+        "%s holds a proxy login (user and password). It was left out of the "
+        "launchd plist so the login is not stored in a plaintext file",
+        name,
+    )
+    click.echo(
+        f"Warning: {name} holds a login. It was left out of the auto-start files, "
+        "so the background service connects without it. If your proxy requires a "
+        f"login, point {name} at a local forwarding proxy that needs none and "
+        "re-run sm setup."
+    )
+    return stripped
+
+
 def _install_launchd_plist() -> bool:
     """Install launchd plist for auto-start + crash recovery (macOS only).
 
@@ -1396,12 +1425,14 @@ def _install_launchd_plist() -> bool:
     proxy_env_xml = "".join(
         f"\n        <key>{name}</key>\n        <string>{escape(value)}</string>"
         for name in (*PROXY_ENV_VARS, "NO_PROXY", "no_proxy")
-        if (value := os.environ.get(name))
+        if (value := _plist_env_value(name, os.environ.get(name, "")))
     )
 
     replacements = {
         "{PYTHON_PATH}": python_path,
-        "{HOME}": escape(os.environ.get("HOME") or str(Path.home())),
+        "{HOME}": escape(
+            _plist_env_value("HOME", os.environ.get("HOME") or str(Path.home()))
+        ),
         "{DAEMON_PORT}": str(cfg.daemon_port),
         "{DATA_DIR}": data_dir,
         "{BIN_DIR}": bin_dir,

@@ -158,9 +158,9 @@ class TestInstallLaunchdPlist:
             assert _install_launchd_plist() is True
 
         for environment in self._installed_environments(launch_agents):
-            assert environment["HTTPS_PROXY"] == (
-                "http://user:pass@127.0.0.1:7890/path?a=1&b=2"
-            )
+            # The login is the one part left out (CLI-FU-SWEEP-1a H1): host, port,
+            # path and query still reach the plist exactly as given.
+            assert environment["HTTPS_PROXY"] == "http://127.0.0.1:7890/path?a=1&b=2"
             assert environment["NO_PROXY"] == "localhost,127.0.0.1"
 
     def test_install_omits_unset_and_empty_proxy_environment(
