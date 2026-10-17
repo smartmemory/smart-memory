@@ -657,6 +657,47 @@ def test_bare_short_team_id_is_not_in_message_member(monkeypatch, isolate):
     assert not leaked, "supplied team identifier survives in message.txt"
 
 
+# Review r3 H3, verbatim: a JSON escape right before a short supplied id. The
+# serialized text holds a backslash and an ``n``, the decoded text a newline.
+def test_json_escaped_boundary_hides_short_supplied_id(monkeypatch, isolate):
+    from smartmemory_app import bug_report, config
+    from smartmemory_app import support_diagnostics as support
+
+    identifier = "abc"  # same synthetic identifier as r2 H3
+    monkeypatch.setenv("SMARTMEMORY_TEAM_ID", identifier)
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: config.SmartMemoryConfig(
+            team_id=identifier,
+            data_dir=str(isolate / "data"),
+        ),
+    )
+    monkeypatch.setattr(
+        bug_report,
+        "debug_log_path",
+        lambda: isolate / "cli-debug.log",
+    )
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: SimpleNamespace(browser_info="probe environment"),
+    )
+    message = json.dumps({"note": "\n" + identifier})
+    path = support.write_support_bundle(
+        isolate / "support.zip",
+        "probe",
+        message=message,
+    )
+    with zipfile.ZipFile(path) as archive:
+        body = archive.read("message.txt").decode()
+    decoded = json.loads(body)["note"]
+    leaked = identifier in body and bool(
+        re.search(rf"(?<!\w){re.escape(identifier)}(?!\w)", decoded)
+    )
+    assert not leaked, "supplied identifier survives the JSON archive boundary"
+
+
 # id -> (where the value is supplied, the value, the text it is planted in). Every
 # length (1, 2, 3, 4+), character class (letters, digits, mixed, a symbol) and
 # placement (the whole text, prose, quoted, a JSON record) appears at least once.
@@ -737,6 +778,71 @@ def test_overlapping_supplied_values_are_masked_whole():
 
     out = mask_exact_values("xxabcdefyy", [("abcdef", "<a>"), ("xxabc", "<b>")])
     assert "abc" not in out and "def" not in out and "xx" not in out
+
+
+# id -> (the JSON string content as the archive member holds it, the supplied value,
+# where it is supplied, masked or kept). One row per escape before and one after the
+# value: the six JSON escapes, an escaped non-ASCII letter (``\u00e9``, an e-acute as
+# json.dumps writes it) and a ``\u`` escape of a newline. Lengths 1, 3 and 8, letters
+# and digits, from the env, the config or both. The ``kept`` rows pin that a short
+# id still masks only as a whole token: ``abc`` stays in ``xabcx`` and ``abcdef``,
+# after an escape too.
+_ESCAPE_ROWS = {
+    "before-n-len1-alpha": (r"\n{v}", "q", "env", "masked"),
+    "before-t-len3-numeric": (r"\t{v}", "417", "config", "masked"),
+    "before-r-len1-numeric": (r"\r{v}", "7", "env", "masked"),
+    "before-quote-len3-alpha": (r"\"{v}", "abc", "env", "masked"),
+    "before-backslash-len8-alpha": (r"\\{v}", "qzxwvuts", "config", "masked"),
+    "before-slash-len3-alpha": (r"\/{v}", "abc", "config", "masked"),
+    "before-e-acute-len3-alpha": (r"\u00e9{v}", "abc", "env", "masked"),
+    "before-u000a-len3-alpha": (r"\u000a{v}", "abc", "both", "masked"),
+    "after-n-len8-numeric": (r"{v}\n", "83194726", "env", "masked"),
+    "after-t-len1-alpha": (r"{v}\t", "q", "config", "masked"),
+    "after-r-len3-alpha": (r"{v}\r", "abc", "both", "masked"),
+    "after-quote-len1-numeric": (r"{v}\"", "7", "env", "masked"),
+    "after-backslash-len3-numeric": (r"{v}\\", "417", "config", "masked"),
+    "after-slash-len8-alpha": (r"{v}\/", "qzxwvuts", "both", "masked"),
+    "after-e-acute-len3-alpha": (r"{v}\u00e9", "abc", "env", "masked"),
+    "after-u000a-len1-numeric": (r"{v}\u000a", "7", "config", "masked"),
+    "kept-inside-word": ("x{v}x", "abc", "both", "kept"),
+    "kept-prefix-of-word": ("{v}def", "abc", "both", "kept"),
+    "kept-escape-then-longer-word": (r"\n{v}def", "abc", "both", "kept"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_ESCAPE_ROWS))
+def test_supplied_value_next_to_an_escape_is_masked(case, monkeypatch, isolate):
+    from smartmemory_app import bug_report, config
+    from smartmemory_app import support_diagnostics as support
+
+    content, value, source, expect = _ESCAPE_ROWS[case]
+    body = '{"note": "' + content.format(v=value) + '"}'
+    if source in ("env", "both"):
+        monkeypatch.setenv("SMARTMEMORY_TEAM_ID", value)
+    team = value if source in ("config", "both") else ""
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: config.SmartMemoryConfig(team_id=team, data_dir=str(isolate / "data")),
+    )
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: isolate / "cli-debug.log")
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: SimpleNamespace(browser_info="probe environment"),
+    )
+    path = support.write_support_bundle(isolate / "support.zip", body, message=body)
+    with zipfile.ZipFile(path) as archive:
+        members = {
+            name: archive.read(name).decode() for name in ("message.txt", "doctor.txt")
+        }
+    for name, member in members.items():
+        note = json.loads(member)["note"]
+        if expect == "kept":
+            assert member == body, f"{name}: a longer word holding the id was masked"
+            continue
+        assert value.lower() not in _LABEL.sub(" ", member).lower(), name
+        assert not _token_hit(value, note), f"{name}: id is a token once decoded"
 
 
 @pytest.mark.parametrize(

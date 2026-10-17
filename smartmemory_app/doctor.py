@@ -382,8 +382,31 @@ def _value_patterns(value: str) -> list[str]:
         if short.isalpha():
             patterns.append(rf"(?<=['\"=]){escaped}(?=['\"]|[\s,.)]|$)")
         else:
-            patterns.append(rf"(?<!\w){escaped}(?!\w)")
+            patterns.append(_whole_token(escaped))
     return patterns
+
+
+# Where a whole token may start: the start of the text, a non-word character, or a
+# complete escape sequence. Archive members hold escaped text (a JSON record, a
+# repr, a URL), where the ``n`` of ``\n`` is a word character but the decoded text
+# has a newline there, so ``\nabc`` holds the token ``abc``. Escapes ending in a
+# symbol (``\"``, ``\\``, ``\/``) already end in a non-word character. A token
+# ends at the end of the text or a non-word character, which covers a following
+# escape (it starts with a backslash or ``%``).
+_TOKEN_START = (
+    r"(?:(?<!\w)"
+    r"|(?<=\\[ntrbf])"  # JSON and repr one-letter escapes
+    r"|(?<=\\x[0-9A-Fa-f]{2})"  # repr
+    r"|(?<=\\u[0-9A-Fa-f]{4})"  # JSON and repr
+    r"|(?<=\\U[0-9A-Fa-f]{8})"  # repr
+    r"|(?<=%[0-9A-Fa-f]{2}))"  # URL quoting
+)
+_TOKEN_END = r"(?!\w)"
+
+
+def _whole_token(escaped: str) -> str:
+    """The regex for ``escaped`` (already ``re.escape``d) as one whole token."""
+    return f"{_TOKEN_START}{escaped}{_TOKEN_END}"
 
 
 def _exact_value_patterns(value: str) -> list[str]:
@@ -391,15 +414,16 @@ def _exact_value_patterns(value: str) -> list[str]:
 
     No length or character-class rule decides whether a form is masked: a form of
     4+ characters matches anywhere, a shorter one (one letter, two digits, ``a1``)
-    matches as a whole token, so ``abc`` goes in ``team abc``, ``'abc'``, a JSON
-    record or a message that is only ``abc``, and stays in ``abcdef``.
+    matches as a whole token (``_whole_token``), so ``abc`` goes in ``team abc``,
+    ``'abc'``, a JSON record, after an escape such as ``\\n`` in JSON-escaped text,
+    or a message that is only ``abc``, and stays in ``abcdef`` and ``xabcx``.
     """
     forms = set()
     for raw in {value, value.strip()}:
         if raw:
             forms |= _value_forms(raw, min_len=1)
     return [
-        re.escape(form) if len(form) >= 4 else rf"(?<!\w){re.escape(form)}(?!\w)"
+        re.escape(form) if len(form) >= 4 else _whole_token(re.escape(form))
         for form in forms
     ]
 
