@@ -760,6 +760,15 @@ PYTHONPATH=. pytest tests/integration/
 PYTHONPATH=. pytest tests/e2e/
 ```
 
+### Fresh-install check (CI)
+
+`.github/workflows/fresh-install.yml` builds the wheel on every wrapper change, installs it into a clean venv with a throwaway `HOME` and no inherited `SMARTMEMORY_*` variables, and runs `scripts/fresh_install_check.py`. The script runs a keyless local setup, `sm doctor`, an add, search and decision round trip, a setup with poisoned `SMARTMEMORY_*` variables, and a remote-mode setup against a fake server on `127.0.0.1`. It prints one `STEP <name> PASS|FAIL|SKIP` line per step and needs no secrets. Run it locally on Linux (on macOS, use a Linux container, because `sm setup` registers a launchd job):
+
+```bash
+python -m build
+python scripts/fresh_install_check.py --wheel dist/smartmemory-*.whl [--core PATH_TO_CORE_SOURCE]
+```
+
 ## License
 
 SmartMemory Lite is distributed as a compiled runtime under the SmartMemory Lite Runtime License (see [LICENSE](LICENSE)).
