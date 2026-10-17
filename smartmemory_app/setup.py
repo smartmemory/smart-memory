@@ -1318,6 +1318,28 @@ def _seed_data_dir(data_dir: str | None = None) -> None:
     )  # seeds entity_patterns.jsonl if absent (side effect of __init__)
 
 
+def _daemon_can_read_key(name: str, value: str) -> bool:
+    """True when the daemon's own key lookup (keychain, then shell profile) finds ``value``.
+
+    A key that only lives in this shell's env is stored in the OS keychain, the same
+    place ``sm setup`` puts a key you type. Never raises. The key is never logged.
+    """
+    try:
+        import keyring
+
+        if keyring.get_password("smartmemory", name) == value:
+            return True
+        keyring.set_password("smartmemory", name, value)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "OS credential store unavailable for %s: %s",
+            name,
+            redact_credentials(str(exc)),
+        )
+    return _read_env_from_profile(name) == value
+
+
 def _install_launchd_plist() -> bool:
     """Install launchd plist for auto-start + crash recovery (macOS only).
 
@@ -1354,15 +1376,22 @@ def _install_launchd_plist() -> bool:
     # override that shouldn't be baked into a persistent plist.
     data_dir = str(Path(cfg.data_dir).expanduser())
 
-    # Resolve GROQ_API_KEY from env or keyring
+    # The key never goes into the plist (a plaintext file in LaunchAgents). The
+    # daemon and the worker read it from the OS keychain or shell profile at boot
+    # (config.load_llm_keys_from_stores), so make sure one of those holds it.
     groq_key = os.environ.get("GROQ_API_KEY", "")
     if not groq_key:
         try:
             import keyring
 
-            groq_key = keyring.get_password("smartmemory", "groq_api_key") or ""
+            groq_key = (
+                keyring.get_password("smartmemory", "GROQ_API_KEY")
+                or keyring.get_password("smartmemory", "groq_api_key")
+                or ""
+            )
         except Exception:
             pass
+    key_readable = not groq_key or _daemon_can_read_key("GROQ_API_KEY", groq_key)
 
     proxy_env_xml = "".join(
         f"\n        <key>{name}</key>\n        <string>{escape(value)}</string>"
@@ -1376,7 +1405,6 @@ def _install_launchd_plist() -> bool:
         "{DAEMON_PORT}": str(cfg.daemon_port),
         "{DATA_DIR}": data_dir,
         "{BIN_DIR}": bin_dir,
-        "{GROQ_API_KEY}": groq_key,
         "{PROXY_ENV_XML}": proxy_env_xml,
     }
 
@@ -1455,8 +1483,13 @@ def _install_launchd_plist() -> bool:
 
     if all_ok:
         click.echo("SmartMemory will auto-start on login and restart on crash.")
-        if groq_key:
+        if groq_key and key_readable:
             click.echo("Enrichment worker enabled (GROQ_API_KEY found).")
+        elif groq_key:
+            click.echo(
+                "Warning: GROQ_API_KEY is set in this shell only, so the background "
+                "service cannot read it. Run sm setup to store it in your OS keychain."
+            )
         else:
             click.echo(
                 "Warning: GROQ_API_KEY not found — enrichment worker won't extract relations."

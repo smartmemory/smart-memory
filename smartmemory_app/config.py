@@ -38,6 +38,42 @@ LLM_KEY_ENV_VARS = (
     "GEMINI_API_KEY",
 )
 
+
+def load_llm_keys_from_stores() -> list[str]:
+    """Fill missing LLM key env vars from the OS keychain, then the shell profile.
+
+    ``sm setup`` stores keys in both, so a background job (launchd daemon or worker)
+    gets them without sourcing a shell profile and without a copy in its plist.
+    Prints names only, never values. Returns the names it loaded.
+    """
+    loaded = []
+    for key_name in LLM_KEY_ENV_VARS:
+        if os.environ.get(key_name):
+            continue
+        try:
+            import keyring
+
+            stored = keyring.get_password("smartmemory", key_name)
+            if stored:
+                os.environ[key_name] = stored
+                print(f"  Loaded {key_name} from keychain", flush=True)
+                loaded.append(key_name)
+                continue
+        except Exception:
+            pass
+        try:
+            from smartmemory_app.setup import _read_env_from_profile
+
+            stored = _read_env_from_profile(key_name)
+            if stored:
+                os.environ[key_name] = stored
+                print(f"  Loaded {key_name} from shell profile", flush=True)
+                loaded.append(key_name)
+        except Exception:
+            pass
+    return loaded
+
+
 # Local OpenAI-compatible LLM servers → default base URL. These speak the OpenAI
 # Chat Completions API, so extraction needs NO provider-specific code: the core
 # extraction path already routes through the OpenAI client, which honors

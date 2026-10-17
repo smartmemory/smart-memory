@@ -25,6 +25,10 @@ def main():
     from smartmemory_app.runtime_diagnostics import install_daemon_diagnostics
 
     install_daemon_diagnostics(_resolve_data_dir(args.data_dir), redact_output=True)
+    # The launchd plist carries no key: read it from the keychain or shell profile.
+    from smartmemory_app.config import load_llm_keys_from_stores
+
+    load_llm_keys_from_stores()
     return run_configured_worker(
         _resolve_data_dir(args.data_dir), idle_exit=0, lease=60
     )

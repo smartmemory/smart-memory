@@ -540,32 +540,9 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # Load LLM API keys: env → keychain → shell profile.
     # setup stores keys in all three locations. Keychain and profile
     # are available immediately without sourcing .zshrc in a new shell.
-    from smartmemory_app.config import LLM_KEY_ENV_VARS
+    from smartmemory_app.config import load_llm_keys_from_stores
 
-    for key_name in LLM_KEY_ENV_VARS:
-        if os.environ.get(key_name):
-            continue
-        # Try keychain
-        try:
-            import keyring
-
-            stored = keyring.get_password("smartmemory", key_name)
-            if stored:
-                os.environ[key_name] = stored
-                print(f"  Loaded {key_name} from keychain", flush=True)
-                continue
-        except Exception:
-            pass
-        # Try shell profile
-        try:
-            from smartmemory_app.setup import _read_env_from_profile
-
-            stored = _read_env_from_profile(key_name)
-            if stored:
-                os.environ[key_name] = stored
-                print(f"  Loaded {key_name} from shell profile", flush=True)
-        except Exception:
-            pass
+    load_llm_keys_from_stores()
 
     # no-silent-degradation: the boot banner and per-add disclosure use the same
     # core route decision, including configured local and subscription providers.

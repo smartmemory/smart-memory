@@ -412,3 +412,131 @@ class TestUninstallCommand:
         assert result.exit_code == 0, result.output
         assert not config_file.exists()
         assert "Removed config file:" not in result.output
+
+
+# SETUP-PLIST-PLAINTEXT-KEY-1: no LLM key value ever sits in a LaunchAgents file.
+# One row per place the install can find the key.
+_PLIST_KEY = "gsk_PlistCanaryKey1234567890"
+_KEY_SOURCES = [
+    # (id, env value, keychain GROQ_API_KEY, keychain legacy groq_api_key, expect keychain write)
+    ("env-only", _PLIST_KEY, None, None, True),
+    ("keychain", "", _PLIST_KEY, None, False),
+    ("legacy-keychain-name", "", None, _PLIST_KEY, True),
+]
+
+
+@pytest.mark.parametrize(
+    ("env", "keychain", "legacy", "writes"),
+    [row[1:] for row in _KEY_SOURCES],
+    ids=[row[0] for row in _KEY_SOURCES],
+)
+def test_installed_plists_never_hold_the_key(
+    env, keychain, legacy, writes, tmp_path, monkeypatch, capsys
+):
+    launch_agents = tmp_path / "LaunchAgents"
+    monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", launch_agents)
+    monkeypatch.setenv("GROQ_API_KEY", env)
+    stored = {}
+    cfg = MagicMock(daemon_port=9014, data_dir=str(tmp_path / "data"))
+
+    def get_password(service, name):
+        return {"GROQ_API_KEY": keychain, "groq_api_key": legacy}.get(
+            name
+        ) or stored.get(name)
+
+    with (
+        patch("smartmemory_app.setup.subprocess.run") as run,
+        patch("smartmemory_app.config.load_config", return_value=cfg),
+        patch("platform.system", return_value="Darwin"),
+        patch("keyring.get_password", side_effect=get_password),
+        patch(
+            "keyring.set_password",
+            side_effect=lambda service, name, value: stored.update({name: value}),
+        ),
+    ):
+        run.return_value = MagicMock(returncode=0)
+        from smartmemory_app.setup import _install_launchd_plist
+
+        assert _install_launchd_plist() is True
+
+    for name in ("ai.smartmemory.daemon.plist", "ai.smartmemory.worker.plist"):
+        raw = (launch_agents / name).read_bytes()
+        assert _PLIST_KEY.encode() not in raw, name
+        assert b"GROQ_API_KEY" not in raw, name
+        assert "EnvironmentVariables" in plistlib.loads(raw)
+    assert (stored.get("GROQ_API_KEY") == _PLIST_KEY) is writes
+    out = capsys.readouterr()
+    assert _PLIST_KEY not in out.out + out.err
+    assert "Enrichment worker enabled" in out.out
+
+
+def test_key_that_cannot_reach_the_daemon_is_a_visible_warning(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", tmp_path / "LA")
+    monkeypatch.setenv("GROQ_API_KEY", _PLIST_KEY)
+    monkeypatch.setattr("smartmemory_app.setup._read_env_from_profile", lambda name: "")
+    cfg = MagicMock(daemon_port=9014, data_dir=str(tmp_path / "data"))
+    with (
+        patch("smartmemory_app.setup.subprocess.run") as run,
+        patch("smartmemory_app.config.load_config", return_value=cfg),
+        patch("platform.system", return_value="Darwin"),
+        patch("keyring.get_password", return_value=None),
+        patch("keyring.set_password", side_effect=RuntimeError("locked")),
+    ):
+        run.return_value = MagicMock(returncode=0)
+        from smartmemory_app.setup import _install_launchd_plist
+
+        assert _install_launchd_plist() is True
+    out = capsys.readouterr().out
+    assert "set in this shell only" in out and _PLIST_KEY not in out
+
+
+def test_no_plist_template_has_a_key_placeholder():
+    for template in sorted(PLIST_TEMPLATE.parent.glob("*.plist")):
+        text = template.read_text()
+        assert "API_KEY" not in text, template.name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "GROQ_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "GEMINI_API_KEY",
+    ],
+)
+def test_launchd_worker_reads_each_key_from_the_keychain(name, monkeypatch):
+    """The worker's launchd entry has no key in its plist, so it loads it itself."""
+    from smartmemory_app import config, worker_entry
+
+    for var in config.LLM_KEY_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("sys.argv", ["worker_entry", "--data-dir", "unused"])
+    monkeypatch.setattr(
+        worker_entry, "_resolve_data_dir", lambda d=None: Path("unused")
+    )
+    monkeypatch.setattr(
+        "smartmemory_app.runtime_diagnostics.install_daemon_diagnostics",
+        lambda *a, **k: None,
+    )
+    seen = {}
+    monkeypatch.setattr(
+        worker_entry,
+        "run_configured_worker",
+        lambda *a, **k: seen.update(
+            {
+                var: bool(__import__("os").environ.get(var))
+                for var in config.LLM_KEY_ENV_VARS
+            }
+        )
+        or 0,
+    )
+    with patch(
+        "keyring.get_password",
+        side_effect=lambda service, key: "stored-value" if key == name else None,
+    ):
+        worker_entry.main()
+    assert seen == {var: var == name for var in config.LLM_KEY_ENV_VARS}
