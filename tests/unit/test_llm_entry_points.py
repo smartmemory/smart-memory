@@ -260,3 +260,237 @@ def test_only_worker_entry_starts_core_run_worker():
         "start core's worker through worker_entry.run_configured_worker, which "
         f"applies the provider config first: {sorted(starters)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# TOUR-ASK-FU-M1: completeness per Click command, not per module.
+# ---------------------------------------------------------------------------
+
+# Names that start core's LLM route (or ask which model it would use).
+LLM_SINKS = {
+    "call_llm",
+    "get_default_model",
+    "create_lite_memory",
+    "run_worker",
+    "llm_route_available",
+}
+# Wrapper calls that run apply_runtime_config() before any of the sinks above.
+CONFIG_APPLIERS = {"apply_runtime_config", "get_memory", "run_configured_worker"}
+
+# "module:command" -> reason. A command that reaches a sink without an applier.
+COMMAND_EXEMPT: dict[str, str] = {}
+
+
+def _app_sources() -> dict[str, str]:
+    return {p.stem: p.read_text(encoding="utf-8") for p in APP.glob("*.py")}
+
+
+def _is_click_command(fn: ast.AST) -> bool:
+    for dec in getattr(fn, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Attribute) and target.attr in {"command", "group"}:
+            return True
+    return False
+
+
+def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
+    """``module:command`` for every Click command whose reachable code starts an LLM
+    sink and never calls a config applier.
+
+    Reachable means the command body plus the module-level functions it calls by
+    bare name, in its own module or imported from ``smartmemory_app``. Appliers are
+    not expanded (storage.get_memory is a real sink holder, and is checked below).
+    Blind spots: method calls on objects, calls through containers, and call order
+    inside one command (an applier after the sink still passes).
+    """
+    funcs: dict[tuple[str, str], ast.AST] = {}
+    imports: dict[str, dict[str, tuple[str, str]]] = {}
+    commands = []
+    for module, source in sources.items():
+        tree = ast.parse(source)
+        imports[module] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                "smartmemory_app"
+            ):
+                origin = node.module.rsplit(".", 1)[-1]
+                for alias in node.names:
+                    imports[module][alias.asname or alias.name] = (origin, alias.name)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.setdefault((module, node.name), node)
+                if _is_click_command(node):
+                    commands.append((module, node.name))
+
+    def reach(module, name, seen):
+        if (module, name) in seen or (module, name) not in funcs:
+            return set(), set()
+        seen.add((module, name))
+        fn = funcs[(module, name)]
+        sinks, appliers, follow = set(), set(), set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Name):
+                label = node.id
+            elif isinstance(node, ast.Attribute):
+                label = node.attr
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name in LLM_SINKS:
+                        sinks.add(alias.name)
+                    if alias.name in CONFIG_APPLIERS:
+                        appliers.add(alias.name)
+                    follow.add(alias.name)
+                continue
+            else:
+                continue
+            if label in LLM_SINKS:
+                sinks.add(label)
+            if isinstance(node, ast.Name):
+                follow.add(label)
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Call):
+                callee = node.func
+                label = getattr(callee, "id", None) or getattr(callee, "attr", None)
+                if label in CONFIG_APPLIERS:
+                    appliers.add(label)
+        for label in follow - LLM_SINKS - CONFIG_APPLIERS:
+            target = (module, label) if (module, label) in funcs else None
+            if target is None and label in imports[module]:
+                target = imports[module][label]
+            if target:
+                more_sinks, more_appliers = reach(*target, seen)
+                sinks |= more_sinks
+                appliers |= more_appliers
+        return sinks, appliers
+
+    offenders = []
+    for module, name in sorted(commands):
+        sinks, appliers = reach(module, name, set())
+        if sinks and not appliers:
+            offenders.append(f"{module}:{name}")
+    return offenders
+
+
+def test_every_llm_command_applies_config_or_is_exempt():
+    offenders = set(_unconfigured_llm_commands(_app_sources()))
+
+    assert offenders <= set(COMMAND_EXEMPT), (
+        "Click command reaches core's LLM without apply_runtime_config(): "
+        f"{sorted(offenders - set(COMMAND_EXEMPT))}"
+    )
+    assert set(COMMAND_EXEMPT) <= offenders, "stale command exemption"
+
+
+def test_config_appliers_really_apply_the_config():
+    """Each applier calls apply_runtime_config() itself or in a helper one hop away."""
+    sources = _app_sources()
+    for module, name in (
+        ("storage", "get_memory"),
+        ("worker_entry", "run_configured_worker"),
+    ):
+        defs = {
+            n.name: n
+            for n in ast.walk(ast.parse(sources[module]))
+            if isinstance(n, ast.FunctionDef)
+        }
+        called = {
+            n.func.id
+            for n in ast.walk(defs[name])
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        }
+        bodies = [ast.unparse(defs[name])] + [
+            ast.unparse(defs[c]) for c in called if c in defs
+        ]
+        assert any("apply_runtime_config(" in b for b in bodies), name
+
+
+_NEW_COMMAND = """
+
+@cli.command("review-new-llm")
+def review_new_llm():
+    {body}
+"""
+
+# (id, extra module sources, text appended to cli.py, offending commands expected)
+GUARD_ROWS = [
+    (
+        "review-m1 repro: call_llm straight in a new command",
+        {},
+        _NEW_COMMAND.format(
+            body="from smartmemory.utils.llm import call_llm; call_llm(user_content='p')"
+        ),
+        ["cli:review_new_llm"],
+    ),
+    (
+        "model lookup through a module attribute",
+        {},
+        _NEW_COMMAND.format(
+            body="import smartmemory.utils.llm as m; m.get_default_model()"
+        ),
+        ["cli:review_new_llm"],
+    ),
+    (
+        "same-module helper starts the memory factory",
+        {},
+        "\ndef _helper():\n    from smartmemory.tools.factory import create_lite_memory\n"
+        "    return create_lite_memory('x')\n" + _NEW_COMMAND.format(body="_helper()"),
+        ["cli:review_new_llm"],
+    ),
+    (
+        "helper imported from a new wrapper module",
+        {
+            "newmod": "from smartmemory.utils.llm import call_llm\n"
+            "def helper():\n    return call_llm(user_content='p')\n"
+        },
+        _NEW_COMMAND.format(body="from smartmemory_app.newmod import helper; helper()"),
+        ["cli:review_new_llm"],
+    ),
+    (
+        "core worker started directly",
+        {},
+        _NEW_COMMAND.format(
+            body="from smartmemory.pipeline.work_graph.worker import run_worker; run_worker('d')"
+        ),
+        ["cli:review_new_llm"],
+    ),
+    (
+        "control: applies the config first",
+        {},
+        _NEW_COMMAND.format(
+            body="from smartmemory_app.storage import apply_runtime_config\n"
+            "    apply_runtime_config()\n"
+            "    from smartmemory.utils.llm import call_llm; call_llm(user_content='p')"
+        ),
+        [],
+    ),
+    (
+        "control: goes through storage.get_memory",
+        {},
+        _NEW_COMMAND.format(
+            body="from smartmemory_app.storage import get_memory; get_memory()"
+        ),
+        [],
+    ),
+    (
+        "control: never touches an LLM",
+        {},
+        _NEW_COMMAND.format(body="print('hi')"),
+        [],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "extra, appended, expected",
+    [row[1:] for row in GUARD_ROWS],
+    ids=[row[0] for row in GUARD_ROWS],
+)
+def test_command_guard_catches_a_new_command_in_an_existing_module(
+    extra, appended, expected
+):
+    sources = _app_sources()
+    sources["cli"] += appended
+    sources.update(extra)
+
+    found = set(_unconfigured_llm_commands(sources)) - set(COMMAND_EXEMPT)
+
+    assert found == set(expected)
