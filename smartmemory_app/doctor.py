@@ -334,8 +334,11 @@ _MASKED_PREFIXES = ("SMARTMEMORY_", "EXTRACTOR_")
 _ATTRIBUTED: set[str] = set()
 
 
-def _value_forms(value: str) -> set[str]:
-    """``value`` plus the forms the CLI prints it in (trimmed, expanded, resolved, URL host)."""
+def _value_forms(value: str, min_len: int = 4) -> set[str]:
+    """``value`` plus the forms the CLI prints it in (trimmed, expanded, resolved, URL host).
+
+    Forms shorter than ``min_len`` are dropped.
+    """
     forms = {value, value.rstrip("/")}
     try:
         expanded = os.path.expanduser(value)
@@ -357,11 +360,14 @@ def _value_forms(value: str) -> set[str]:
     # escaped text no longer contains the raw value.
     for form in list(forms):
         forms |= {json.dumps(form)[1:-1], repr(form)[1:-1], quote(form, safe="")}
-    return {form for form in forms if len(form) >= 4}
+    return {form for form in forms if len(form) >= max(min_len, 1)}
 
 
 def _value_patterns(value: str) -> list[str]:
-    """Regexes for every printed form of ``value``, matched case-insensitively.
+    """Regexes for every printed form of an env value, matched case-insensitively.
+
+    This is the guessing pass for values nobody declared secret (``sm doctor``
+    output). Supplied secrets and identifiers use ``_exact_value_patterns``.
 
     Forms of 4+ characters match anywhere. A shorter value matches as a whole
     token when it holds a digit or symbol, and only quoted or after ``=`` when it
@@ -378,6 +384,53 @@ def _value_patterns(value: str) -> list[str]:
         else:
             patterns.append(rf"(?<!\w){escaped}(?!\w)")
     return patterns
+
+
+def _exact_value_patterns(value: str) -> list[str]:
+    """Regexes for every printed form of a supplied secret or identifier.
+
+    No length or character-class rule decides whether a form is masked: a form of
+    4+ characters matches anywhere, a shorter one (one letter, two digits, ``a1``)
+    matches as a whole token, so ``abc`` goes in ``team abc``, ``'abc'``, a JSON
+    record or a message that is only ``abc``, and stays in ``abcdef``.
+    """
+    forms = set()
+    for raw in {value, value.strip()}:
+        if raw:
+            forms |= _value_forms(raw, min_len=1)
+    return [
+        re.escape(form) if len(form) >= 4 else rf"(?<!\w){re.escape(form)}(?!\w)"
+        for form in forms
+    ]
+
+
+def _mask_spans(text: str, labelled_patterns: Iterable[tuple[str, str]]) -> str:
+    """Replace every match of every pattern in ``text`` with its label, in one pass.
+
+    Matches are found on the original text and overlapping matches are merged, so
+    one label can never hide part of another value or be rewritten by a later one.
+    """
+    spans = sorted(
+        (match.start(), match.end(), label)
+        for pattern, label in labelled_patterns
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE)
+        if match.end() > match.start()
+    )
+    merged: list[tuple[int, int, str]] = []
+    for start, end, label in spans:
+        if merged and start < merged[-1][1]:
+            first, last, kept = merged[-1]
+            if end - start > last - first:
+                kept = label
+            merged[-1] = (first, max(last, end), kept)
+        else:
+            merged.append((start, end, label))
+    pieces, position = [], 0
+    for start, end, label in merged:
+        pieces += [text[position:start], label]
+        position = end
+    pieces.append(text[position:])
+    return "".join(pieces)
 
 
 # An identifier (team, workspace, tenant id) names who the user is, so a purely
@@ -422,24 +475,33 @@ def mask_env_values(text: str, environ: Optional[Mapping[str, str]] = None) -> s
         ):
             continue
         pairs.append((value, f"${name} (env)"))
-    return mask_exact_values(text, pairs)
+    return _mask_spans(
+        text,
+        [
+            (pattern, label)
+            for value, label in pairs
+            if value and value.strip()
+            for pattern in _value_patterns(value)
+        ],
+    )
 
 
 def mask_exact_values(text: str, labelled: Iterable[tuple[str, str]]) -> str:
     """Replace every printed form of each ``(value, label)`` in ``text`` with its label.
 
-    Matching is by the exact supplied value, whatever its length, letter case or
-    escaping (JSON, repr, URL), never by a pattern that guesses what a secret looks like.
+    Matching is by the exact supplied value, whatever its length, character class,
+    letter case or escaping (JSON, repr, URL), never by a pattern that guesses what a
+    secret looks like (``_exact_value_patterns``).
     """
-    pairs = [
-        (pattern, label)
-        for value, label in labelled
-        if value and value.strip()
-        for pattern in _value_patterns(value)
-    ]
-    for pattern, label in sorted(pairs, key=lambda pair: -len(pair[0])):
-        text = re.sub(pattern, lambda _m, label=label: label, text, flags=re.IGNORECASE)
-    return text
+    return _mask_spans(
+        text,
+        [
+            (pattern, label)
+            for value, label in labelled
+            if value and value.strip()
+            for pattern in _exact_value_patterns(value)
+        ],
+    )
 
 
 class _MaskingFilter(logging.Filter):

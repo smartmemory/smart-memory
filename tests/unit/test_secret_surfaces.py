@@ -10,6 +10,7 @@ import io
 import json
 import os
 import plistlib
+import re
 import subprocess
 import zipfile
 from types import SimpleNamespace
@@ -623,6 +624,138 @@ def test_zip_paths(case, monkeypatch, isolate):
     assert not leaks, f"raw identifier or secret in extracted zip: {leaks}"
     if row.get("message"):
         assert (extracted / "message.txt").read_text() != message
+
+
+# Review r2 H3, verbatim: a bare short alphabetic team id as the whole message.
+def test_bare_short_team_id_is_not_in_message_member(monkeypatch, isolate):
+    from smartmemory_app import bug_report, config
+    from smartmemory_app import support_diagnostics as support
+
+    identifier = "abc"
+    monkeypatch.setenv("SMARTMEMORY_TEAM_ID", identifier)
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: config.SmartMemoryConfig(
+            team_id=identifier,
+            data_dir=str(isolate / "data"),
+        ),
+    )
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: isolate / "cli-debug.log")
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: SimpleNamespace(
+            browser_info="probe environment",
+        ),
+    )
+    path = support.write_support_bundle(
+        isolate / "support.zip", "probe", message=identifier
+    )
+    with zipfile.ZipFile(path) as archive:
+        leaked = identifier.encode() in archive.read("message.txt")
+    assert not leaked, "supplied team identifier survives in message.txt"
+
+
+# id -> (where the value is supplied, the value, the text it is planted in). Every
+# length (1, 2, 3, 4+), character class (letters, digits, mixed, a symbol) and
+# placement (the whole text, prose, quoted, a JSON record) appears at least once.
+# The exact-value pass masks a supplied value at any length and any class.
+_EXACT_ROWS = {
+    "len1-whole": ("SMARTMEMORY_TEAM_ID", "x", "{v}"),
+    "len2-prose": ("SMARTMEMORY_TEAM_ID", "ab", "my team {v} cannot sync"),
+    "len3-alpha-quoted": ("SMARTMEMORY_TEAM_ID", "abc", "team_id='{v}' failed"),
+    "len3-numeric-json": ("SMARTMEMORY_TEAM_ID", "417", '{{"team_id": "{v}"}}'),
+    "len3-symbol-json-escaped": ("SMARTMEMORY_TEAM_ID", 'q"z', "{j}"),
+    "len4-alpha-prose": ("SMARTMEMORY_TEAM_ID", "abcd", "team {v}, again"),
+    "mixed-short-whole": ("SMARTMEMORY_TEAM_ID", "a1", "{v}"),
+    "numeric-long-quoted": ("SMARTMEMORY_TEAM_ID", "8319472056", 'team "{v}"'),
+    "upper-case-prose": ("SMARTMEMORY_TEAM_ID", "Qx", "team QX and {v}"),
+    "workspace-len2-prose": ("SMARTMEMORY_WORKSPACE_ID", "wq", "workspace {v} is gone"),
+    "tenant-len1-quoted": ("TENANT_ID", "t", 'tenant "{v}"'),
+    "config-only-len1": ("config team_id", "z", "{v}"),
+    "key-alpha-len2-prose": ("GROQ_API_KEY", "kq", "my key {v} was refused"),
+    "key-numeric-whole": ("GROQ_API_KEY", "73", "{v}"),
+}
+_LABEL = re.compile(r"\$[A-Z_]+ \(env\)|<[a-z_]+>")
+
+
+def _token_hit(value, text):
+    """``value`` as a whole token in ``text`` once every mask label is removed."""
+    bare = _LABEL.sub(" ", text)
+    return re.search(rf"(?<!\w){re.escape(value)}(?!\w)", bare, re.IGNORECASE)
+
+
+@pytest.mark.parametrize("case", sorted(_EXACT_ROWS))
+def test_every_supplied_value_is_masked_at_any_length(case, monkeypatch, isolate):
+    from smartmemory_app import bug_report, config
+    from smartmemory_app import support_diagnostics as support
+
+    where, value, template = _EXACT_ROWS[case]
+    text = template.format(v=value, j=json.dumps({"team_id": value}))
+    team = value if where in ("SMARTMEMORY_TEAM_ID", "config team_id") else ""
+    if where != "config team_id":
+        monkeypatch.setenv(where, value)
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda: config.SmartMemoryConfig(team_id=team, data_dir=str(isolate / "data")),
+    )
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: isolate / "cli-debug.log")
+    monkeypatch.setattr(
+        bug_report,
+        "gather_environment",
+        lambda: SimpleNamespace(browser_info=f"probe environment {text}"),
+    )
+    for name in ("cli-debug.log", "daemon.log"):
+        (isolate / name).write_text(f"2026-10-17 12:00:00 INFO {text}\n")
+    path = support.write_support_bundle(isolate / "support.zip", text, message=text)
+    with zipfile.ZipFile(path) as archive:
+        members = {name: archive.read(name).decode() for name in archive.namelist()}
+    assert members["message.txt"] != text
+    escaped = json.dumps(value)[1:-1]
+    leaks = [
+        name
+        for name, body in members.items()
+        for form in {value, escaped}
+        if _token_hit(form, body)
+        or any(_token_hit(value, d) for d in _decoded_strings(body))
+    ]
+    assert not leaks, f"supplied value survives in zip members: {sorted(set(leaks))}"
+
+
+def test_short_value_is_masked_only_as_a_whole_token():
+    from smartmemory_app.doctor import mask_exact_values
+
+    out = mask_exact_values("abc abcdef xabc 'abc' ABC", [("abc", "<id>")])
+    assert out == "<id> abcdef xabc '<id>' <id>"
+
+
+def test_overlapping_supplied_values_are_masked_whole():
+    """One label never leaves part of an overlapping value behind."""
+    from smartmemory_app.doctor import mask_exact_values
+
+    out = mask_exact_values("xxabcdefyy", [("abcdef", "<a>"), ("xxabc", "<b>")])
+    assert "abc" not in out and "def" not in out and "xx" not in out
+
+
+@pytest.mark.parametrize(
+    "name,value,masked",
+    [
+        ("GROQ_API_KEY", "4096", True),
+        ("VENDOR_SECRET", "123456", True),
+        ("SERVICE_PASSWORD", "2468", True),
+        ("MAX_TOKEN", "4096", False),  # a token budget is a setting
+        ("VENDOR_TOKEN", "tok-abc", True),
+    ],
+)
+def test_numeric_values_under_secret_names(name, value, masked, monkeypatch):
+    from smartmemory_app import config
+    from smartmemory_app.support_diagnostics import supplied_values
+
+    monkeypatch.setattr(config, "load_config", lambda: config.SmartMemoryConfig())
+    found = [v for v, _label in supplied_values({name: value})]
+    assert (value in found) is masked
 
 
 def _captured(callable_, *args):

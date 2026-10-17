@@ -246,6 +246,12 @@ def local_checks(*, budget: float | None = None) -> list[str]:
 _SECRET_NAME = re.compile(
     r"(?:^|_)(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD)(?:_|$)"
 )
+# A bare number is a setting (a token budget) only under a name whose one secret
+# word is TOKEN. A provider key, or a KEY, SECRET or PASSWORD name, is masked even
+# when it is all digits.
+_SECRET_EVEN_IF_NUMERIC = re.compile(
+    r"(?:^|_)(?:API_?KEY|KEY|SECRET|PASSWORD|PASSWD)(?:_|$)"
+)
 _SECRET_FIELD = ("key", "token", "password", "secret")
 
 
@@ -266,9 +272,13 @@ def supplied_values(environ=None) -> list[tuple[str, str]]:
         if is_identifier_name(name):
             pairs.append((value, f"${name} (env)"))
         elif name in LLM_KEY_ENV_VARS or _SECRET_NAME.search(name.upper()):
-            # A bare number under a key-like name (a token budget) is a setting.
-            if not value.strip().isdigit():
-                pairs.append((value, "<redacted>"))
+            if (
+                value.strip().isdigit()
+                and name not in LLM_KEY_ENV_VARS
+                and not _SECRET_EVEN_IF_NUMERIC.search(name.upper())
+            ):
+                continue
+            pairs.append((value, "<redacted>"))
     try:
         fields = asdict(load_config())
     except Exception:
