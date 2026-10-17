@@ -150,12 +150,23 @@ def test_missing_file_is_created_as_before():
     assert "SMARTMEMORY_MODE" in path.read_text(encoding="utf-8")
 
 
-def test_read_only_callers_keep_reading_empty(caplog):
+# (file kind, exception class the WARNING names): malformed TOML and invalid UTF-8
+# are the same documented arm (CLI-ENV-DETECT-1 review r2 ruling, LOW follow-up).
+READ_ONLY_ROWS = [("toml", "TOMLDecodeError"), ("utf8", "UnicodeDecodeError")]
+
+
+@pytest.mark.parametrize("kind,cls", READ_ONLY_ROWS, ids=[r[0] for r in READ_ONLY_ROWS])
+def test_read_only_callers_keep_reading_empty(kind, cls, caplog):
     """The lenient reader is for readers that never write the file back."""
-    path = _put("toml")
-    assert env_sources.read_config_table(path) == {}
-    assert env_pin.apply_project_env(environ={}, path=path) == {}
-    assert path.read_text(encoding="utf-8") == BROKEN
+    path = _put(kind)
+    before = path.read_bytes()
+    with caplog.at_level("WARNING"):
+        assert env_sources.read_config_table(path) == {}
+        assert env_pin.apply_project_env(environ={}, path=path) == {}
+    warned = [r.getMessage() for r in caplog.records if "unreadable" in r.getMessage()]
+    assert warned, "no WARNING naming the unreadable config"
+    assert all(str(path) in w and cls in w for w in warned)
+    assert path.read_bytes() == before
 
 
 def test_first_run_migration_refuses_unreadable_config():
