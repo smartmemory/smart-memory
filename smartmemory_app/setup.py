@@ -1330,7 +1330,11 @@ def _daemon_can_read_key(name: str, value: str) -> bool:
         if keyring.get_password("smartmemory", name) == value:
             return True
         keyring.set_password("smartmemory", name, value)
-        return True
+        # A store that accepts a write but does not hand it back (a null backend)
+        # has not saved the key, so only the read-back counts.
+        if keyring.get_password("smartmemory", name) == value:
+            return True
+        logger.warning("OS credential store did not return the %s it was given", name)
     except Exception as exc:
         logger.warning(
             "OS credential store unavailable for %s: %s",
@@ -1338,6 +1342,25 @@ def _daemon_can_read_key(name: str, value: str) -> bool:
             redact_credentials(str(exc)),
         )
     return _read_env_from_profile(name) == value
+
+
+def _installed_plist_key(name: str) -> str:
+    """The ``name`` value an installed daemon or worker plist holds ("" when none).
+
+    Plists written before SETUP-PLIST-PLAINTEXT-KEY-1 carried the provider key, and
+    for a key that only lived in the environment they were its only copy.
+    """
+    import plistlib
+
+    for plist_name in (PLIST_NAME, WORKER_PLIST_NAME):
+        try:
+            data = plistlib.loads((LAUNCH_AGENTS_DIR / plist_name).read_bytes())
+            value = data.get("EnvironmentVariables", {}).get(name, "")
+        except Exception:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _plist_env_value(name: str, value: str) -> str:
@@ -1421,6 +1444,20 @@ def _install_launchd_plist() -> bool:
         except Exception:
             pass
     key_readable = not groq_key or _daemon_can_read_key("GROQ_API_KEY", groq_key)
+    if not groq_key:
+        # The key may live only in the plists about to be rewritten. Move it to the
+        # secure store first, and keep the old plists if it cannot be moved.
+        groq_key = _installed_plist_key("GROQ_API_KEY")
+        if groq_key:
+            key_readable = _daemon_can_read_key("GROQ_API_KEY", groq_key)
+            if not key_readable:
+                click.echo(
+                    "Warning: your Groq key is stored only in the existing auto-start "
+                    "files, and it could not be moved to the OS keychain. The files were "
+                    "left as they are. Unlock the keychain or export GROQ_API_KEY in "
+                    "your shell, then run sm setup again."
+                )
+                return (LAUNCH_AGENTS_DIR / PLIST_NAME).exists()
 
     proxy_env_xml = "".join(
         f"\n        <key>{name}</key>\n        <string>{escape(value)}</string>"

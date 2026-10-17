@@ -109,6 +109,7 @@ def _plist_env(agents, name):
 _PLIST_ROWS = {
     "fresh": {"GROQ_API_KEY": KEY},
     "rewrite": {"GROQ_API_KEY": KEY},
+    "old-plist-only": {},
     "proxy": {
         "GROQ_API_KEY": KEY,
         "HTTPS_PROXY": f"http://probe-user:{KEY}@127.0.0.1:9",
@@ -126,7 +127,7 @@ def test_plist_paths(case, monkeypatch, plist_env, caplog):
     home, agents, store, run = plist_env
     from smartmemory_app import config, setup
 
-    if case == "rewrite":
+    if case in ("rewrite", "old-plist-only"):
         for name in (setup.PLIST_NAME, setup.WORKER_PLIST_NAME):
             (agents / name).write_bytes(
                 plistlib.dumps({"EnvironmentVariables": {"GROQ_API_KEY": KEY}})
@@ -138,7 +139,7 @@ def test_plist_paths(case, monkeypatch, plist_env, caplog):
     assert not hits, f"plaintext secret remains in generated HOME files: {hits}"
     assert KEY not in output, "secret in writer output"
     assert KEY not in caplog.text, "secret in writer log"
-    if "GROQ_API_KEY" in _PLIST_ROWS[case]:
+    if case in ("fresh", "rewrite", "proxy", "old-plist-only"):
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         with contextlib.redirect_stdout(io.StringIO()):
             config.load_llm_keys_from_stores()
@@ -186,3 +187,70 @@ def test_login_free_proxy_and_no_proxy_list_are_copied_unchanged(
     assert env["HTTPS_PROXY"] == "http://proxy.example.test:3128"
     assert env["NO_PROXY"] == "localhost,127.0.0.1,*.corp.example.test"
     assert "holds a login" not in output and "proxy login" not in caplog.text
+
+
+def _old_plist(agents, *names, key=KEY):
+    for name in names:
+        (agents / name).write_bytes(
+            plistlib.dumps({"EnvironmentVariables": {"GROQ_API_KEY": key}})
+        )
+
+
+def test_old_key_in_only_the_worker_plist_is_migrated(plist_env, caplog):
+    from smartmemory_app import setup
+
+    _home, agents, store, run = plist_env
+    _old_plist(agents, setup.WORKER_PLIST_NAME)
+    run(caplog)
+    assert store["GROQ_API_KEY"] == KEY
+    for name in (setup.PLIST_NAME, setup.WORKER_PLIST_NAME):
+        assert "GROQ_API_KEY" not in _plist_env(agents, name)
+
+
+def test_unreadable_old_plist_is_not_a_key_source(plist_env, caplog):
+    from smartmemory_app import setup
+
+    _home, agents, store, run = plist_env
+    (agents / setup.PLIST_NAME).write_bytes(b"not a plist")
+    run(caplog)
+    assert "GROQ_API_KEY" not in store
+
+
+def test_current_env_key_wins_over_the_old_plist_key(monkeypatch, plist_env, caplog):
+    from smartmemory_app import setup
+
+    _home, agents, store, run = plist_env
+    _old_plist(agents, setup.PLIST_NAME, setup.WORKER_PLIST_NAME, key="old-plist-key-1")
+    monkeypatch.setenv("GROQ_API_KEY", KEY)
+    run(caplog)
+    assert store["GROQ_API_KEY"] == KEY
+
+
+@pytest.mark.parametrize("cause", ["set-raises", "accepts-but-returns-nothing"])
+def test_key_that_cannot_be_migrated_keeps_the_old_plists(
+    cause, monkeypatch, plist_env, caplog
+):
+    """No rewrite when the secure store cannot take the key: the old files still hold the only copy."""
+    from smartmemory_app import setup
+
+    _home, agents, store, run = plist_env
+    _old_plist(agents, setup.PLIST_NAME, setup.WORKER_PLIST_NAME)
+    before = {
+        n: (agents / n).read_bytes()
+        for n in (setup.PLIST_NAME, setup.WORKER_PLIST_NAME)
+    }
+    if cause == "set-raises":
+
+        def refuse(service, name, value):
+            raise RuntimeError("keychain locked")
+
+        monkeypatch.setattr("keyring.set_password", refuse)
+    else:
+        monkeypatch.setattr("keyring.set_password", lambda service, name, value: None)
+    monkeypatch.setattr(setup, "_read_env_from_profile", lambda name: "")
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert setup._install_launchd_plist() is True
+    assert {n: (agents / n).read_bytes() for n in before} == before
+    assert "left as they are" in output.getvalue()
+    assert KEY not in output.getvalue()
