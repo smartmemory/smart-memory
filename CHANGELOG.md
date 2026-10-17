@@ -33,6 +33,11 @@
 - Fix: `smartmemory config KEY VALUE` and remote login no longer write inherited `SMARTMEMORY_*` values (team id, data dir, API URL) into the config file. `load_config(apply_env=False)` reads the file layer for read-change-save.
 - Fix: a config file that exists but cannot be read or parsed is never rewritten. `smartmemory env set/reset`, the first-command prompt, `save_config()` (setup, `config`, login) and first-run auto-config now stop with one line naming the file (`Cannot update <path>: it is not valid TOML (line N). Fix or remove it, then retry.`) instead of replacing the user's settings with defaults. The first-command prompt prints that line and your command still runs. Read-only paths are unchanged.
 
+## Unreleased - SETUP-DOCTOR-1 (2026-10-17)
+
+- `sm doctor` now starts with a pass/warn/fail table of what the CLI will actually use: Python and venv, config path, active mode and which source won, inherited `SMARTMEMORY_*` variables (names and the file that exports them, never values), API key presence, tenant and workspace against the web identity (`/auth/me`), LLM provider and key presence, daemon or service health and version, and graph backend. Each failing row has a one-line fix. `--json` prints the same rows. Exit code 1 on any FAIL. A check that cannot run is a WARN naming what was not checked.
+- `sm setup` runs the table at the end, and `sm tour` runs it before starting. A FAIL stops the tour and prints the fix.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.

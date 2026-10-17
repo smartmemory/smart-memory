@@ -1233,6 +1233,10 @@ def viewer_cmd(port: int | None) -> None:
 )
 def tour_cmd(keep: bool, code: bool, port: int | None, no_viewer: bool) -> None:
     """Run the guided SmartMemory onboarding tour."""
+    # SETUP-DOCTOR-1: before require_local, so an inherited mode is explained.
+    from smartmemory_app.doctor import require_healthy
+
+    require_healthy("tour")
     require_local("sm tour")
     from smartmemory_app import tour
 
@@ -3056,7 +3060,10 @@ def _venv_repair_commands() -> str:
     type=click.Path(dir_okay=False, path_type=Path),
     help="Local output path for --bundle.",
 )
-def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
+@click.option("--json", "as_json", is_flag=True, help="Print the checks as JSON.")
+def doctor_cmd(
+    bundle: bool, url: str | None, out: Path | None, as_json: bool = False
+) -> None:
     """Diagnose a broken install (DIST-INSTALL-RESOLVE-1).
 
     Detects the pip-backtracked-wrapper trap: a fresh `pip install smartmemory`
@@ -3072,7 +3079,30 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         _download_diagnostics_bundle(url, out)
         return
 
+    # SETUP-DOCTOR-1: what the CLI will actually use, and which source won.
+    from smartmemory_app import doctor as _doctor
+
+    config_rows = _doctor.run_checks("doctor")
     status = check_installation()
+    if as_json:
+        click.echo(
+            _doctor.doctor_json(
+                config_rows,
+                {
+                    "ok": status.doctor_ok and not _doctor.failures(config_rows),
+                    "install": {
+                        "ok": status.doctor_ok,
+                        "python": ".".join(str(p) for p in status.python_version),
+                        "core_version": status.core_version,
+                    },
+                },
+            )
+        )
+        if not status.doctor_ok or _doctor.failures(config_rows):
+            raise SystemExit(1)
+        return
+    if config_rows:
+        click.echo(_doctor.render(config_rows) + "\n")
 
     # ── Python version ──────────────────────────────────────────────────────
     py_str = ".".join(str(part) for part in status.python_version)
@@ -3138,6 +3168,13 @@ def doctor_cmd(bundle: bool, url: str | None, out: Path | None) -> None:
         )
 
     if not status.doctor_ok:
+        raise SystemExit(1)
+    if _doctor.failures(config_rows):
+        click.echo(
+            f"\n{len(_doctor.failures(config_rows))} configuration check(s) failed. "
+            "Fix the FAIL rows at the top, then run sm doctor again.",
+            err=True,
+        )
         raise SystemExit(1)
     state_warnings = any(
         row.startswith(

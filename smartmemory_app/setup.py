@@ -42,6 +42,7 @@ from smartmemory_app.daemon import (
 
 from smartmemory_app.support_diagnostics import download_failure, log_download_start
 from smartmemory_app.diagnostics import redact_credentials
+from smartmemory_app.doctor import after_setup as _doctor_after_setup
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +324,7 @@ HOOK_REGISTRATIONS = _get_hook_registrations(shell="bash")
 @click.option(
     "--api-url", help="Remote service base URL (overrides SMARTMEMORY_API_URL)."
 )
+@_doctor_after_setup  # SETUP-DOCTOR-1: show what the CLI will use, stop on a FAIL
 def setup(
     mode: str | None,
     api_key: str | None,

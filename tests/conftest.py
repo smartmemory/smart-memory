@@ -64,6 +64,11 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
         install_check, "run_native_checks", lambda: ["Native libraries: OK"]
     )
     monkeypatch.setattr(diagnostic_process, "offline_checks", lambda task, **kwargs: [])
+    # SETUP-DOCTOR-1: the setup/tour/doctor table probes the daemon, keychain and
+    # hosted API. tests/unit/test_setup_doctor.py drives it with injected fakes.
+    from smartmemory_app import doctor
+
+    monkeypatch.setattr(doctor, "run_checks", lambda context="doctor": [])
 
     # Detached-entry tests also install global handlers/hooks. Restore them per test.
     import logging
