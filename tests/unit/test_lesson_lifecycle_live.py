@@ -10,7 +10,7 @@ from smartmemory_app.session_lessons import capture_lessons
 FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_lifecycle_live"
 
 
-def test_live_responses_three_sessions(tmp_path, monkeypatch):
+def test_live_responses_three_sessions(tmp_path, monkeypatch, provider_pin_isolated):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
 
@@ -29,13 +29,7 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         "SMARTMEMORY_HOOK_TRACE": str(tmp_path / "trace.jsonl"),
     }.items():
         monkeypatch.setenv(key, value)
-    for key in (
-        "LLM_PROVIDER",
-        "LLM_API_KEY",
-        "OPENAI_BASE_URL",
-        "SMARTMEMORY_CAPTURE_OFFLINE",
-    ):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
 
     sessions = json.loads((FIXTURES / "sessions.json").read_text())
     recorded_ids = [

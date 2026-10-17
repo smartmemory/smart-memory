@@ -14,7 +14,9 @@ PROMPT = "Add support for refunds, full and partial, triggered by Stripe's `char
 LESSON = "Nordbank refunds require reversal E2E id RV plus the original E2E id. Only one reversal per original reference per clearing date is allowed, so same-day partial refunds conflict."
 
 
-def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
+def test_real_store_lesson_import_and_fresh_hooks(
+    tmp_path, monkeypatch, provider_pin_isolated
+):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
     from smartmemory_app.lifecycle_config import LifecycleConfig
@@ -32,8 +34,6 @@ def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
         "SMARTMEMORY_HOOK_TRACE": str(tmp_path / "trace.jsonl"),
     }.items():
         monkeypatch.setenv(key, value)
-    for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
-        monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
 
     def make_memory():
@@ -131,7 +131,9 @@ def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
     assert queue.jobs()[-1]["lesson_ids"] == receipt["lesson_ids"]
 
 
-def test_three_session_lifecycle_and_fresh_injection(tmp_path, monkeypatch):
+def test_three_session_lifecycle_and_fresh_injection(
+    tmp_path, monkeypatch, provider_pin_isolated
+):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
     from smartmemory_app.lifecycle_config import LifecycleConfig

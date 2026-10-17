@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from scripts import check_session_lesson_extraction as probe
 
 
-def test_multiple_transcripts_report_per_file_and_total(monkeypatch, capsys):
+def test_multiple_transcripts_report_per_file_and_total(
+    monkeypatch, capsys, provider_pin_isolated
+):
     monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
     rule = "User-stated rule – The original workspace slug must be retained."
     detail = "Added helper X that converts other workspace slugs."
@@ -75,7 +77,7 @@ def test_multiple_transcripts_report_per_file_and_total(monkeypatch, capsys):
 
 @pytest.mark.parametrize("failure", ["parse", "empty", "classifier"])
 def test_failure_continues_and_deltas_match_repeated_runs(
-    monkeypatch, capsys, tmp_path, failure
+    monkeypatch, capsys, tmp_path, failure, provider_pin_isolated
 ):
     monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
     baseline = tmp_path / "base.jsonl"

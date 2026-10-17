@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### CLI-TEST-ENV-LEAK-1 (2026-10-18)
+
+- Tests no longer leak provider variables into each other. Session-lesson tests called code that sets `LLM_PROVIDER`, `LLM_API_KEY` and `OPENAI_BASE_URL` straight in the process environment, which made 7 `test_setup_doctor.py` rows read `provider groq (from env LLM_PROVIDER)` when run after them. Those tests now use the new `provider_pin_isolated` fixture, and an autouse guard in `tests/conftest.py` fails any test that leaves a provider, model or key variable changed (names only, never values) and undoes the change. Test-only, no shipped code changed.
+
 ### SETUP-FRESH-CI-1 (2026-10-17)
 
 - New fresh-install check for the `sm` CLI: `scripts/fresh_install_check.py` and `.github/workflows/fresh-install.yml`. It installs the built wheel into a clean venv with a throwaway `HOME`, then checks a keyless local `sm setup`, `sm doctor`, an add, search and decision round trip, the inherited `SMARTMEMORY_*` detection with poisoned variables, and a remote-mode setup against a local fake server. It prints `STEP <name> PASS|FAIL|SKIP` lines and needs no secrets. No product code changed.

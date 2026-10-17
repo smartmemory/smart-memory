@@ -21,8 +21,83 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
+# CLI-TEST-ENV-LEAK-1: provider/model/key variables. A test that leaves one changed
+# makes every later test read it (a leaked LLM_PROVIDER=groq failed 7 doctor rows).
+_PROVIDER_ENV_PREFIXES = (
+    "LLM_",
+    "SMARTMEMORY_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "GROQ_",
+    "GEMINI_",
+    "DEEPSEEK_",
+)
+_PROVIDER_ENV_SUFFIXES = ("_API_KEY", "_BASE_URL")
+
+
+def _provider_env_names(names):
+    return {
+        n
+        for n in names
+        if n.startswith(_PROVIDER_ENV_PREFIXES) or n.endswith(_PROVIDER_ENV_SUFFIXES)
+    }
+
+
+def _provider_env_snapshot():
+    return {n: os.environ[n] for n in _provider_env_names(list(os.environ))}
+
+
+def assert_provider_env_unchanged(before):
+    """Undo any provider env change since `before`, then fail naming the variables."""
+    after = _provider_env_snapshot()
+    leaked = sorted(
+        n for n in before.keys() | after.keys() if before.get(n) != after.get(n)
+    )
+    for name in leaked:
+        if name in before:
+            os.environ[name] = before[name]
+        else:
+            os.environ.pop(name, None)
+    assert not leaked, (
+        "Test leaked provider env vars (use monkeypatch.setenv/delenv or "
+        "mock.patch.dict(os.environ)): " + ", ".join(leaked)
+    )
+
+
 @pytest.fixture(autouse=True)
-def isolated_support_diagnostics(monkeypatch, tmp_path):
+def provider_env_leak_guard():
+    """Fail the test that leaves a provider env var changed, then undo the change.
+
+    Names only, never values. The fixtures that use monkeypatch or restore
+    SMARTMEMORY_* request this one, so it is set up first and its check runs
+    after their teardown.
+    """
+    before = _provider_env_snapshot()
+    yield
+    assert_provider_env_unchanged(before)
+
+
+@pytest.fixture
+def provider_pin_isolated(monkeypatch):
+    """Undo the provider pin that capture_lessons/_memory write straight to os.environ.
+
+    CLI-TEST-ENV-LEAK-1: session_lessons and capture_worker set LLM_PROVIDER,
+    LLM_API_KEY, OPENAI_BASE_URL and SMARTMEMORY_LLM_MODEL themselves, so a test
+    that calls them must have monkeypatch own those names first. setenv before
+    delenv, because delenv on an absent name records nothing to restore.
+    """
+    for name in (
+        "LLM_PROVIDER",
+        "LLM_API_KEY",
+        "OPENAI_BASE_URL",
+        "SMARTMEMORY_LLM_MODEL",
+    ):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+@pytest.fixture(autouse=True)
+def isolated_support_diagnostics(provider_env_leak_guard, monkeypatch, tmp_path):
     """Never write user logs or make doctor probes against a live network."""
     if not os.environ.get("HF_HOME"):
         monkeypatch.setenv("HF_HOME", _REAL_HF_HOME)
@@ -105,7 +180,7 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def restore_smartmemory_env():
+def restore_smartmemory_env(provider_env_leak_guard):
     """Undo SMARTMEMORY_* changes a test's code made straight to os.environ.
 
     env_pin (CLI-ENV-DETECT-1) applies a project's ignore/override decisions to

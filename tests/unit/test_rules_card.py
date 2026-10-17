@@ -58,13 +58,18 @@ def environment(tmp_path, monkeypatch):
     ],
 )
 def test_capture_replays_raw_fixture_and_persists_kind(
-    environment, monkeypatch, caplog, response, source, promoted, mixed_tags
+    environment,
+    monkeypatch,
+    caplog,
+    response,
+    source,
+    promoted,
+    mixed_tags,
+    provider_pin_isolated,
 ):
     mem = environment
     monkeypatch.setenv("GROQ_API_KEY", "fixture-only")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
-    for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
-        monkeypatch.delenv(key, raising=False)
     calls = []
 
     def replay(**kwargs):

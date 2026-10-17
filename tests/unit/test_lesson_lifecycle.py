@@ -93,7 +93,7 @@ def pair(oid, **overrides):
 
 
 @pytest.fixture
-def setup(tmp_path, monkeypatch):
+def setup(tmp_path, monkeypatch, provider_pin_isolated):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "fake")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
@@ -499,7 +499,7 @@ def test_nonarray_change_response_warns_and_degrades(setup, raw):
     assert old.status == "active"
 
 
-def test_usage_sums_both_steps(monkeypatch):
+def test_usage_sums_both_steps(monkeypatch, provider_pin_isolated):
     monkeypatch.setenv("GROQ_API_KEY", "fake")
     responses = iter([[change()], [pair("old")]])
 

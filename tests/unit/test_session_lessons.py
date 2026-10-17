@@ -19,11 +19,9 @@ LESSON = (
 
 
 @pytest.fixture
-def lesson_env(monkeypatch, tmp_path):
+def lesson_env(monkeypatch, tmp_path, provider_pin_isolated):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "fake-groq")
-    for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
-        monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     mem = Mock()
     mem.find_decision_conflicts.return_value = []

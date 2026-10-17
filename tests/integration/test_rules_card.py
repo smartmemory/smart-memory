@@ -21,7 +21,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "rules_card"
     ],
 )
 def test_capture_card_and_lifecycle_on_reopened_lite_store(
-    tmp_path, monkeypatch, response, source
+    tmp_path, monkeypatch, response, source, provider_pin_isolated
 ):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
@@ -38,13 +38,7 @@ def test_capture_card_and_lifecycle_on_reopened_lite_store(
         "GROQ_API_KEY": "fixture-only",
     }.items():
         monkeypatch.setenv(key, value)
-    for key in (
-        "LLM_PROVIDER",
-        "LLM_API_KEY",
-        "OPENAI_BASE_URL",
-        "SMARTMEMORY_CAPTURE_OFFLINE",
-    ):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     monkeypatch.setattr(
         "smartmemory.plugins.extractors.reasoning.call_llm",
         lambda **kwargs: (None, (FIXTURES / response).read_text()),
@@ -104,7 +98,9 @@ def constraint_classifier_replay(monkeypatch):
     )
 
 
-def test_reclassify_persists_in_reopened_store(tmp_path, monkeypatch):
+def test_reclassify_persists_in_reopened_store(
+    tmp_path, monkeypatch, provider_pin_isolated
+):
     from click.testing import CliRunner
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory

@@ -17,7 +17,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_classifier"
 
 
 @pytest.fixture
-def replay(monkeypatch, tmp_path):
+def replay(monkeypatch, tmp_path, provider_pin_isolated):
     monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "ws")
