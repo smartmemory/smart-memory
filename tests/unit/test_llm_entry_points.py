@@ -274,8 +274,14 @@ LLM_SINKS = {
     "run_worker",
     "llm_route_available",
 }
-# Wrapper calls that run apply_runtime_config() before any of the sinks above.
-CONFIG_APPLIERS = {"apply_runtime_config", "get_memory", "run_configured_worker"}
+# Wrapper functions, as (module, name), that run apply_runtime_config() before any
+# of the sinks above. A call earns applier credit only when the called name is
+# bound to one of these, never because of how the call is spelled.
+CONFIG_APPLIERS = {
+    ("storage", "apply_runtime_config"),
+    ("storage", "get_memory"),
+    ("worker_entry", "run_configured_worker"),
+}
 
 # "module:command" -> reason. A command that reaches a sink without an applier.
 COMMAND_EXEMPT: dict[str, str] = {}
@@ -283,14 +289,6 @@ COMMAND_EXEMPT: dict[str, str] = {}
 
 def _app_sources() -> dict[str, str]:
     return {p.stem: p.read_text(encoding="utf-8") for p in APP.glob("*.py")}
-
-
-def _is_click_command(fn: ast.AST) -> bool:
-    for dec in getattr(fn, "decorator_list", []):
-        target = dec.func if isinstance(dec, ast.Call) else dec
-        if isinstance(target, ast.Attribute) and target.attr in {"command", "group"}:
-            return True
-    return False
 
 
 def _dotted(node: ast.AST) -> list[str] | None:
@@ -304,161 +302,405 @@ def _dotted(node: ast.AST) -> list[str] | None:
     return [node.id, *reversed(parts)]
 
 
-_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPES = (*_DEFS, ast.Lambda, ast.ClassDef, *_COMPS)
+
+
+def _runs_outside(node: ast.AST) -> list[ast.AST]:
+    """Parts of a nested scope node that the ENCLOSING scope evaluates: decorators,
+    defaults, class bases, a comprehension's first iterable."""
+    if isinstance(node, (*_DEFS, ast.Lambda)):
+        args = node.args
+        out = [*args.defaults, *(d for d in args.kw_defaults if d is not None)]
+        return out + list(getattr(node, "decorator_list", []))
+    if isinstance(node, ast.ClassDef):
+        return [*node.decorator_list, *node.bases, *node.keywords]
+    return [node.generators[0].iter]
+
+
+def _runs_inside(node: ast.AST) -> list[ast.AST]:
+    """The code a nested scope node runs in its own scope."""
+    if isinstance(node, (*_DEFS, ast.ClassDef)):
+        return list(node.body)
+    if isinstance(node, ast.Lambda):
+        return [node.body]
+    elts = [node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt]
+    for i, gen in enumerate(node.generators):
+        elts += [gen.target, *gen.ifs] + ([gen.iter] if i else [])
+    return elts
 
 
 def _scope_nodes(body: list) -> list[ast.AST]:
-    """Nodes of one scope: ``body`` without descending into nested defs or classes."""
+    """Nodes of one scope: ``body`` without descending into nested scopes, plus the
+    parts of each nested scope that run here (``_runs_outside``)."""
     out: list[ast.AST] = []
     stack = list(body)
     while stack:
         node = stack.pop()
         out.append(node)
-        if not isinstance(node, _SCOPES):
+        if isinstance(node, _SCOPES):
+            stack.extend(_runs_outside(node))
+        else:
             stack.extend(ast.iter_child_nodes(node))
     return out
 
 
-def _local_names(fn: ast.AST) -> set[str]:
-    """Names a function binds itself (arguments, assignments, nested defs)."""
-    names = {a.arg for a in ast.walk(fn.args) if isinstance(a, ast.arg)}
-    for node in _scope_nodes(fn.body):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            names.add(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-    return names
+def _arg_names(node: ast.AST) -> list[str]:
+    if not isinstance(node, (*_DEFS, ast.Lambda)):
+        return []
+    return [a.arg for a in ast.walk(node.args) if isinstance(a, ast.arg)]
 
 
-def _app_bindings(nodes, modules: set[str]) -> dict[str, tuple]:
-    """Names ``nodes`` bind to wrapper code: ``("func", module, name)``,
-    ``("module", module)`` or ``("package",)`` (``import smartmemory_app``).
+class _Scope:
+    """One Python scope and the raw binding specs of every name it binds.
 
-    An import is only a binding. Nothing here says the bound name is ever called.
+    A spec is ``("def", module, qualname)``, ``("func", module, name)`` (a name
+    imported from a wrapper module), ``("pkgattr", name)`` (``from smartmemory_app
+    import name``), ``("module", stem)``, ``("package",)``,
+    ``("ext", "dotted.path")`` (anything outside ``smartmemory_app``),
+    ``("alias", value_node, scope)`` (``x = a.b``) or ``("opaque",)`` (an
+    argument, a loop target, any other value).
     """
-    env: dict[str, tuple] = {}
-    for node in nodes:
-        if isinstance(node, ast.ImportFrom):
-            top = (node.module or "").split(".")[0]
-            if node.level == 0 and top != "smartmemory_app":
+
+    def __init__(self, kind, module, qual, parent, node):
+        self.kind, self.module, self.qual = kind, module, qual
+        self.parent, self.node = parent, node
+        self.binds: dict[str, list[tuple]] = {}
+        self.declared: dict[str, _Scope] = {}  # global / nonlocal name -> owner
+        self.nodes: list[ast.AST] = []
+        self.children: list[_Scope] = []
+
+    def bind(self, name: str, spec: tuple) -> None:
+        owner = self.declared.get(name, self)
+        owner.binds.setdefault(name, []).append(spec)
+
+    def lookup(self, name: str) -> list[tuple] | None:
+        """Python's rule: own scope, enclosing functions (never a class body),
+        the module. ``global``/``nonlocal`` go straight to their owner."""
+        scope = self
+        while scope is not None:
+            if name in scope.declared:
+                return scope.declared[name].binds.get(name)
+            if name in scope.binds and (scope is self or scope.kind != "class"):
+                return scope.binds[name]
+            scope = scope.parent
+        return None
+
+
+def _import_specs(node: ast.AST, modules: set[str]) -> list[tuple[str, tuple]]:
+    """``(bound name, spec)`` for every name an import statement binds."""
+    out = []
+    if isinstance(node, ast.ImportFrom):
+        mod = node.module or ""
+        for alias in node.names:
+            if alias.name == "*":
                 continue
-            origin = (node.module or "").rsplit(".", 1)[-1]
-            package_level = not node.module or node.module == "smartmemory_app"
-            for alias in node.names:
-                bound = alias.asname or alias.name
-                if not package_level:
-                    env[bound] = ("func", origin, alias.name)
-                elif alias.name in modules:
-                    env[bound] = ("module", alias.name)
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                parts = alias.name.split(".")
-                if parts[0] != "smartmemory_app":
-                    continue
-                if alias.asname:
-                    if len(parts) == 2 and parts[1] in modules:
-                        env[alias.asname] = ("module", parts[1])
-                else:
-                    env["smartmemory_app"] = ("package",)
-    return env
+            bound = alias.asname or alias.name
+            if node.level == 0 and mod.split(".")[0] != "smartmemory_app":
+                spec = ("ext", f"{mod}.{alias.name}")
+            elif mod in ("", "smartmemory_app"):
+                spec = ("pkgattr", alias.name)
+            else:
+                spec = ("func", mod.rsplit(".", 1)[-1], alias.name)
+            out.append((bound, spec))
+    elif isinstance(node, ast.Import):
+        for alias in node.names:
+            parts = alias.name.split(".")
+            app = parts[0] == "smartmemory_app"
+            if not alias.asname:
+                out.append((parts[0], ("package",) if app else ("ext", parts[0])))
+            elif not app:
+                out.append((alias.asname, ("ext", alias.name)))
+            elif len(parts) == 1:
+                out.append((alias.asname, ("package",)))
+            elif len(parts) == 2 and parts[1] in modules:
+                out.append((alias.asname, ("module", parts[1])))
+            else:
+                out.append((alias.asname, ("opaque",)))
+    return out
+
+
+def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
+    scope = _Scope(kind, module, qual, parent, node)
+    if parent is not None:
+        parent.children.append(scope)
+    if kind == "function":
+        funcs[(module, qual)] = scope
+    scope.nodes = _scope_nodes(body)
+    for stmt in scope.nodes:
+        if isinstance(stmt, ast.Global):
+            root = scope
+            while root.parent is not None:
+                root = root.parent
+            scope.declared.update(dict.fromkeys(stmt.names, root))
+        elif isinstance(stmt, ast.Nonlocal):
+            for name in stmt.names:
+                owner = parent
+                while owner is not None and (
+                    owner.kind in ("class", "module") or name not in owner.binds
+                ):
+                    owner = owner.parent
+                scope.declared[name] = owner or parent
+    for name in _arg_names(node):
+        scope.bind(name, ("opaque",))
+    aliases: dict[int, ast.AST] = {}
+    walrus: set[int] = set()
+    for stmt in scope.nodes:
+        if isinstance(stmt, ast.Assign) and _dotted(stmt.value):
+            for target in stmt.targets:
+                aliases[id(target)] = stmt.value
+        elif isinstance(stmt, (ast.AnnAssign, ast.NamedExpr)):
+            if stmt.value is not None and _dotted(stmt.value):
+                aliases[id(stmt.target)] = stmt.value
+            if isinstance(stmt, ast.NamedExpr):
+                walrus.add(id(stmt.target))
+    prefix = f"{qual}." if qual else ""
+    for stmt in scope.nodes:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for bound, spec in _import_specs(stmt, modules):
+                scope.bind(bound, spec)
+        elif isinstance(stmt, _DEFS):
+            scope.bind(stmt.name, ("def", module, prefix + stmt.name))
+        elif isinstance(stmt, ast.ClassDef):
+            scope.bind(stmt.name, ("opaque",))
+        elif isinstance(stmt, ast.Name) and isinstance(stmt.ctx, (ast.Store, ast.Del)):
+            home = scope
+            while id(stmt) in walrus and home.kind == "comp":
+                home = home.parent  # a walrus in a comprehension binds outside it
+            value = aliases.get(id(stmt))
+            home.bind(stmt.id, ("alias", value, scope) if value else ("opaque",))
+        elif isinstance(stmt, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+            if stmt.name:
+                scope.bind(stmt.name, ("opaque",))
+        elif isinstance(stmt, ast.MatchMapping) and stmt.rest:
+            scope.bind(stmt.rest, ("opaque",))
+    for stmt in scope.nodes:
+        if isinstance(stmt, _SCOPES):
+            child_kind = {
+                ast.FunctionDef: "function",
+                ast.AsyncFunctionDef: "function",
+                ast.Lambda: "lambda",
+                ast.ClassDef: "class",
+            }.get(type(stmt), "comp")
+            child_qual = (
+                prefix + stmt.name if child_kind in ("function", "class") else qual
+            )
+            _build_scope(
+                child_kind,
+                module,
+                child_qual,
+                scope,
+                stmt,
+                _runs_inside(stmt),
+                modules,
+                funcs,
+            )
+    return scope
+
+
+class _Resolver:
+    """What a name or dotted chain is bound to, as canonical identities:
+    ``("func", module, qualname)``, ``("module", stem)``, ``("package",)``,
+    ``("ext", "dotted.path")``, ``("opaque",)`` or ``("unbound", name)``.
+    A wrapper name imported from a module in ``sources`` is followed to what that
+    module binds it to (re-exports and aliases included)."""
+
+    def __init__(self, modules, module_scopes):
+        self.modules, self.module_scopes = modules, module_scopes
+
+    def name(self, name, scope, seen=frozenset()):
+        specs = scope.lookup(name)
+        if specs is None:
+            return {("unbound", name)}
+        return set().union(*(self.spec(s, seen) for s in specs))
+
+    def spec(self, spec, seen):
+        kind = spec[0]
+        if kind == "def":
+            return {("func", spec[1], spec[2])}
+        if kind == "func":
+            return self.export(spec[1], spec[2], seen)
+        if kind == "pkgattr":
+            return self.package_attr(spec[1], seen)
+        if kind == "alias":
+            key = ("alias", id(spec[1]))
+            if key in seen:
+                return {("opaque",)}
+            return self.expr(spec[1], spec[2], seen | {key})
+        return {spec} if kind in ("ext", "module", "package") else {("opaque",)}
+
+    def export(self, module, name, seen):
+        scope = self.module_scopes.get(module)
+        key = ("export", module, name)
+        if key in seen:
+            return {("opaque",)}
+        if scope is None or name not in scope.binds:
+            return {("func", module, name)}
+        return self.name(name, scope, seen | {key})
+
+    def package_attr(self, name, seen):
+        """``smartmemory_app.<name>``: what ``__init__`` binds it to, else the
+        submodule of that name (Python's order for ``from package import name``)."""
+        init = self.module_scopes.get("__init__")
+        if init is not None and name in init.binds:
+            return self.export("__init__", name, seen)
+        return {("module", name)}
+
+    def attr(self, ident, attr, seen):
+        if ident[0] == "ext":
+            return {("ext", f"{ident[1]}.{attr}")}
+        if ident[0] == "package":
+            return self.package_attr(attr, seen)
+        if ident[0] == "module":
+            return self.export(ident[1], attr, seen)
+        return {("opaque",)}
+
+    def expr(self, node, scope, seen=frozenset()):
+        parts = _dotted(node)
+        if parts is None:
+            return {("opaque",)}
+        out = self.name(parts[0], scope, seen)
+        for attr in parts[1:]:
+            out = set().union(*(self.attr(i, attr, seen) for i in out))
+        return out
+
+
+def _is_sink(ident: tuple) -> bool:
+    if ident[0] == "ext":
+        return ident[1].rsplit(".", 1)[-1] in LLM_SINKS
+    return ident[0] == "func" and ident[2].rsplit(".", 1)[-1] in LLM_SINKS
+
+
+def _is_applier(ident: tuple) -> bool:
+    return ident[0] == "func" and ident[1:] in CONFIG_APPLIERS
+
+
+def _is_click_command(fn: ast.AST, scope: _Scope, resolver: _Resolver) -> bool:
+    """``@<group>.command``/``.group`` (any object), or a decorator bound to
+    ``click.command``/``click.group`` however it was imported or renamed."""
+    for dec in getattr(fn, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Attribute) and target.attr in {"command", "group"}:
+            return True
+        for ident in resolver.expr(target, scope):
+            path = ident[1].split(".") if ident[0] == "ext" else []
+            if path[:1] == ["click"] and path[-1] in {"command", "group"}:
+                return True
+    return False
+
+
+class _CallGraph:
+    """Per wrapper function: sinks it names, appliers it calls (by resolved
+    identity), resolved call targets, and its call and reference edges."""
+
+    def __init__(self, sources: dict[str, str]):
+        modules = set(sources)
+        self.funcs: dict[tuple[str, str], _Scope] = {}
+        module_scopes = {}
+        for module, source in sources.items():
+            tree = ast.parse(source)
+            module_scopes[module] = _build_scope(
+                "module", module, "", None, tree, tree.body, modules, self.funcs
+            )
+        self.resolver = _Resolver(modules, module_scopes)
+        self.commands = sorted(
+            key
+            for key, scope in self.funcs.items()
+            if _is_click_command(scope.node, scope.parent, self.resolver)
+        )
+        self.sinks = {key: set() for key in self.funcs}
+        self.appliers = {key: set() for key in self.funcs}
+        self.calls = {key: set() for key in self.funcs}
+        self.call_edges = {key: set() for key in self.funcs}
+        self.ref_edges = {key: set() for key in self.funcs}
+        for key, scope in self.funcs.items():
+            self._facts(key, scope, runs=True)
+
+    def _facts(self, key, scope, runs):
+        """Facts of ``scope`` charged to function ``key``. ``runs`` is False inside
+        a lambda: its body may never run, so it names sinks but credits nothing."""
+        resolve = self.resolver.expr
+        for node in scope.nodes:
+            if isinstance(node, ast.ImportFrom):
+                self.sinks[key] |= {a.name for a in node.names} & LLM_SINKS
+            elif isinstance(node, ast.Call):
+                idents = resolve(node.func, scope)
+                hits = {i[1:] for i in idents if i[0] == "func" and i[1:] in self.funcs}
+                if runs:
+                    self.calls[key] |= idents
+                if runs and all(_is_applier(i) for i in idents):
+                    self.appliers[key] |= {i[1:] for i in idents}
+                # A name bound two ways donates sinks from both, appliers from none.
+                edges = self.call_edges if runs and len(idents) == 1 else self.ref_edges
+                edges[key] |= hits
+            elif isinstance(node, (ast.Name, ast.Attribute)):
+                idents = resolve(node, scope)
+                spelled = node.id if isinstance(node, ast.Name) else node.attr
+                if spelled in LLM_SINKS:
+                    self.sinks[key].add(spelled)
+                self.sinks[key] |= {i[-1] for i in idents if _is_sink(i)}
+                self.ref_edges[key] |= {
+                    i[1:] for i in idents if i[0] == "func" and i[1:] in self.funcs
+                }
+        for child in scope.children:
+            if child.kind == "function":
+                # A nested def's sinks count, its appliers only when it is called.
+                self.ref_edges[key].add((child.module, child.qual))
+            else:
+                self._facts(key, child, runs and child.kind != "lambda")
+
+    def reachable(self) -> tuple[dict, dict]:
+        """Sinks and appliers per function after following the edges to a fixed
+        point: sinks along call and reference edges, appliers along calls only."""
+        sinks = {k: set(v) for k, v in self.sinks.items()}
+        appliers = {k: set(v) for k, v in self.appliers.items()}
+        changed = True
+        while changed:
+            changed = False
+            for key in self.funcs:
+                for hit in self.call_edges[key] | self.ref_edges[key]:
+                    if not sinks[hit] <= sinks[key]:
+                        sinks[key] |= sinks[hit]
+                        changed = True
+                    if (
+                        hit in self.call_edges[key]
+                        and not appliers[hit] <= appliers[key]
+                    ):
+                        appliers[key] |= appliers[hit]
+                        changed = True
+        return sinks, appliers
 
 
 def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     """``module:command`` for every Click command whose reachable code starts an LLM
     sink and never calls a config applier.
 
-    Reachable means the command body plus the wrapper functions it calls or names
-    statically: a bare name in its own module, a name imported from a
-    ``smartmemory_app`` module, or a module-qualified call through ``from
-    smartmemory_app import helper``, ``import smartmemory_app.helper as h`` or
-    ``import smartmemory_app.helper``. A sink counts when it is named at all, so a
-    sink that is merely referenced still flags. An applier counts only when it is
-    CALLED, here or in a function reached through a call: an import is a binding,
-    not execution, and a helper that is only named does not run. Appliers are not
-    expanded (storage.get_memory is a real sink holder, and is checked below).
-    Names resolve per scope: module-level imports, shadowed by what the function
-    assigns or takes as an argument (a local ``search`` is not ``storage.search``),
-    plus the function's own imports. A command's decorators are not read.
+    Every name is resolved to what it is bound to, scope by scope, the way Python
+    does: the function's own bindings (imports, ``x = a.b`` aliases, arguments,
+    loop and ``with`` targets, nested defs) shadow enclosing functions, which
+    shadow the module; a class body is never an enclosing scope; ``global`` and
+    ``nonlocal`` go to their owner. Imports follow ``import x as y``, ``from m
+    import f as g``, ``m.f()`` and an aliased module ``h.f()``, and a name
+    imported from a wrapper module follows what that module binds it to.
+
+    A call earns applier credit only when its name resolves to a member of
+    ``CONFIG_APPLIERS``, every way it is bound. A call that resolves to a sink is
+    a sink call whatever it is spelled, and a name with no binding earns nothing.
+    A sink also counts when it is merely named or imported, or when an attribute
+    is spelled like one. Reachable code is the command body, comprehensions and
+    class bodies in it, the wrapper functions it calls (appliers and sinks) or
+    names (sinks only), and nested defs and lambdas (sinks only, unless called).
+    Appliers are not expanded (storage.get_memory is a real sink holder, and is
+    checked below). A command's decorators are not read.
     Blind spots: method calls on objects, calls through containers, and call order
     inside one command (an applier after the sink still passes).
     """
-    modules = set(sources)
-    funcs: dict[tuple[str, str], ast.AST] = {}
-    module_env: dict[str, dict[str, tuple]] = {}
-    commands = []
-    for module, source in sources.items():
-        tree = ast.parse(source)
-        module_env[module] = _app_bindings(_scope_nodes(tree.body), modules)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                funcs.setdefault((module, node.name), node)
-                if _is_click_command(node):
-                    commands.append((module, node.name))
-
-    def target(node, module, env):
-        parts = _dotted(node)
-        if parts is None:
-            return None
-        if len(parts) == 1:
-            if (module, parts[0]) in funcs:
-                return (module, parts[0])
-            bound = env.get(parts[0])
-            return (bound[1], bound[2]) if bound and bound[0] == "func" else None
-        bound = env.get(parts[0])
-        if bound and bound[0] == "module" and len(parts) == 2:
-            return (bound[1], parts[1])
-        if bound and bound[0] == "package" and len(parts) == 3:
-            return (parts[1], parts[2])
-        return None
-
-    # Direct facts per function, then propagate along the edges to a fixed point.
-    sinks: dict[tuple[str, str], set] = {}
-    appliers: dict[tuple[str, str], set] = {}
-    call_edges: dict[tuple[str, str], set] = {}
-    ref_edges: dict[tuple[str, str], set] = {}
-    for key, fn in funcs.items():
-        module = key[0]
-        body = [n for stmt in fn.body for n in ast.walk(stmt)]
-        # Module-level imports, minus names this function rebinds, plus its own
-        # imports. Decorators (``@group.command``) name the parent group, they do
-        # not run it, so only the body is read.
-        local = _local_names(fn)
-        env = {k: v for k, v in module_env[module].items() if k not in local}
-        env.update(_app_bindings(body, modules))
-        sinks[key], appliers[key] = set(), set()
-        call_edges[key], ref_edges[key] = set(), set()
-        for node in body:
-            if isinstance(node, ast.ImportFrom):
-                sinks[key] |= {a.name for a in node.names} & LLM_SINKS
-            elif isinstance(node, ast.Call):
-                label = (_dotted(node.func) or [None])[-1]
-                if label in CONFIG_APPLIERS:
-                    appliers[key].add(label)
-                if (hit := target(node.func, module, env)) is not None:
-                    call_edges[key].add(hit)
-            elif isinstance(node, (ast.Name, ast.Attribute)):
-                label = node.id if isinstance(node, ast.Name) else node.attr
-                if label in LLM_SINKS:
-                    sinks[key].add(label)
-                if (hit := target(node, module, env)) is not None:
-                    ref_edges[key].add(hit)
-    changed = True
-    while changed:
-        changed = False
-        for key in funcs:
-            for hit in call_edges[key] | ref_edges[key]:
-                if hit not in funcs:
-                    continue
-                if not sinks[hit] <= sinks[key]:
-                    sinks[key] |= sinks[hit]
-                    changed = True
-                if hit in call_edges[key] and not appliers[hit] <= appliers[key]:
-                    appliers[key] |= appliers[hit]
-                    changed = True
-
+    graph = _CallGraph(sources)
+    sinks, appliers = graph.reachable()
     return [
         f"{module}:{name}"
-        for module, name in sorted(commands)
+        for module, name in graph.commands
         if sinks[(module, name)] and not appliers[(module, name)]
     ]
 
@@ -474,26 +716,21 @@ def test_every_llm_command_applies_config_or_is_exempt():
 
 
 def test_config_appliers_really_apply_the_config():
-    """Each applier calls apply_runtime_config() itself or in a helper one hop away."""
-    sources = _app_sources()
-    for module, name in (
-        ("storage", "get_memory"),
-        ("worker_entry", "run_configured_worker"),
-    ):
-        defs = {
-            n.name: n
-            for n in ast.walk(ast.parse(sources[module]))
-            if isinstance(n, ast.FunctionDef)
-        }
-        called = {
-            n.func.id
-            for n in ast.walk(defs[name])
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        }
-        bodies = [ast.unparse(defs[name])] + [
-            ast.unparse(defs[c]) for c in called if c in defs
-        ]
-        assert any("apply_runtime_config(" in b for b in bodies), name
+    """Each applier calls the real apply_runtime_config() itself or in a helper one
+    hop away, resolved by binding, not by spelling."""
+    graph = _CallGraph(_app_sources())
+    apply = ("storage", "apply_runtime_config")
+    assert apply in graph.funcs
+    for key in CONFIG_APPLIERS - {apply}:
+        called = graph.calls[key]
+        hops = called.union(
+            *(
+                graph.calls[i[1:]]
+                for i in called
+                if i[0] == "func" and i[1:] in graph.funcs
+            )
+        )
+        assert ("func", *apply) in hops, key
 
 
 _NEW_COMMAND = """
@@ -732,4 +969,188 @@ QUALIFIED_ROWS = [
 def test_every_unconfigured_click_command_is_detected(body, helpers, expected):
     sources = {"cli": _CMD.format(body=body), **helpers}
 
+    assert _unconfigured_llm_commands(sources) == expected
+
+
+# r2 HIGH-2: applier credit follows what the called name is bound to, never its
+# spelling. The first three rows are the reviewer's r2 repro.
+_ALIASED_SINK = "from smartmemory.utils.llm import call_llm as {0}\n    {0}()"
+_MODULE_GET_MEMORY = "from smartmemory_app.storage import get_memory\n"
+
+
+def _cli(body: str, header: str = "") -> dict[str, str]:
+    return {"cli": header + _CMD.format(body=body)}
+
+
+# (id, module sources, offending commands expected)
+ALIAS_ROWS = [
+    ("get_memory", _cli(_ALIASED_SINK.format("get_memory")), _OFFENDER),
+    (
+        "apply_runtime_config",
+        _cli(_ALIASED_SINK.format("apply_runtime_config")),
+        _OFFENDER,
+    ),
+    (
+        "run_configured_worker",
+        _cli(_ALIASED_SINK.format("run_configured_worker")),
+        _OFFENDER,
+    ),
+    (
+        "control-local-import-get_memory",
+        _cli(
+            "from smartmemory_app.storage import get_memory\n    get_memory()\n    "
+            + _SINK
+        ),
+        [],
+    ),
+    (
+        "control-local-import-apply_runtime_config",
+        _cli(
+            "from smartmemory_app.storage import apply_runtime_config\n"
+            "    apply_runtime_config()\n    " + _SINK
+        ),
+        [],
+    ),
+    (
+        "control-local-import-run_configured_worker",
+        _cli(
+            "from smartmemory_app.worker_entry import run_configured_worker\n"
+            "    run_configured_worker()\n    " + _SINK
+        ),
+        [],
+    ),
+    (
+        "control-module-level-applier-alias",
+        _cli(
+            "mem()\n    " + _SINK,
+            "from smartmemory_app.storage import get_memory as mem\n",
+        ),
+        [],
+    ),
+    (
+        "local-variable-shadows-applier-with-sink",
+        _cli(
+            "from smartmemory.utils.llm import call_llm\n"
+            "    get_memory = call_llm\n    get_memory()",
+            _MODULE_GET_MEMORY,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "module-level-sink-alias",
+        _cli(
+            "get_memory()",
+            "from smartmemory.utils.llm import call_llm as get_memory\n",
+        ),
+        _OFFENDER,
+    ),
+    (
+        "wrapper-module-reexports-a-sink",
+        {
+            **_cli("from smartmemory_app.helper import get_memory\n    get_memory()"),
+            "helper": "from smartmemory.utils.llm import call_llm as get_memory\n",
+        },
+        _OFFENDER,
+    ),
+    (
+        "applier-module-rebinds-the-name-to-a-sink",
+        {
+            **_cli("from smartmemory_app import storage\n    storage.get_memory()"),
+            "storage": "from smartmemory.utils.llm import call_llm as get_memory\n",
+        },
+        _OFFENDER,
+    ),
+    (
+        "nested-def-local-sink-alias",
+        _cli(
+            "def inner():\n"
+            "        from smartmemory.utils.llm import call_llm as get_memory\n"
+            "        get_memory()\n    inner()",
+            _MODULE_GET_MEMORY,
+        ),
+        _OFFENDER,
+    ),
+    (
+        "nested-def-applier-never-called",
+        _cli(
+            "from smartmemory_app.storage import get_memory\n"
+            "    def later():\n        get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "control-nested-def-applier-called",
+        _cli(
+            "from smartmemory_app.storage import get_memory\n"
+            "    def later():\n        get_memory()\n    later()\n    " + _SINK
+        ),
+        [],
+    ),
+    (
+        "lambda-applier-may-never-run",
+        _cli(
+            "from smartmemory_app.storage import get_memory\n"
+            "    later = lambda: get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    ("unbound-applier-name", _cli("get_memory()\n    " + _SINK), _OFFENDER),
+    (
+        "applier-spelled-on-an-object",
+        _cli("ctx = object()\n    ctx.get_memory()\n    " + _SINK),
+        _OFFENDER,
+    ),
+    (
+        "control-aliased-applier-module",
+        _cli(
+            "from smartmemory_app import storage as st\n    st.get_memory()\n    "
+            + _SINK
+        ),
+        [],
+    ),
+    (
+        "two-bindings-one-a-sink",
+        _cli(
+            "from smartmemory_app.storage import get_memory\n"
+            "    if flag:\n"
+            "        from smartmemory.utils.llm import call_llm as get_memory\n"
+            "    get_memory()"
+        ),
+        _OFFENDER,
+    ),
+    (
+        "global-rebinds-applier-to-sink",
+        _cli(
+            "_swap()\n    get_memory()",
+            _MODULE_GET_MEMORY + "from smartmemory.utils.llm import call_llm\n"
+            "def _swap():\n    global get_memory\n    get_memory = call_llm\n",
+        ),
+        _OFFENDER,
+    ),
+    (
+        "control-comprehension-target-does-not-shadow",
+        _cli(
+            "[get_memory for get_memory in ()]\n    get_memory()\n    " + _SINK,
+            _MODULE_GET_MEMORY,
+        ),
+        [],
+    ),
+    (
+        "click-command-decorator-imported-renamed",
+        {
+            "cli": "from click import command as cmd\n"
+            "from smartmemory.utils.llm import call_llm\n"
+            '@cmd("review")\ndef review_command():\n    call_llm()\n'
+        },
+        _OFFENDER,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "sources, expected",
+    [row[1:] for row in ALIAS_ROWS],
+    ids=[row[0] for row in ALIAS_ROWS],
+)
+def test_applier_credit_follows_the_binding_not_the_spelling(sources, expected):
     assert _unconfigured_llm_commands(sources) == expected
