@@ -1219,11 +1219,13 @@ def worker_cmd(ctx: click.Context, loop: bool) -> None:
     if load_config().mode == "remote":
         raise click.ClickException("Worker commands are only available in local mode.")
     if ctx.invoked_subcommand is None:
-        from smartmemory.pipeline.work_graph.worker import run_worker
         from smartmemory_app.storage import _resolve_data_dir
+        from smartmemory_app.worker_entry import run_configured_worker
 
         ctx.exit(
-            run_worker(_resolve_data_dir(), idle_exit=0 if loop else 0.2, lease=60)
+            run_configured_worker(
+                _resolve_data_dir(), idle_exit=0 if loop else 0.2, lease=60
+            )
         )
 
 

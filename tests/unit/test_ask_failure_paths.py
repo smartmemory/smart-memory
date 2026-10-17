@@ -361,6 +361,14 @@ PROVIDER_ROWS = [
     ("groq", "llama-3.3-70b-versatile", None, "llama-3.3-70b-versatile"),
     ("claude-agent", "", None, None),  # core's own default (the SDK) stays
     ("none", "", None, None),
+    # anthropic: the SDK route (the `claude` CLI honours ANTHROPIC_API_KEY) is the
+    # only one core can serve. Without the SDK, a claude-* id reaches
+    # call_openai_chat with no key and no base_url (api.openai.com), so pinning it
+    # would swap a working route for a broken one. Left on core's default.
+    ("anthropic", "", None, None),
+    # deepseek: core's llm.py has no DeepSeek route (only evaluation/judge.py), so
+    # there is no default model to pin. Left on core's default.
+    ("deepseek", "", None, None),
 ]
 
 

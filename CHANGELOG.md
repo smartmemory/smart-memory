@@ -14,6 +14,7 @@
 ## Unreleased - TOUR-ASK-502-1 (2026-10-17)
 
 - `sm ask` (and the tour's ask step) no longer fails with "502 Bad Gateway" when the Claude Agent SDK happens to be installed in the same Python. A `groq` or `openai` setup now pins its own default model (`openai/gpt-oss-120b`, `OPENAI_MODEL` or `gpt-4o-mini`), as `gemini` already did, so core no longer prefers the `claude` CLI, which exits 1 when it is not logged in. `claude-agent` and `none` keep core's default. An explicit `SMARTMEMORY_LLM_MODEL` still wins.
+- `sm worker` and `smartmemory worker --loop` now apply the configured provider before running, like the daemon and the background worker already did, so Tier-2 extraction no longer goes to the Claude Agent SDK on a `groq` or `openai` setup. Both worker entry points share one helper (`worker_entry.run_configured_worker`), and a table test covers every entry point that can reach an LLM. `anthropic` and `deepseek` setups stay on core's default: core has no non-SDK route to pin them to.
 - Ask failures show their reason. The daemon's 502 detail names the error type. The tour shows `HTTP <code>: <server detail>` instead of the bare status line. The hosted `sm ask` shows the service's 502 detail (503 stays hidden, it names server settings).
 - Handled failures are reported (when crash reports are on): every daemon route that answers 5xx through `HTTPException` (except the by-design 501 of remote-proxy mode), the tour's ask failure and empty answer, the tour's "seeded content not returned" degradation, and a tour run that fails.
 
