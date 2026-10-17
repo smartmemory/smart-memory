@@ -249,6 +249,7 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
         gather_environment,
     )
     from smartmemory_app.config import load_config
+    from smartmemory_app.doctor import mask_env_values
     from smartmemory_app.report_privacy import (
         private_text,
         private_value,
@@ -271,6 +272,11 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
                 word in key.lower() for word in ("key", "token", "password", "secret")
             )
         }
+        # Mask before encoding: a value with quotes or backslashes changes form in JSON.
+        config = {
+            key: mask_env_values(value) if isinstance(value, str) else value
+            for key, value in config.items()
+        }
         return "Effective config:\n" + json.dumps(private_value(config), indent=2)
 
     texts = {
@@ -280,8 +286,6 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
         ),
         "config.txt": private_text(_best_effort(config_text)),
     }
-    if message:
-        texts["message.txt"] = private_text(message)
     for name in ("cli-debug.log", "daemon.log"):
         texts[name] = safe_log_text(
             _best_effort(
@@ -289,6 +293,11 @@ def support_texts(doctor_output: str, message: str = "") -> dict[str, str]:
             )
             or "Log unavailable or empty"
         )
+    # Every member leaves the machine, so env-sourced values print as $NAME (env),
+    # the same contract `sm doctor` follows. The user's own message is theirs to word.
+    texts = {name: mask_env_values(value) for name, value in texts.items()}
+    if message:
+        texts["message.txt"] = private_text(message)
     return texts
 
 

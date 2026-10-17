@@ -9,6 +9,9 @@
 ## 1.5.27 — 2026-10-17
 
 - Setup and first-run hardening from the 2026-10-17 demo feedback: pins `smartmemory-core==1.5.27` and `smartmemory-mcp==1.5.23`. Ships the `Unreleased` sections below: CLI-TENANT-1, LOCAL-DAEMON-1, TOUR-ASK-502-1, CLI-WORKSPACE-UX-1, CLI-ENV-DETECT-1, SETUP-DOCTOR-1, CLI-SETUP-UX-1, BENEFITS-WORDING-1, plus the SM-SETUP-BATCH-1 integration glue. The per-unit headings keep their `Unreleased` labels.
+## Unreleased - CLI-FU-SWEEP-1a (2026-10-17)
+
+- `sm report --zip` and `sm report --send` no longer put env-sourced values (team id, LLM provider and model, embedding provider, data directory, workspace id) in the support archive. Every member (doctor, environment, config, both log tails) now prints them as `$NAME (env)`, the same masking `sm doctor` uses. Your own message text is left as you wrote it. (SUPPORT-BUNDLE-REDACT-1)
 
 ## Unreleased - CLI-TENANT-1 (2026-10-17)
 
