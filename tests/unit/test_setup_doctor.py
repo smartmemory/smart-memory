@@ -1541,3 +1541,141 @@ def test_fix_r1_probe(probe, monkeypatch, tmp_path, capsys):
     got = run(monkeypatch, tmp_path)
     with capsys.disabled():
         print(f"\nPROBE {_id}: {got}")
+
+
+# CLI-FU-SWEEP-1a H5: every way the OS can refuse doctor a read of the store is "not
+# checked" (WARN naming it), and only damage the store itself reports stays FAIL.
+# Real files and real permissions where the OS can produce the cause, a patched
+# sqlite3.connect where only SQLite can (lock and busy words, a read-only volume).
+
+
+def _chmod(path, mode):
+    path.chmod(mode)
+
+
+def _unreadable_db(monkeypatch, data_dir):
+    _chmod(data_dir / "memory.db", 0)
+
+
+def _unsearchable_dir(monkeypatch, data_dir):
+    _chmod(data_dir, 0)
+
+
+def _db_is_a_directory(monkeypatch, data_dir):
+    (data_dir / "memory.db").unlink()
+    (data_dir / "memory.db").mkdir()
+
+
+def _raises(exc):
+    def patch(monkeypatch, data_dir):
+        def connect(*args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(doctor.sqlite3, "connect", connect)
+
+    return patch
+
+
+_perm = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores permissions"
+)
+SQLITE_READ_ROWS = [
+    # (how the read goes wrong, status, text), one id per cause
+    pytest.param(
+        _unreadable_db, WARN, "cannot be read", marks=_perm, id="db-permission-denied"
+    ),
+    pytest.param(
+        _unsearchable_dir,
+        WARN,
+        "cannot be read",
+        marks=_perm,
+        id="data-dir-not-searchable",
+    ),
+    pytest.param(_db_is_a_directory, WARN, "cannot be read", id="db-is-a-directory"),
+    pytest.param(
+        _raises(sqlite3.OperationalError("unable to open database file")),
+        WARN,
+        "cannot be read (OperationalError)",
+        id="open-refused",
+    ),
+    pytest.param(
+        _raises(sqlite3.OperationalError("attempt to write a readonly database")),
+        WARN,
+        "cannot be read (OperationalError)",
+        id="read-only-volume",
+    ),
+    pytest.param(
+        _raises(sqlite3.OperationalError("database table is locked")),
+        WARN,
+        "in use by another process",
+        id="lock-busy",
+    ),
+    # damage the store itself reports is a definite answer
+    pytest.param(
+        _raises(sqlite3.DatabaseError("database disk image is malformed")),
+        FAIL,
+        "cannot be opened",
+        id="malformed",
+    ),
+    pytest.param(
+        _raises(sqlite3.DatabaseError("file is not a database")),
+        FAIL,
+        "cannot be opened",
+        id="not-a-database",
+    ),
+]
+
+
+@pytest.mark.parametrize("break_it,status,text", SQLITE_READ_ROWS)
+def test_unreadable_sqlite_store_is_not_checked_and_damage_is_fail(
+    break_it, status, text, monkeypatch, tmp_path
+):
+    ctx = build(monkeypatch, tmp_path, store="ok")
+    data_dir = tmp_path / "home" / ".smartmemory"
+    assert row(ctx, "graph").status == PASS  # healthy before the read goes wrong
+    try:
+        break_it(monkeypatch, data_dir)
+        result = doctor.check_graph(
+            ctx
+        )  # called directly: collect() would hide a crash as WARN
+    finally:
+        for path in (
+            data_dir,
+            data_dir / "memory.db",
+        ):  # the dir first: it gates the file
+            if path.exists():
+                path.chmod(0o700 if path.is_dir() else 0o600)
+    assert result.status == status, result
+    assert text in result.detail, result
+    assert result.fix, result
+    if status == WARN and "in use" not in text:
+        assert "not checked:" in result.detail and "memory.db" in result.detail, result
+
+
+@_perm
+def test_unreadable_config_directory_is_not_checked(monkeypatch, tmp_path):
+    ctx = build(monkeypatch, tmp_path)
+    cfg_dir = tmp_path / "xdg" / "smartmemory"
+    cfg_dir.chmod(0)
+    try:
+        result = doctor.check_config(ctx)
+    finally:
+        cfg_dir.chmod(0o700)
+    assert result.status == WARN and "not checked:" in result.detail, result
+    assert "cannot be read (PermissionError)" in result.detail, result
+
+
+@_perm
+def test_unreadable_healthy_sqlite_is_cannot_check(monkeypatch, tmp_path):
+    """The r1 reviewer's replay: PASS, then WARN while unreadable, then PASS again."""
+    ctx = build(monkeypatch, tmp_path, store="ok")
+    db = tmp_path / "home" / ".smartmemory" / "memory.db"
+    assert doctor.check_graph(ctx).status == PASS
+    try:
+        db.chmod(0)
+        result = doctor.check_graph(ctx)
+    finally:
+        db.chmod(0o600)
+    assert doctor.check_graph(ctx).status == PASS
+    assert result.status == WARN, "permission prevents checking a healthy SQLite store"
+    assert "not checked:" in result.detail

@@ -641,7 +641,16 @@ def check_config(ctx: Context) -> Row:
     else:
         moved_by = "XDG_CONFIG_HOME" if ctx.environ.get("XDG_CONFIG_HOME") else None
     where = f"{path} (location set by env {moved_by})" if moved_by else str(path)
-    if not path.exists():
+    try:
+        config_exists = path.exists()
+    except OSError as exc:
+        return Row(
+            "Config file",
+            WARN,
+            f"not checked: {where} cannot be read ({type(exc).__name__})",
+            f"Fix the permissions on {path.parent}, then run: sm doctor",
+        )
+    if not config_exists:
         return Row(
             "Config file",
             WARN,
@@ -1665,6 +1674,44 @@ def check_service(ctx: Context) -> Row:
     return _check_daemon(ctx)
 
 
+# SQLite errors that say this process could not read the store, not that the store
+# is damaged: another process holds it, or the OS refused the open (permissions, a
+# read-only volume, a directory in its place). Damage ("file is not a database",
+# "malformed") is a DatabaseError that matches none of these and stays FAIL.
+_SQLITE_IN_USE = ("locked", "busy")
+_SQLITE_UNREADABLE = (
+    "unable to open",
+    "permission",
+    "readonly",
+    "read-only",
+    "disk i/o",
+)
+
+
+def _sqlite_in_use(exc: sqlite3.Error) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        word in str(exc).lower() for word in _SQLITE_IN_USE
+    )
+
+
+def _sqlite_unreadable(exc: sqlite3.Error) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        word in str(exc).lower() for word in _SQLITE_UNREADABLE
+    )
+
+
+def _store_not_checked(
+    db_label: str, where: str, exc: Exception, ignored: str = ""
+) -> Row:
+    """Cannot check: the OS would not let doctor read the store, which says nothing about its contents."""
+    return Row(
+        "Graph backend",
+        WARN,
+        f"not checked: SQLite store {db_label} (from {where}) cannot be read ({type(exc).__name__}){ignored}",
+        f"Fix the permissions on {db_label}, then run: sm doctor",
+    )
+
+
 def check_graph(ctx: Context) -> Row:
     cfg = _config(ctx)
     if cfg.mode == "remote":
@@ -1716,7 +1763,11 @@ def check_graph(ctx: Context) -> Row:
             f" The config file data_dir ({cfg_dir}) is not used by sm commands run from"
             " this shell. Only the login auto-start daemon reads it."
         )
-    if not db.exists():
+    try:
+        db_exists = db.exists()
+    except OSError as exc:
+        return _store_not_checked(db_label, where, exc, ignored)
+    if not db_exists:
         return Row(
             "Graph backend",
             WARN,
@@ -1730,10 +1781,7 @@ def check_graph(ctx: Context) -> Row:
         finally:
             conn.close()
     except sqlite3.Error as exc:
-        locked = isinstance(exc, sqlite3.OperationalError) and any(
-            word in str(exc).lower() for word in ("locked", "busy")
-        )
-        if locked:
+        if _sqlite_in_use(exc):
             # Cannot check: another process holds the store, which is normal while it runs.
             return Row(
                 "Graph backend",
@@ -1741,6 +1789,8 @@ def check_graph(ctx: Context) -> Row:
                 f"not checked: SQLite store {db_label} (from {where}) is in use by another process ({type(exc).__name__})",
                 "Run: sm stop, then sm doctor",
             )
+        if _sqlite_unreadable(exc):
+            return _store_not_checked(db_label, where, exc, ignored)
         return Row(
             "Graph backend",
             FAIL,
