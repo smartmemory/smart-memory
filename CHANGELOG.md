@@ -1,5 +1,10 @@
 # Changelog — smartmemory
 
+## Unreleased - CLI-TENANT-1 (2026-10-17)
+
+- `sm ask` in local mode with no LLM provider key now exits non-zero before any request. The error names the missing key (the configured provider's, or all supported ones), and gives `export <KEY>=...`, `sm restart` and `sm setup`. The keyless excerpt listing moved behind `sm ask --extractive`. A daemon that answers extractively although this shell has a key now says it needs `sm restart`.
+- Remote mode: when the workspace the CLI sends (`SMARTMEMORY_TEAM_ID` or the config file) differs from the default workspace of the API key's login (`/auth/me`), every remote command prints, once per run on stderr, both workspaces, the tenant, the API URL and how to switch. An empty search, list or recall result from such a workspace says so instead of reading as "no memories". New module `smartmemory_app/preflight.py`.
+
 ## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
 
 - README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.

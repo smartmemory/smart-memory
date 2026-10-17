@@ -35,6 +35,16 @@ def require_local(command: str) -> None:
 
 
 def request_memory(cfg, method: str, path: str, **kwargs):
+    """Run one hosted request, saying so first when the CLI workspace is not the login default."""
+    from smartmemory_app.preflight import note_empty_result, warn_on_workspace_mismatch
+
+    mismatch = warn_on_workspace_mismatch(cfg, _get_remote_memory(cfg))
+    result = _request_memory(cfg, method, path, **kwargs)
+    note_empty_result(mismatch, path, result)
+    return result
+
+
+def _request_memory(cfg, method: str, path: str, **kwargs):
     """Use hosted contracts, adapting the few daemon-specific request envelopes."""
     mem = _get_remote_memory(cfg)
     try:

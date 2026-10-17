@@ -275,7 +275,7 @@ smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
 
-In local mode without an LLM key, `sm ask` shows the most relevant stored excerpts with full IDs, types and dates. The output is labelled extractive and contains no AI-written answer. Run `smartmemory setup` or set a supported provider key to enable synthesized answers.
+In local mode without an LLM key, `sm ask` stops with an error that names the missing provider key and the fix (`smartmemory setup`, or export a supported provider key and run `sm restart`). `sm ask --extractive` lists the most relevant stored excerpts with full IDs, types and dates instead. That output is labelled extractive and contains no AI-written answer.
 
 In remote mode, `sm ask`, `add`, `search`, `recall`, `get` and `status` use the hosted service without a local daemon. `sm ask` uses the service's LLM credentials, so you only need your SmartMemory API key. `add` accepts user properties, and `search '*'` supports paginated listing with one exact property filter. Property filters on semantic text searches are explicitly refused. The guided tour, store maintenance, corpus import/export, seed-pack installation and transcript capture commands require local mode. Import dry runs can still validate files in remote mode.
 

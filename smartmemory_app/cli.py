@@ -2136,12 +2136,22 @@ def _render_ask_relations(result: dict) -> None:
     is_flag=True,
     help="Also print the reasoning, the memories used as evidence, and the graph relations.",
 )
-def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
+@click.option(
+    "--extractive",
+    is_flag=True,
+    help="Local mode without an LLM key: list the matching memories instead of failing.",
+)
+def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> None:
     """Answer QUESTION from matching memories and their graph relations.
 
     Prints the direct answer by default, with --reasoning to see why.
-    Without an LLM key in local mode, prints labelled memory excerpts.
+    Local mode needs an LLM key, or --extractive to print labelled memory excerpts.
     """
+    from smartmemory_app.config import load_config
+    from smartmemory_app.preflight import require_llm_key
+
+    cfg = load_config()
+    require_llm_key(cfg, extractive=extractive)
     result = _memory_request(
         "POST",
         "/memory/ask",
@@ -2157,6 +2167,10 @@ def ask_cmd(question: str, limit: int, reasoning: bool) -> None:
         raise click.ClickException("SmartMemory returned an invalid ask response.")
 
     if result.get("mode") == "extractive" and result.get("synthesized") is False:
+        if not extractive and cfg.mode != "remote":
+            from smartmemory_app.preflight import daemon_missing_key_error
+
+            raise daemon_missing_key_error()
         click.echo("Extractive: No LLM configured, so this is not a written answer.")
         evidence = result.get("evidence") or []
         if evidence:
