@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import ast
 import builtins
+import json
+import subprocess
 import sys
 import tomllib
 import types
@@ -451,6 +453,34 @@ NON_SWALLOWING_MANAGERS = {
     "contextlib.redirect_stderr",
     "contextlib.nullcontext",
 }
+# Decorators, applied as a call, that return the decorated function itself, so a
+# decorated helper still runs its own body and lets its exceptions out (checked in
+# CPython's functools source). Every other decorator may swallow: a decorated helper
+# earns no applier credit unless each of its decorators is a call bound to one of
+# these.
+SAFE_DECORATORS = {"functools.wraps"}
+# CLI-GUARD-HARDEN-2: the builtin and allow-list proofs read these namespaces. A
+# scanned source that writes into them, or into any module namespace dynamically,
+# voids those proofs everywhere and flags its own commands (``_namespace_writes``).
+_PROOF_ROOTS = {
+    "builtins",
+    "__builtins__",
+    *(p.split(".")[0] for p in NON_SWALLOWING_MANAGERS | SAFE_DECORATORS),
+}
+# Names and attributes that reach a namespace as a mapping or run code in one.
+_DYNAMIC_NAMES = {
+    "globals",
+    "vars",
+    "locals",
+    "exec",
+    "eval",
+    "__import__",
+    "builtins",
+    "__builtins__",
+}
+_DYNAMIC_ATTRS = {"__dict__", "__setattr__", "__delattr__"}
+# Spellings that fetch a module object at runtime, outside any lexical binding.
+_MODULE_FETCHERS = {"modules", "import_module", "__import__"}
 # Statements that cannot jump: a handler made of these and then a ``raise`` stops the
 # command (if one of them raises, a different exception propagates instead).
 _STRAIGHT = (
@@ -496,26 +526,20 @@ class _Swallow:
     A handler catches ``kind="import"`` when it is bare, names ImportError, a
     subclass or a base, or names anything not provably the builtin: an attribute, a
     starred or computed member, or a name bound in any enclosing scope (class bodies
-    included), under a wildcard import, or in a source that touches ``builtins``.
-    ``kind="any"`` is caught by every handler."""
+    included), under a wildcard import, or while ``proofs_lost``.
+    ``kind="any"`` is caught by every handler.
 
-    def __init__(self, trees, funcs, resolver):
+    ``proofs_lost`` (some scanned source writes a namespace dynamically, see
+    ``_namespace_writes``) also voids every manager and decorator allow-list proof."""
+
+    def __init__(self, trees, funcs, resolver, proofs_lost):
         self.parents: dict[int, ast.AST] = {}
         for tree in trees:
             for node in ast.walk(tree):
                 for child in ast.iter_child_nodes(node):
                     self.parents[id(child)] = node
         self.funcs, self.resolver = funcs, resolver
-        self.builtins_touched = any(
-            (isinstance(n, ast.Name) and n.id in ("builtins", "__builtins__"))
-            or (
-                isinstance(n, ast.alias)
-                and n.name.split(".")[0] in ("builtins", "__builtins__")
-            )
-            or (isinstance(n, ast.ImportFrom) and n.module == "builtins")
-            for tree in trees
-            for n in ast.walk(tree)
-        )
+        self.proofs_lost = proofs_lost
 
     def may_swallow(self, node: ast.AST, scope: _Scope, kind: str) -> bool:
         child, parent = node, self.parents.get(id(node))
@@ -549,7 +573,7 @@ class _Swallow:
         return False
 
     def _builtin(self, name: str, scope: _Scope) -> bool:
-        if self.builtins_touched:
+        if self.proofs_lost:
             return False
         while scope is not None:
             if name in scope.binds or name in scope.declared or scope.star:
@@ -581,7 +605,11 @@ class _Swallow:
             n += 1
         if n == len(body) or not isinstance(body[n], ast.Raise):
             return None
-        for sub in _scope_nodes(body[:n]):
+        # Everything the handler evaluates before it leaves: the straight-line part,
+        # the raised exception and its cause, and the lambdas and comprehensions in
+        # them (a lambda that is called there runs here; one that is not is refused
+        # all the same).
+        for sub in (s for stmt in body[: n + 1] for s in ast.walk(stmt)):
             if isinstance(sub, (ast.Yield, ast.YieldFrom)):
                 return None
             if isinstance(sub, (ast.Name, ast.Attribute)):
@@ -596,13 +624,90 @@ class _Swallow:
         return "import" if bare else "any"
 
     def _safe_manager(self, item: ast.withitem, scope: _Scope) -> bool:
-        call = item.context_expr
-        if not isinstance(call, ast.Call):
+        return self._allowed_call(item.context_expr, scope, NON_SWALLOWING_MANAGERS)
+
+    def plain(self, fn: _Scope) -> bool:
+        """``fn`` is called as written: each decorator is a call bound to
+        ``SAFE_DECORATORS``. Any other decorator (a bare name, an attribute, a
+        class, a local ``contextmanager``, a rebound allow-listed name) may wrap the
+        body in a catcher, so ``fn`` lends no applier credit to its callers."""
+        return all(
+            self._allowed_call(dec, fn.parent, SAFE_DECORATORS)
+            for dec in getattr(fn.node, "decorator_list", [])
+        )
+
+    def _allowed_call(self, call: ast.AST, scope: _Scope, allowed: set) -> bool:
+        if self.proofs_lost or not isinstance(call, ast.Call):
             return False
         idents = self.resolver.expr(call.func, scope)
-        return bool(idents) and all(
-            i[0] == "ext" and i[1] in NON_SWALLOWING_MANAGERS for i in idents
+        return bool(idents) and all(i[0] == "ext" and i[1] in allowed for i in idents)
+
+
+def _namespace_writes(nodes: list, scope: _Scope, resolver: _Resolver) -> list[str]:
+    """Where ``nodes``, read in ``scope``, may write a namespace the guard's proofs
+    read, as ``"L<line> <code>"``. A flat refusal, not a proof (CLI-GUARD-HARDEN-2):
+
+    - any use of ``globals``, ``vars``, ``locals``, ``exec``, ``eval``,
+      ``__import__``, ``builtins`` or ``__builtins__``, or of a ``__dict__``,
+      ``__setattr__`` or ``__delattr__`` attribute;
+    - an attribute store or delete, or a ``setattr``/``delattr`` call, on a target
+      that is not a dotted name, or that resolves to a scanned module, the package,
+      or a module under ``_PROOF_ROOTS`` (``contextlib.nullcontext = ...``,
+      ``storage.get_memory = ...``), or whose expression fetches a module at
+      runtime (``sys.modules[...]``, ``import_module(...)``).
+
+    Stores on other imported modules stay allowed: shipped code patches
+    ``smartmemory.utils.llm``, ``socket``, ``sys`` and ``huggingface_hub``, and no
+    proof reads those namespaces."""
+    out = []
+
+    def risky(target: ast.AST) -> bool:
+        if _dotted(target) is None:
+            return any(
+                (isinstance(n, ast.Name) and n.id in _MODULE_FETCHERS)
+                or (isinstance(n, ast.Attribute) and n.attr in _MODULE_FETCHERS)
+                or (
+                    isinstance(n, (ast.Name, ast.Attribute))
+                    and _dotted(n) is not None
+                    and risky(n)
+                )
+                for n in ast.walk(target)
+                if n is not target
+            )
+        for ident in resolver.expr(target, scope):
+            while ident[0] == "caught" and len(ident) > 1:
+                ident = ident[1]
+            if ident[0] in ("module", "package"):
+                return True
+            if ident[0] == "ext" and ident[1].split(".")[0] in _PROOF_ROOTS:
+                return True
+        return False
+
+    for node in nodes:
+        hit = (
+            (isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMES)
+            or (isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_ATTRS)
+            or (
+                isinstance(node, ast.alias)
+                and node.name.split(".")[0] in _DYNAMIC_NAMES
+            )
+            or (isinstance(node, ast.ImportFrom) and node.module == "builtins")
+            or (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+                and risky(node.value)
+            )
+            or (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in ("setattr", "delattr")
+                and bool(node.args)
+                and risky(node.args[0])
+            )
         )
+        if hit:
+            out.append(f"L{getattr(node, 'lineno', '?')} {ast.unparse(node)[:60]}")
+    return out
 
 
 def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
@@ -833,7 +938,22 @@ class _CallGraph:
                 "module", module, "", None, tree, tree.body, modules, self.funcs
             )
         self.resolver = _Resolver(modules, module_scopes)
-        self.swallow = _Swallow(trees, self.funcs, self.resolver)
+        self.dynamic: dict[str, list[str]] = {}
+        for (module, scope), tree in zip(module_scopes.items(), trees):
+            scopes = list(_all_scopes([scope]))
+            owned = {id(n) for s in scopes for n in s.nodes}
+            # Annotations run at ``def`` time but no scope owns them: read them in
+            # the module scope.
+            loose = [n for n in ast.walk(tree) if id(n) not in owned]
+            writes = [
+                w for s in scopes for w in _namespace_writes(s.nodes, s, self.resolver)
+            ]
+            writes += _namespace_writes(loose, scope, self.resolver)
+            if writes:
+                self.dynamic[module] = writes
+        self.swallow = _Swallow(
+            trees, self.funcs, self.resolver, proofs_lost=bool(self.dynamic)
+        )
         settled = {}
         for scope in _all_scopes(module_scopes.values()):
             for specs in scope.binds.values():
@@ -845,6 +965,9 @@ class _CallGraph:
                                 spec[2], spec[3], "import"
                             )
                         specs[i] = ("caught", spec[1]) if settled[key] else spec[1]
+        self.plain = {
+            key: self.swallow.plain(scope) for key, scope in self.funcs.items()
+        }
         self.commands = sorted(
             key
             for key, scope in self.funcs.items()
@@ -862,7 +985,9 @@ class _CallGraph:
             up = scope
             while up is not None and not up.star:
                 up = up.parent
-            self.wild[key] = up is not None or _star_in(scope)
+            # A wildcard import or a dynamic namespace write in reach: the guard
+            # cannot know what any name is bound to.
+            self.wild[key] = up is not None or _star_in(scope) or key[0] in self.dynamic
 
     def _facts(self, key, scope, runs):
         """Facts of ``scope`` charged to function ``key``. ``runs`` is False inside
@@ -883,7 +1008,13 @@ class _CallGraph:
                     _is_applier(i, self.funcs) for i in idents
                 )
                 kind = "import" if direct else "any"
-                trusted = runs and not self.swallow.may_swallow(node, scope, kind)
+                # A decorated callee lends credit only through ``SAFE_DECORATORS``:
+                # any other decorator may catch what the body raises.
+                trusted = (
+                    runs
+                    and all(self.plain[h] for h in hits)
+                    and not self.swallow.may_swallow(node, scope, kind)
+                )
                 if trusted and direct:
                     self.appliers[key] |= {i[1:] for i in idents}
                 if trusted and hits and len(hits) == len(idents):
@@ -962,8 +1093,21 @@ def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     that may not be the builtin): the import may have failed and the command run on,
     wherever the call sits. The credited call itself must not sit where its own
     failure may be swallowed either (an ImportError for a direct applier, anything
-    for a wrapper). Not modelled: a target module whose own top-level import fails
-    (the failure is not in this command's ``try``). A call that resolves to a sink is
+    for a wrapper). A decorated function lends no credit to its callers unless each
+    decorator is a call bound to ``SAFE_DECORATORS``. Not modelled: a target module
+    whose own top-level import fails (the failure is not in this command's ``try``).
+
+    Scope of the guarantee (CLI-GUARD-HARDEN-2): every proof above is over lexical
+    bindings, what the source text binds each name to. Writes that change a binding
+    without a lexical store are not modelled; they are refused flat instead
+    (``_namespace_writes``): ``globals()``/``vars()``/``locals()``, ``exec``,
+    ``builtins``, ``__dict__``, ``setattr``, or an attribute store on a scanned
+    module or a module the proofs read (``contextlib``, ``functools``). A source
+    that does any of these voids every builtin and allow-list proof in every scanned
+    module, and each command in it, or reaching it, is an offender. Still out of
+    reach: a module object bound through a plain variable from a runtime fetch
+    (``m = importlib.import_module("contextlib")``, then ``m.nullcontext = ...``).
+    A call that resolves to a sink is
     a sink call whatever it is spelled, and a name with no binding earns nothing.
     A sink also counts when it is merely named or imported, or when an attribute
     is spelled like one. Reachable code is the command body, comprehensions and
@@ -2292,3 +2436,347 @@ def test_non_swallowing_managers_never_suppress():
         "contextlib.redirect_stderr",
         "contextlib.nullcontext",
     }
+
+
+# CLI-GUARD-HARDEN-2: review r1 of HARDEN-1 (``units/CLI-GUARD-HARDEN-1/review-r1.md``)
+# found a decorator, an attribute store on ``contextlib`` and a ``globals()`` write
+# that each swallow the failed import with credit kept, and sinks evaluated inside a
+# stopping handler. Rows named after a review probe are that probe. Every row is also
+# run, in a fresh interpreter with the real builtins, because several rows write the
+# shared ``contextlib`` and ``builtins`` namespaces.
+_SW_SETUP_CALL = "def setup():\n" + _ind(_SW_IMPORT) + "\nsetup()\n" + _SW_SINK
+_SW_QUIET_CM = (
+    "@contextlib.contextmanager\ndef quiet():\n"
+    "    try:\n        yield\n    except ImportError:\n        pass\n"
+)
+_SW_QUIET_FN = (
+    "def quiet(f):\n    def run():\n        try:\n            return f()\n"
+    "        except ImportError:\n            pass\n    return run\n"
+)
+_SW_NULL_WITH = (
+    "with contextlib.nullcontext(ImportError):\n" + _ind(_SW_IMPORT) + "\n" + _SW_SINK
+)
+_SW_LLM = "from smartmemory.utils.llm import call_llm"
+
+# (id, module sources, offending commands expected, command really reaches the sink)
+BYPASS_ROWS = [
+    # R1-H1: a decorator replaces the helper, so its body's credit is not the caller's.
+    (
+        "decorator-suppresses-helper",  # review probe: a call, a local contextmanager
+        _sw("@quiet()\n" + _SW_SETUP_CALL, _SW_QUIET_CM),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "decorator-bare-name",
+        _sw("@quiet\n" + _SW_SETUP_CALL, _SW_QUIET_FN),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "decorator-attribute",
+        _sw(
+            "@deco.quiet\n" + _SW_SETUP_CALL,
+            "class deco:\n    @staticmethod\n" + _ind(_SW_QUIET_FN),
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "decorators-stacked-one-unsafe",
+        _sw(
+            "@functools.wraps(print)\n@quiet\n" + _SW_SETUP_CALL,
+            "import functools\n" + _SW_QUIET_FN,
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "decorator-is-a-class",
+        _sw(
+            "@quiet\n" + _SW_SETUP_CALL,
+            "class quiet:\n    def __init__(self, f):\n        self.f = f\n"
+            "    def __call__(self):\n        try:\n            return self.f()\n"
+            "        except ImportError:\n            pass\n",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "allow-listed-decorator-rebound-locally",
+        _sw(
+            "@wraps(print)\n" + _SW_SETUP_CALL,
+            "from functools import wraps\n"
+            + _SW_QUIET_FN
+            + "wraps = lambda wrapped: quiet\n",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        # Conservative: a bare ``wraps`` makes ``setup()`` a TypeError, never a swallow.
+        "allow-listed-decorator-not-called",
+        _sw("@functools.wraps\n" + _SW_SETUP_CALL, "import functools"),
+        _OFFENDER,
+        False,
+    ),
+    (
+        "control-allow-listed-decorator-call",
+        _sw("@functools.wraps(print)\n" + _SW_SETUP_CALL, "import functools"),
+        [],
+        False,
+    ),
+    # R1-H2/H3: a namespace written without a lexical binding, one row per form.
+    (
+        "allowlisted-manager-attribute-rebound",  # review probe
+        _sw("contextlib.nullcontext = contextlib.suppress\n" + _SW_NULL_WITH),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "globals-dict-rebinds-KeyError",  # review probe: subscript store
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            'globals()["KeyError"] = ImportError',
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "globals-update-rebinds-KeyError",
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            "globals().update(KeyError=ImportError)",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "globals-aliased-then-written",
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            'namespace = globals()\nnamespace["KeyError"] = ImportError',
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "module-locals-rebinds-KeyError",
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            'locals()["KeyError"] = ImportError',
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "exec-rebinds-KeyError",
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            'exec("KeyError = ImportError")',
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "builtins-attribute-store",
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            "import builtins\nbuiltins.KeyError = ImportError",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "annotation-writes-a-namespace",  # runs at def time, owned by no scope
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            "def helper(arg: globals().update(KeyError=ImportError)):\n    pass",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "vars-of-a-module-updated",
+        _sw(
+            "vars(contextlib).update(nullcontext=contextlib.suppress)\n" + _SW_NULL_WITH
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "module-dict-subscript-store",
+        _sw(
+            'contextlib.__dict__["nullcontext"] = contextlib.suppress\n' + _SW_NULL_WITH
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "setattr-on-an-allow-listed-module",
+        _sw(
+            'setattr(contextlib, "nullcontext", contextlib.suppress)\n' + _SW_NULL_WITH
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "setattr-through-sys-modules",
+        _sw(
+            'setattr(sys.modules["contextlib"], "nullcontext", contextlib.suppress)\n'
+            + _SW_NULL_WITH,
+            "import sys",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "allow-listed-manager-method-patched",
+        _sw(
+            "with contextlib.nullcontext():\n" + _ind(_SW_IMPORT) + "\n" + _SW_SINK,
+            "contextlib.nullcontext.__exit__ = lambda *exc: True",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "scanned-module-attribute-store",  # the applier itself replaced
+        _sw(
+            "storage.get_memory()\n" + _SW_SINK,
+            "from smartmemory_app import storage\nstorage.get_memory = lambda: None",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        # Conservative here (the oracle runs only cli), but in the CLI the other
+        # module may load first: a write anywhere voids the proofs everywhere.
+        "write-in-another-module-voids-the-proof",
+        {
+            **_sw(_SW_NULL_WITH),
+            "patcher": "import contextlib\n"
+            "contextlib.nullcontext = contextlib.suppress\n",
+        },
+        _OFFENDER,
+        False,
+    ),
+    (
+        # Shipped shape (storage, doctor, hf_progress patch modules no proof reads).
+        "control-store-on-a-module-no-proof-reads",
+        _sw(
+            "get_memory()\n" + _SW_SINK,
+            "import socket\nsocket.review_marker = 1\n" + _SW_MODULE_GM,
+        ),
+        [],
+        False,
+    ),
+    (
+        "control-setattr-on-a-local-object",  # shipped shape: setattr(cfg, key, value)
+        _sw(
+            'state = types.SimpleNamespace()\nsetattr(state, "x", 1)\nget_memory()\n'
+            + _SW_SINK,
+            "import types\n" + _SW_MODULE_GM,
+        ),
+        [],
+        False,
+    ),
+    # R1-M1: a stopping handler that reaches a sink while it raises.
+    (
+        "sink-in-raise-expression",  # review probe
+        _sw(_sw_catch("raise RuntimeError(call_llm())"), _SW_LLM),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "sink-in-raise-cause",
+        _sw(_sw_catch("raise RuntimeError('stop') from call_llm()"), _SW_LLM),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "sink-in-handler-lambda",  # review probe
+        _sw(_sw_catch("(lambda: call_llm())()\nraise"), _SW_LLM),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "sink-in-handler-comprehension",  # review probe
+        _sw(_sw_catch("[call_llm() for _ in (0,)]\nraise"), _SW_LLM),
+        _OFFENDER,
+        True,
+    ),
+]
+
+# ``_reaches_sink`` in a fresh interpreter: real builtins, so a write to ``builtins``
+# or ``contextlib`` acts as it would in the CLI, and stays in that process. Module
+# ``smartmemory_app`` resolves to a stand-in whose ``storage.get_memory`` fails.
+_ISOLATED_DRIVER = """
+import builtins, json, sys, types
+events, loading = [], [True]
+real_import = builtins.__import__
+def missing(*args, **kwargs):
+    raise ModuleNotFoundError("synthetic missing storage dependency")
+def fake_import(name, *args, **kwargs):
+    if name in ("smartmemory_app", "smartmemory_app.storage"):
+        if not loading[0]:
+            missing()
+        storage = types.SimpleNamespace(get_memory=missing)
+        if name == "smartmemory_app":
+            return types.SimpleNamespace(storage=storage)
+        return storage
+    if name == "smartmemory.utils.llm":
+        return types.SimpleNamespace(call_llm=lambda: events.append("sink"))
+    return real_import(name, *args, **kwargs)
+builtins.__import__ = fake_import
+namespace = {"__name__": "review_cli", "log": lambda: events.append("log")}
+exec(compile(sys.stdin.read(), "<review-cli>", "exec"), namespace)
+loading[0] = False
+try:
+    namespace["review_command"].callback()
+except BaseException:  # the command stopped; only whether the sink ran matters
+    pass
+sys.stdout.write(json.dumps("sink" in events))
+"""
+
+
+def _reaches_sink_isolated(cli_source: str) -> bool:
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", _ISOLATED_DRIVER],
+        input=cli_source,
+        capture_output=True,
+        text=True,
+        env={},  # no provider key reaches the child
+        timeout=60,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "sources, expected, reaches_sink",
+    [row[1:] for row in BYPASS_ROWS],
+    ids=[row[0] for row in BYPASS_ROWS],
+)
+def test_decorated_and_dynamic_bypasses_earn_no_credit(sources, expected, reaches_sink):
+    """The guarantee is over lexical bindings plus a flat refusal. A decorated helper
+    lends credit only through ``SAFE_DECORATORS``; a handler that reaches a sink in
+    what it evaluates before it leaves does not stop. Namespace writes the lexical
+    proof cannot see (``globals()``/``vars()``/``locals()``, ``exec``, ``builtins``,
+    ``__dict__``, ``setattr``, an attribute store on a scanned module or on a module
+    the proofs read) are not modelled: they void every builtin and allow-list proof
+    and flag the commands in, or reaching, the writing module."""
+    assert _unconfigured_llm_commands(sources) == expected
+    assert _reaches_sink_isolated(sources["cli"]) is reaches_sink
+    assert expected or not reaches_sink  # a command that reaches the sink is flagged
+
+
+def test_safe_decorators_return_the_function_itself():
+    """The decorator allow-list holds only decorators that hand back the function."""
+    import functools
+
+    def body():
+        pass
+
+    assert functools.wraps(print)(body) is body
+    assert SAFE_DECORATORS == {"functools.wraps"}
+    assert _PROOF_ROOTS == {"builtins", "__builtins__", "contextlib", "functools"}
