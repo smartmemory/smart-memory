@@ -4,6 +4,7 @@
 
 ### CLI-POSTLAND-FU-1 (2026-10-18)
 
+- The LLM entry-point guard (test-only) also gives no trusted-applier credit to a name imported inside a `try` whose handler can swallow an ImportError (`ImportError`, `ModuleNotFoundError`, `Exception`, `BaseException`, a bare `except:`, or a tuple holding one). A handler that re-raises stops the command, so it does not count as swallowing (r2, review r1 H2).
 - `smartmemory setup` no longer shows a provider API key as you type it, for a new key or a replacement for a stored one. The two prompts in the local questionnaire now hide input like the remote login prompt already did.
 - The LLM entry-point guard (`tests/unit/test_llm_entry_points.py`, test-only) credits a trusted config applier only when the called function exists in the scanned sources under its full path. A missing module or missing export earns nothing, so a command that swallows the failed import and then reaches an LLM call is flagged.
 - Text a user can read no longer contains an em dash or a semicolon: command help, echoed messages, warnings, log lines that reach stderr and HTTP `detail` strings. The default of `--max-hops`, `--top-k`, `--limit`, `--timeout` and `--batch-size` moves from Click's `[default: N; x>=1]` suffix into the option help. A new test (`tests/unit/test_user_text_punctuation.py`) renders every command's `--help` and scans every string literal in `smartmemory_app/` so a new one fails.

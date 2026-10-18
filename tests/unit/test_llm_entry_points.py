@@ -12,6 +12,7 @@ network, no daemon and no keychain is reached.
 from __future__ import annotations
 
 import ast
+import builtins
 import sys
 import tomllib
 import types
@@ -359,7 +360,8 @@ class _Scope:
     imported from a wrapper module), ``("pkgattr", name)`` (``from smartmemory_app
     import name``), ``("module", stem)``, ``("package",)``,
     ``("ext", "dotted.path")`` (anything outside ``smartmemory_app``),
-    ``("alias", value_node, scope)`` (``x = a.b``) or ``("opaque",)`` (an
+    ``("alias", value_node, scope)`` (``x = a.b``), ``("caught", spec)`` (an import
+    in a ``try`` whose handler may swallow an ImportError) or ``("opaque",)`` (an
     argument, a loop target, any other value).
     """
 
@@ -438,6 +440,55 @@ def _import_specs(node: ast.AST, modules: set[str]) -> list[tuple[str, tuple]]:
     return out
 
 
+_TRIES = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t)
+
+
+def _may_catch_import_error(handler: ast.ExceptHandler) -> bool:
+    """Can this handler swallow an ImportError? A bare ``except:`` can. So can a
+    builtin exception class that is ImportError, a subclass of it
+    (``ModuleNotFoundError``) or a base of it (``Exception``, ``BaseException``), alone
+    or in a tuple. A name that is not a builtin exception, or a starred or computed
+    tuple member, might be an alias of one: it counts (fail closed)."""
+    if handler.type is None:
+        return True
+    types_ = (
+        handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+    )
+    for expr in types_:
+        name = (
+            expr.id
+            if isinstance(expr, ast.Name)
+            else expr.attr
+            if isinstance(expr, ast.Attribute)
+            else None
+        )
+        cls = getattr(builtins, name, None) if name else None
+        if not (isinstance(cls, type) and issubclass(cls, BaseException)):
+            return True
+        if issubclass(cls, ImportError) or issubclass(ImportError, cls):
+            return True
+    return False
+
+
+def _caught_imports(nodes: list[ast.AST]) -> set[int]:
+    """ids of the import statements of one scope that sit in the BODY of a ``try``
+    with a handler that may swallow an ImportError. A handler, ``else`` or ``finally``
+    is not protected by its own ``try``; a nested def's body is another scope."""
+    caught: set[int] = set()
+    for node in nodes:
+        if isinstance(node, _TRIES) and any(
+            _may_catch_import_error(h)
+            and not any(isinstance(s, ast.Raise) for s in h.body)
+            for h in node.handlers
+        ):
+            caught |= {
+                id(n)
+                for n in _scope_nodes(node.body)
+                if isinstance(n, (ast.Import, ast.ImportFrom))
+            }
+    return caught
+
+
 def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
     scope = _Scope(kind, module, qual, parent, node)
     if parent is not None:
@@ -489,10 +540,12 @@ def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
             prefix + stmt.name + (f"@L{stmt.lineno}" if defined[stmt.name] > 1 else "")
         )
 
+    caught = _caught_imports(scope.nodes)
     for stmt in scope.nodes:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             for bound, spec in _import_specs(stmt, modules):
-                scope.bind(bound, spec)
+                # A swallowed ImportError means the name may never have been bound.
+                scope.bind(bound, ("caught", spec) if id(stmt) in caught else spec)
         elif isinstance(stmt, _DEFS):
             scope.bind(stmt.name, ("def", module, own_qual(stmt)))
         elif isinstance(stmt, ast.ClassDef):
@@ -534,7 +587,9 @@ class _Resolver:
     """What a name or dotted chain is bound to, as canonical identities:
     ``("func", module, qualname)``, ``("unresolved", module, name)`` (no such
     module or export in the scanned sources), ``("module", stem)``, ``("package",)``,
-    ``("ext", "dotted.path")``, ``("opaque",)`` or ``("unbound", name)``.
+    ``("ext", "dotted.path")``, ``("opaque",)`` or ``("unbound", name)``. A name that
+    a swallowed ImportError may have left unbound also resolves to ``("caught",)``:
+    it still names what it names (a sink stays a sink) and can earn no applier credit.
     A wrapper name imported from a module in ``sources`` is followed to what that
     module binds it to (re-exports and aliases included)."""
 
@@ -549,6 +604,8 @@ class _Resolver:
 
     def spec(self, spec, seen):
         kind = spec[0]
+        if kind == "caught":
+            return self.spec(spec[1], seen) | {("caught",)}
         if kind == "def":
             return {("func", spec[1], spec[2])}
         if kind == "func":
@@ -582,6 +639,8 @@ class _Resolver:
         return {("module", name)}
 
     def attr(self, ident, attr, seen):
+        if ident[0] == "caught":
+            return {ident}
         if ident[0] == "ext":
             return {("ext", f"{ident[1]}.{attr}")}
         if ident[0] == "package":
@@ -749,7 +808,13 @@ def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     A call earns applier credit only when its name resolves to a member of
     ``CONFIG_APPLIERS``, every way it is bound, and that function exists in the
     scanned sources under its full dotted path (a missing module, a missing export
-    or an import that fails earns nothing). A call that resolves to a sink is
+    or an import that fails earns nothing), and the name is not bound by an import
+    inside a ``try`` whose handler may swallow an ImportError (``ImportError``,
+    ``ModuleNotFoundError``, ``Exception``, ``BaseException``, a bare ``except:``, a
+    tuple holding one, or a name that is not a builtin exception): the import may have
+    failed and the command run on, wherever the call sits. Not modelled: a target
+    module whose own top-level import fails (the failure is not in this command's
+    ``try``). A call that resolves to a sink is
     a sink call whatever it is spelled, and a name with no binding earns nothing.
     A sink also counts when it is merely named or imported, or when an attribute
     is spelled like one. Reachable code is the command body, comprehensions and
@@ -1510,4 +1575,180 @@ MISSING_EXPORT_ROWS = [
     ids=[row[0] for row in MISSING_EXPORT_ROWS],
 )
 def test_guard_credits_only_appliers_that_exist(sources, expected):
+    assert _unconfigured_llm_commands(sources) == expected
+
+
+# CLI-POSTLAND-FU-1 r2 H2: a name bound inside a ``try:`` whose handlers can catch an
+# ImportError earns no applier credit anywhere (the try body, its handlers, ``else``,
+# ``finally`` or after the ``try``): Python may have swallowed the failed import and
+# run on. The first row is the reviewer's repro.
+_R1_CLI = """import click
+@click.command()
+def review_command():
+    try:
+        from smartmemory_app.storage import get_memory
+        get_memory()
+    except ImportError:
+        pass
+    from smartmemory.utils.llm import call_llm
+    call_llm()
+"""
+_IMPORT_GM = "from smartmemory_app.storage import get_memory"
+
+
+def _caught(handler: str) -> dict[str, str]:
+    """The applier is imported and called in a ``try`` whose handler is ``handler``."""
+    return _resolve(
+        f"try:\n        {_IMPORT_GM}\n        get_memory()\n    {handler}\n"
+        f"        pass\n    " + _SINK
+    )
+
+
+def _try_import(tail: str) -> dict[str, str]:
+    """Import in a ``try`` that catches ImportError, then ``tail`` (more statements,
+    each indented four spaces after the first) and the sink."""
+    return _resolve(
+        f"try:\n        {_IMPORT_GM}\n    except ImportError:\n        pass\n"
+        f"    {tail}\n    " + _SINK
+    )
+
+
+# (id, module sources, offending commands expected)
+CAUGHT_IMPORT_ROWS = [
+    (
+        "r1-repro-storage-imports-a-missing-module",
+        {
+            "storage": (
+                "import review_backend_that_does_not_exist\ndef get_memory(): pass\n"
+            ),
+            "cli": _R1_CLI,
+        },
+        _OFFENDER,
+    ),
+    (
+        "r1-companion-storage-defines-get_memory",
+        {"storage": "def get_memory(): pass\n", "cli": _R1_CLI},
+        _OFFENDER,
+    ),
+    ("handler-ImportError", _caught("except ImportError:"), _OFFENDER),
+    ("handler-ModuleNotFoundError", _caught("except ModuleNotFoundError:"), _OFFENDER),
+    (
+        "handler-tuple-with-ImportError",
+        _caught("except (ImportError, OSError):"),
+        _OFFENDER,
+    ),
+    ("handler-Exception", _caught("except Exception:"), _OFFENDER),
+    ("handler-BaseException", _caught("except BaseException:"), _OFFENDER),
+    ("handler-bare-except", _caught("except:"), _OFFENDER),
+    (
+        "handler-raises-only-when-a-condition-holds",
+        _caught("except ImportError:\n        if debug:\n            raise"),
+        _OFFENDER,
+    ),
+    # A name the guard cannot resolve to a builtin might be ImportError: fail closed.
+    ("handler-unknown-name", _caught("except SomethingElse:"), _OFFENDER),
+    ("handler-tuple-starred", _caught("except (KeyError, *others):"), _OFFENDER),
+    ("call-after-the-try", _try_import("get_memory()"), _OFFENDER),
+    (
+        "call-in-except-handler",
+        _resolve(
+            f"try:\n        {_IMPORT_GM}\n    except ImportError:\n"
+            "        get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "call-in-else",
+        _resolve(
+            f"try:\n        {_IMPORT_GM}\n    except ImportError:\n        pass\n"
+            "    else:\n        get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "call-in-finally",
+        _resolve(
+            f"try:\n        {_IMPORT_GM}\n    except ImportError:\n        pass\n"
+            "    finally:\n        get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    ("alias-of-a-caught-import", _try_import("g = get_memory\n    g()"), _OFFENDER),
+    (
+        "caught-module-import-then-attribute-call",
+        _resolve(
+            "try:\n        from smartmemory_app import storage\n"
+            "    except ImportError:\n        pass\n    storage.get_memory()\n    "
+            + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "caught-re-export-through-a-wrapper-module",
+        _resolve(
+            "from smartmemory_app.helpers import get_memory\n    get_memory()\n    "
+            + _SINK,
+            helpers=f"try:\n    {_IMPORT_GM}\nexcept ImportError:\n    pass\n",
+        ),
+        _OFFENDER,
+    ),
+    (
+        "bound-twice-once-uncaught-once-caught",
+        _resolve(
+            f"{_IMPORT_GM}\n    try:\n        {_IMPORT_GM}\n    except ImportError:\n"
+            "        pass\n    get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "inner-try-does-not-hide-the-outer-catch",
+        _resolve(
+            f"try:\n        try:\n            {_IMPORT_GM}\n        except KeyError:\n"
+            "            pass\n    except ImportError:\n        pass\n"
+            "    get_memory()\n    " + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "control-no-try-earns-credit",
+        _resolve(f"{_IMPORT_GM}\n    get_memory()\n    " + _SINK),
+        [],
+    ),
+    ("control-except-KeyError-earns-credit", _caught("except KeyError:"), []),
+    (
+        # cli_code.code_index_cmd: the handler raises ClickException, the command stops.
+        "control-handler-always-raises-earns-credit",
+        _caught("except Exception as exc:\n        raise RuntimeError(exc)"),
+        [],
+    ),
+    (
+        "control-except-tuple-without-ImportError-earns-credit",
+        _caught("except (KeyError, OSError):"),
+        [],
+    ),
+    (
+        "control-try-finally-has-no-handler-earns-credit",
+        _resolve(
+            f"try:\n        {_IMPORT_GM}\n    finally:\n        pass\n"
+            "    get_memory()\n    " + _SINK
+        ),
+        [],
+    ),
+    (
+        "control-import-in-the-handler-is-not-protected-by-it",
+        _resolve(
+            "try:\n        pass\n    except ImportError:\n"
+            f"        {_IMPORT_GM}\n    get_memory()\n    " + _SINK
+        ),
+        [],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "sources, expected",
+    [row[1:] for row in CAUGHT_IMPORT_ROWS],
+    ids=[row[0] for row in CAUGHT_IMPORT_ROWS],
+)
+def test_caught_import_bindings_earn_no_applier_credit(sources, expected):
     assert _unconfigured_llm_commands(sources) == expected
