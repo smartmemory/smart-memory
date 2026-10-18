@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### CLI-POSTLAND-FU-1 (2026-10-18)
+
+- `smartmemory setup` no longer shows a provider API key as you type it, for a new key or a replacement for a stored one. The two prompts in the local questionnaire now hide input like the remote login prompt already did.
+- The LLM entry-point guard (`tests/unit/test_llm_entry_points.py`, test-only) credits a trusted config applier only when the called function exists in the scanned sources under its full path. A missing module or missing export earns nothing, so a command that swallows the failed import and then reaches an LLM call is flagged.
+- Text a user can read no longer contains an em dash or a semicolon: command help, echoed messages, warnings, log lines that reach stderr and HTTP `detail` strings. The default of `--max-hops`, `--top-k`, `--limit`, `--timeout` and `--batch-size` moves from Click's `[default: N; x>=1]` suffix into the option help. A new test (`tests/unit/test_user_text_punctuation.py`) renders every command's `--help` and scans every string literal in `smartmemory_app/` so a new one fails.
+
 ### CLI-TEST-ENV-LEAK-1 (2026-10-18)
 
 - Tests no longer leak provider variables into each other. Session-lesson tests called code that sets `LLM_PROVIDER`, `LLM_API_KEY` and `OPENAI_BASE_URL` straight in the process environment, which made 7 `test_setup_doctor.py` rows read `provider groq (from env LLM_PROVIDER)` when run after them. Those tests now use the new `provider_pin_isolated` fixture, and an autouse guard in `tests/conftest.py` fails any test that leaves a provider, model or key variable changed (names only, never values) and undoes the change. Test-only, no shipped code changed.

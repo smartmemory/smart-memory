@@ -143,7 +143,7 @@ def test_card_eligibility_and_legacy_warning(environment, caplog):
     assert "[session:2026-09-26]" in card
     warnings = [r.message for r in caplog.records if "legacy lessons" in r.message]
     assert warnings == [
-        "Rules card classified 2 legacy lessons with rule regex; run smartmemory lifecycle reclassify"
+        "Rules card classified 2 legacy lessons with rule regex, run smartmemory lifecycle reclassify"
     ]
     environment._graph.search_nodes.assert_called_once_with(
         {"memory_type": "decision", "origin": ORIGIN}

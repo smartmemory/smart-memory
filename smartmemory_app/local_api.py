@@ -1131,7 +1131,7 @@ def ask_endpoint(body: AskRequest) -> dict:
             exc.name == "openai" or str(exc) == "openai package is required"
         ):
             detail = (
-                "Python dependency 'openai' is missing; its SDK provides transport for "
+                "Python dependency 'openai' is missing, its SDK provides transport for "
                 "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
                 "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
                 "(core-library users: pip install 'smartmemory-core[llm]')."
@@ -1140,7 +1140,7 @@ def ask_endpoint(body: AskRequest) -> dict:
     if not isinstance(answer, str) or not answer.strip():
         raise HTTPException(
             status_code=502,
-            detail="The configured LLM returned no answer; no fallback answer was generated.",
+            detail="The configured LLM returned no answer, no fallback answer was generated.",
         )
     direct, reasoning = _split_answer(answer)
     return {
@@ -1199,7 +1199,7 @@ def ingest_launch_event(body: dict) -> dict:
                 )
         else:
             log.warning(
-                "launch_metrics: remote mode but no API key available; writing local JSONL only"
+                "launch_metrics: remote mode but no API key available, writing local JSONL only"
             )
 
     record = {

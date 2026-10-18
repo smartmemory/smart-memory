@@ -64,7 +64,7 @@ class JSONLPatternStore:
         try:
             bundled = json.loads(SEEDS_MANIFEST.read_text())
         except (json.JSONDecodeError, OSError):
-            log.warning("Failed to read seed manifest — skipping seed sync")
+            log.warning("Failed to read seed manifest, skipping seed sync")
             return
 
         # Load applied manifest (what was already synced)
@@ -132,7 +132,7 @@ class JSONLPatternStore:
         if not SEED_PATTERNS_FILE.exists():
             self._path.touch()
             log.warning(
-                "Seed patterns file missing at %s — entity ruler will start empty",
+                "Seed patterns file missing at %s, entity ruler will start empty",
                 SEED_PATTERNS_FILE,
             )
             return

@@ -233,7 +233,7 @@ def test_config_failure_still_runs_engine_fail_open(
     assert result.exit_code == 0, result.output
     assert result.output == ""
     assert calls == [SESSION]
-    assert "mode resolution failed; using in-process engine" in caplog.text
+    assert "mode resolution failed, using in-process engine" in caplog.text
 
 
 def state(root):
@@ -306,9 +306,9 @@ def test_remote_failures_stay_fail_open_with_diagnostics(hosted, phase, caplog):
     expected = {
         "orient": "Remote recall lost search context",
         "recall": "Remote recall lost search context",
-        "observe": "Observe ingest failed; tool observation lost",
-        "distill": "Distill ingest failed; turn pair lost",
-        "learn": "Learn ingest failed; error memory lost",
+        "observe": "Observe ingest failed, tool observation lost",
+        "distill": "Distill ingest failed, turn pair lost",
+        "learn": "Learn ingest failed, error memory lost",
     }
     assert expected[phase] in caplog.text
     if phase in PHASES[:2]:

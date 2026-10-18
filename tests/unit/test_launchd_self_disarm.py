@@ -55,7 +55,7 @@ def test_launchd_guard_boots_out_and_exits_zero_when_package_is_missing(
         ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"], check=False
     )
     assert (tmp_path / "daemon.log").read_text() == (
-        f"SmartMemory was removed; background job {label} switched itself off.\n"
+        f"SmartMemory was removed, background job {label} switched itself off.\n"
     )
 
 

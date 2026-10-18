@@ -442,7 +442,7 @@ def _shutdown() -> None:
             _memory._graph.backend.close()
     except Exception as exc:
         log.warning(
-            "SmartMemory shutdown error — session data may not be fully persisted: %s",
+            "SmartMemory shutdown error: session data may not be fully persisted: %s",
             exc,
         )
     finally:
@@ -499,7 +499,7 @@ def llm_extraction_warning() -> str | None:
     if available:
         return None
     return (
-        "LLM entity/relation extraction unavailable (no usable provider configured); "
+        "LLM entity/relation extraction unavailable (no usable provider configured), "
         "ruler extraction and local enrichers still run. "
         "Run `smartmemory setup` to configure an LLM provider."
     )
@@ -1015,7 +1015,7 @@ def recall(
 
     if emitted < requested:
         log.warning(
-            "recall shortfall: requested=%d emitted=%d; eligible distinct candidates exhausted",
+            "recall shortfall: requested=%d emitted=%d, eligible distinct candidates exhausted",
             requested,
             emitted,
         )

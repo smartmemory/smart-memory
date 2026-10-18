@@ -62,7 +62,7 @@ def test_embedding_timeout_is_incomplete_and_completed_rows_survive(
     assert rows[0] == "Completed check: OK"
     assert (
         rows[-1]
-        == "Embedding runtime: not checked (probe exceeded 20 s; slow cold start)"
+        == "Embedding runtime: not checked (probe exceeded 20 s, slow cold start)"
     )
     assert "warning:" not in rows[-1] and "Fix:" not in rows[-1]
     assert "not checked" in caplog.text

@@ -419,7 +419,7 @@ class RemoteMemory:
             )
         if any(key not in response for key in result.parse_summary()):
             log.warning(
-                "Server omitted code diagnostic evidence; missing counts/outcomes reported as unknown"
+                "Server omitted code diagnostic evidence, missing counts/outcomes reported as unknown"
             )
         result.entities_created, result.edges_created = expected
         result.replaced = True
@@ -437,7 +437,7 @@ class RemoteMemory:
             result.embeddings_generated = embedded
             if embedded < result.entities_created:
                 log.warning(
-                    "Hosted code index embedded %d of %d entities; semantic code search coverage is partial.",
+                    "Hosted code index embedded %d of %d entities, semantic code search coverage is partial.",
                     embedded,
                     result.entities_created,
                 )

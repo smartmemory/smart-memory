@@ -58,7 +58,7 @@ DEFAULT_TOUR_STEP_DWELL_SECONDS = 4.0
 # the viewer shows a linked knowledge graph within the first step.
 DEFAULT_TOUR_FACTS: tuple[str, ...] = (
     "Project Atlas picked Postgres as the application database because reporting queries need joins.",
-    "Project Atlas deploys go through GitHub Actions; never deploy manually from a laptop.",
+    "Project Atlas deploys go through GitHub Actions, never deploy manually from a laptop.",
     "GitHub Actions runs the Postgres migrations against Staging before every deploy.",
     "Staging rate-limits uploads at 100 requests per minute, so the uploader batches its Postgres writes.",
     "The nightly reporting job on Project Atlas reads the Postgres replica on Staging, never the primary.",
@@ -143,7 +143,7 @@ def _resolve_step_dwell_seconds(value: float | None) -> float:
         return float(env_value)
     except ValueError:
         logger.warning(
-            "Invalid %s=%r; using default %.1f seconds",
+            "Invalid %s=%r, using default %.1f seconds",
             TOUR_STEP_DWELL_ENV,
             env_value,
             DEFAULT_TOUR_STEP_DWELL_SECONDS,
@@ -519,14 +519,14 @@ class TourArcDriver:
         ask = getattr(self.client, "ask", None)
         if ask is None:
             logger.warning(
-                "SmartMemory tour: client has no ask(); showing the command only."
+                "SmartMemory tour: client has no ask(), showing the command only."
             )
             return "(ask unavailable: this tour client does not implement ask)"
         try:
             response = ask(question, 5)
         except Exception as exc:
             logger.warning(
-                "SmartMemory tour: sm ask failed (%s); showing the command only.", exc
+                "SmartMemory tour: sm ask failed (%s), showing the command only.", exc
             )
             _report_degraded("ask", str(exc), exc)
             return f"(ask unavailable: {exc})"
@@ -628,7 +628,7 @@ class TourDaemon:
                 self.port = requested_port
                 if not _is_port_available(self.port):
                     raise RuntimeError(
-                        f"port {self.port} is in use; omit --port to auto-select "
+                        f"port {self.port} is in use, omit --port to auto-select "
                         "a free one"
                     )
             try:
@@ -744,7 +744,7 @@ class TourDaemon:
         if node_count != 0:
             raise RuntimeError(
                 "tour daemon identity check failed: reached a non-empty memory "
-                "graph; aborting before ingest to avoid writing to another daemon"
+                "graph, aborting before ingest to avoid writing to another daemon"
             )
 
     def _has_store_files(self) -> bool:
@@ -861,7 +861,7 @@ class TourSessionRunner:
     def _run_code_stub(self, emit: EventCallback | None) -> TourRunResult:
         body = (
             "The code-intelligence branch is coming soon. The default tour is "
-            "offline-safe and complete; run `sm tour` without --code to watch it."
+            "offline-safe and complete, run `sm tour` without --code to watch it."
         )
         if emit is not None:
             emit(TourEvent(step=0, title="Code tour coming soon", body=body))
@@ -1144,7 +1144,7 @@ def _tour_degraded_reason(
         reasons.append("search did not return the seeded Postgres fact")
     if not recall_text.strip() or not any(fact in recall_text for fact in facts):
         reasons.append("recall did not return non-empty seeded content")
-    return "; ".join(reasons)
+    return ", ".join(reasons)
 
 
 def _search_contains_fact(response: dict | list, fact: str) -> bool:

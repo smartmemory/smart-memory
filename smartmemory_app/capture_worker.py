@@ -115,7 +115,7 @@ def import_capture(job: dict) -> dict:
         result = mem.ingest_conversation_sync(**kwargs)
         if result.chunks_failed:
             raise RuntimeError(
-                "; ".join(chunk.error for chunk in result.chunk_results if chunk.error)
+                ", ".join(chunk.error for chunk in result.chunk_results if chunk.error)
             )
         lessons = lessons_for(
             [chunk.item_id for chunk in result.chunk_results if chunk.item_id]

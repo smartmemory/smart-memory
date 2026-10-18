@@ -196,7 +196,7 @@ def mcp_install_cmd(client: str, dry_run: bool, override_path: str | None) -> No
         click.echo(text.rstrip())
 
     if dry_run:
-        click.echo("[mcp:install] dry-run — no file written")
+        click.echo("[mcp:install] dry-run: no file written")
     else:
         click.echo(f"[mcp:install] wrote {target}")
 

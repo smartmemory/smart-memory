@@ -105,7 +105,7 @@ def offline_checks(task: str, *, budget: float | None = None) -> list[str]:
         prefix = labels.get(task, task)
         if timeout:
             detail = f"probe exceeded {budget:g} s" + (
-                "; slow cold start" if task == "embedding" else "; timed out"
+                ", slow cold start" if task == "embedding" else ", timed out"
             )
             log.warning("%s not checked: %s", prefix, detail)
             rows.append(f"{prefix}: not checked ({detail})")

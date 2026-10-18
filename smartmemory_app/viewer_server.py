@@ -75,7 +75,7 @@ def _safe_degraded_reason(exc: Exception) -> str:
 def _safe_warmup_reason(exc: BaseException) -> str:
     """Flatten grouped warmup failures into one redacted health-safe summary."""
     if isinstance(exc, BaseExceptionGroup):
-        return "; ".join(_safe_warmup_reason(item) for item in exc.exceptions)[:480]
+        return ", ".join(_safe_warmup_reason(item) for item in exc.exceptions)[:480]
     if isinstance(exc, Exception):
         return _safe_degraded_reason(exc)
     return type(exc).__name__
@@ -243,7 +243,7 @@ def _build_app() -> FastAPI:
                 degraded_reason or "SmartMemory could not open saved memories."
             )
             log.warning(
-                "SmartMemory could not open saved memories; status is degraded "
+                "SmartMemory could not open saved memories, status is degraded "
                 "and the memory count is unavailable: %s",
                 degraded_reason,
             )
@@ -408,7 +408,7 @@ def _warm_backend() -> bool:
                 "Run sm doctor after startup for help."
             )
 
-    _set_last_warmup_failure("; ".join(failure_reasons) or None)
+    _set_last_warmup_failure(", ".join(failure_reasons) or None)
     elapsed = time.perf_counter() - started
     if backend_ok:
         _startup_line(f"SmartMemory startup complete ({elapsed:.1f}s)")
@@ -426,7 +426,7 @@ def _sync_hooks() -> None:
     except Exception as exc:
         reason = _safe_degraded_reason(exc)
         log.warning(
-            "Hook sync failed; updated hook scripts were not installed: %s", reason
+            "Hook sync failed, updated hook scripts were not installed: %s", reason
         )
         _startup_line(f"Warning: hook sync failed ({reason})")
 
@@ -449,7 +449,7 @@ def _start_background_warmup() -> threading.Thread:
             report_in_background(exc, source="daemon", handled=True)
             reason = _safe_warmup_reason(exc)
             log.warning(
-                "Background startup failed; saved memories remain unavailable: %s",
+                "Background startup failed, saved memories remain unavailable: %s",
                 reason,
                 exc_info=True,
             )
@@ -474,7 +474,7 @@ def _start_background_warmup() -> threading.Thread:
         thread.start()
     except Exception as exc:
         log.warning(
-            "Background warmup unavailable; startup will block while models load: %s",
+            "Background warmup unavailable, startup will block while models load: %s",
             _safe_degraded_reason(exc),
         )
         run()

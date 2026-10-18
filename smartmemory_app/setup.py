@@ -350,7 +350,7 @@ def setup(
 ) -> None:
     """First-run questionnaire: configure local or remote mode.
 
-    Three self-contained branches — each handles config, post-config, AND daemon
+    Three self-contained branches: each handles config, post-config, AND daemon
     start. No shared post-branch code to avoid double-start bugs.
     """
     # SETUP-RESUMABLE-1: every step is checked after it runs and its result saved
@@ -678,7 +678,7 @@ def _start_daemon_local(
 _SETUP_WARMING_WARNING = (
     "Warning: SmartMemory daemon is still warming up. Setup is configured, "
     "but SmartMemory is not ready yet.\n"
-    "Check: sm status. Additional worker startup is deferred; once warmup finishes, run sm start --wait."
+    "Check: sm status. Additional worker startup is deferred, once warmup finishes, run sm start --wait."
 )
 
 
@@ -806,7 +806,7 @@ def _persist_env_var(name: str, value: str) -> None:
             click.echo("  Stored in Windows credential store for the daemon.")
         except Exception as exc:
             logger.warning(
-                "Credential persistence failed; key is only available in this setup process: %s",
+                "Credential persistence failed, key is only available in this setup process: %s",
                 redact_credentials(str(exc), (value,)),
             )
             click.echo(
@@ -971,11 +971,13 @@ def _ask_local_choices() -> dict:
             api_key = click.prompt(
                 f"\n{key_envvar} ({_masked_key_hint(existing)}). Press Enter to keep, or paste new key",
                 default="",
+                hide_input=True,
             )
         else:
             api_key = click.prompt(
                 f"\n{key_envvar} not set. Enter your API key (Enter to skip)",
                 default="",
+                hide_input=True,
             )
         if api_key.strip():
             _persist_env_var(key_envvar, api_key.strip())
@@ -1527,7 +1529,7 @@ def _install_launchd_plist() -> bool:
 
     if not PLIST_TEMPLATE.exists():
         click.echo(
-            "Warning: launchd plist template not found — skipping auto-start setup."
+            "Warning: launchd plist template not found, skipping auto-start setup."
         )
         return False
 
@@ -1628,7 +1630,7 @@ def _install_launchd_plist() -> bool:
         main_call,
     ) in templates:
         if not template_path.exists():
-            click.echo(f"Warning: {display_name} plist template not found — skipping.")
+            click.echo(f"Warning: {display_name} plist template not found: skipping.")
             continue
 
         content = template_path.read_text()
@@ -1677,7 +1679,7 @@ def _install_launchd_plist() -> bool:
             )
         else:
             click.echo(
-                "Warning: GROQ_API_KEY not found — enrichment worker won't extract relations."
+                "Warning: GROQ_API_KEY not found: enrichment worker won't extract relations."
             )
     return all_ok
 
@@ -1692,7 +1694,7 @@ except (ModuleNotFoundError, ImportError) as exc:
     if getattr(exc, "name", None) != "smartmemory_app":
         raise
     job_label = "{label}"
-    message = f"SmartMemory was removed; background job {{job_label}} switched itself off."
+    message = f"SmartMemory was removed, background job {{job_label}} switched itself off."
     data_dir = os.environ.get("SMARTMEMORY_DATA_DIR", os.path.expanduser("~/.smartmemory"))
     try:
         os.makedirs(data_dir, exist_ok=True)

@@ -32,7 +32,7 @@ def _get_worker_memory():
         _generation_initialized = True
     elif generation != _observed_store_generation:
         logger.warning(
-            "Lite store generation changed (%s -> %s); refreshing worker memory handle",
+            "Lite store generation changed (%s -> %s), refreshing worker memory handle",
             _observed_store_generation or "legacy",
             generation or "legacy",
         )
@@ -148,7 +148,7 @@ def drain_queue() -> int:
             queue_id = job["queue_id"]
             if not _same_store_generation(job):
                 logger.warning(
-                    "Store was cleared before enriching %s; discarded stale queue job",
+                    "Store was cleared before enriching %s, discarded stale queue job",
                     item_id,
                 )
                 continue
@@ -160,7 +160,7 @@ def drain_queue() -> int:
                 new_r = result.get("new_relations", 0)
                 if not _same_store_generation(job):
                     logger.warning(
-                        "Store was cleared while enriching %s; discarded stale queue completion",
+                        "Store was cleared while enriching %s, discarded stale queue completion",
                         item_id,
                     )
                     continue
@@ -189,7 +189,7 @@ def drain_queue() -> int:
                 ):
                     mark_retry(queue_id, status)
                     logger.warning(
-                        "%s (attempt %d/%d); job remains retryable",
+                        "%s (attempt %d/%d), job remains retryable",
                         warning,
                         attempts,
                         _MAX_ITEM_NOT_FOUND_ATTEMPTS,
@@ -198,14 +198,14 @@ def drain_queue() -> int:
                     return processed
 
                 mark_failed(queue_id, status)
-                logger.warning("%s; job marked failed", warning)
+                logger.warning("%s, job marked failed", warning)
             except Exception as e:
                 if _same_store_generation(job):
                     mark_failed(queue_id, str(e))
                     logger.warning("Enrichment failed for %s: %s", item_id, e)
                 else:
                     logger.warning(
-                        "Store was cleared while enrichment %s failed; ignored stale queue id: %s",
+                        "Store was cleared while enrichment %s failed, ignored stale queue id: %s",
                         item_id,
                         e,
                     )
@@ -220,7 +220,7 @@ def run_loop(poll_interval: float = 2.0) -> None:
 
 def main():
     logger.warning(
-        "Legacy enrichment_worker is retired; use smartmemory_app.worker_entry "
+        "Legacy enrichment_worker is retired, use smartmemory_app.worker_entry "
         "to run the core work-graph worker."
     )
 

@@ -62,7 +62,7 @@ def _lesson_usage(usage, model):
         }
     log.warning(
         "Session lesson usage is final-response only: core does not expose SDK "
-        "attempt counts or cached-token details; retries are unmeasured"
+        "attempt counts or cached-token details, retries are unmeasured"
     )
     return record
 
@@ -278,7 +278,7 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
             kinds = classify_lessons([d.content for d in decisions], receipt)
         except Exception as exc:
             log.warning(
-                "Lesson constraint classifier failed; falling back to model_prefix: %s",
+                "Lesson constraint classifier failed, falling back to model_prefix: %s",
                 exc,
             )
             kinds = [None] * len(decisions)

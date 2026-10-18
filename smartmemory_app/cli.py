@@ -362,7 +362,7 @@ def _lifecycle_request(path: str, body: dict):
         remote = load_config().mode == "remote"
     except Exception as exc:
         log.warning(
-            "Lifecycle %s lost daemon acceleration: mode resolution failed; "
+            "Lifecycle %s lost daemon acceleration: mode resolution failed, "
             "using in-process engine: %s",
             path,
             exc,
@@ -396,7 +396,7 @@ def _daemon_marker_live() -> bool:
         return False
     except OSError as exc:
         log.warning(
-            "Lifecycle daemon probe skipped: daemon.pid unreadable (%s); "
+            "Lifecycle daemon probe skipped: daemon.pid unreadable (%s), "
             "using in-process engine",
             type(exc).__name__,
         )
@@ -405,7 +405,7 @@ def _daemon_marker_live() -> bool:
         pid = int(raw)
     except ValueError:
         log.warning(
-            "Lifecycle daemon probe skipped: daemon.pid is not a PID; "
+            "Lifecycle daemon probe skipped: daemon.pid is not a PID, "
             "using in-process engine"
         )
         return False
@@ -573,7 +573,7 @@ class _CLIGroup(click.Group):
     help="Hide the mode/tenant/workspace header line.",
 )
 def cli() -> None:
-    """SmartMemory — persistent AI memory system."""
+    """SmartMemory: persistent AI memory system."""
     configure_console_encoding()
     # CLI-ENV-DETECT-1: apply this project's decisions about inherited
     # SMARTMEMORY_* variables, then ask (terminal) or warn once (no terminal).
@@ -770,7 +770,7 @@ def provenance_import_codex(codex_dir, since, dry_run) -> None:
     verb = "Would import" if dry_run else "Imported"
     click.echo(
         f"{verb} {rows} evidence rows across {sessions} sessions "
-        f"({edges} edges; {no_patch} rollouts had no apply_patch)."
+        f"({edges} edges, {no_patch} rollouts had no apply_patch)."
     )
 
 
@@ -896,7 +896,7 @@ def _daemon_failure(action: str, exc: Exception) -> click.ClickException:
     "--num-workers",
     default=1,
     show_default=True,
-    help="Compatibility option; local mode always uses one core worker.",
+    help="Compatibility option, local mode always uses one core worker.",
 )
 @click.option(
     "--wait",
@@ -970,7 +970,7 @@ def stop_cmd() -> None:
     "--num-workers",
     default=1,
     show_default=True,
-    help="Compatibility option; local mode always uses one core worker.",
+    help="Compatibility option, local mode always uses one core worker.",
 )
 @bounded_lifecycle(RESTART_TIMEOUT)
 def restart_cmd(num_workers: int) -> None:
@@ -1088,7 +1088,7 @@ def update_cmd(ctx: click.Context) -> None:
     if daemon_was_running:
         ctx.invoke(restart_cmd, num_workers=1)
     else:
-        click.echo("Daemon was not running; it was not started.")
+        click.echo("Daemon was not running, it was not started.")
 
 
 @cli.command("warm")
@@ -1102,7 +1102,7 @@ def warm_cmd(no_reranker: bool) -> None:
 
     The first add() otherwise pays a cold embedder load (~12s, or ~38s the first
     time the model downloads) and the first search() pays a cold reranker load.
-    Run this once after install — or before a demo — to move that cost off the
+    Run this once after install, or before a demo, to move that cost off the
     user's first real call (DIST-LITE-WARMSTART-1).
     """
     require_local("sm warm")
@@ -1110,7 +1110,7 @@ def warm_cmd(no_reranker: bool) -> None:
 
     from smartmemory_app.warm import warm_models
 
-    click.echo("Warming local models (one-time; subsequent runs are cached)...")
+    click.echo("Warming local models (one-time, subsequent runs are cached)...")
     t0 = time.perf_counter()
     try:
         warm_models(reranker=not no_reranker, strict=True)
@@ -1210,7 +1210,7 @@ def status_cmd(as_json: bool) -> None:
         click.echo(f"  LLM:        {_llm} (no model chosen, extraction off)")
         click.echo(f"  {NO_LOCAL_MODEL_OFF_LINE}")
     elif info.get("llm_key_present") is False and _llm not in ("none", "?"):
-        click.echo(f"  LLM:        {_llm} (no API key — extraction disabled)")
+        click.echo(f"  LLM:        {_llm} (no API key: extraction disabled)")
     else:
         click.echo(f"  LLM:        {_llm}")
     click.echo(f"  Embeddings: {info.get('embedding_provider', '?')}")
@@ -1608,7 +1608,7 @@ def add_cmd(
                     raise click.ClickException(str(exc)) from exc
                 except RemoteBackendError as e:
                     raise click.ClickException(
-                        f"Add failed — could not reach the SmartMemory service: {e}"
+                        f"Add failed: could not reach the SmartMemory service: {e}"
                     )
         click.echo(f"Added {len(ids)} memories")
         for item_id in ids:
@@ -1657,7 +1657,7 @@ def add_cmd(
             raise click.ClickException(str(exc)) from exc
         except RemoteBackendError as e:
             raise click.ClickException(
-                f"Add failed — could not reach the SmartMemory service: {e}"
+                f"Add failed: could not reach the SmartMemory service: {e}"
             )
 
 
@@ -1789,7 +1789,7 @@ def retag_cmd(
 
     if dry_run:
         click.echo(
-            f"(dry run — re-run without --dry-run to retag with origin={new_origin!r})"
+            f"(dry run: re-run without --dry-run to retag with origin={new_origin!r})"
         )
         return
 
@@ -1833,11 +1833,11 @@ def retag_cmd(
 @click.option(
     "--multi-hop", is_flag=True, help="Follow related entities across search hops"
 )
-@click.option("--max-hops", type=click.IntRange(1, 10), default=3, show_default=True)
+@click.option("--max-hops", type=click.IntRange(1, 10), default=3, help="Default: 3.")
 @click.option(
     "--hop-strategy",
     type=click.Choice(["consensus", "relevance", "semantic"]),
-    help="consensus: shared entities; relevance: best-result bridges; semantic: asks an LLM",
+    help="consensus: shared entities, relevance: best-result bridges, semantic: asks an LLM",
 )
 @click.option(
     "--prop",
@@ -1949,7 +1949,7 @@ def search_cmd(
             raise click.ClickException(str(e))
         except RemoteBackendError as e:
             raise click.ClickException(
-                f"Search failed — could not reach the SmartMemory service: {e}"
+                f"Search failed: could not reach the SmartMemory service: {e}"
             )
     if multi_hop and hop_strategy == "semantic":
         from smartmemory_app.config import llm_key_present, load_config
@@ -1964,7 +1964,7 @@ def search_cmd(
                 key_present = llm_key_present()
             if key_present is False:
                 notice = (
-                    "semantic hop planning needs an LLM key; "
+                    "semantic hop planning needs an LLM key, "
                     "this search used the heuristic planner."
                 )
                 log.warning(notice)
@@ -2103,7 +2103,7 @@ def _render_why_provenance(
 
 @cli.command("why")
 @click.argument("question")
-@click.option("--top-k", default=3, show_default=True, type=click.IntRange(min=1))
+@click.option("--top-k", default=3, help="Default: 3.", type=click.IntRange(min=1))
 @click.option("--json", "as_json", is_flag=True, help="Print raw provenance JSON.")
 def why_cmd(question: str, top_k: int, as_json: bool) -> None:
     """Explain the closest decision or derivation for QUESTION."""
@@ -2139,7 +2139,7 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
         return
 
     click.echo(
-        "Note: full decision provenance (supersession, evidence) requires service mode; "
+        "Note: full decision provenance (supersession, evidence) requires service mode, "
         "showing derivation lineage of the closest match."
     )
     results = _daemon_request(
@@ -2189,7 +2189,7 @@ def _render_ask_relations(result: dict) -> None:
 
 @cli.command("ask")
 @click.argument("question")
-@click.option("--limit", default=5, show_default=True, type=click.IntRange(min=1))
+@click.option("--limit", default=5, help="Default: 5.", type=click.IntRange(min=1))
 @click.option(
     "--reasoning",
     is_flag=True,
@@ -2277,8 +2277,8 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
 def explore_cmd(target: str | None) -> None:
     """Browse the memory graph in the terminal (DIST-LITE-10).
 
-    TARGET is a memory id or a search term; without it the browser opens on the
-    search box. Requires the daemon — this is a live view, not a snapshot.
+    TARGET is a memory id or a search term, without it the browser opens on the
+    search box. Requires the daemon: this is a live view, not a snapshot.
     """
     if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
         logging.getLogger(__name__).debug("Skipping graph explorer TUI on Windows")
@@ -2306,7 +2306,7 @@ def explore_cmd(target: str | None) -> None:
             client.health()
         except ExploreUnavailable as exc:
             raise click.ClickException(
-                f"{_DAEMON_NOT_RUNNING_MSG}  ({exc}; check {_DAEMON_LOG_HINT})"
+                f"{_DAEMON_NOT_RUNNING_MSG}  ({exc}, check {_DAEMON_LOG_HINT})"
             )
         start_id = None
         if target:
@@ -2376,19 +2376,19 @@ def _read_lifecycle_payload(phase: str) -> dict | None:
     try:
         raw = read_utf8_stdin()
     except UnicodeDecodeError:
-        log.warning("Lifecycle %s skipped: stdin is not UTF-8; hook event lost", phase)
+        log.warning("Lifecycle %s skipped: stdin is not UTF-8, hook event lost", phase)
         return None
     if not raw.strip():
-        log.warning("Lifecycle %s skipped: empty stdin; hook event lost", phase)
+        log.warning("Lifecycle %s skipped: empty stdin, hook event lost", phase)
         return None
     try:
         body = json.loads(raw)
     except json.JSONDecodeError:
-        log.warning("Lifecycle %s skipped: invalid JSON; hook event lost", phase)
+        log.warning("Lifecycle %s skipped: invalid JSON, hook event lost", phase)
         return None
     if not isinstance(body, dict):
         log.warning(
-            "Lifecycle %s skipped: expected JSON object; hook event lost", phase
+            "Lifecycle %s skipped: expected JSON object, hook event lost", phase
         )
         return None
     return body
@@ -2421,7 +2421,7 @@ def _hook_deadline() -> float:
         value = math.nan
     if not math.isfinite(value) or value <= 0:
         log.warning(
-            "%s=%r is not a positive number of seconds; using %.0fs",
+            "%s=%r is not a positive number of seconds, using %.0fs",
             _HOOK_DEADLINE_ENV,
             raw,
             _HOOK_DEADLINE_DEFAULT,
@@ -2494,7 +2494,7 @@ def _hook_deadline_exceeded(command: str, deadline: float, phases: _HookPhases):
     elapsed = phases.elapsed()
     phase, timings = phases.snapshot()
     log.warning(
-        "%s exceeded its %.1fs hook deadline after %.2fs (stuck in phase %r); "
+        "%s exceeded its %.1fs hook deadline after %.2fs (stuck in phase %r), "
         "no memory context injected for this event. Phase timings (s): %s. "
         "Keep the engine warm with `smartmemory start`, or raise %s.",
         command,
@@ -2733,10 +2733,10 @@ def lifecycle_persist() -> None:
 
 @lifecycle_group.command("drain")
 @click.option(
-    "--timeout", type=click.FloatRange(min=0), default=60.0, show_default=True
+    "--timeout", type=click.FloatRange(min=0), default=60.0, help="Default: 60.0."
 )
 def lifecycle_drain(timeout: float) -> None:
-    """Await all SessionEnd captures; exit 0 done, 1 error, 2 timeout."""
+    """Await all SessionEnd captures, exit 0 done, 1 error, 2 timeout."""
     require_local("sm lifecycle drain")
     from smartmemory_app.capture_queue import drain
 
@@ -2753,7 +2753,7 @@ def lifecycle_drain(timeout: float) -> None:
     show_default=True,
 )
 @click.option(
-    "--batch-size", type=click.IntRange(min=1, max=40), default=40, show_default=True
+    "--batch-size", type=click.IntRange(min=1, max=40), default=40, help="Default: 40."
 )
 @click.option(
     "--dry-run", is_flag=True, help="Classify and report without writing metadata."
@@ -2788,7 +2788,7 @@ def lifecycle_reclassify(cwd: str, batch_size: int, dry_run: bool) -> None:
             for kind in ("constraint", "finding", "unclassified")
         )
 
-    click.echo(f"Workspace: {workspace}; active lessons: {len(rows)}")
+    click.echo(f"Workspace: {workspace}, active lessons: {len(rows)}")
     click.echo(
         "Before: "
         + counts(meta.get("lesson_kind") or "unclassified" for _, meta in rows)
@@ -2800,7 +2800,7 @@ def lifecycle_reclassify(cwd: str, batch_size: int, dry_run: bool) -> None:
             kinds = classify_lessons([item.content for item, _ in batch], {})
         except Exception as exc:
             raise click.ClickException(
-                f"Classifier failed for batch {start // batch_size + 1}; this batch was not written "
+                f"Classifier failed for batch {start // batch_size + 1}, this batch was not written "
                 f"({start} prior lessons {'previewed' if dry_run else 'written'}): {exc}"
             ) from exc
         for (item, meta), kind in zip(batch, kinds):
@@ -3032,7 +3032,7 @@ def _download_diagnostics_bundle(url: str, output_path: Path) -> None:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
             log.warning(
-                "Diagnostics bundle download failed; temporary output was removed"
+                "Diagnostics bundle download failed, temporary output was removed"
             )
 
     try:
@@ -3126,7 +3126,7 @@ def doctor_cmd(
         click.echo(f"✓ Python {py_str} (>=3.11 OK)")
     else:
         click.echo(
-            f"✗ Python {py_str} is too old — SmartMemory requires >=3.11. "
+            f"✗ Python {py_str} is too old: SmartMemory requires >=3.11. "
             "Old Python forces pip to backtrack onto a legacy wrapper.",
             err=True,
         )
@@ -3398,7 +3398,7 @@ def report_cmd(
     click.echo(report)
     click.echo(
         "\nPaste this report into the tracker's Bug Report dialog. The dialog "
-        "already shows the debug-log path with a one-click copy button; attach "
+        "already shows the debug-log path with a one-click copy button, attach "
         "the log file manually there."
     )
 
@@ -3539,7 +3539,7 @@ def import_cmd(
 ) -> None:
     """Import an OKF bundle directory into SmartMemory (default).
 
-    PATH is an OKF bundle directory by default; pass ``--legacy-jsonl`` to read
+    PATH is an OKF bundle directory by default, pass ``--legacy-jsonl`` to read
     a legacy single-file JSONL corpus.
     """
     if not dry_run:
@@ -3564,7 +3564,7 @@ def import_cmd(
         click.echo(f"OKF bundle: {total} pages")
 
     if dry_run:
-        click.echo("Dry run — validating records...")
+        click.echo("Dry run: validating records...")
 
     try:
         from rich.progress import (
@@ -3651,7 +3651,7 @@ def export_cmd(
 ) -> None:
     """Export memories to an OKF bundle directory (default).
 
-    PATH is an OKF bundle directory by default; pass ``--legacy-jsonl`` to
+    PATH is an OKF bundle directory by default, pass ``--legacy-jsonl`` to
     write a legacy single-file JSONL corpus. ``--source`` and ``--domain``
     apply only to legacy JSONL output.
     """
@@ -3745,7 +3745,7 @@ def mine_cmd(
         f"Mined {len(result.entities)} unique entities ({result.total_queries} queries)"
     )
     if result.quota_exhausted:
-        click.echo("Quota exhausted — resume with same command to continue")
+        click.echo("Quota exhausted: resume with same command to continue")
     for domain_name, count in result.domain_counts.items():
         click.echo(f"  {domain_name}: {count}")
 
@@ -3853,7 +3853,7 @@ def install_pack_cmd(
     pack = SeedPack(pack_dir)
     errors = pack.validate()
     if errors:
-        click.echo(f"Invalid pack: {'; '.join(errors)}")
+        click.echo(f"Invalid pack: {', '.join(errors)}")
         raise SystemExit(1)
 
     sm = get_memory()
@@ -3964,7 +3964,7 @@ def reextract_cmd(yes: bool, all_items: bool, ruler: bool, decline: bool) -> Non
     memory = get_memory()
     plan = plan_reextract(memory, "all" if all_items else "default", ruler)
     click.echo(
-        f"{plan.item_count} memories; about {plan.estimated_tokens} tokens; mode: {plan.mode}."
+        f"{plan.item_count} memories, about {plan.estimated_tokens} tokens, mode: {plan.mode}."
     )
     if not yes:
         click.confirm("Queue re-extraction?", abort=True)

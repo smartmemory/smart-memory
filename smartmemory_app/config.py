@@ -179,7 +179,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
             if file_mode is not None and file_mode not in _VALID_MODES:
                 warnings.warn(
                     f"Invalid mode {file_mode!r} in config file {path} "
-                    f"(expected one of {sorted(_VALID_MODES)}) — treating as unconfigured.",
+                    f"(expected one of {sorted(_VALID_MODES)}), treating as unconfigured.",
                     stacklevel=2,
                 )
                 file_mode = None
@@ -198,7 +198,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
             cfg.data_dir = local.get("data_dir", "~/.smartmemory")
         except Exception as exc:
             warnings.warn(
-                f"Failed to parse config at {path}: {exc} — treating as unconfigured.",
+                f"Failed to parse config at {path}: {exc} (treating as unconfigured).",
                 stacklevel=2,
             )
 
@@ -452,7 +452,7 @@ def set_api_key(key: str) -> None:
             )
             return
         warnings.warn(
-            "OS keychain unavailable — API key not persisted. "
+            "OS keychain unavailable: API key not persisted. "
             "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",
             stacklevel=2,
         )

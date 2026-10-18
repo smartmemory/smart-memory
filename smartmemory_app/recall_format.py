@@ -128,7 +128,7 @@ def event_date(item: dict) -> str | None:
         if dt is not None:
             return dt.date().isoformat()
         log.warning(
-            "recall lost event date for %s: unparseable session_date %r; using write time",
+            "recall lost event date for %s: unparseable session_date %r, using write time",
             recall_item_label(item),
             session_date,
         )
@@ -258,7 +258,7 @@ def format_recall_lines(
         iid = it.get("item_id")
         if not iid:
             log.warning(
-                "recall lost stored item ID; using stable content label %s",
+                "recall lost stored item ID, using stable content label %s",
                 recall_item_label(it),
             )
         if iid and iid in seen_ids:
@@ -490,7 +490,7 @@ def derive_workspace_id(cwd: str | None) -> str | None:
             canonical = os.path.realpath(toplevel)
     except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         log.warning(
-            "workspace lost git-root resolution; using cwd %s: %s", canonical, exc
+            "workspace lost git-root resolution, using cwd %s: %s", canonical, exc
         )
 
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]

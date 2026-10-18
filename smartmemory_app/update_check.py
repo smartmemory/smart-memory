@@ -155,7 +155,7 @@ def update_hint(current: str, *, now: float | None = None) -> str | None:
     latest = latest_version(now=now)
     if not latest or not version_lt(current, latest):
         return None
-    return f"smartmemory {latest} available — pip install -U smartmemory"
+    return f"smartmemory {latest} available: pip install -U smartmemory"
 
 
 def upgrade_notices(current: str, tour_version: "Callable[[], int]") -> list[str]:

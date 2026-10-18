@@ -56,7 +56,7 @@ def test_semantic_keyless_notice_logged_and_visible(monkeypatch, caplog, keyed):
             cli.cli, ["search", "test", "--multi-hop", "--hop-strategy", "semantic"]
         )
     assert result.exit_code == 0, result.output
-    notice = "semantic hop planning needs an LLM key; this search used the heuristic planner."
+    notice = "semantic hop planning needs an LLM key, this search used the heuristic planner."
     assert (f"Note: {notice}" in result.output) is (not keyed)
     assert (notice in caplog.text) is (not keyed)
 
@@ -127,7 +127,7 @@ def test_semantic_notice_uses_daemon_health(
                 cli.cli, ["search", "test", "--multi-hop", "--hop-strategy", "semantic"]
             )
     assert result.exit_code == 0, result.output
-    notice = "semantic hop planning needs an LLM key; this search used the heuristic planner."
+    notice = "semantic hop planning needs an LLM key, this search used the heuristic planner."
     assert (f"Note: {notice}" in result.output) is (not daemon_keyed)
     assert (notice in caplog.text) is (not daemon_keyed)
     assert requests[0] == "/memory/search"

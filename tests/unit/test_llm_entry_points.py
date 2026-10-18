@@ -532,7 +532,8 @@ def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
 
 class _Resolver:
     """What a name or dotted chain is bound to, as canonical identities:
-    ``("func", module, qualname)``, ``("module", stem)``, ``("package",)``,
+    ``("func", module, qualname)``, ``("unresolved", module, name)`` (no such
+    module or export in the scanned sources), ``("module", stem)``, ``("package",)``,
     ``("ext", "dotted.path")``, ``("opaque",)`` or ``("unbound", name)``.
     A wrapper name imported from a module in ``sources`` is followed to what that
     module binds it to (re-exports and aliases included)."""
@@ -567,7 +568,9 @@ class _Resolver:
         if key in seen:
             return {("opaque",)}
         if scope is None or name not in scope.binds:
-            return {("func", module, name)}
+            # No such module or no such export in the scanned sources: nothing the
+            # guard can credit. It still counts as a sink when it is spelled like one.
+            return {("unresolved", module, name)}
         return self.name(name, scope, seen | {key})
 
     def package_attr(self, name, seen):
@@ -600,11 +603,14 @@ class _Resolver:
 def _is_sink(ident: tuple) -> bool:
     if ident[0] == "ext":
         return ident[1].rsplit(".", 1)[-1] in LLM_SINKS
-    return ident[0] == "func" and ident[2].rsplit(".", 1)[-1] in LLM_SINKS
+    return ident[0] in ("func", "unresolved") and (
+        ident[2].rsplit(".", 1)[-1] in LLM_SINKS
+    )
 
 
-def _is_applier(ident: tuple) -> bool:
-    return ident[0] == "func" and ident[1:] in CONFIG_APPLIERS
+def _is_applier(ident: tuple, funcs) -> bool:
+    """A trusted applier that exists in the scanned sources under its full path."""
+    return ident[0] == "func" and ident[1:] in CONFIG_APPLIERS and ident[1:] in funcs
 
 
 def _is_click_command(fn: ast.AST, scope: _Scope, resolver: _Resolver) -> bool:
@@ -672,7 +678,7 @@ class _CallGraph:
                 hits = {i[1:] for i in idents if i[0] == "func" and i[1:] in self.funcs}
                 if runs:
                     self.calls[key] |= idents
-                if runs and all(_is_applier(i) for i in idents):
+                if runs and all(_is_applier(i, self.funcs) for i in idents):
                     self.appliers[key] |= {i[1:] for i in idents}
                 if runs and hits and len(hits) == len(idents):
                     # A name bound several ways donates sinks from every binding,
@@ -741,7 +747,9 @@ def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     it reaches) makes the command an offender: it can rebind any name.
 
     A call earns applier credit only when its name resolves to a member of
-    ``CONFIG_APPLIERS``, every way it is bound. A call that resolves to a sink is
+    ``CONFIG_APPLIERS``, every way it is bound, and that function exists in the
+    scanned sources under its full dotted path (a missing module, a missing export
+    or an import that fails earns nothing). A call that resolves to a sink is
     a sink call whatever it is spelled, and a name with no binding earns nothing.
     A sink also counts when it is merely named or imported, or when an attribute
     is spelled like one. Reachable code is the command body, comprehensions and
@@ -1024,7 +1032,7 @@ QUALIFIED_ROWS = [
     ids=[row[0] for row in QUALIFIED_ROWS],
 )
 def test_every_unconfigured_click_command_is_detected(body, helpers, expected):
-    sources = {"cli": _CMD.format(body=body), **helpers}
+    sources = {**_TRUSTED, "cli": _CMD.format(body=body), **helpers}
 
     assert _unconfigured_llm_commands(sources) == expected
 
@@ -1210,7 +1218,7 @@ ALIAS_ROWS = [
     ids=[row[0] for row in ALIAS_ROWS],
 )
 def test_applier_credit_follows_the_binding_not_the_spelling(sources, expected):
-    assert _unconfigured_llm_commands(sources) == expected
+    assert _unconfigured_llm_commands({**_TRUSTED, **sources}) == expected
 
 
 # r3 HIGH (CLI-GUARD-RESOLVE-1): where a name does not provably resolve to a trusted
@@ -1409,4 +1417,97 @@ RESOLVE_ROWS = [
     ids=[row[0] for row in RESOLVE_ROWS],
 )
 def test_guard_refuses_where_resolution_is_ambiguous(sources, expected):
+    assert _unconfigured_llm_commands(sources) == expected
+
+
+# CLI-POSTLAND-FU-1 H2: a trusted applier earns credit only when the called function
+# exists in the scanned sources under its full dotted path. Rows 1 to 3 are the
+# reviewer's repro (missing export behind a swallowed ImportError).
+def _guarded_call(module: str, name: str) -> str:
+    return (
+        f"try:\n        from smartmemory_app.{module} import {name}\n"
+        f"        {name}()\n    except ImportError:\n        pass\n    " + _SINK
+    )
+
+
+_UNRELATED = "present_but_not_the_trusted_export = True\n"
+
+# (id, module sources, offending commands expected)
+MISSING_EXPORT_ROWS = [
+    (
+        "missing-get_memory-behind-importerror",
+        {**_cli(_guarded_call("storage", "get_memory")), "storage": _UNRELATED},
+        _OFFENDER,
+    ),
+    (
+        "missing-apply_runtime_config-behind-importerror",
+        {
+            **_cli(_guarded_call("storage", "apply_runtime_config")),
+            "storage": _UNRELATED,
+        },
+        _OFFENDER,
+    ),
+    (
+        "missing-run_configured_worker-behind-importerror",
+        {
+            **_cli(_guarded_call("worker_entry", "run_configured_worker")),
+            "worker_entry": _UNRELATED,
+        },
+        _OFFENDER,
+    ),
+    (
+        "missing-module-entirely",
+        _cli(
+            "from smartmemory_app.storage import get_memory\n    get_memory()\n    "
+            + _SINK
+        ),
+        _OFFENDER,
+    ),
+    (
+        "missing-export-no-try",
+        {
+            **_cli(
+                "from smartmemory_app.storage import get_memory\n"
+                "    get_memory()\n    " + _SINK
+            ),
+            "storage": _UNRELATED,
+        },
+        _OFFENDER,
+    ),
+    (
+        "missing-export-through-module-attribute",
+        {
+            **_cli(
+                "storage.get_memory()\n    " + _SINK,
+                "from smartmemory_app import storage\n",
+            ),
+            "storage": _UNRELATED,
+        },
+        _OFFENDER,
+    ),
+    (
+        "control-real-get_memory-earns-credit",
+        _resolve(
+            "from smartmemory_app.storage import get_memory\n    get_memory()\n    "
+            + _SINK
+        ),
+        [],
+    ),
+    (
+        "control-real-run_configured_worker-earns-credit",
+        _resolve(
+            "from smartmemory_app.worker_entry import run_configured_worker\n"
+            "    run_configured_worker()\n    " + _SINK
+        ),
+        [],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "sources, expected",
+    [row[1:] for row in MISSING_EXPORT_ROWS],
+    ids=[row[0] for row in MISSING_EXPORT_ROWS],
+)
+def test_guard_credits_only_appliers_that_exist(sources, expected):
     assert _unconfigured_llm_commands(sources) == expected

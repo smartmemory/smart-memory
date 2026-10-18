@@ -98,7 +98,7 @@ def test_update_hint_prints_the_available_line_when_newer(monkeypatch):
     monkeypatch.setattr(update_check, "latest_version", lambda **_: "1.4.87")
     assert (
         update_check.update_hint("1.4.86")
-        == "smartmemory 1.4.87 available — pip install -U smartmemory"
+        == "smartmemory 1.4.87 available: pip install -U smartmemory"
     )
 
 
@@ -237,7 +237,7 @@ def test_trailing_notices_orders_upgrade_before_update(tmp_path, monkeypatch):
     assert update_check.trailing_notices("status", argv=["sm", "status"]) == [
         "Updated to 1.4.86",
         "Run 'sm tour' to see what's new",
-        "smartmemory 1.4.99 available — pip install -U smartmemory",
+        "smartmemory 1.4.99 available: pip install -U smartmemory",
     ]
 
 

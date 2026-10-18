@@ -43,7 +43,7 @@ def build_rules_card(cwd=None, *, budget=2000):
     if isinstance(mem, RemoteMemory):
         record_hook_degradation(
             "Orient lost rules card",
-            "remote backend has no complete workspace lesson listing; card unavailable",
+            "remote backend has no complete workspace lesson listing, card unavailable",
         )
         return ""
     workspace = derive_workspace_id(cwd)
@@ -79,7 +79,7 @@ def build_rules_card(cwd=None, *, budget=2000):
             constraints.append(row)
     if legacy_count:
         log.warning(
-            "Rules card classified %d legacy lessons with rule regex; "
+            "Rules card classified %d legacy lessons with rule regex, "
             "run smartmemory lifecycle reclassify",
             legacy_count,
         )

@@ -136,7 +136,7 @@ def test_update_does_not_start_daemon_that_was_not_running(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "SmartMemory updated: 1.4.110 → 1.4.111." in result.output
-    assert "Daemon was not running; it was not started." in result.output
+    assert "Daemon was not running, it was not started." in result.output
     stop.assert_not_called()
     start.assert_not_called()
 

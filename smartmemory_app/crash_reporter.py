@@ -330,7 +330,7 @@ def crash_notice(exc: BaseException, args: list[str]) -> str:
     if result.status == "sent":
         return f"Crash report sent (ID {result.report_id}). Disable: SMARTMEMORY_CRASH_REPORTS=0"
     if result.status == "failed":
-        return "Crash report could not be sent; run smartmemory report --zip"
+        return "Crash report could not be sent, run smartmemory report --zip"
     if result.status == "queued":
         return "Crash report queued for the next CLI or daemon start. Run smartmemory report --zip for a local copy."
     return ""

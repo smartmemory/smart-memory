@@ -121,7 +121,7 @@ def test_reextract_flags(lite, monkeypatch, flags, mode, count):
     )
     result = CliRunner().invoke(cli, ["admin", "reextract", *flags], input="y\n")
     assert result.exit_code == 0, result.output
-    assert f"{count} memories; about" in result.output
+    assert f"{count} memories, about" in result.output
     assert f"mode: {mode}" in result.output
     assert f"Queued {count} re-extraction runs" in result.output
     assert ("Queue re-extraction?" in result.output) == ("--yes" not in flags)

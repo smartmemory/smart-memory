@@ -990,3 +990,95 @@ def test_redact_credentials_without_secrets_is_unchanged():
 
     assert redact_credentials("plain error text", ()) == "plain error text"
     assert redact_credentials("plain error text") == "plain error text"
+
+
+# ── CLI-POSTLAND-FU-1 H1: a typed credential is never echoed ────────────────
+
+_TYPED = "postland-synthetic-not-a-real-credential-112233"
+_STORED = "postland-stored-not-a-real-credential-445566"
+_KEY_ENVVARS = {
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+# (id, provider, a key is already stored)
+PROMPT_ROWS = [
+    (f"{provider}-{mode}", provider, mode == "replace")
+    for provider in _KEY_ENVVARS
+    for mode in ("fresh", "replace")
+]
+
+
+@pytest.mark.parametrize(
+    "provider, stored",
+    [row[1:] for row in PROMPT_ROWS],
+    ids=[row[0] for row in PROMPT_ROWS],
+)
+def test_provider_key_prompt_does_not_echo_the_typed_key(
+    provider, stored, tmp_path, monkeypatch
+):
+    import click
+    from click.testing import CliRunner
+
+    from smartmemory_app import setup
+
+    home = tmp_path / "prompt-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    for name in _KEY_ENVVARS.values():
+        monkeypatch.delenv(name, raising=False)
+    if stored:
+        monkeypatch.setenv(_KEY_ENVVARS[provider], _STORED)
+    vault: dict = {}
+    keyring = pytest.importorskip("keyring")
+    monkeypatch.setattr(keyring, "get_password", lambda *a: vault.get(a))
+    monkeypatch.setattr(keyring, "set_password", lambda *a: vault.update({a[:2]: a[2]}))
+
+    command = click.command()(setup._ask_local_choices)
+    result = CliRunner().invoke(
+        command, input=f"n\n{provider}\n{_TYPED}\nlocal\nsm\n\n"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _TYPED not in result.output
+    assert _STORED not in result.output
+
+
+def test_every_credential_prompt_in_the_app_hides_its_input():
+    """The class: any ``click.prompt`` whose text asks for a key, token, password or
+    secret passes ``hide_input=True``."""
+    import ast
+    from pathlib import Path
+
+    import smartmemory_app
+
+    asks = ("api key", "api_key", "token", "password", "secret")
+    bad = []
+    for path in sorted(Path(smartmemory_app.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            is_prompt = (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "prompt"
+            )
+            if not is_prompt:
+                continue
+            text = " ".join(
+                c.value
+                for arg in node.args[:1]
+                for c in ast.walk(arg)
+                if isinstance(c, ast.Constant) and isinstance(c.value, str)
+            ).lower()
+            hidden = any(
+                k.arg == "hide_input"
+                and isinstance(k.value, ast.Constant)
+                and k.value.value is True
+                for k in node.keywords
+            )
+            if any(a in text for a in asks) and not hidden:
+                bad.append(f"{path.name}:{node.lineno}")
+    assert not bad, bad

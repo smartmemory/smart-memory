@@ -253,7 +253,7 @@ def lock_row(data_dir: Path) -> str:
         return "Write lock: OK (absent)"
     return (
         "Write lock: warning: ownership unverified (lock file exists, no verified owner metadata). "
-        "Fix: smartmemory stop and disconnect MCP clients before writing; no lock was acquired or deleted."
+        "Fix: smartmemory stop and disconnect MCP clients before writing, no lock was acquired or deleted."
     )
 
 
