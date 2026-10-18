@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.28 (2026-10-18)
+
+- Setup no longer shows a provider key on screen while you type it. In 1.5.27 and earlier the key was visible on screen as you typed. Where setup saves the key is unchanged (your shell profile, and the OS keychain when available).
+
 ### CLI-POSTLAND-FU-1 (2026-10-18)
 
 - The LLM entry-point guard (test-only) also gives no trusted-applier credit to a name imported inside a `try` whose handler can swallow an ImportError (`ImportError`, `ModuleNotFoundError`, `Exception`, `BaseException`, a bare `except:`, or a tuple holding one). A handler that re-raises stops the command, so it does not count as swallowing (r2, review r1 H2).
