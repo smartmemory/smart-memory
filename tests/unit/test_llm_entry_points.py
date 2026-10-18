@@ -360,9 +360,10 @@ class _Scope:
     imported from a wrapper module), ``("pkgattr", name)`` (``from smartmemory_app
     import name``), ``("module", stem)``, ``("package",)``,
     ``("ext", "dotted.path")`` (anything outside ``smartmemory_app``),
-    ``("alias", value_node, scope)`` (``x = a.b``), ``("caught", spec)`` (an import
-    in a ``try`` whose handler may swallow an ImportError) or ``("opaque",)`` (an
-    argument, a loop target, any other value).
+    ``("alias", value_node, scope)`` (``x = a.b``), ``("pending", spec, stmt,
+    scope)`` (an import, until ``_CallGraph`` settles it to ``spec`` or to
+    ``("caught", spec)`` when ``_Swallow`` finds its ImportError may be swallowed) or
+    ``("opaque",)`` (an argument, a loop target, any other value).
     """
 
     def __init__(self, kind, module, qual, parent, node):
@@ -441,52 +442,167 @@ def _import_specs(node: ast.AST, modules: set[str]) -> list[tuple[str, tuple]]:
 
 
 _TRIES = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t)
+_TRY_STAR = getattr(ast, "TryStar", ())
+# Context managers whose ``__exit__`` never returns true, so they cannot swallow an
+# exception raised in their body (each checked in CPython's contextlib source).
+# Every other manager, ``contextlib.suppress`` and ``open`` included, may swallow.
+NON_SWALLOWING_MANAGERS = {
+    "contextlib.redirect_stdout",
+    "contextlib.redirect_stderr",
+    "contextlib.nullcontext",
+}
+# Statements that cannot jump: a handler made of these and then a ``raise`` stops the
+# command (if one of them raises, a different exception propagates instead).
+_STRAIGHT = (
+    ast.Expr,
+    ast.Pass,
+    ast.Assign,
+    ast.AugAssign,
+    ast.AnnAssign,
+    ast.Delete,
+    ast.Import,
+    ast.ImportFrom,
+    ast.Global,
+    ast.Nonlocal,
+    ast.Assert,
+)
+_JUMPS = (ast.Return, ast.Break, ast.Continue)
 
 
-def _may_catch_import_error(handler: ast.ExceptHandler) -> bool:
-    """Can this handler swallow an ImportError? A bare ``except:`` can. So can a
-    builtin exception class that is ImportError, a subclass of it
-    (``ModuleNotFoundError``) or a base of it (``Exception``, ``BaseException``), alone
-    or in a tuple. A name that is not a builtin exception, or a starred or computed
-    tuple member, might be an alias of one: it counts (fail closed)."""
-    if handler.type is None:
-        return True
-    types_ = (
-        handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
-    )
-    for expr in types_:
-        name = (
-            expr.id
-            if isinstance(expr, ast.Name)
-            else expr.attr
-            if isinstance(expr, ast.Attribute)
-            else None
+def _within(child: ast.AST, block: list) -> bool:
+    return any(child is stmt for stmt in block)
+
+
+class _Swallow:
+    """Can an exception raised at ``node`` be swallowed so that the code after it
+    runs on? Walks from ``node`` up to its function (a nested def's exceptions leave
+    through its callers, which are checked at their call sites). ``kind`` is what is
+    propagating: ``"import"`` (an ImportError) or ``"any"`` (an exception the guard
+    cannot name, such as one a handler raised instead). Swallowed, fail closed, when
+    on the way up:
+
+    - a ``try`` whose body holds it has a handler that may catch ``kind`` and does not
+      stop: its top-level statements are not straight-line statements and then a
+      ``raise`` (``break``, ``continue``, ``return``, an ``if``, a loop or no
+      ``raise`` at all before the end), or the straight-line part may reach a sink or
+      a scanned function. A stopping handler that re-raises anything but a bare
+      ``raise`` after only ``pass``, or any ``except*`` handler, propagates ``"any"``;
+    - a ``finally`` it passes through holds a ``return``, ``break`` or ``continue``
+      anywhere in its own scope; any other non-``pass`` ``finally`` makes ``"any"``;
+    - a ``with`` whose body holds it has a manager that is not a call bound to
+      ``NON_SWALLOWING_MANAGERS`` (``contextlib.suppress`` in any spelling, a
+      local ``contextmanager``, ``open``, ``ExitStack``: anything else).
+
+    A handler catches ``kind="import"`` when it is bare, names ImportError, a
+    subclass or a base, or names anything not provably the builtin: an attribute, a
+    starred or computed member, or a name bound in any enclosing scope (class bodies
+    included), under a wildcard import, or in a source that touches ``builtins``.
+    ``kind="any"`` is caught by every handler."""
+
+    def __init__(self, trees, funcs, resolver):
+        self.parents: dict[int, ast.AST] = {}
+        for tree in trees:
+            for node in ast.walk(tree):
+                for child in ast.iter_child_nodes(node):
+                    self.parents[id(child)] = node
+        self.funcs, self.resolver = funcs, resolver
+        self.builtins_touched = any(
+            (isinstance(n, ast.Name) and n.id in ("builtins", "__builtins__"))
+            or (
+                isinstance(n, ast.alias)
+                and n.name.split(".")[0] in ("builtins", "__builtins__")
+            )
+            or (isinstance(n, ast.ImportFrom) and n.module == "builtins")
+            for tree in trees
+            for n in ast.walk(tree)
         )
-        cls = getattr(builtins, name, None) if name else None
-        if not (isinstance(cls, type) and issubclass(cls, BaseException)):
-            return True
-        if issubclass(cls, ImportError) or issubclass(ImportError, cls):
-            return True
-    return False
 
+    def may_swallow(self, node: ast.AST, scope: _Scope, kind: str) -> bool:
+        child, parent = node, self.parents.get(id(node))
+        while parent is not None:
+            if isinstance(parent, _DEFS) and _within(child, parent.body):
+                return False
+            if isinstance(parent, ast.Lambda) and child is parent.body:
+                return False
+            if isinstance(parent, _TRIES):
+                if _within(child, parent.body):
+                    for handler in parent.handlers:
+                        if not self._catches(handler, kind, scope):
+                            continue
+                        out = self._stops(handler, scope)
+                        if out is None:
+                            return True
+                        if out == "any" or isinstance(parent, _TRY_STAR):
+                            kind = "any"
+                if parent.finalbody and not _within(child, parent.finalbody):
+                    final = _scope_nodes(parent.finalbody)
+                    if any(isinstance(n, _JUMPS) for n in final):
+                        return True
+                    if not all(isinstance(s, ast.Pass) for s in parent.finalbody):
+                        kind = "any"
+            elif isinstance(parent, (ast.With, ast.AsyncWith)) and _within(
+                child, parent.body
+            ):
+                if not all(self._safe_manager(i, scope) for i in parent.items):
+                    return True
+            child, parent = parent, self.parents.get(id(parent))
+        return False
 
-def _caught_imports(nodes: list[ast.AST]) -> set[int]:
-    """ids of the import statements of one scope that sit in the BODY of a ``try``
-    with a handler that may swallow an ImportError. A handler, ``else`` or ``finally``
-    is not protected by its own ``try``; a nested def's body is another scope."""
-    caught: set[int] = set()
-    for node in nodes:
-        if isinstance(node, _TRIES) and any(
-            _may_catch_import_error(h)
-            and not any(isinstance(s, ast.Raise) for s in h.body)
-            for h in node.handlers
-        ):
-            caught |= {
-                id(n)
-                for n in _scope_nodes(node.body)
-                if isinstance(n, (ast.Import, ast.ImportFrom))
-            }
-    return caught
+    def _builtin(self, name: str, scope: _Scope) -> bool:
+        if self.builtins_touched:
+            return False
+        while scope is not None:
+            if name in scope.binds or name in scope.declared or scope.star:
+                return False
+            scope = scope.parent
+        return True
+
+    def _catches(self, handler: ast.ExceptHandler, kind: str, scope: _Scope) -> bool:
+        if kind != "import" or handler.type is None:
+            return True
+        types_ = (
+            handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        )
+        for expr in types_:
+            if not isinstance(expr, ast.Name) or not self._builtin(expr.id, scope):
+                return True
+            cls = getattr(builtins, expr.id, None)
+            if not (isinstance(cls, type) and issubclass(cls, BaseException)):
+                return True
+            if issubclass(cls, ImportError) or issubclass(ImportError, cls):
+                return True
+        return False
+
+    def _stops(self, handler: ast.ExceptHandler, scope: _Scope) -> str | None:
+        """None when the handler may fall through, else the kind it propagates."""
+        body = handler.body
+        n = 0
+        while n < len(body) and isinstance(body[n], _STRAIGHT):
+            n += 1
+        if n == len(body) or not isinstance(body[n], ast.Raise):
+            return None
+        for sub in _scope_nodes(body[:n]):
+            if isinstance(sub, (ast.Yield, ast.YieldFrom)):
+                return None
+            if isinstance(sub, (ast.Name, ast.Attribute)):
+                spelled = sub.id if isinstance(sub, ast.Name) else sub.attr
+                idents = self.resolver.expr(sub, scope)
+                if spelled in LLM_SINKS or any(
+                    _is_sink(i) or (i[0] == "func" and i[1:] in self.funcs)
+                    for i in idents
+                ):
+                    return None  # the handler may reach an LLM before it stops
+        bare = body[n].exc is None and all(isinstance(s, ast.Pass) for s in body[:n])
+        return "import" if bare else "any"
+
+    def _safe_manager(self, item: ast.withitem, scope: _Scope) -> bool:
+        call = item.context_expr
+        if not isinstance(call, ast.Call):
+            return False
+        idents = self.resolver.expr(call.func, scope)
+        return bool(idents) and all(
+            i[0] == "ext" and i[1] in NON_SWALLOWING_MANAGERS for i in idents
+        )
 
 
 def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
@@ -540,12 +656,12 @@ def _build_scope(kind, module, qual, parent, node, body, modules, funcs):
             prefix + stmt.name + (f"@L{stmt.lineno}" if defined[stmt.name] > 1 else "")
         )
 
-    caught = _caught_imports(scope.nodes)
     for stmt in scope.nodes:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             for bound, spec in _import_specs(stmt, modules):
-                # A swallowed ImportError means the name may never have been bound.
-                scope.bind(bound, ("caught", spec) if id(stmt) in caught else spec)
+                # Settled by ``_CallGraph`` once every scope is built: ``("caught",
+                # spec)`` when a swallowed ImportError may have left it unbound.
+                scope.bind(bound, ("pending", spec, stmt, scope))
         elif isinstance(stmt, _DEFS):
             scope.bind(stmt.name, ("def", module, own_qual(stmt)))
         elif isinstance(stmt, ast.ClassDef):
@@ -604,6 +720,9 @@ class _Resolver:
 
     def spec(self, spec, seen):
         kind = spec[0]
+        if kind == "pending":
+            # Only while ``_CallGraph`` settles imports (manager and handler names).
+            return self.spec(spec[1], seen)
         if kind == "caught":
             return self.spec(spec[1], seen) | {("caught",)}
         if kind == "def":
@@ -686,6 +805,12 @@ def _is_click_command(fn: ast.AST, scope: _Scope, resolver: _Resolver) -> bool:
     return False
 
 
+def _all_scopes(scopes):
+    for scope in scopes:
+        yield scope
+        yield from _all_scopes(scope.children)
+
+
 def _star_in(scope: _Scope) -> bool:
     """A wildcard import in ``scope`` or in any scope below it."""
     return scope.star or any(_star_in(child) for child in scope.children)
@@ -700,12 +825,26 @@ class _CallGraph:
         modules = set(sources)
         self.funcs: dict[tuple[str, str], _Scope] = {}
         module_scopes = {}
+        trees = []
         for module, source in sources.items():
             tree = ast.parse(source)
+            trees.append(tree)
             module_scopes[module] = _build_scope(
                 "module", module, "", None, tree, tree.body, modules, self.funcs
             )
         self.resolver = _Resolver(modules, module_scopes)
+        self.swallow = _Swallow(trees, self.funcs, self.resolver)
+        settled = {}
+        for scope in _all_scopes(module_scopes.values()):
+            for specs in scope.binds.values():
+                for i, spec in enumerate(specs):
+                    if spec[0] == "pending":
+                        key = id(spec[2])
+                        if key not in settled:
+                            settled[key] = self.swallow.may_swallow(
+                                spec[2], spec[3], "import"
+                            )
+                        specs[i] = ("caught", spec[1]) if settled[key] else spec[1]
         self.commands = sorted(
             key
             for key, scope in self.funcs.items()
@@ -737,9 +876,17 @@ class _CallGraph:
                 hits = {i[1:] for i in idents if i[0] == "func" and i[1:] in self.funcs}
                 if runs:
                     self.calls[key] |= idents
-                if runs and all(_is_applier(i, self.funcs) for i in idents):
+                # The callee's own imports may fail: a call whose ImportError (a direct
+                # applier) or any exception (a wrapper may have raised another one in
+                # its place) can be swallowed earns no credit.
+                direct = bool(idents) and all(
+                    _is_applier(i, self.funcs) for i in idents
+                )
+                kind = "import" if direct else "any"
+                trusted = runs and not self.swallow.may_swallow(node, scope, kind)
+                if trusted and direct:
                     self.appliers[key] |= {i[1:] for i in idents}
-                if runs and hits and len(hits) == len(idents):
+                if trusted and hits and len(hits) == len(idents):
                     # A name bound several ways donates sinks from every binding,
                     # and applier credit only for what every one of them earns.
                     self.call_edges[key] |= hits
@@ -809,12 +956,14 @@ def _unconfigured_llm_commands(sources: dict[str, str]) -> list[str]:
     ``CONFIG_APPLIERS``, every way it is bound, and that function exists in the
     scanned sources under its full dotted path (a missing module, a missing export
     or an import that fails earns nothing), and the name is not bound by an import
-    inside a ``try`` whose handler may swallow an ImportError (``ImportError``,
-    ``ModuleNotFoundError``, ``Exception``, ``BaseException``, a bare ``except:``, a
-    tuple holding one, or a name that is not a builtin exception): the import may have
-    failed and the command run on, wherever the call sits. Not modelled: a target
-    module whose own top-level import fails (the failure is not in this command's
-    ``try``). A call that resolves to a sink is
+    whose ImportError may be swallowed on any path (``_Swallow``: a catching handler
+    that jumps or never raises, a ``finally`` that jumps, a ``with`` that may
+    suppress, an enclosing catcher of what a handler raised instead, a handler name
+    that may not be the builtin): the import may have failed and the command run on,
+    wherever the call sits. The credited call itself must not sit where its own
+    failure may be swallowed either (an ImportError for a direct applier, anything
+    for a wrapper). Not modelled: a target module whose own top-level import fails
+    (the failure is not in this command's ``try``). A call that resolves to a sink is
     a sink call whatever it is spelled, and a name with no binding earns nothing.
     A sink also counts when it is merely named or imported, or when an attribute
     is spelled like one. Reachable code is the command body, comprehensions and
@@ -1752,3 +1901,394 @@ CAUGHT_IMPORT_ROWS = [
 )
 def test_caught_import_bindings_earn_no_applier_credit(sources, expected):
     assert _unconfigured_llm_commands(sources) == expected
+
+
+# CLI-GUARD-HARDEN-1: credit only an applier whose import (or call) cannot fail
+# silently on any path: a handler that jumps or never raises, ``finally`` that jumps,
+# a ``with`` that may suppress, an enclosing catcher of what a handler raised instead,
+# a handler name that may not be the builtin, a caller that swallows a helper's
+# failure. Rows 1 to 15 are review r2's probes (``units/CLI-POSTLAND-FU-1/review-r2.md``),
+# built the same way. Each row is also run: storage's dependency is missing, so
+# importing storage inside the command fails, and a storage imported at module load
+# fails when ``get_memory()`` runs. ``reaches_sink`` is what really happens; a row
+# that reaches the sink must be an offender.
+_SW_SINK = "from smartmemory.utils.llm import call_llm\ncall_llm()"
+_SW_IMPORT = "from smartmemory_app.storage import get_memory\nget_memory()"
+
+
+def _ind(text: str, n: int = 4) -> str:
+    return "\n".join(" " * n + line for line in text.splitlines())
+
+
+def _sw(body: str, header: str = "") -> dict[str, str]:
+    return {
+        "storage": (
+            "import review_backend_that_does_not_exist\ndef get_memory(): pass\n"
+        ),
+        "cli": "import click\nimport contextlib\n"
+        + header
+        + "\n@click.command()\ndef review_command():\n"
+        + _ind(body)
+        + "\n",
+    }
+
+
+def _sw_catch(handler: str, exc: str = "ImportError") -> str:
+    return f"try:\n{_ind(_SW_IMPORT)}\nexcept {exc}:\n{_ind(handler)}"
+
+
+def _sw_helper(body: str) -> str:
+    return f"def helper():\n{_ind(body)}\nhelper()\n{_SW_SINK}"
+
+
+_SW_HELPER_SETUP = "def setup():\n" + _ind(_SW_IMPORT) + "\n"
+_SW_MODULE_GM = "from smartmemory_app.storage import get_memory\n"
+
+# (id, module sources, offending commands expected, command really reaches the sink)
+SWALLOW_ROWS = [
+    (
+        "if-only-raise",
+        _sw(_sw_catch("if False:\n    raise\npass") + "\n" + _SW_SINK),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "return-before-raise-helper",
+        _sw(_sw_helper(_sw_catch("return\nraise"))),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "conditional-return-before-raise-helper",
+        _sw(_sw_helper(_sw_catch("if True:\n    return\nraise"))),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "break-before-raise",
+        _sw("for _ in (0,):\n" + _ind(_sw_catch("break\nraise")) + "\n" + _SW_SINK),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "continue-before-raise",
+        _sw("for _ in (0,):\n" + _ind(_sw_catch("continue\nraise")) + "\n" + _SW_SINK),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "control-pass-then-raise",
+        _sw(_sw_catch("pass\nraise") + "\n" + _SW_SINK),
+        [],
+        False,
+    ),
+    (
+        "control-log-then-raise",
+        _sw(_sw_catch("log()\nraise") + "\n" + _SW_SINK),
+        [],
+        False,
+    ),
+    (
+        "suppress-ImportError",
+        _sw(
+            "with contextlib.suppress(ImportError):\n"
+            + _ind(_SW_IMPORT)
+            + "\n"
+            + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "nested-reraise-same",
+        _sw(
+            "try:\n"
+            + _ind(_sw_catch("raise"))
+            + "\nexcept ImportError:\n    pass\n"
+            + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "nested-reraise-different",
+        _sw(
+            "try:\n"
+            + _ind(_sw_catch("raise RuntimeError('changed')"))
+            + "\nexcept RuntimeError:\n    pass\n"
+            + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "control-raise-different-stops",
+        _sw(_sw_catch("raise RuntimeError('changed')") + "\n" + _SW_SINK),
+        [],
+        False,
+    ),
+    (
+        "TryStar-swallow",
+        _sw(
+            "try:\n"
+            + _ind(_SW_IMPORT)
+            + "\nexcept* ImportError:\n    pass\n"
+            + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "control-TryStar-raise-stops",
+        _sw(
+            "try:\n"
+            + _ind(_SW_IMPORT)
+            + "\nexcept* ImportError:\n    raise\n"
+            + _SW_SINK
+        ),
+        [],
+        False,
+    ),
+    (
+        "finally-return-overrides-raise",
+        _sw(_sw_helper(_sw_catch("raise") + "\nfinally:\n    return")),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "shadowed-builtin-handler",
+        _sw(
+            _sw_catch("pass", "ValueError") + "\n" + _SW_SINK,
+            "ValueError = ImportError",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    # The author's three required probes.
+    (
+        "suppress-imported-under-an-alias",
+        _sw(
+            "with s(ImportError):\n" + _ind(_SW_IMPORT) + "\n" + _SW_SINK,
+            "from contextlib import suppress as s",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        # Conservative: the local ImportError is KeyError, so nothing is swallowed,
+        # but a rebound name is never trusted to be the builtin.
+        "ImportError-rebound-in-the-function",
+        _sw("ImportError = KeyError\n" + _sw_catch("pass") + "\n" + _SW_SINK),
+        _OFFENDER,
+        False,
+    ),
+    (
+        "unknown-manager-open",  # conservative: open() does not swallow, unproven
+        _sw(
+            "with open(os.devnull):\n" + _ind(_SW_IMPORT) + "\n" + _SW_SINK, "import os"
+        ),
+        _OFFENDER,
+        False,
+    ),
+    # The rest of the class.
+    (
+        "KeyError-bound-to-ImportError-in-the-function",
+        _sw(
+            "KeyError = ImportError\n" + _sw_catch("pass", "KeyError") + "\n" + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "handler-name-is-an-attribute",
+        _sw(
+            _sw_catch("pass", "errors.KeyError") + "\n" + _SW_SINK,
+            "class errors:\n    KeyError = ImportError",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "builtins-namespace-rebound",
+        _sw(
+            _sw_catch("pass", "KeyError") + "\n" + _SW_SINK,
+            '__builtins__["KeyError"] = ImportError',
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "local-contextmanager-swallows",
+        _sw(
+            "with quiet():\n" + _ind(_SW_IMPORT) + "\n" + _SW_SINK,
+            "@contextlib.contextmanager\ndef quiet():\n"
+            "    try:\n        yield\n    except ImportError:\n        pass",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "ExitStack-is-not-allow-listed",  # conservative: an empty stack does not swallow
+        _sw("with contextlib.ExitStack():\n" + _ind(_SW_IMPORT) + "\n" + _SW_SINK),
+        _OFFENDER,
+        False,
+    ),
+    (
+        "control-redirect_stdout-is-allow-listed",
+        _sw(
+            "with contextlib.redirect_stdout(sys.stderr):\n"
+            + _ind(_SW_IMPORT)
+            + "\n"
+            + _SW_SINK,
+            "import sys",
+        ),
+        [],
+        False,
+    ),
+    (
+        "finally-break-in-a-loop",
+        _sw(
+            "for _ in (0,):\n    try:\n"
+            + _ind(_SW_IMPORT, 8)
+            + "\n    finally:\n        break\n"
+            + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "TryStar-reraise-caught-as-a-group",
+        _sw(
+            "try:\n    try:\n"
+            + _ind(_SW_IMPORT, 8)
+            + "\n    except* ImportError:\n        raise\nexcept ExceptionGroup:\n    pass\n"
+            + _SW_SINK
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "handler-reaches-a-sink-before-it-raises",
+        _sw(
+            _sw_catch("call_llm()\nraise"), "from smartmemory.utils.llm import call_llm"
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "caller-swallows-a-helpers-failed-import",
+        _sw(
+            "try:\n    setup()\nexcept ImportError:\n    pass\n" + _SW_SINK,
+            _SW_HELPER_SETUP,
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "caller-catches-what-a-helper-raised-instead",
+        _sw(
+            "try:\n    setup()\nexcept RuntimeError:\n    pass\n" + _SW_SINK,
+            "def setup():\n" + _ind(_sw_catch("raise RuntimeError('changed')")) + "\n",
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "applier-call-suppressed",  # get_memory's own import fails inside it
+        _sw(
+            "with contextlib.suppress(ImportError):\n    get_memory()\n" + _SW_SINK,
+            _SW_MODULE_GM,
+        ),
+        _OFFENDER,
+        True,
+    ),
+    (
+        "control-applier-call-unprotected",
+        _sw("get_memory()\n" + _SW_SINK, _SW_MODULE_GM),
+        [],
+        False,
+    ),
+    (
+        "control-applier-call-under-except-KeyError",
+        _sw(
+            "try:\n    get_memory()\nexcept KeyError:\n    pass\n" + _SW_SINK,
+            _SW_MODULE_GM,
+        ),
+        [],
+        False,
+    ),
+    (
+        # cli_code.code_index_cmd's shape: both handlers raise ClickException.
+        "control-shipped-click-exception-handlers",
+        _sw(
+            "try:\n    from smartmemory_app.storage import get_memory\n"
+            "except Exception as exc:\n    raise click.ClickException(str(exc))\n"
+            "try:\n    memory = get_memory()\n"
+            "except Exception as exc:\n    raise click.ClickException(str(exc))\n"
+            + _SW_SINK
+        ),
+        [],
+        False,
+    ),
+]
+
+
+def _reaches_sink(cli_source: str) -> bool:
+    """Run the command with storage's dependency missing; True if the sink ran."""
+    events: list[str] = []
+    loading = [True]
+    real_import = builtins.__import__
+
+    def missing(*args, **kwargs):
+        raise ModuleNotFoundError("synthetic missing storage dependency")
+
+    def fake_import(name, *args, **kwargs):
+        if name == "smartmemory_app.storage":
+            if loading[0]:
+                return types.SimpleNamespace(get_memory=missing)
+            missing()
+        if name == "smartmemory.utils.llm":
+            return types.SimpleNamespace(call_llm=lambda: events.append("sink"))
+        return real_import(name, *args, **kwargs)
+
+    namespace = {
+        "__builtins__": {**vars(builtins), "__import__": fake_import},
+        "log": lambda: events.append("log"),
+    }
+    exec(compile(cli_source, "<review-cli>", "exec"), namespace)
+    loading[0] = False
+    try:
+        namespace["review_command"].callback()
+    except BaseException:  # the command stopped; only whether the sink ran matters
+        pass
+    return "sink" in events
+
+
+@pytest.mark.parametrize(
+    "sources, expected, reaches_sink",
+    [row[1:] for row in SWALLOW_ROWS],
+    ids=[row[0] for row in SWALLOW_ROWS],
+)
+def test_swallowed_import_earns_no_applier_credit(sources, expected, reaches_sink):
+    assert _unconfigured_llm_commands(sources) == expected
+    assert _reaches_sink(sources["cli"]) is reaches_sink
+    assert expected or not reaches_sink  # a command that reaches the sink is flagged
+
+
+def test_non_swallowing_managers_never_suppress():
+    """The allow-list holds only managers whose ``__exit__`` returns a false value."""
+    import contextlib
+    import sys
+
+    for manager in (
+        contextlib.redirect_stdout(sys.stdout),
+        contextlib.redirect_stderr(sys.stderr),
+        contextlib.nullcontext(),
+    ):
+        manager.__enter__()
+        assert not manager.__exit__(ImportError, ImportError("x"), None)
+    assert NON_SWALLOWING_MANAGERS == {
+        "contextlib.redirect_stdout",
+        "contextlib.redirect_stderr",
+        "contextlib.nullcontext",
+    }
