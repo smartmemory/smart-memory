@@ -25,6 +25,10 @@ from smartmemory_app.lifecycle_config import LifecycleConfig
 def isolated_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("SMARTMEMORY_HOOK_TRACE", str(tmp_path / "trace.jsonl"))
+    # HOOK-LOAD-CAP-1: caps read the real host (process table, load1); tests exercise the hook body.
+    for cap in ("OBSERVE_MAX", "LEARN_MAX", "DISTILL_MAX"):
+        monkeypatch.setenv(f"SMARTMEMORY_{cap}", "0")
+    monkeypatch.setenv("SMARTMEMORY_HOOK_LOAD_MAX", "0")
     monkeypatch.delenv("SMARTMEMORY_WORKSPACE_ID", raising=False)
     monkeypatch.delenv("SMARTMEMORY_RECALL_STRICT", raising=False)
     monkeypatch.delenv("SMARTMEMORY_RECALL_FLOOR", raising=False)

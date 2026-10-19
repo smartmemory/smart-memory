@@ -5,6 +5,17 @@ export PYTHONUTF8=1
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
 HOOK_MARKER_DIR="$HOME/.smartmemory"
 mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR"
+# HOOK-LOAD-CAP-1 (s1-chat, 2026-10-19 23:4x, measured: 14-18 concurrent observe processes at 50-93% CPU each, load1 135-171):
+# at most SMARTMEMORY_OBSERVE_MAX observe runs machine-wide; extra calls drop their payload with one log line. 0 = no cap.
+OBSERVE_MAX="${SMARTMEMORY_OBSERVE_MAX:-3}"
+if [ "$OBSERVE_MAX" -gt 0 ] 2>/dev/null; then
+    RUNNING=$(pgrep -f 'smartmemory lifecycle observe' 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [ "${RUNNING:-0}" -ge "$OBSERVE_MAX" ]; then
+        echo "WARNING: lifecycle observe skipped: $RUNNING already running (cap $OBSERVE_MAX, HOOK-LOAD-CAP-1)" >>"$HOOK_DATA_DIR/hooks.log"
+        cat >/dev/null
+        exit 0
+    fi
+fi
 # Capture stdin before backgrounding: non-interactive async jobs inherit /dev/null.
 if ! mkdir -p "$HOOK_DATA_DIR/tmp"; then
     echo "WARNING: lifecycle observe payload lost: cannot create hook temp directory" >&2

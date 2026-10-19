@@ -6,6 +6,16 @@ export PYTHONUTF8=1
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
 HOOK_MARKER_DIR="$HOME/.smartmemory"
 mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR"
+# HOOK-LOAD-CAP-1: at most SMARTMEMORY_DISTILL_MAX distill runs machine-wide; extra calls drop their payload with one log line. 0 = no cap.
+DISTILL_MAX="${SMARTMEMORY_DISTILL_MAX:-2}"
+if [ "$DISTILL_MAX" -gt 0 ] 2>/dev/null; then
+    RUNNING=$(pgrep -f 'smartmemory lifecycle distill' 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [ "${RUNNING:-0}" -ge "$DISTILL_MAX" ]; then
+        echo "WARNING: lifecycle distill skipped: $RUNNING already running (cap $DISTILL_MAX, HOOK-LOAD-CAP-1)" >>"$HOOK_DATA_DIR/hooks.log"
+        cat >/dev/null
+        exit 0
+    fi
+fi
 # Capture stdin before backgrounding: non-interactive async jobs inherit /dev/null.
 if ! mkdir -p "$HOOK_DATA_DIR/tmp"; then
     echo "WARNING: lifecycle distill payload lost: cannot create hook temp directory" >&2

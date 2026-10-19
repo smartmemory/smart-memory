@@ -5,6 +5,16 @@ export PYTHONUTF8=1
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
 HOOK_MARKER_DIR="$HOME/.smartmemory"
 mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR"
+# HOOK-LOAD-CAP-1: at most SMARTMEMORY_LEARN_MAX learn runs machine-wide; extra calls drop their payload with one log line. 0 = no cap.
+LEARN_MAX="${SMARTMEMORY_LEARN_MAX:-2}"
+if [ "$LEARN_MAX" -gt 0 ] 2>/dev/null; then
+    RUNNING=$(pgrep -f 'smartmemory lifecycle learn' 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [ "${RUNNING:-0}" -ge "$LEARN_MAX" ]; then
+        echo "WARNING: lifecycle learn skipped: $RUNNING already running (cap $LEARN_MAX, HOOK-LOAD-CAP-1)" >>"$HOOK_DATA_DIR/hooks.log"
+        cat >/dev/null
+        exit 0
+    fi
+fi
 # Capture stdin before backgrounding: non-interactive async jobs inherit /dev/null.
 if ! mkdir -p "$HOOK_DATA_DIR/tmp"; then
     echo "WARNING: lifecycle learn payload lost: cannot create hook temp directory" >&2

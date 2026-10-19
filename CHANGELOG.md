@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Lifecycle hooks no longer pile up on a busy machine (HOOK-LOAD-CAP-1). The `observe`, `learn` and `distill` hooks skip a run when `SMARTMEMORY_OBSERVE_MAX` (default 3), `SMARTMEMORY_LEARN_MAX` (default 2) or `SMARTMEMORY_DISTILL_MAX` (default 2) runs are already going, and the per-prompt `recall` hook skips when the 1-minute load average is over `SMARTMEMORY_HOOK_LOAD_MAX` (default 48). A skipped run logs one line to `hooks.log`, prints nothing and exits 0. Set any of them to `0` to turn that cap off. Re-run `sm setup` to pick it up.
 - `sm folder sync ROOT --preset markdown|logseq|apple_notes [--watch SECONDS]` reads a folder of notes (Markdown, text, PDF) on your machine into the local daemon. Unchanged files are not re-ingested, edited files replace their memory, and a file missing from two complete scans in a row is deleted. Needs the new optional extra `smartmemory[folders]` (`smartmemory-connectors>=0.6.0`, not yet published, and `pypdf`). CONN-LOCAL-FS-1.
 ## 1.5.28 (2026-10-18)
 
