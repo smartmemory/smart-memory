@@ -37,6 +37,7 @@ smartmemory-mcp = { workspace = true }
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff==0.11.4"]
+folders = ["smartmemory-connectors>=0.6.0", "pypdf>=4.0"]  # CONN-LOCAL-FS-1: `sm folder sync` (not published yet)
 tui = ["textual>=8.0"]         # kept for backward compat (now included by default)
 
 [project.scripts]

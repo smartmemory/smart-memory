@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `sm folder sync ROOT --preset markdown|logseq|apple_notes [--watch SECONDS]` reads a folder of notes (Markdown, text, PDF) on your machine into the local daemon. Unchanged files are not re-ingested, edited files replace their memory, and a file missing from two complete scans in a row is deleted. Needs the new optional extra `smartmemory[folders]` (`smartmemory-connectors>=0.6.0`, not yet published, and `pypdf`). CONN-LOCAL-FS-1.
 ## 1.5.28 (2026-10-18)
 
 - Setup no longer shows a provider key on screen while you type it. In 1.5.27 and earlier the key was visible on screen as you typed. Where setup saves the key is unchanged (your shell profile, and the OS keychain when available).

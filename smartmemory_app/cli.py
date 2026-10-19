@@ -703,6 +703,45 @@ from smartmemory_app.env_pin import env_cmd as _env_cmd  # noqa: E402
 cli.add_command(_env_cmd, name="env")
 
 
+# ── `sm folder …` — a watched local folder as memory (CONN-LOCAL-FS-1) ──
+@cli.group("folder")
+def folder_group() -> None:
+    """Ingest a local folder of notes (Markdown, text, PDF) as memory."""
+
+
+@folder_group.command("sync")
+@click.argument("root", type=click.Path(file_okay=False))
+@click.option(
+    "--preset",
+    type=click.Choice(["markdown", "logseq", "apple_notes"]),
+    default="markdown",
+    show_default=True,
+    help="Which files count: a generic notes folder, a Logseq graph, or an Apple Notes export.",
+)
+@click.option("--watch", "watch_seconds", type=click.IntRange(min=5), default=None, help="Repeat every N seconds.")
+def folder_sync_cmd(root: str, preset: str, watch_seconds: int | None) -> None:
+    """Sync ROOT into memory once (or every N seconds with --watch). Local mode only; runs on this machine."""
+    import time
+
+    from smartmemory_app.folder_sync import FolderSyncError, sync_folder
+
+    require_local("sm folder sync")
+    while True:
+        try:
+            r = sync_folder(root, preset=preset, request=_daemon_request)
+        except FolderSyncError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(
+            f"created {r.created}, replaced {r.replaced}, unchanged {r.unchanged}, removed {r.archived}, "
+            f"skipped {r.inaccessible}, failed {r.failed}" + (f", stopped: {r.error_code}" if r.error_code else "")
+        )
+        if watch_seconds is None:
+            if r.failed or r.error_code:
+                raise click.exceptions.Exit(1)
+            return
+        time.sleep(watch_seconds)
+
+
 # ── `sm provenance …` — code-to-conversation provenance (CORE-CODE-PROVENANCE-1) ──
 def _codex_path_on_or_after(path, root, since: str) -> bool:
     """A rollout lives at ``<root>/YYYY/MM/DD/rollout-*.jsonl``; keep it iff its
