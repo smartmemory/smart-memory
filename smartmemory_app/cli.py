@@ -2784,6 +2784,28 @@ def lifecycle_drain(timeout: float) -> None:
     raise SystemExit(code)
 
 
+@lifecycle_group.command("release-held")
+@click.option(
+    "--large", is_flag=True, help="Release quarantine-large/ instead of held-all/."
+)
+@click.option("--dry-run", is_flag=True, help="List the events, move nothing.")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Release although the hold or size knob would park them again.",
+)
+def lifecycle_release_held(large: bool, dry_run: bool, force: bool) -> None:
+    """Put held SessionEnd captures back in the queue once, then run `sm lifecycle drain`.
+
+    Refused while SMARTMEMORY_CAPTURE_HOLD is on (with --large also while
+    SMARTMEMORY_CAPTURE_HOLD_OVER_MB would park them again) unless --force.
+    """
+    require_local("sm lifecycle release-held")
+    from smartmemory_app.capture_queue import run_release
+
+    raise SystemExit(run_release(large, dry_run, force))
+
+
 @lifecycle_group.command("reclassify")
 @click.option(
     "--cwd",

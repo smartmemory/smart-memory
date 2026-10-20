@@ -746,6 +746,8 @@ Env vars always override the config file, which is the correct path for Docker a
 | `CAPTURE_MAX_MB` | Largest transcript slice a session-end capture reads at once (default `50`). A larger transcript, or a larger new tail, is captured one slice per queue pass from where the last capture stopped, so nothing is skipped and other sessions are not held up |
 | `CAPTURE_MAX_RSS_MB` | Memory ceiling for the capture worker (default `3072`). Past it, between items, the worker hands the queue to a fresh worker and exits. The waiting item stays queued |
 | `SMARTMEMORY_CAPTURE_MAX` | Most capture workers a session end starts machine-wide (default `2`, `0` = no cap). A capped start loses nothing, the queued capture waits for a running worker |
+| `SMARTMEMORY_CAPTURE_HOLD` | Parks every session capture in `captures/held-all/` and starts no worker (default `1`, `0` = capture as before). Put them back with `sm lifecycle release-held`, then `sm lifecycle drain` |
+| `SMARTMEMORY_CAPTURE_HOLD_OVER_MB` | With the hold off, a transcript over this size goes to `captures/quarantine-large/` unread (default `50`, `0` = off). `sm lifecycle release-held --large` puts them back |
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
 | `GROQ_API_KEY` | Groq API key, an alternative to OpenAI for LLM extraction |
 

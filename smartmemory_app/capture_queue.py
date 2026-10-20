@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -13,6 +14,8 @@ from pathlib import Path
 
 from filelock import FileLock
 from smartmemory.utils.process import spawn_detached
+
+from smartmemory_app import capture_hold as hold
 
 log = logging.getLogger(__name__)
 
@@ -69,11 +72,32 @@ def enqueue(
     workspace_id: str | None,
     cwd: str | None = None,
 ) -> dict:
-    """Queue a capture. At most one queued event per transcript: a newer one replaces it."""
+    """Queue a capture. At most one queued event per transcript: a newer one replaces it.
+
+    While SMARTMEMORY_CAPTURE_HOLD is on (the default) the event is parked in ``held-all/``
+    instead and comes back with status ``held``: callers spawn no worker for it.
+    """
     root = capture_dir()
     resolved = (
         str(Path(transcript_path).expanduser().resolve()) if transcript_path else None
     )
+    if resolved and hold.hold_on():
+        record = {
+            "capture_id": uuid.uuid4().hex,
+            "session_id": session_id,
+            "transcript_path": resolved,
+            "workspace_id": workspace_id,
+            "cwd": cwd,
+            "queued_at": time.time(),
+        }
+        with FileLock(str(root / "ledger.lock"), timeout=2):
+            hold.park(root, record, hold.HELD)
+        log.warning(
+            "Capture held for session %s (%s=1), release with `release-held`",
+            session_id,
+            hold.HOLD_ENV,
+        )
+        return {**record, "status": "held"}
     with FileLock(str(root / "ledger.lock"), timeout=2):
         # A running item is not touched: the new event captures what it appends.
         stale = (
@@ -109,6 +133,26 @@ def enqueue(
             job = _append(root, {**job, "status": "running"})
             job = _append(root, {**job, "status": "error", "error": message})
     return job
+
+
+def hold_event(job: dict, dirname: str, why: str) -> None:
+    """Move a pending ledger event into a parking dir, one WARNING, status ``held``/``quarantined``."""
+    root = capture_dir()
+    with FileLock(str(root / "ledger.lock"), timeout=2):
+        hold.park(
+            root, job, dirname
+        )  # Durable first: a crash leaves it pending, not lost.
+        _append(
+            root,
+            {**job, "status": "held" if dirname == hold.HELD else "quarantined"},
+        )
+    log.warning(
+        "Capture %s for session %s parked in %s: %s",
+        job["capture_id"],
+        job.get("session_id"),
+        dirname,
+        why,
+    )
 
 
 DEFAULT_CAPTURE_MAX = 2
@@ -197,3 +241,117 @@ def drain(timeout: float = 60) -> tuple[dict[str, int], int]:
         time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         result = counts()
     return result, 1 if result["error"] else 0
+
+
+_ACTIVE = {"queued", "running"}
+
+
+class ReleaseRefused(Exception):
+    """The hold or the size knob would park the events again."""
+
+
+def release_held(
+    large: bool = False, dry_run: bool = False, force: bool = False
+) -> list[tuple[str, dict, float | None]]:
+    """Re-queue every parked event once. Returns (action, event, transcript MB) per file.
+
+    Newest event per transcript path is queued, older ones are recorded ``superseded``.
+    Spawns no worker: follow with ``sm lifecycle drain``. A dry run moves nothing.
+    """
+    root = capture_dir()
+    events = hold.parked(root, hold.LARGE if large else hold.HELD)
+    sizes = {
+        e.get("transcript_path"): hold.size_mb(e.get("transcript_path"))
+        for _, e in events
+    }
+    if not dry_run and not force:
+        limit = hold.over_mb()
+        if hold.hold_on():
+            raise ReleaseRefused(
+                f"{hold.HOLD_ENV} is on, the worker would park them again"
+            )
+        if (
+            large
+            and limit > 0
+            and any(m is not None and m > limit for m in sizes.values())
+        ):
+            raise ReleaseRefused(f"{hold.OVER_ENV}={limit:g} would park them again")
+    newest = {e.get("transcript_path"): e["capture_id"] for _, e in events}
+    snapshot = {}
+    for record in jobs(root):
+        snapshot[record["capture_id"]] = record
+    queued_by_path: dict = {}
+    for record in snapshot.values():
+        if record["status"] in _ACTIVE:
+            queued_by_path.setdefault(record.get("transcript_path"), []).append(record)
+    done = []
+    for path, event in events:
+        cid, tpath = event["capture_id"], event.get("transcript_path")
+        keep = newest[tpath] == cid or not tpath
+        action = "released" if keep else "superseded"
+        done.append((action, event, sizes.get(tpath)))
+        if dry_run:
+            continue
+        with FileLock(str(root / "ledger.lock"), timeout=2):
+            if snapshot.get(cid, {}).get("status") not in _ACTIVE:
+                if keep:
+                    for old in queued_by_path.pop(tpath, []):
+                        _append(
+                            root, {**old, "status": "superseded", "superseded_by": cid}
+                        )
+                    _append(root, {**event, "status": "queued"})
+                else:
+                    _append(
+                        root,
+                        {
+                            **event,
+                            "status": "superseded",
+                            "superseded_by": newest[tpath],
+                        },
+                    )
+            path.unlink(missing_ok=True)
+    return done
+
+
+def run_release(large: bool, dry_run: bool, force: bool) -> int:
+    """CLI body shared by ``capture_queue release-held`` and ``sm lifecycle release-held``."""
+    try:
+        done = release_held(large, dry_run, force)
+    except ReleaseRefused as exc:
+        print(f"refused: {exc}. Use --force to release anyway.", file=sys.stderr)
+        return 1
+    for action, event, mb in done:
+        size = "missing" if mb is None else f"{mb:.1f} MB"
+        print(f"{'would ' if dry_run else ''}{action} {event.get('session_id')} {size}")
+    print(
+        f"{len(done)} event(s). Run `sm lifecycle drain` to start a worker."
+        if done and not dry_run
+        else f"{len(done)} event(s)."
+    )
+    return 0
+
+
+RELEASE_HELP = (
+    "Move parked capture events back to the queue once, one line per event. Default source "
+    "is held-all/, --large uses quarantine-large/. Refused while SMARTMEMORY_CAPTURE_HOLD is "
+    "on (with --large also while SMARTMEMORY_CAPTURE_HOLD_OVER_MB would park them again) "
+    "unless --force. --dry-run lists without moving. Starts no worker: follow with "
+    "`sm lifecycle drain`."
+)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="capture_queue")
+    sub = parser.add_subparsers(dest="command", required=True)
+    rel = sub.add_parser("release-held", help=RELEASE_HELP, description=RELEASE_HELP)
+    rel.add_argument("--large", action="store_true", help="release quarantine-large/")
+    rel.add_argument("--dry-run", action="store_true", help="list, move nothing")
+    rel.add_argument(
+        "--force", action="store_true", help="release although it would be parked again"
+    )
+    args = parser.parse_args(argv)
+    return run_release(args.large, args.dry_run, args.force)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

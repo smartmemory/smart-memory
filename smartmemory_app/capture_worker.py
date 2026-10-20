@@ -12,6 +12,7 @@ from pathlib import Path
 
 from filelock import FileLock, Timeout
 
+from smartmemory_app import capture_hold as hold
 from smartmemory_app import capture_queue as queue
 from smartmemory_app import capture_slices as slices
 from smartmemory_app.capture_slices import rss_mb
@@ -258,6 +259,18 @@ def _drain(root, fresh: bool = True) -> str | None:
     between items). A fresh process always takes its first item, so recycling ends.
     """
     while pending := _pending(root):
+        if hold.hold_on():
+            # Before anything is imported or read: park every pending event and stop.
+            for job in pending:
+                queue.hold_event(job, hold.HELD, f"{hold.HOLD_ENV} is on")
+            return None
+        if (mb := hold.over_limit(pending[0].get("transcript_path"))) is not None:
+            queue.hold_event(
+                pending[0],
+                hold.LARGE,
+                f"transcript is {mb:.0f} MB, over {hold.OVER_ENV}={hold.over_mb():g}",
+            )
+            continue
         if not fresh and (reason := _over_rss()):
             return reason
         fresh = False

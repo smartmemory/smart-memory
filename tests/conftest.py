@@ -84,6 +84,9 @@ def capture_rss_guard_off(provider_env_leak_guard, monkeypatch):
     counts real capture workers on this machine, so it is off unless a test sets it."""
     monkeypatch.setenv("CAPTURE_MAX_RSS_MB", "1000000")
     monkeypatch.setenv("SMARTMEMORY_CAPTURE_MAX", "0")
+    # CAPTURE-HOLD-ALL-1: the hold ships ON, so capture tests opt out. Hold tests set it.
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_HOLD", "0")
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_HOLD_OVER_MB", "0")
 
 
 @pytest.fixture
