@@ -743,6 +743,8 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
 | `SMARTMEMORY_LOG_LEVEL` | Logging threshold (default: `WARNING`). Set to `DEBUG` for startup context, daemon/fallback routing, and bounded request/response wire detail on stderr; `Authorization` and other credential-shaped fields are always redacted |
 | `SMARTMEMORY_NO_UPDATE_CHECK` | Set to `1` to turn off the daily update-available hint |
+| `CAPTURE_MAX_MB` | Largest transcript slice a session-end capture reads at once (default `50`). A never-captured transcript over this size is skipped with a warning, and later captures take only the new tail in chunks of at most this size |
+| `CAPTURE_MAX_RSS_MB` | Memory ceiling for the capture worker (default `1024`). Past it, the current item is marked `skipped` and the worker moves on |
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
 | `GROQ_API_KEY` | Groq API key, an alternative to OpenAI for LLM extraction |
 

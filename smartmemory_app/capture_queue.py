@@ -69,22 +69,40 @@ def enqueue(
     workspace_id: str | None,
     cwd: str | None = None,
 ) -> dict:
+    """Queue a capture. At most one queued event per transcript: a newer one replaces it."""
     root = capture_dir()
+    resolved = (
+        str(Path(transcript_path).expanduser().resolve()) if transcript_path else None
+    )
     with FileLock(str(root / "ledger.lock"), timeout=2):
+        # A running item is not touched: the new event captures what it appends.
+        stale = (
+            [
+                j
+                for j in jobs(root)
+                if j["status"] == "queued" and j.get("transcript_path") == resolved
+            ]
+            if resolved
+            else []
+        )
         job = _append(
             root,
             {
                 "capture_id": uuid.uuid4().hex,
                 "session_id": session_id,
-                "transcript_path": str(Path(transcript_path).expanduser().resolve())
-                if transcript_path
-                else None,
+                "transcript_path": resolved,
                 "workspace_id": workspace_id,
                 "cwd": cwd,
                 "queued_at": time.time(),
                 "status": "queued",
             },
         )
+        # New event first: a crash between the two appends leaves a duplicate, never a gap.
+        for old in stale:
+            _append(
+                root,
+                {**old, "status": "superseded", "superseded_by": job["capture_id"]},
+            )
         if not transcript_path:
             message = "SessionEnd capture missing transcript_path"
             log.warning(message)
