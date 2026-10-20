@@ -223,7 +223,7 @@ def test_release_large_table(transcript, monkeypatch, capsys):
     worker.run()
     assert len(_files(hold.LARGE)) == 1
     assert queue.main(["release-held", "--large"]) == 1  # Knob would park it again.
-    assert "refused" in capsys.readouterr().err
+    assert "left s0" in capsys.readouterr().out and len(_files(hold.LARGE)) == 1
     monkeypatch.setenv(hold.OVER_ENV, "0")
     assert queue.main(["release-held", "--large"]) == 0
     assert _files(hold.LARGE) == [] and len(_ledger("queued")) == 1
@@ -239,6 +239,7 @@ def test_release_keeps_newest_per_path_and_supersedes_the_rest(transcript, tmp_p
             json.dumps(_chat_event(sid, transcript, f"id{n}"))
         )
     other = str(tmp_path / "other.jsonl")
+    Path(other).write_text("y")  # A missing transcript is left parked, not released.
     (root / hold.HELD / f"{9:020d}-b.json").write_text(
         json.dumps(_chat_event("solo", other, "id9"))
     )
@@ -289,3 +290,199 @@ def test_click_command_dry_run(transcript):
     queue.enqueue("s0", transcript, "ws")
     result = CliRunner().invoke(cli, ["lifecycle", "release-held", "--dry-run"])
     assert result.exit_code == 0 and "would released s0" in result.output
+
+
+# CAPTURE-LARGE-RELEASE-NOENQUEUE-1: `released` means the worker captures it, never parks
+# it again. One row per release mode and per failure shape. "big" = over the knob.
+_RELEASE_ROWS = [
+    # id, --large, hold, knob MB, --force, transcript, exit, action, parked after, marked
+    ("default", False, "0", "0", False, "file", 0, "released", 0, False),
+    ("default-hold-on", False, "1", "0", False, "file", 1, None, 1, False),
+    ("default-hold-on-force", False, "1", "0", True, "file", 0, "released", 0, True),
+    ("default-big", False, "0", "0.001", False, "file", 1, "left", 1, False),
+    ("default-big-force", False, "0", "0.001", True, "file", 0, "released", 0, True),
+    ("large-big", True, "0", "0.001", False, "file", 1, "left", 1, False),
+    # The live failure: 5 forced large events reported released, all parked again.
+    ("large-big-force", True, "0", "0.001", True, "file", 0, "released", 0, True),
+    (
+        "large-big-force-hold-on",
+        True,
+        "1",
+        "0.001",
+        True,
+        "file",
+        0,
+        "released",
+        0,
+        True,
+    ),
+    ("large-knob-raised", True, "0", "0", False, "file", 0, "released", 0, False),
+    ("large-hold-on", True, "1", "0", False, "file", 1, None, 1, False),
+    ("large-missing-force", True, "0", "0.001", True, "missing", 1, "left", 1, False),
+    ("default-no-path-force", False, "0", "0", True, "none", 1, "left", 1, False),
+]
+
+
+@pytest.mark.parametrize(
+    "large,hold_env,knob,force,kind,code,action,parked_after,marked",
+    [r[1:] for r in _RELEASE_ROWS],
+    ids=[r[0] for r in _RELEASE_ROWS],
+)
+def test_release_mode_table(
+    transcript,
+    tmp_path,
+    monkeypatch,
+    capsys,
+    caplog,
+    large,
+    hold_env,
+    knob,
+    force,
+    kind,
+    code,
+    action,
+    parked_after,
+    marked,
+):
+    source = hold.LARGE if large else hold.HELD
+    path = {"file": transcript, "missing": str(tmp_path / "gone.jsonl"), "none": None}
+    (queue.capture_dir() / source).mkdir()
+    (queue.capture_dir() / source / f"{1:020d}-a.json").write_text(
+        json.dumps(_chat_event("s0", path[kind], "id0"))
+    )
+    monkeypatch.setenv(hold.HOLD_ENV, hold_env)
+    monkeypatch.setenv(hold.OVER_ENV, knob)
+    with caplog.at_level(logging.WARNING):
+        argv = ["release-held"] + ["--large"] * large + ["--force"] * force
+        assert queue.main(argv) == code
+    out = capsys.readouterr()
+    assert len(_files(source)) == parked_after
+    if action is None:
+        assert "refused" in out.err and queue.jobs() == []
+        return
+    assert f"{action} s0" in out.out
+    if action == "left":
+        (warning,) = _warnings(caplog)
+        assert "not released" in warning.getMessage() and queue.jobs() == []
+        return
+    (job,) = _ledger("queued")
+    assert queue.forced(job) is marked and _warnings(caplog) == []
+    captured = []
+    monkeypatch.setattr(
+        worker, "capture_transcript", lambda j: captured.append(j["capture_id"]) or {}
+    )
+    worker.run()  # What `sm lifecycle drain` starts, in the same environment.
+    assert captured == ["id0"] and _ledger("done")
+    assert _files(hold.HELD) == [] and _files(hold.LARGE) == []
+
+
+def test_release_dry_run_previews_left_and_moves_nothing(
+    transcript, monkeypatch, capsys
+):
+    _queue_while_hold_off(monkeypatch, transcript)
+    monkeypatch.setenv(hold.HOLD_ENV, "0")
+    monkeypatch.setenv(hold.OVER_ENV, "0.001")
+    worker.run()
+    assert queue.main(["release-held", "--large", "--dry-run"]) == 1
+    assert "would left s0" in capsys.readouterr().out and len(_files(hold.LARGE)) == 1
+    assert _ledger("queued") == []
+
+
+def _lock_times_out(*args, **kwargs):
+    raise queue.Timeout("ledger.lock")
+
+
+def _moves_without_queueing(root, path, *args):
+    path.unlink()  # The original bug shape: the file leaves the lot, nothing is queued.
+
+
+@pytest.mark.parametrize(
+    "target,fake,action,parked_after",
+    [
+        ("FileLock", _lock_times_out, "left", 1),
+        ("_release_one", _moves_without_queueing, "lost", 0),
+    ],
+    ids=["lock-timeout", "moved-not-queued"],
+)
+def test_release_failure_shapes_are_reported(
+    transcript, monkeypatch, capsys, caplog, target, fake, action, parked_after
+):
+    other = transcript + ".2"
+    Path(other).write_text("y")
+    (queue.capture_dir() / hold.HELD).mkdir()
+    for n, path in enumerate((transcript, other)):
+        (queue.capture_dir() / hold.HELD / f"{n:020d}-a.json").write_text(
+            json.dumps(_chat_event(f"s{n}", path, f"id{n}"))
+        )
+    monkeypatch.setenv(hold.HOLD_ENV, "0")
+    real, calls = getattr(queue, target), []
+
+    def first_fails(*args, **kwargs):
+        # Only the first event fails: its sibling is still released.
+        calls.append(1)
+        return (fake if len(calls) == 1 else real)(*args, **kwargs)
+
+    monkeypatch.setattr(queue, target, first_fails)
+    with caplog.at_level(logging.WARNING):
+        assert queue.main(["release-held"]) == 1
+    out = capsys.readouterr().out
+    assert f"{action} s0" in out and "released s1" in out and "1 not released" in out
+    assert len(_warnings(caplog)) == 1 and len(_files(hold.HELD)) == parked_after
+    assert [j["session_id"] for j in _ledger("queued")] == ["s1"]
+
+
+def test_forced_and_unforced_pending_split_under_the_hold(transcript, monkeypatch):
+    other = transcript + ".2"
+    Path(other).write_text("y")
+    monkeypatch.setenv(hold.HOLD_ENV, "0")
+    queue.enqueue("plain", other, "ws")
+    queue.enqueue("forced", transcript, "ws", force=True)
+    monkeypatch.setenv(hold.HOLD_ENV, "1")
+    seen = []
+    monkeypatch.setattr(
+        worker, "capture_transcript", lambda j: seen.append(j["session_id"]) or {}
+    )
+    worker.run()
+    assert seen == ["forced"] and [j["session_id"] for j in _ledger("held")] == [
+        "plain"
+    ]
+
+
+def test_forced_continuation_is_captured_not_parked(tmp_path, monkeypatch):
+    """A forced huge transcript drains slice by slice past the knob and the hold."""
+    from smartmemory_app import capture_slices as slices
+
+    path = tmp_path / "huge.jsonl"
+    path.write_text(
+        "".join(
+            json.dumps({"type": "user", "n": i, "pad": "x" * 40}) + "\n"
+            for i in range(40)
+        )
+    )
+    monkeypatch.setenv("CAPTURE_MAX_MB", "0.0006")  # About 629 bytes per slice.
+    monkeypatch.setenv(hold.OVER_ENV, "0.001")
+    monkeypatch.setattr(
+        worker, "import_capture", lambda job, tail=None, byte_range=None: {}
+    )
+    monkeypatch.setattr(worker, "rss_mb", lambda: 10.0)
+    monkeypatch.setattr(queue, "spawn_successor", lambda: None)
+    queue.enqueue(
+        "huge", str(path), "ws", force=True
+    )  # Hold on: still queued, not parked.
+    worker.run()
+    done = _ledger("done")
+    assert len(done) > 1 and all(queue.forced(j) for j in done)
+    assert _files(hold.HELD) == [] and _files(hold.LARGE) == []
+    assert (
+        slices.read_offset(queue.capture_dir(), str(path.resolve()))
+        == path.stat().st_size
+    )
+
+
+def test_session_end_replacing_a_forced_event_keeps_the_mark(transcript, monkeypatch):
+    monkeypatch.setenv(hold.HOLD_ENV, "0")
+    first = queue.enqueue("s", transcript, "ws", force=True)
+    second = queue.enqueue("s", transcript, "ws")
+    (job,) = _ledger("queued")
+    assert job["capture_id"] == second["capture_id"] != first["capture_id"]
+    assert queue.forced(job)

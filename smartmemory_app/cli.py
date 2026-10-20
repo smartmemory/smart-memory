@@ -2792,13 +2792,14 @@ def lifecycle_drain(timeout: float) -> None:
 @click.option(
     "--force",
     is_flag=True,
-    help="Release although the hold or size knob would park them again.",
+    help="Release past the hold and the size knob: the worker captures these events.",
 )
 def lifecycle_release_held(large: bool, dry_run: bool, force: bool) -> None:
     """Put held SessionEnd captures back in the queue once, then run `sm lifecycle drain`.
 
-    Refused while SMARTMEMORY_CAPTURE_HOLD is on (with --large also while
-    SMARTMEMORY_CAPTURE_HOLD_OVER_MB would park them again) unless --force.
+    Refused while SMARTMEMORY_CAPTURE_HOLD is on unless --force. Without --force an
+    event over SMARTMEMORY_CAPTURE_HOLD_OVER_MB is left parked with a warning. An event
+    whose transcript is missing is always left. Exits 1 if any event is left.
     """
     require_local("sm lifecycle release-held")
     from smartmemory_app.capture_queue import run_release

@@ -299,7 +299,11 @@ def capture_transcript(job: dict) -> dict:
     receipt = {**_merge([receipt]), "tail_start": start, "tail_end": piece.end}
     if piece.end < size:
         nxt = queue.enqueue(
-            job["session_id"], path, job["workspace_id"], job.get("cwd")
+            job["session_id"],
+            path,
+            job["workspace_id"],
+            job.get("cwd"),
+            force=queue.forced(job),
         )
         log.warning(
             "Transcript %s captured to byte %d of %d, the rest is queued as %s",
@@ -324,21 +328,36 @@ def _drain(root, fresh: bool = True) -> str | None:
     """
     while pending := _pending(root):
         if hold.hold_on():
-            # Before anything is imported or read: park every pending event and stop.
+            # Before anything is imported or read: park every pending event and stop,
+            # except the ones an operator released with --force.
             for job in pending:
-                queue.hold_event(job, hold.HELD, f"{hold.HOLD_ENV} is on")
-            return None
-        if (mb := hold.over_limit(pending[0].get("transcript_path"))) is not None:
-            queue.hold_event(
-                pending[0],
-                hold.LARGE,
-                f"transcript is {mb:.0f} MB, over {hold.OVER_ENV}={hold.over_mb():g}",
+                if not queue.forced(job):
+                    queue.hold_event(job, hold.HELD, f"{hold.HOLD_ENV} is on")
+            pending = [job for job in pending if queue.forced(job)]
+            if not pending:
+                return None
+        job = pending[0]
+        if (mb := hold.over_limit(job.get("transcript_path"))) is not None:
+            if not queue.forced(job):
+                queue.hold_event(
+                    job,
+                    hold.LARGE,
+                    f"transcript is {mb:.0f} MB, over {hold.OVER_ENV}={hold.over_mb():g}",
+                )
+                continue
+            log.warning(
+                "Capture %s for session %s was released with --force, capturing its "
+                "%.0f MB transcript past %s=%g",
+                job["capture_id"],
+                job.get("session_id"),
+                mb,
+                hold.OVER_ENV,
+                hold.over_mb(),
             )
-            continue
         if not fresh and (reason := _over_rss()):
             return reason
         fresh = False
-        job = queue.transition(pending[0], "running")
+        job = queue.transition(job, "running")
         try:
             receipt = capture_transcript(job)
         except Exception as exc:
