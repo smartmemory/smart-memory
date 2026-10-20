@@ -718,7 +718,13 @@ def folder_group() -> None:
     show_default=True,
     help="Which files count: a generic notes folder, a Logseq graph, or an Apple Notes export.",
 )
-@click.option("--watch", "watch_seconds", type=click.IntRange(min=5), default=None, help="Repeat every N seconds.")
+@click.option(
+    "--watch",
+    "watch_seconds",
+    type=click.IntRange(min=5),
+    default=None,
+    help="Repeat every N seconds.",
+)
 def folder_sync_cmd(root: str, preset: str, watch_seconds: int | None) -> None:
     """Sync ROOT into memory once (or every N seconds with --watch). Local mode only; runs on this machine."""
     import time
@@ -733,7 +739,8 @@ def folder_sync_cmd(root: str, preset: str, watch_seconds: int | None) -> None:
             raise click.ClickException(str(exc)) from None
         click.echo(
             f"created {r.created}, replaced {r.replaced}, unchanged {r.unchanged}, removed {r.archived}, "
-            f"skipped {r.inaccessible}, failed {r.failed}" + (f", stopped: {r.error_code}" if r.error_code else "")
+            f"skipped {r.inaccessible}, failed {r.failed}"
+            + (f", stopped: {r.error_code}" if r.error_code else "")
         )
         if watch_seconds is None:
             if r.failed or r.error_code:
@@ -2805,6 +2812,34 @@ def lifecycle_release_held(large: bool, dry_run: bool, force: bool) -> None:
     from smartmemory_app.capture_queue import run_release
 
     raise SystemExit(run_release(large, dry_run, force))
+
+
+@lifecycle_group.command("requeue")
+@click.option(
+    "--errors",
+    "errors",
+    is_flag=True,
+    required=True,
+    help="Requeue capture jobs whose status is error.",
+)
+@click.option(
+    "--id",
+    "ids",
+    multiple=True,
+    help="Only this capture id (repeatable). An unknown id is reported, exit 1.",
+)
+@click.option("--dry-run", is_flag=True, help="List the jobs, write nothing.")
+def lifecycle_requeue(errors: bool, ids: tuple[str, ...], dry_run: bool) -> None:
+    """Move errored SessionEnd captures from error back to queued, once each.
+
+    One line per job: id, old status -> new status, the previous error (200 chars).
+    Jobs that are not in error are skipped, never changed. A second run finds them
+    queued and skips them. Starts no worker: follow with `sm lifecycle drain`.
+    """
+    require_local("sm lifecycle requeue")
+    from smartmemory_app.capture_queue import run_requeue_errors
+
+    raise SystemExit(run_requeue_errors(list(ids) or None, dry_run))
 
 
 @lifecycle_group.command("reclassify")

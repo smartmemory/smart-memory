@@ -424,6 +424,84 @@ def run_release(large: bool, dry_run: bool, force: bool) -> int:
     return 1 if failed else 0
 
 
+ERROR_TEXT_MAX = 200
+
+
+def requeue_errors(
+    ids: list[str] | None = None, dry_run: bool = False
+) -> list[tuple[str, str, str, str, str | None]]:
+    """Move each ``error`` job back to ``queued`` once. Returns (action, id, old, new, error).
+
+    Actions: ``requeued`` (written once, new status ``queued``), ``skipped`` (a matched job
+    that is not ``error``: ``done``, ``queued``, ``running``, ``superseded`` or parked
+    ``held``, left alone, new status = old status) and ``unknown`` (an ``--id`` that
+    matches nothing). ``ids`` limits the move to those capture ids. Without ``ids`` only
+    error jobs are returned, since every other job is simply not in scope. ``error`` is the
+    previous error text truncated to ``ERROR_TEXT_MAX``. The ledger lock is held from the
+    read to the write, so a second call (or a racing worker) finds the job already
+    ``queued`` and skips it. A dry run writes nothing. Spawns no worker: follow with
+    ``sm lifecycle drain``.
+    """
+    root = capture_dir()
+    wanted = list(dict.fromkeys(ids)) if ids else None
+    out: list[tuple[str, str, str, str, str | None]] = []
+    with FileLock(str(root / "ledger.lock"), timeout=2):
+        current = {j["capture_id"]: j for j in jobs(root)}
+        parked = {e["capture_id"]: e for _, e in hold.parked(root, hold.HELD)}
+        for cid in wanted if wanted is not None else list(current):
+            job = current.get(cid)
+            if job is None:
+                if cid in parked:
+                    out.append(("skipped", cid, "held", "held", None))
+                elif wanted is not None:
+                    out.append(("unknown", cid, "unknown", "unknown", None))
+                continue
+            status = job["status"]
+            if status != "error":
+                if wanted is not None:
+                    out.append(("skipped", cid, status, status, None))
+                continue
+            text = (job.get("error") or "")[:ERROR_TEXT_MAX]
+            if not dry_run:
+                body = {
+                    k: v for k, v in job.items() if k not in ("error", "recorded_at")
+                }
+                _append(
+                    root,
+                    {
+                        **body,
+                        "status": "queued",
+                        "requeued_from": "error",
+                        "previous_error": text,
+                    },
+                )
+            out.append(("requeued", cid, "error", "queued", text))
+    return out
+
+
+def run_requeue_errors(ids: list[str] | None, dry_run: bool) -> int:
+    """CLI body of ``sm lifecycle requeue --errors``. One line per job, exit 1 on an unknown id."""
+    try:
+        done = requeue_errors(ids, dry_run)
+    except Timeout as exc:
+        print(f"refused: the capture ledger is locked: {exc}", file=sys.stderr)
+        return 1
+    for action, cid, old, new, text in done:
+        line = f"{'would ' if dry_run else ''}{action} {cid} {old} -> {new}"
+        print(f"{line}: {text}" if text else line)
+    tally = {
+        a: sum(d[0] == a for d in done) for a in ("requeued", "skipped", "unknown")
+    }
+    summary = (
+        f"{len(done)} job(s): {tally['requeued']} requeued, {tally['skipped']} "
+        f"skipped, {tally['unknown']} unknown."
+    )
+    if tally["requeued"] and not dry_run:
+        summary += " Run `sm lifecycle drain` to start a worker."
+    print(summary)
+    return 1 if tally["unknown"] else 0
+
+
 RELEASE_HELP = (
     "Move parked capture events back to the queue once, one line per event. Default source "
     "is held-all/, --large uses quarantine-large/. Refused while SMARTMEMORY_CAPTURE_HOLD is "
