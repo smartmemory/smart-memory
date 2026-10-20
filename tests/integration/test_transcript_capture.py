@@ -123,6 +123,9 @@ def test_mid_session_lesson_recall_duplicate_and_growth(capture_env, monkeypatch
         keys = [chunk.metadata["source_path"] for chunk in grown]
         assert len(keys) == len(set(keys))
         assert any(LESSON in chunk.content for chunk in grown)
-        assert max(chunk.metadata["turn_range"][1] for chunk in grown) == 23
+        # CAPTURE-HUGE-TRANSCRIPT-1: only the appended tail is imported, under its own
+        # `@start-end` key, so its turn_range counts from the start of the tail (13 turns).
+        assert any("@" in key for key in keys)
+        assert max(chunk.metadata["turn_range"][1] for chunk in grown) == 13
     finally:
         mem.close()

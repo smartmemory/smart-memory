@@ -77,6 +77,13 @@ def provider_env_leak_guard():
     assert_provider_env_unchanged(before)
 
 
+@pytest.fixture(autouse=True)
+def capture_rss_guard_off(provider_env_leak_guard, monkeypatch):
+    """A pytest process is itself over the worker's 1 GB RSS default, so in-process
+    worker runs would be skipped. Tests of the guard set CAPTURE_MAX_RSS_MB themselves."""
+    monkeypatch.setenv("CAPTURE_MAX_RSS_MB", "1000000")
+
+
 @pytest.fixture
 def provider_pin_isolated(monkeypatch):
     """Undo the provider pin that capture_lessons/_memory write straight to os.environ.
