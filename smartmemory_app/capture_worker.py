@@ -20,16 +20,29 @@ from smartmemory_app.capture_slices import rss_mb
 log = logging.getLogger(__name__)
 
 
+def _ai_opted_in() -> bool:
+    """MEM-SIZE-1: AI on the capture path is a per-source opt-in, default OFF (owner: "captures too").
+
+    Session lessons run only on the opt-in (offline capture then records them as degraded, as before). The Groq pin
+    and the LLM pipeline profile need the opt-in AND an online capture (``_memory``).
+    """
+    from smartmemory.ingest.admission import CLAUDE_CODE_TRANSCRIPT, ai_opted_in
+
+    return ai_opted_in(CLAUDE_CODE_TRANSCRIPT)
+
+
 def _memory():
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
 
-    # Explicit offline capture uses the existing Tier 1 pipeline, not another
-    # extractor. Production capture is pinned to Groq, never subscription billing.
-    offline = os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") == "1"
-    if not offline:
+    # Capture is costless by default: rules extraction, local embeddings, keyword index, local enrichers, no LLM
+    # route at all (``llm_allowed=False``). Only the AI opt-in pins Groq, never subscription billing.
+    ai = _ai_opted_in() and os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") != "1"
+    if ai:
         if not os.environ.get("GROQ_API_KEY"):
-            raise RuntimeError("Transcript capture requires GROQ_API_KEY")
+            raise RuntimeError(
+                "AI transcript capture (SMARTMEMORY_INGEST_AI_SUMMARY) requires GROQ_API_KEY"
+            )
         os.environ["LLM_PROVIDER"] = "groq"
         os.environ["LLM_API_KEY"] = os.environ["GROQ_API_KEY"]
         os.environ["OPENAI_BASE_URL"] = "https://api.groq.com/openai/v1"
@@ -37,12 +50,45 @@ def _memory():
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = "local"
     return create_lite_memory(
         data_dir=str(queue.capture_dir().parent),
-        pipeline_profile=PipelineConfig.tier1() if offline else PipelineConfig.lite(),
+        pipeline_profile=PipelineConfig.lite() if ai else PipelineConfig.costless(),
     )
 
 
-def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
-    """Import a transcript, or only the ``tail`` byte range of it (an incremental capture)."""
+def _source_ref(
+    job: dict, tail: slices.Slice | None, byte_range: tuple[int, int] | None
+):
+    """The pointer target for this capture: the real transcript and the byte range parsed (MEM-SIZE-1)."""
+    from datetime import datetime, timezone
+
+    from smartmemory.ingest import SourceRef
+    from smartmemory.ingest.admission import CLAUDE_CODE_TRANSCRIPT
+
+    if tail is not None:
+        start, end = tail.start, tail.end
+    elif byte_range is not None:
+        start, end = byte_range
+    else:
+        start, end = 0, Path(job["transcript_path"]).stat().st_size
+    return SourceRef(
+        kind=CLAUDE_CODE_TRANSCRIPT,
+        source_path=str(job["transcript_path"]),
+        byte_start=start,
+        byte_end=end,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+        refetchable=True,
+    )
+
+
+def import_capture(
+    job: dict,
+    tail: slices.Slice | None = None,
+    byte_range: tuple[int, int] | None = None,
+) -> dict:
+    """Import a transcript, or only the ``tail`` byte range of it (an incremental capture).
+
+    Each chunk is stored as a summary plus a pointer to ``byte_range`` (or the tail's range) of the transcript, never
+    as raw text (MEM-SIZE-1). The pointer is passed outside the fingerprinted kwargs, so the fingerprint is unchanged.
+    """
     from smartmemory.importers.agent_transcript import (
         iter_transcript_ingest_kwargs,
         parse_transcript,
@@ -77,8 +123,10 @@ def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
                 "item_ids": previous.get("item_ids", []),
                 "unchanged": True,
             }
-            if previous.get("lessons_complete") or (
-                previous.get("lesson_ids") and not previous.get("degradation")
+            if (
+                previous.get("lessons_complete")
+                or (previous.get("lesson_ids") and not previous.get("degradation"))
+                or (previous.get("lessons_skipped") and not _ai_opted_in())
             ):
                 return {
                     **cached,
@@ -88,6 +136,7 @@ def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
                             "lesson_ids",
                             "lesson_transitions",
                             "lessons_complete",
+                            "lessons_skipped",
                             "degradation",
                         )
                         if key in previous
@@ -99,6 +148,14 @@ def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
         from smartmemory_app.session_lessons import capture_lessons
 
         def lessons_for(item_ids):
+            if not _ai_opted_in():
+                # Session lessons are an LLM call: skipped on the costless path. Not a degradation, so the
+                # whole-file retry never re-runs it.
+                log.warning(
+                    "capture %s: session lessons skipped (costless capture; AI opt-in is off)",
+                    job.get("capture_id") or job.get("session_id"),
+                )
+                return {"lesson_ids": [], "lessons_skipped": True}
             return capture_lessons(
                 mem,
                 job,
@@ -127,7 +184,9 @@ def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
                 and existing.metadata.get("workspace_id") != job["workspace_id"]
             ):
                 raise ValueError("Transcript natural key belongs to another workspace")
-        result = mem.ingest_conversation_sync(**kwargs)
+        result = mem.ingest_conversation_sync(
+            **kwargs, source_ref=_source_ref(job, tail, byte_range)
+        )
         if result.chunks_failed:
             raise RuntimeError(
                 ", ".join(chunk.error for chunk in result.chunk_results if chunk.error)
@@ -168,6 +227,7 @@ _RECEIPT_LESSON_KEYS = (
     "lesson_ids",
     "lesson_transitions",
     "lessons_complete",
+    "lessons_skipped",
     "degradation",
 )
 
@@ -212,7 +272,11 @@ def capture_transcript(job: dict) -> dict:
             and previous.get("degradation")
             and not previous.get("lessons_complete")
         ):
-            return {**import_capture(job), "tail_start": 0, "tail_end": size}
+            return {
+                **import_capture(job, byte_range=(0, size)),
+                "tail_start": 0,
+                "tail_end": size,
+            }
         return {
             "unchanged": True,
             "no_new_bytes": True,
@@ -222,7 +286,7 @@ def capture_transcript(job: dict) -> dict:
             "tail_end": size,
         }
     if start == 0 and size <= cap:
-        receipt = import_capture(job)
+        receipt = import_capture(job, byte_range=(0, size))
         slices.write_offset(root, path, size)
         return {**_merge([receipt]), "tail_start": 0, "tail_end": size}
     with closing(slices.iter_slices(path, start, size, cap, root)) as pieces:

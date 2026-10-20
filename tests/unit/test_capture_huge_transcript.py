@@ -49,7 +49,7 @@ def fake_import(monkeypatch):
     """Record every import call: (tail start, tail end, slice text) or None for a whole file."""
     calls = []
 
-    def fake(job, tail=None):
+    def fake(job, tail=None, byte_range=None):
         calls.append(
             None if tail is None else (tail.start, tail.end, tail.path.read_text())
         )
@@ -170,7 +170,7 @@ def test_cap_slice_memory_stays_bounded(transcript, monkeypatch):
     transcript.write_text(lines(20))
     seen = []
 
-    def fake(job, tail=None):
+    def fake(job, tail=None, byte_range=None):
         held = list((queue.capture_dir() / "slices").glob("*/*/*"))
         seen.append((tail.path.stat().st_size, len(held)))
         return {}

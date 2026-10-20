@@ -167,6 +167,7 @@ def test_partial_chunk_failure_is_error(tmp_path, monkeypatch, caplog):
 
 def test_groq_pin_never_uses_openai_key(monkeypatch):
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    monkeypatch.setenv("SMARTMEMORY_INGEST_AI_SUMMARY", "claude_code_transcript")
     monkeypatch.setenv("GROQ_API_KEY", "test-groq")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
     monkeypatch.setenv("LLM_API_KEY", "wrong-key")
@@ -187,6 +188,42 @@ def test_groq_pin_never_uses_openai_key(monkeypatch):
 
 def test_missing_groq_key_fails_closed(monkeypatch):
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    monkeypatch.setenv("SMARTMEMORY_INGEST_AI_SUMMARY", "claude_code_transcript")
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         worker._memory()
+
+
+# MEM-SIZE-1: capture is costless unless the per-source AI opt-in is on (and capture is not offline).
+COSTLESS_ROWS = [
+    # (id, opt-in env, offline env, expected profile)
+    ("default: opt-in off, online", None, None, "costless"),
+    ("offline wins over the opt-in", "claude_code_transcript", "1", "costless"),
+    ("opt-in for another kind only", "web_page", None, "costless"),
+]
+
+
+@pytest.mark.parametrize("row", COSTLESS_ROWS, ids=[r[0] for r in COSTLESS_ROWS])
+def test_costless_capture_needs_no_groq_key(monkeypatch, row):
+    _, opt_in, offline, expected = row
+    for name, value in (
+        ("SMARTMEMORY_INGEST_AI_SUMMARY", opt_in),
+        ("SMARTMEMORY_CAPTURE_OFFLINE", offline),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "")
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_PROVIDER", "")
+    factory = Mock()
+    monkeypatch.setattr("smartmemory.tools.factory.create_lite_memory", factory)
+    worker._memory()  # no GROQ_API_KEY and no raise
+    profile = factory.call_args.kwargs["pipeline_profile"]
+    assert profile.profile_name == expected
+    assert profile.llm_allowed is False
+    assert (
+        worker.os.environ["LLM_PROVIDER"] == ""
+    )  # no provider pin on the costless path
+    assert worker.os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] == "local"

@@ -273,6 +273,12 @@ def test_three_session_lifecycle_and_fresh_injection(
 
 
 @pytest.fixture(autouse=True)
+def _lessons_opt_in(monkeypatch):
+    """Session lessons are an LLM call: they run only on the per-source AI opt-in since MEM-SIZE-1."""
+    monkeypatch.setenv("SMARTMEMORY_INGEST_AI_SUMMARY", "claude_code_transcript")
+
+
+@pytest.fixture(autouse=True)
 def constraint_classifier_replay(monkeypatch):
     """Isolate RC5 classification from existing extraction/lifecycle recordings."""
     from pathlib import Path

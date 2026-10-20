@@ -158,6 +158,9 @@ def _library_get_memory(seen, monkeypatch):
 def _capture_worker_memory(seen, monkeypatch):
     from smartmemory_app import capture_worker
 
+    # MEM-SIZE-1: the Groq pin applies only on the per-source AI opt-in; costless capture has no LLM route.
+    monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    monkeypatch.setenv("SMARTMEMORY_INGEST_AI_SUMMARY", "claude_code_transcript")
     monkeypatch.setenv("GROQ_API_KEY", "not-a-real-key")
     with pytest.raises(_Stop):
         capture_worker._memory()
@@ -181,8 +184,12 @@ EXEMPT = {
     # TOUR-ASK-FU-H1: never calls apply_runtime_config() and overwrites
     # SMARTMEMORY_LLM_MODEL (capture_worker.py), on purpose. Product policy since
     # DEMO-CC-UPLIFT-1 6a017f4: production capture is pinned to Groq, never to
-    # subscription billing, whatever provider the user configured.
-    "capture_worker": "deliberate Groq pin, not the configured provider (policy)",
+    # subscription billing, whatever provider the user configured. MEM-SIZE-1: capture is
+    # costless by default (no LLM route); the pin applies only on the AI opt-in.
+    # CAPTURE-HOLD-ALL-1 release-held CLI: moves held event files and spawns the
+    # capture worker (exempt below); it makes no LLM call itself.
+    "capture_queue": "hold release CLI: moves queue files, no LLM call",
+    "capture_worker": "deliberate Groq pin only on the AI opt-in, not the configured provider; costless by default (policy)",
 }
 
 

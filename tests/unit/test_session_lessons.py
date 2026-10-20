@@ -18,6 +18,12 @@ LESSON = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _lessons_opt_in(monkeypatch):
+    """Session lessons are an LLM call: they run only on the per-source AI opt-in since MEM-SIZE-1."""
+    monkeypatch.setenv("SMARTMEMORY_INGEST_AI_SUMMARY", "claude_code_transcript")
+
+
 @pytest.fixture
 def lesson_env(monkeypatch, tmp_path, provider_pin_isolated):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
