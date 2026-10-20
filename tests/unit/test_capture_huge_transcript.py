@@ -1,4 +1,5 @@
-"""CAPTURE-HUGE-TRANSCRIPT-1: incremental capture, size cap, dedupe, lock waiters, RSS guard.
+"""CAPTURE-HUGE-TRANSCRIPT-1: incremental capture, size cap, dedupe, lock waiters, RSS
+recycle, spawn cap.
 
 Transcripts are generated under tmp_path. Nothing here reads a real transcript.
 """
@@ -16,6 +17,7 @@ from smartmemory_app import capture_queue as queue, capture_slices as slices
 from smartmemory_app import capture_worker as worker
 
 CAP_BYTES = 600  # CAPTURE_MAX_MB=0.0006 is about 629 bytes
+_real_spawn_worker = queue.spawn_worker
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +26,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("CAPTURE_MAX_MB", "0.0006")
     monkeypatch.setattr(queue, "spawn_worker", lambda: None)
+    monkeypatch.setattr(queue, "spawn_successor", lambda: None)
     monkeypatch.setattr(worker, "rss_mb", lambda: 10.0)
 
 
@@ -136,20 +139,47 @@ def test_offset_write_is_atomic_rename(tmp_path):
     ] == []
 
 
-def test_cap_over_with_no_offset_is_skipped_and_sets_offset(
-    transcript, fake_import, caplog
+def test_cap_never_captured_over_cap_drains_fully_across_passes(
+    transcript, tmp_path, fake_import
 ):
     transcript.write_text(lines(20))
     size = transcript.stat().st_size
     assert size > CAP_BYTES
-    receipt = capture(transcript)
-    assert receipt["status"] == "skipped" and fake_import == []
-    assert str(transcript.resolve()) in caplog.text and str(size) in caplog.text
+    other = tmp_path / "other.jsonl"
+    other.write_text(lines(1))
+    queue.enqueue("s", str(transcript), "ws")
+    queue.enqueue("s2", str(other), "ws")
+    worker.run()
+    huge = [
+        j for j in queue.jobs() if j["transcript_path"] == str(transcript.resolve())
+    ]
+    pieces = [c for c in fake_import if c is not None]
+    assert len(pieces) > 1 and len(huge) == len(pieces)  # One slice per job.
+    assert all(j["status"] == "done" for j in queue.jobs())
+    assert pieces[0][0] == 0 and pieces[-1][1] == size
+    assert [a[1] for a in pieces[:-1]] == [b[0] for b in pieces[1:]]  # Contiguous.
+    assert "".join(text for _, _, text in pieces) == transcript.read_text()
+    assert fake_import[1] is None  # The other session ran right after slice 1.
+    assert huge[0]["continued_by"] == huge[1]["capture_id"]
     assert stored_offset(transcript) == size
-    with transcript.open("a") as handle:  # Later SessionEnds capture only the new tail.
-        handle.write(lines(1, start=20))
+
+
+def test_cap_slice_memory_stays_bounded(transcript, monkeypatch):
+    """Measured 2026-10-20 (report-c2): RSS grows with what one process holds, so a job
+    holds one slice of at most the cap, and only one slice exists at a time."""
+    transcript.write_text(lines(20))
+    seen = []
+
+    def fake(job, tail=None):
+        held = list((queue.capture_dir() / "slices").glob("*/*/*"))
+        seen.append((tail.path.stat().st_size, len(held)))
+        return {}
+
+    monkeypatch.setattr(worker, "import_capture", fake)
     capture(transcript)
-    assert fake_import[0][0] == size
+    assert len(seen) > 1
+    assert all(size <= CAP_BYTES and held == 1 for size, held in seen)
+    assert all(j.get("slices") == 1 for j in queue.jobs())
 
 
 def test_cap_under_is_processed(transcript, fake_import):
@@ -162,9 +192,10 @@ def test_cap_tail_over_cap_is_chunked(transcript, fake_import):
     grown = lines(20, start=2)
     with transcript.open("a") as handle:
         handle.write(grown)
-    receipt = capture(transcript)
+    capture(transcript)
     pieces = fake_import[1:]
-    assert len(pieces) > 1 and receipt["slices"] == len(pieces)
+    tails = [j for j in queue.jobs() if j.get("tail_start", 0) >= base]
+    assert len(pieces) > 1 and len(tails) == len(pieces)
     assert all(len(text.encode()) <= CAP_BYTES for _, _, text in pieces)
     assert pieces[0][0] == base
     assert [a[1] for a in pieces[:-1]] == [b[0] for b in pieces[1:]]  # Contiguous.
@@ -258,12 +289,13 @@ def test_lock_holder_rescans_after_the_final_scan(
     late.write_text(lines(1))
     real_drain, raced = worker._drain, []
 
-    def drain_then_race(root):
-        real_drain(root)
+    def drain_then_race(root, *args):
+        result = real_drain(root, *args)
         if (
             not raced
         ):  # An enqueue lands after the last scan, before the lock is released.
             raced.append(queue.enqueue("s", str(late), "ws"))
+        return result
 
     monkeypatch.setattr(worker, "_drain", drain_then_race)
     queue.enqueue("s", str(transcript), "ws")
@@ -272,23 +304,29 @@ def test_lock_holder_rescans_after_the_final_scan(
     assert len(fake_import) == 2
 
 
-def test_rss_over_limit_skips_the_item_and_moves_on(
+def test_rss_over_limit_recycles_and_leaves_the_item_queued(
     transcript, tmp_path, fake_import, monkeypatch, caplog
 ):
     other = tmp_path / "other.jsonl"
     other.write_text(lines(1))
-    readings = iter([5000.0, 10.0])
-    monkeypatch.setattr(worker, "rss_mb", lambda: next(readings))
-    monkeypatch.setenv("CAPTURE_MAX_RSS_MB", "1024")
+    monkeypatch.setattr(worker, "rss_mb", lambda: 5000.0)
+    monkeypatch.setenv("CAPTURE_MAX_RSS_MB", "3072")
+    lock_free = []
+
+    def successor():
+        probe = FileLock(str(queue.capture_dir() / "worker.lock"), timeout=0)
+        probe.acquire()  # Raises if the recycling worker still held it.
+        probe.release()
+        lock_free.append(True)
+
+    monkeypatch.setattr(queue, "spawn_successor", successor)
     queue.enqueue("s", str(transcript), "ws")
     queue.enqueue("s", str(other), "ws")
     worker.run()
     first, second = queue.jobs()
-    assert first["status"] == "skipped" and "CAPTURE_MAX_RSS_MB" in first["reason"]
-    assert second["status"] == "done"
-    assert (
-        stored_offset(transcript) is None
-    )  # Not advanced: a later SessionEnd retries it.
+    assert first["status"] == "done"  # A fresh process always takes its first item.
+    assert second["status"] == "queued" and stored_offset(other) is None
+    assert lock_free == [True]
     assert [r.levelname for r in caplog.records if "RSS" in r.message] == ["WARNING"]
 
 
@@ -300,3 +338,61 @@ def test_rss_unreadable_does_not_block_capture(transcript, fake_import, monkeypa
 def test_rss_reader_reads_this_process():
     value = slices.rss_mb()
     assert value is None or value > 1
+
+
+def test_rss_default_is_3072(monkeypatch):
+    monkeypatch.delenv("CAPTURE_MAX_RSS_MB")
+    assert slices.max_rss_mb() == 3072
+
+
+def _fake_pgrep(bin_dir, running):
+    bin_dir.mkdir()
+    if running is not None:
+        script = bin_dir / "pgrep"
+        script.write_text(
+            "#!/bin/sh\n"
+            + "".join(f"echo {1000 + i}\n" for i in range(running))
+            + ("exit 0\n" if running else "exit 1\n")
+        )
+        script.chmod(0o755)
+
+
+# (id, live workers per pgrep or None when pgrep is missing, SMARTMEMORY_CAPTURE_MAX, spawns)
+_SPAWN_CAP_CASES = (
+    ("at-cap", 2, None, False),
+    ("under-cap", 1, None, True),
+    ("off", 9, "0", True),
+    ("pgrep-missing-fails-open", None, None, True),
+)
+
+
+@pytest.mark.parametrize(
+    "running,cap,spawns",
+    [c[1:] for c in _SPAWN_CAP_CASES],
+    ids=[c[0] for c in _SPAWN_CAP_CASES],
+)
+def test_spawn_cap_table(tmp_path, monkeypatch, running, cap, spawns):
+    _fake_pgrep(tmp_path / "bin", running)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    if cap is None:
+        monkeypatch.delenv("SMARTMEMORY_CAPTURE_MAX")
+    else:
+        monkeypatch.setenv("SMARTMEMORY_CAPTURE_MAX", cap)
+    started = Mock()
+    monkeypatch.setattr(queue, "spawn_successor", started)
+    _real_spawn_worker()
+    log = queue.capture_dir().parent / "hooks.log"
+    cap_lines = [
+        ln
+        for ln in (log.read_text() if log.exists() else "").splitlines()
+        if "HOOK-LOAD-CAP-1" in ln
+    ]
+    assert started.call_count == (1 if spawns else 0)
+    assert cap_lines == (
+        []
+        if spawns
+        else [
+            "WARNING: capture worker spawn skipped: 2 already running "
+            "(cap 2, HOOK-LOAD-CAP-1)"
+        ]
+    )

@@ -111,7 +111,56 @@ def enqueue(
     return job
 
 
+DEFAULT_CAPTURE_MAX = 2
+_WORKER_PATTERN = "smartmemory_app.capture_worker"
+
+
+def _capture_max() -> int:
+    raw = os.environ.get("SMARTMEMORY_CAPTURE_MAX", "")
+    try:
+        return int(raw) if raw.strip() else DEFAULT_CAPTURE_MAX
+    except ValueError:
+        return DEFAULT_CAPTURE_MAX
+
+
+def _running_workers() -> int:
+    """Live capture workers machine-wide, as the hooks count theirs. 0 if pgrep fails."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", _WORKER_PATTERN],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    return len(out.stdout.split())
+
+
 def spawn_worker() -> None:
+    """Start a worker unless SMARTMEMORY_CAPTURE_MAX are already alive (0 = no cap).
+
+    The event is already durable, so a capped spawn loses nothing: a live worker or the
+    next SessionEnd drains it. Cap 2, not 1: a SessionEnd landing after the holder's last
+    scan must still be able to start one.
+    """
+    cap = _capture_max()
+    if cap > 0:
+        running = _running_workers()
+        if running >= cap:
+            # HOOK-LOAD-CAP-1 mechanism, same line shape as hooks/observe.sh.
+            with (capture_dir().parent / "hooks.log").open("a") as handle:
+                handle.write(
+                    f"WARNING: capture worker spawn skipped: {running} already running "
+                    f"(cap {cap}, HOOK-LOAD-CAP-1)\n"
+                )
+            return
+    spawn_successor()
+
+
+def spawn_successor() -> None:
+    """Start a worker with no cap check: a recycling worker replaces itself one for one."""
     root = capture_dir()
     with (root.parent / "hooks.log").open("a") as handle:
         spawn_detached(

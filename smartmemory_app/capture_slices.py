@@ -21,7 +21,9 @@ from typing import Iterator
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_MB = 50.0
-DEFAULT_MAX_RSS_MB = 1024.0
+# Measured 2026-10-20 on a copy of a 610 MB store: opening it reaches 1,466 MB, one job peaks
+# at 2,040 MB, each further item adds 10-105 MB. 3,072 MB leaves room for about ten more.
+DEFAULT_MAX_RSS_MB = 3072.0
 _SKIP_BLOCK = 1024 * 1024
 _rss_unreadable_logged = False
 

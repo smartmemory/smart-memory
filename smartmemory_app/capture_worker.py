@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+from contextlib import closing
 from pathlib import Path
 
 from filelock import FileLock, Timeout
@@ -16,10 +17,6 @@ from smartmemory_app import capture_slices as slices
 from smartmemory_app.capture_slices import rss_mb
 
 log = logging.getLogger(__name__)
-
-
-class CaptureSkipped(Exception):
-    """The item is deliberately not (fully) captured. Recorded as status ``skipped``."""
 
 
 def _memory():
@@ -54,8 +51,8 @@ def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
         tail.path if tail else job["transcript_path"], min_turns=1
     )
     if conversation is None:
-        if tail is not None and tail.start > 0:
-            return {"empty_tail": True}  # Appended records with no spoken turns.
+        if tail is not None:
+            return {"empty_tail": True}  # A byte range with no spoken turns.
         raise ValueError("Transcript contains no conversational turns")
     kwargs = next(iter_transcript_ingest_kwargs([(conversation, "claude_code", stats)]))
     if tail is not None:
@@ -147,12 +144,11 @@ def import_capture(job: dict, tail: slices.Slice | None = None) -> dict:
         mem.close()
 
 
-def _check_rss() -> None:
+def _over_rss() -> str | None:
     limit, used = slices.max_rss_mb(), rss_mb()
     if used is not None and used > limit:
-        raise CaptureSkipped(
-            f"worker RSS {used:.0f} MB over CAPTURE_MAX_RSS_MB={limit:g}"
-        )
+        return f"worker RSS {used:.0f} MB over CAPTURE_MAX_RSS_MB={limit:g}"
+    return None
 
 
 def _merge(receipts: list[dict]) -> dict:
@@ -183,7 +179,12 @@ def _last_done(path: str) -> dict:
 
 
 def capture_transcript(job: dict) -> dict:
-    """Capture only what the transcript gained since the stored offset."""
+    """Capture what the transcript gained since the stored offset, one slice per job.
+
+    A range over the cap is captured one slice at a time: after a slice, a continuation
+    is queued for the same path behind every other waiting session, so one huge file
+    never starves the queue and never holds more than one slice in memory.
+    """
     path = job["transcript_path"]
     try:
         size = Path(path).stat().st_size
@@ -192,19 +193,7 @@ def capture_transcript(job: dict) -> dict:
     root, cap = queue.capture_dir(), slices.max_bytes()
     start = slices.read_offset(root, path)
     if start is None:
-        if size > cap:
-            log.warning(
-                "Transcript %s is %d bytes, over CAPTURE_MAX_MB, skipped. "
-                "Later captures start at byte %d",
-                path,
-                size,
-                size,
-            )
-            slices.write_offset(root, path, size)
-            raise CaptureSkipped(
-                f"over CAPTURE_MAX_MB: {size} bytes, offset set to {size}"
-            )
-        start = 0
+        start = 0  # Never captured: from the first byte, however large.
     elif size < start:
         log.warning(
             "Transcript %s shrank from %d to %d bytes, capturing from the start",
@@ -231,40 +220,57 @@ def capture_transcript(job: dict) -> dict:
             "tail_start": start,
             "tail_end": size,
         }
-    receipts, end = [], start
     if start == 0 and size <= cap:
-        _check_rss()
-        receipts.append(import_capture(job))
+        receipt = import_capture(job)
         slices.write_offset(root, path, size)
-        end = size
-    else:
-        for piece in slices.iter_slices(path, start, size, cap, root):
-            _check_rss()
-            receipts.append(import_capture(job, piece))
-            slices.write_offset(root, path, piece.end)  # After success only.
-            end = piece.end
-            gc.collect()
-    return {**_merge(receipts), "tail_start": start, "tail_end": end}
+        return {**_merge([receipt]), "tail_start": 0, "tail_end": size}
+    with closing(slices.iter_slices(path, start, size, cap, root)) as pieces:
+        piece = next(pieces, None)
+        if piece is None:  # The file shrank to the offset under us.
+            return {"unchanged": True, "no_new_bytes": True, "item_ids": []}
+        receipt = import_capture(job, piece)
+        slices.write_offset(root, path, piece.end)  # After success only.
+    gc.collect()
+    receipt = {**_merge([receipt]), "tail_start": start, "tail_end": piece.end}
+    if piece.end < size:
+        nxt = queue.enqueue(
+            job["session_id"], path, job["workspace_id"], job.get("cwd")
+        )
+        log.warning(
+            "Transcript %s captured to byte %d of %d, the rest is queued as %s",
+            path,
+            piece.end,
+            size,
+            nxt["capture_id"],
+        )
+        receipt.update(continued_by=nxt["capture_id"], bytes_left=size - piece.end)
+    return receipt
 
 
 def _pending(root) -> list[dict]:
     return [j for j in queue.jobs(root) if j["status"] in {"queued", "running"}]
 
 
-def _drain(root) -> None:
+def _drain(root, fresh: bool = True) -> str | None:
+    """Drain FIFO. Return the reason when RSS passed the limit before an item.
+
+    The item is then left ``queued`` for a fresh process (memory is never given back
+    between items). A fresh process always takes its first item, so recycling ends.
+    """
     while pending := _pending(root):
+        if not fresh and (reason := _over_rss()):
+            return reason
+        fresh = False
         job = queue.transition(pending[0], "running")
         try:
             receipt = capture_transcript(job)
-        except CaptureSkipped as exc:
-            log.warning("Transcript capture %s skipped: %s", job["capture_id"], exc)
-            queue.transition(job, "skipped", reason=str(exc))
         except Exception as exc:
             message = f"{type(exc).__name__}: {exc}"
             log.warning("Transcript capture %s failed: %s", job["capture_id"], message)
             queue.transition(job, "error", error=message)
         else:
             queue.transition(job, "done", **receipt)
+    return None
 
 
 def run() -> None:
@@ -273,6 +279,7 @@ def run() -> None:
     # the holder re-scans after releasing it, so an enqueue racing its last scan is
     # picked up by the holder (or by whoever takes the lock next), never stranded.
     lock = FileLock(str(root / "worker.lock"), timeout=0)
+    fresh = True
     while True:
         try:
             lock.acquire()
@@ -280,9 +287,22 @@ def run() -> None:
             log.info("Capture worker lock is held, the holder drains the queue")
             return
         try:
-            _drain(root)
+            recycle = _drain(root, fresh)
         finally:
             lock.release()
+        fresh = False
+        if recycle:
+            # After the release: the successor's timeout=0 lock attempt must succeed.
+            log.warning("Capture worker recycles itself: %s", recycle)
+            try:
+                queue.spawn_successor()
+            except OSError as exc:
+                log.warning(
+                    "Capture worker could not start its successor, the queue waits "
+                    "for the next SessionEnd: %s",
+                    exc,
+                )
+            return
         if not _pending(root):
             return
 
