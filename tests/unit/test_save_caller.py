@@ -1070,7 +1070,10 @@ def _lock_is_held(ctx):
     held = filelock.FileLock(lock_path)
     held.acquire()
     ctx.addfinalizer(held.release)
-    cause = f"Timeout: The file lock {lock_path!r} could not be acquired."
+    # The cause text belongs to storage's StoreBusyError, so read it from the lock instead of copying it.
+    with pytest.raises(storage.StoreBusyError) as busy:
+        storage._get_lock_file(ctx.tmp_path).acquire()
+    cause = f"StoreBusyError: {busy.value}"
     return (
         lambda: storage.save(
             build_save_call(seam="mcp", content="c"), memory=Recorder()
