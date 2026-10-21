@@ -41,6 +41,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical, VerticalScroll
+from textual.markup import escape
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Static
 
@@ -180,6 +181,63 @@ def compute_token_receipt(
     )
 
 
+class TourRequestError(httpx.HTTPStatusError):
+    """A tour daemon call failed; the message carries the server's own detail.
+
+    TOUR-ASK-502-1: ``raise_for_status()`` text names only the status and URL,
+    so the tour screen said "502 Bad Gateway" while the daemon's ``detail`` held
+    the real reason. Subclassing HTTPStatusError keeps existing handlers working.
+    """
+
+
+def _http_error_reason(response: httpx.Response) -> str:
+    """``HTTP <code>: <server detail>``; falls back to the body, then the reason phrase."""
+    try:
+        detail = response.json().get("detail")
+    except Exception:
+        detail = None
+    if detail and not isinstance(detail, str):
+        detail = json.dumps(detail)
+    if not detail:
+        detail = (response.text or "").strip()[:500] or response.reason_phrase
+    return f"HTTP {response.status_code}: {detail}"
+
+
+def _checked_json(response: httpx.Response) -> Any:
+    if response.is_error:
+        raise TourRequestError(
+            _http_error_reason(response),
+            request=response.request,
+            response=response,
+        )
+    return response.json()
+
+
+def _report_degraded(step: str, reason: str, exc: BaseException | None = None) -> None:
+    """Report a handled tour degradation (TOUR-ASK-502-1).
+
+    Gated by ``crash_reporter.enabled()``; never raises into the tour. An
+    exception goes out with its cause chain, a degradation without one as a
+    deduplicated ``tour_degraded`` event.
+    """
+    try:
+        from smartmemory_app import crash_reporter
+
+        if exc is not None:
+            crash_reporter.report_in_background(exc, source="tour", handled=True)
+        else:
+            crash_reporter.report_event(
+                "tour_degraded",
+                {"tour_step": step, "reason": reason},
+                dedupe_key=f"tour_degraded:{step}",
+            )
+    except Exception as error:
+        logger.warning(
+            "SmartMemory tour: degradation report unavailable (%s)",
+            type(error).__name__,
+        )
+
+
 class TourHttpClient:
     """Small daemon HTTP client for the tour arc."""
 
@@ -200,16 +258,14 @@ class TourHttpClient:
                 "properties": {"tour": "DIST-TOUR-1"},
             },
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def search(self, query: str, top_k: int = 5) -> dict:
         response = self._client.post(
             "/memory/search",
             json={"query": query, "top_k": top_k},
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def recall(
         self, cwd: str | None = None, top_k: int = 8, query: str | None = None
@@ -224,16 +280,14 @@ class TourHttpClient:
                 "strict": "false",
             },
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def ask(self, question: str, limit: int = 5) -> dict:
         response = self._client.post(
             "/memory/ask",
             json={"question": question, "limit": limit},
         )
-        response.raise_for_status()
-        return response.json()
+        return _checked_json(response)
 
     def close(self) -> None:
         self._client.close()
@@ -276,6 +330,9 @@ class TourArcDriver:
             # Type first, then run: the graph reacts while the command is on screen.
             self._session_type(emit, f'sm add "{fact}"')
             result = self.client.ingest(fact, memory_type="semantic")
+            if result.get("status") == "held":
+                self._session_print(emit, f"Held: {result.get('reason')}")
+                continue
             seeded_ids.append(str(result.get("item_id", "?")))
             self._session_print(emit, seeded_ids[-1])
             self._emit(
@@ -292,7 +349,11 @@ class TourArcDriver:
             emit,
             2,
             "Semantic search",
-            "A question in plain language, answered from the facts just stored.",
+            (
+                "A question in plain language, answered from the facts just stored."
+                if seeded_ids
+                else "A question in plain language, searching the existing memory."
+            ),
         )
         self._session_type(emit, f'sm search "{SEARCH_QUERY}"')
         search_response = self.client.search(SEARCH_QUERY, top_k=5)
@@ -314,6 +375,7 @@ class TourArcDriver:
         )
         if degraded_reason:
             logger.warning("SmartMemory tour degraded: %s", degraded_reason)
+            _report_degraded("seeded_content", degraded_reason)
             self._emit(
                 emit,
                 3,
@@ -362,6 +424,7 @@ class TourArcDriver:
         self._session_print(emit, recall_text or "(recall returned no context)")
 
         imported_claude = False
+        claude_hold = None
         imported_search_text = ""
         claude_path = self.cwd / "CLAUDE.md"
         if include_claude_import and claude_path.exists() and claude_path.is_file():
@@ -375,8 +438,11 @@ class TourArcDriver:
                     "Already keeping a CLAUDE.md? One command imports it, searchable like everything else.",
                 )
                 self._session_type(emit, "sm add --all - < ./CLAUDE.md")
-                self.client.ingest(content, memory_type="semantic")
-                imported_claude = True
+                receipt = self.client.ingest(content, memory_type="semantic")
+                if receipt.get("status") == "held":
+                    claude_hold = receipt
+                    self._session_print(emit, f"Held: {receipt.get('reason')}")
+                imported_claude = receipt.get("status") != "held"
                 imported_search_text = _format_search_response(
                     self.client.search("project instructions", top_k=3)
                 )
@@ -387,7 +453,9 @@ class TourArcDriver:
                 emit,
                 5,
                 "Import your CLAUDE.md",
-                "No ./CLAUDE.md found in this directory, so the import step was skipped.",
+                f"CLAUDE.md held: {claude_hold.get('reason')}"
+                if claude_hold
+                else "No ./CLAUDE.md found in this directory, so the import step was skipped.",
                 "sm add --all - < ./CLAUDE.md",
             )
 
@@ -460,10 +528,12 @@ class TourArcDriver:
             logger.warning(
                 "SmartMemory tour: sm ask failed (%s); showing the command only.", exc
             )
+            _report_degraded("ask", str(exc), exc)
             return f"(ask unavailable: {exc})"
         answer = response.get("answer") if isinstance(response, dict) else None
         if not isinstance(answer, str) or not answer.strip():
             logger.warning("SmartMemory tour: sm ask returned no answer.")
+            _report_degraded("ask", "ask returned no answer")
             return "(ask returned no answer)"
         return answer.strip()
 
@@ -643,8 +713,22 @@ class TourDaemon:
                     )
                 try:
                     response = client.get(f"{self.base_url}/health")
-                    if response.status_code == 200:
+                    # /health answers 200 while still "warming"; memory routes block until
+                    # warmup ends, so only a finished warmup counts as ready.
+                    status = (
+                        response.json().get("status")
+                        if response.status_code == 200
+                        else None
+                    )
+                    if status == "degraded":
+                        raise RuntimeError(
+                            "tour daemon failed to start: "
+                            f"{response.json().get('degraded_reason') or 'warmup did not complete'}"
+                        )
+                    if response.status_code == 200 and status != "warming":
                         return
+                except RuntimeError:
+                    raise
                 except Exception as exc:
                     last_error = exc
                 time.sleep(0.25)
@@ -652,7 +736,7 @@ class TourDaemon:
         raise TimeoutError(f"tour daemon did not become healthy{detail}")
 
     def _assert_reached_empty_store(self) -> None:
-        with httpx.Client(trust_env=False, timeout=5.0) as client:
+        with httpx.Client(trust_env=False, timeout=60.0) as client:
             response = client.get(f"{self.base_url}/memory/graph/full")
             response.raise_for_status()
             payload = response.json()
@@ -924,6 +1008,8 @@ class TourApp(App):
             result = self.runner.run(emit=emit)
             self.call_from_thread(self._finish, result)
         except BaseException as exc:
+            if isinstance(exc, Exception):
+                _report_degraded("run", str(exc), exc)
             self.call_from_thread(
                 self._show_event,
                 TourEvent(
@@ -963,7 +1049,7 @@ class TourApp(App):
         if screen is None:
             return
         screen.query_one("#tour-title", Static).update(
-            f"[bold]Step {event.step}: {event.title}[/bold]"
+            f"[bold]{tour_step_label(event.step)} {event.title}[/bold]"
         )
         # Shell commands render with a prompt marker; labels/URLs render as-is.
         cmd = event.command
@@ -973,6 +1059,17 @@ class TourApp(App):
         screen.query_one("#tour-output", Static).update(event.body)
 
 
+# CLI-SETUP-UX-1: the arc emits steps 1 to 7; step 0 is the intro before the arc starts.
+TOUR_STEP_COUNT = 7
+
+
+def tour_step_label(step: int) -> str:
+    """The same ``[n/N]`` counter setup prints. Escaped so TUI markup keeps it literal."""
+    if step <= 0:
+        return "Getting ready:"
+    return escape(f"[{step}/{TOUR_STEP_COUNT}]") + ":"
+
+
 def run_tour(
     keep: bool = False,
     code: bool = False,
@@ -980,6 +1077,23 @@ def run_tour(
     no_viewer: bool = False,
 ) -> TourRunResult | None:
     """Launch the guided tour TUI."""
+    if sys.platform == "win32" and os.environ.get("SMARTMEMORY_FORCE_TUI") != "1":
+        import click
+
+        logging.getLogger(__name__).debug("Skipping guided tour TUI on Windows")
+        click.echo(
+            "The guided tour TUI is disabled on Windows while terminal support is tested. "
+            "Try 'sm add', 'sm search' and 'sm recall'. "
+            "Set SMARTMEMORY_FORCE_TUI=1 to test the TUI."
+        )
+        return None
+    from smartmemory_app.console import NO_TERMINAL_MESSAGE, interactive_terminal
+
+    if not interactive_terminal():
+        import click
+
+        click.echo(NO_TERMINAL_MESSAGE.format(name="The guided tour"))
+        return None
     runner = TourSessionRunner(
         keep=keep,
         code=code,

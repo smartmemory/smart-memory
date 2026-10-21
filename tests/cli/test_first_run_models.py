@@ -133,6 +133,12 @@ def machine(_isolated):
     with (
         patch("spacy.util.is_package", side_effect=m.is_package),
         patch("huggingface_hub.snapshot_download", side_effect=m.snapshot_download),
+        # The simulated installation supplies an inference-capable local model.
+        # Keep core's warm() real so setup also validates the loader result.
+        patch(
+            "smartmemory.plugins.embedding.shared_onnx_minilm",
+            return_value=MagicMock(encode_one=lambda text: [0.1] * 384),
+        ),
         patch(
             "smartmemory.tools.factory.create_lite_memory",
             side_effect=m.create_lite_memory,
@@ -512,18 +518,54 @@ def test_remote_mode_skips_local_model_check(_isolated, monkeypatch):
 
 
 def test_remote_mode_direct_access_has_no_local_banner(_isolated, monkeypatch):
+    import httpx
+
+    import smartmemory_app.storage as storage
+
     monkeypatch.setenv("SMARTMEMORY_MODE", "remote")
+    monkeypatch.setenv("SMARTMEMORY_API_URL", "https://test-first-run.invalid")
+    monkeypatch.setenv("SMARTMEMORY_API_KEY", "test_first_run_key")
+    monkeypatch.setenv("SMARTMEMORY_TEAM_ID", "test_first_run_team")
+    monkeypatch.setattr(storage, "_remote_memory", None)
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        assert request.headers["Authorization"] == "Bearer test_first_run_key"
+        if request.url.path == "/auth/me":
+            return httpx.Response(200, json={})
+        assert str(request.url) == "https://test-first-run.invalid/memory/remote-1"
+        assert request.method == "GET"
+        assert request.headers["X-Workspace-Id"] == "test_first_run_team"
+        return httpx.Response(
+            200, json={"item_id": "remote-1", "content": "Hosted memory"}
+        )
+
+    original_client = httpx.Client
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(
+        httpx._api, "Client", lambda **kw: original_client(transport=transport, **kw)
+    )
     with (
         patch(
             "smartmemory_app.warm.is_warm",
             side_effect=AssertionError("local warm probe"),
         ),
         patch("spacy.util.is_package", side_effect=AssertionError("local model check")),
-        patch("smartmemory_app.storage.get", return_value={"item_id": "remote-1"}),
+        patch(
+            "smartmemory_app.storage.get", side_effect=AssertionError("local fallback")
+        ),
+        patch(
+            "smartmemory_app.cli._daemon_request",
+            side_effect=AssertionError("local daemon"),
+        ),
     ):
         result = _invoke(["get", "remote-1"])
     assert result.exit_code == 0, _text(result)
     assert "loading local models" not in _text(result)
+    assert "remote-1" in result.stdout
+    assert "Hosted memory" in result.stdout
+    assert [request.url.path for request in calls] == ["/auth/me", "/memory/remote-1"]
 
 
 @pytest.mark.parametrize("error", ["missing", "hf"])
@@ -644,7 +686,15 @@ def test_unrelated_error_still_raises(machine):
     machine.install_embedding()
     with patch("smartmemory_app.storage.ingest", side_effect=ValueError("boom")):
         result = _add()
-    assert isinstance(result.exception, ValueError)
+    assert result.exit_code == 1
+    assert result.stdout == "", "errors stay off stdout"
+    assert "ValueError: boom" in result.stderr
+    assert "smartmemory report --zip" in result.stderr
+    assert "Traceback" not in _text(result)
+    from smartmemory_app.bug_report import debug_log_path
+
+    crash_log = debug_log_path().read_text()
+    assert "Traceback" in crash_log and "ValueError:" in crash_log
 
 
 @pytest.mark.parametrize(
@@ -709,7 +759,16 @@ def test_suppressed_context_is_not_mislabelled(machine):
 
     with patch("smartmemory_app.storage.ingest", side_effect=ingest):
         result = _add()
-    assert isinstance(result.exception, ValueError)
+    assert result.exit_code == 1
+    assert result.stdout == "", "errors stay off stdout"
+    assert "ValueError: invalid unrelated field" in result.stderr
+    assert "smartmemory report --zip" in result.stderr
+    assert "Traceback" not in _text(result)
+    from smartmemory_app.bug_report import debug_log_path
+
+    crash_log = debug_log_path().read_text()
+    assert "Traceback" in crash_log and "ValueError:" in crash_log
+    assert "MissingModelError" not in _text(result) + crash_log
 
 
 def test_add_embedding_download_shows_no_progress_bars(machine):

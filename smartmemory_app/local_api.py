@@ -25,8 +25,11 @@ import threading
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from smartmemory.errors import MissingModelError
 from smartmemory_app.config import UnconfiguredError, llm_key_present
@@ -40,6 +43,25 @@ log = logging.getLogger(__name__)
 _rw_lock = threading.RLock()
 
 api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
+
+
+# TOUR-ASK-502-1: this app is MOUNTED under /memory. An unhandled route error
+# propagates to the parent app, whose Exception handler (viewer_server._build_app)
+# reports it. A route that converts a failure into HTTPException(5xx) is answered
+# here and never reaches the parent, so those handled 5xx are reported here,
+# gated by crash_reporter.enabled(). The original exception rides along as
+# __context__/__cause__ in the report.
+@api.exception_handler(StarletteHTTPException)
+async def _report_handled_5xx(request: Request, exc: StarletteHTTPException):
+    # 501 is a by-design "not available in remote-proxy mode" answer, not a failure.
+    if exc.status_code >= 500 and exc.status_code != 501:
+        from smartmemory_app.crash_reporter import report_in_background
+
+        await run_in_threadpool(
+            report_in_background, exc, source="daemon", handled=True
+        )
+    return await http_exception_handler(request, exc)
+
 
 # Fields that normalizeAPIResponse reads at top level (normalize.js:38,46).
 # Also includes entity-detection fields (normalize.js:38): node_category, entity_type.
@@ -472,7 +494,12 @@ def get_memory_item(memory_id: str) -> dict[str, Any]:
         return node
     with _rw_lock:
         backend = _get_backend()
-        node = backend.get_node(memory_id)
+        from smartmemory_app.storage import resolve_readonly_item_id
+
+        try:
+            node = backend.get_node(resolve_readonly_item_id(backend, memory_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     if node is None:
         raise HTTPException(status_code=404, detail="Memory not found")
     return node
@@ -488,27 +515,18 @@ def clear_all() -> dict:
     with _rw_lock:
         from smartmemory_app.storage import _resolve_data_dir, _shutdown
 
-        _shutdown()
-
         data_path = _resolve_data_dir()
-        removed = 0
-        if data_path.exists():
-            for pattern in [
-                "*.db",
-                "*.db-shm",
-                "*.db-wal",
-                "*.db-journal",
-                "*.usearch",
-                "*.json",
-                "*.jsonl",
-                ".write.lock",
-            ]:
-                for f in data_path.glob(pattern):
-                    try:
-                        f.unlink()
-                        removed += 1
-                    except OSError:
-                        pass
+        from smartmemory_app.store_reset import (
+            preflight_store_reset,
+            remove_store_files,
+        )
+
+        try:
+            preflight_store_reset(data_path)
+            _shutdown()
+            removed = remove_store_files(data_path)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         # Re-seed patterns
         from smartmemory_app.setup import _seed_data_dir
@@ -761,7 +779,9 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     # Auto-stamp workspace_id so this item is filterable in scoped recall.
     workspace_id = body.workspace_id or derive_workspace_id(body.cwd)
     properties = dict(body.properties or {})
-    if workspace_id and "workspace_id" not in properties:
+    # The stamped workspace wins: a caller property must not move an item out of the
+    # workspace the request (and the CLI's scope header) named.
+    if workspace_id:
         properties["workspace_id"] = workspace_id
 
     # DIST-LITE-QUIET-1: the daemon is a generic local HTTP surface, not CLI-private —
@@ -790,6 +810,8 @@ def ingest_endpoint(body: IngestRequest) -> dict:
             raise HTTPException(
                 status_code=502, detail=f"Hosted SmartMemory API error: {exc}"
             ) from exc
+    if isinstance(result, dict) and result.get("status") == "held":
+        return result
     response = {"item_id": result["item_id"] if isinstance(result, dict) else result}
     if isinstance(result, dict) and result.get("warning"):
         response["warning"] = result["warning"]
@@ -797,6 +819,7 @@ def ingest_endpoint(body: IngestRequest) -> dict:
 
 
 class SearchRequest(BaseModel):
+    origin: str | None = None
     multi_hop: bool = False
     max_hops: int = 3
     hop_strategy: str | None = None
@@ -834,6 +857,7 @@ def _search_items(body: SearchRequest) -> list[dict]:
                 **{
                     k: v
                     for k, v in {
+                        "origin": body.origin,
                         "since": body.since,
                         "until": body.until,
                         "multi_hop": True if body.multi_hop else None,
@@ -880,6 +904,7 @@ def search_endpoint(body: SearchRequest) -> dict:
 class AskRequest(BaseModel):
     question: str
     limit: int = 5
+    reasoning: bool = True
 
 
 _STRUCTURAL_EDGE_TYPES = frozenset(
@@ -1040,12 +1065,36 @@ def _split_answer(text: str) -> tuple[str, str]:
 @api.post("/ask")
 def ask_endpoint(body: AskRequest) -> dict:
     """Answer a question from semantic memories plus their one-hop graph relations."""
+    from smartmemory_app.config import load_config
+    from smartmemory_app.remote_backend import RemoteBackendError
+    from smartmemory_app.storage import _get_remote_memory
+
+    cfg = load_config()
+    if cfg.mode == "remote":
+        try:
+            return _get_remote_memory(cfg).ask(
+                body.question, body.limit, reasoning=body.reasoning
+            )
+        except RemoteBackendError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
     if not llm_key_present():
-        raise HTTPException(
-            status_code=503,
-            detail="`sm ask` requires a configured LLM key (for example GROQ_API_KEY). "
-            "Run `smartmemory setup` or set a supported provider key.",
+        log.warning(
+            "No LLM configured. Returning extractive memories without a written answer."
         )
+        with _rw_lock:
+            try:
+                return _get_mem().ask(
+                    body.question,
+                    body.limit,
+                    reasoning=body.reasoning,
+                    mode="extractive",
+                    search_fn=lambda question, limit: _search_items(
+                        SearchRequest(query=question, top_k=limit)
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
     evidence = [
@@ -1072,7 +1121,9 @@ def ask_endpoint(body: AskRequest) -> dict:
         )
     except Exception as exc:
         log.exception("sm ask LLM request failed")
-        detail = f"Unable to answer with the configured LLM: {exc}"
+        detail = (
+            f"Unable to answer with the configured LLM: {type(exc).__name__}: {exc}"
+        )
         if isinstance(exc, ImportError) and (
             exc.name == "openai" or str(exc) == "openai package is required"
         ):

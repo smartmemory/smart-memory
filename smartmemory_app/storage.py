@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import os
 import threading
 import time
@@ -19,22 +20,47 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 if TYPE_CHECKING:
     from smartmemory import SmartMemory
     from smartmemory_app.remote_backend import RemoteMemory
 
 from smartmemory_app.config import (
+    NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
     UnconfiguredError,
     _detect_and_migrate,
     is_configured,
     load_config,
+    local_llm_without_model,
+    set_derived_env,
 )
 
 
 log = logging.getLogger(__name__)
+
+# Producer-owned fields. Shared with CLI validation so hosted writes cannot
+# bypass the property protection used by storage.ingest().
+RESERVED_INGEST_PROPERTIES = frozenset(
+    {
+        "memory_type",
+        "node_category",
+        "item_id",
+        "content",
+        "embedding",
+        "created_at",
+        "valid_from",
+        "valid_to",
+        "origin",
+    }
+)
+
+# What a user may not set through `sm add --prop`: the producer-owned fields plus
+# `workspace_id`. Not part of RESERVED_INGEST_PROPERTIES itself, because ingest()
+# receives the stamped workspace_id as a property (daemon stamp, `sm add` fallback,
+# lifecycle hooks) and must keep it.
+USER_RESERVED_PROPERTIES = RESERVED_INGEST_PROPERTIES | {"workspace_id"}
 
 _memory: "SmartMemory | None" = None
 _data_path: Path | None = None  # resolved once on first init; reused by ingest()
@@ -44,8 +70,22 @@ _remote_memory: "RemoteMemory | None" = None
 _remote_init_lock = threading.Lock()
 
 WRITE_LOCK_TIMEOUT = (
-    2.0  # seconds — daemon ingest only, worker uses SmartMemory.add() (no lock)
+    30.0  # seconds, override with SMARTMEMORY_WRITE_LOCK_TIMEOUT (0 < value <= 300)
 )
+
+
+class StoreBusyError(RuntimeError):
+    """Write ownership could not be acquired. No write has started."""
+
+
+class _StoreWriteLock(FileLock):
+    def acquire(self, *args, **kwargs):
+        try:
+            return super().acquire(*args, **kwargs)
+        except Timeout as exc:
+            raise StoreBusyError(
+                "Store busy. Try again after current writes finish, or start the daemon with sm start."
+            ) from exc
 
 
 # --- Directory & lock resolution -------------------------------------------------
@@ -59,7 +99,14 @@ def _resolve_data_dir(explicit: str | None = None) -> Path:
 
 
 def _get_lock_file(data_path: Path):
-    return FileLock(str(data_path / ".write.lock"), timeout=WRITE_LOCK_TIMEOUT)
+    timeout = float(
+        os.environ.get("SMARTMEMORY_WRITE_LOCK_TIMEOUT", WRITE_LOCK_TIMEOUT)
+    )
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise ValueError(
+            "SMARTMEMORY_WRITE_LOCK_TIMEOUT must be greater than 0 and at most 300 seconds."
+        )
+    return _StoreWriteLock(str(data_path / ".write.lock"), timeout=timeout)
 
 
 # --- Singleton lifecycle ---------------------------------------------------------
@@ -144,7 +191,20 @@ def apply_runtime_config() -> SmartMemoryConfig:
     cfg = load_config()
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
+    pin_llm_model(cfg)
+    if local_llm_without_model(cfg):
+        _hold_llm_route_off()
+    return cfg
 
+
+def pin_llm_model(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]:
+    """Pin SMARTMEMORY_LLM_MODEL from config. Returns ``{name: origin}`` it set.
+
+    ``environ`` defaults to os.environ. sm doctor runs it on a copy so it reports
+    the model every command will use (SETUP-DOCTOR-1).
+    """
+    env = os.environ if environ is None else environ
+    derived: dict[str, str] = {}
     # CORE-LLM-GEMINI-1 (review finding 2): pin the LLM model from config so the
     # configured provider is honored. An explicit cfg.llm_model is respected for
     # any provider (previously ignored entirely); a gemini provider with no explicit
@@ -152,13 +212,84 @@ def apply_runtime_config() -> SmartMemoryConfig:
     # key-presence and (without this) never selected Gemini, so a gemini selection
     # silently routed elsewhere. Mirrors the embedding pin; an explicit
     # SMARTMEMORY_LLM_MODEL env var still wins.
-    if not os.environ.get("SMARTMEMORY_LLM_MODEL"):
-        _llm_model = cfg.llm_model or (
-            "gemini/gemini-2.0-flash" if cfg.llm_provider == "gemini" else None
-        )
-        if _llm_model:
-            os.environ["SMARTMEMORY_LLM_MODEL"] = _llm_model
-    return cfg
+    #
+    # TOUR-ASK-502-1: the same gap hit groq and openai. get_default_model() ranks
+    # the Claude Agent SDK above every provider key whenever `claude_agent_sdk` is
+    # importable. smartmemory does not depend on it, but a shared interpreter
+    # (e.g. a conda base) may carry it, so a "groq" setup sent every call_llm
+    # (ask, Tier-2 extraction) to the `claude` CLI, which exits 1 when it is not
+    # logged in under this HOME: `sm ask` returned 502 "Command failed with exit
+    # code 1". Only "claude-agent" (and "none") keep core's own default.
+    # Pinning the model, not core's LLM_PROVIDER: that pin also rewrites key and
+    # endpoint resolution for every call in the process, and "openai" as a pin
+    # does not change get_default_model() at all.
+    if not env.get("SMARTMEMORY_LLM_MODEL"):
+        env.pop("SMARTMEMORY_LLM_MODEL", None)  # an empty value counts as unset
+        if cfg.llm_model:
+            set_derived_env(
+                env, "SMARTMEMORY_LLM_MODEL", cfg.llm_model, "llm_model", derived
+            )
+        else:
+            provider_model = _provider_default_model(cfg.llm_provider, env)
+            if provider_model:
+                set_derived_env(
+                    env,
+                    "SMARTMEMORY_LLM_MODEL",
+                    provider_model,
+                    f"{(cfg.llm_provider or '').lower()} provider default",
+                    derived,
+                )
+    return derived
+
+
+def _provider_default_model(provider: str | None, environ=None) -> str | None:
+    """The model a configured cloud provider means when the config names none.
+
+    ``environ`` is the env the pin writes to (os.environ when None), so OPENAI_MODEL
+    is read from the same place the result lands.
+    """
+    env = os.environ if environ is None else environ
+    provider = (provider or "").lower()
+    if provider == "gemini":
+        return "gemini/gemini-2.0-flash"
+    if provider == "groq":
+        return "openai/gpt-oss-120b"  # core's Groq default (is_groq_model routes it)
+    if provider == "openai":
+        return env.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
+    return None
+
+
+def _hold_llm_route_off() -> None:
+    """Make core's LLM route resolver answer no while a local provider has no model.
+
+    Core has no "off" value for its route: with no model it still accepts an ambient
+    provider key, an ``OPENAI_BASE_URL`` or the Claude Agent SDK, and the Lite save
+    queues LLM extraction on that answer. Every core reader (Lite save placement,
+    the work-graph worker, re-extraction, ``PipelineConfig.lite``,
+    ``create_lite_memory``) imports ``llm_route_available`` from its module at call
+    time, so replacing the module attribute reaches all of them in this process.
+    Worker processes call ``apply_runtime_config`` and install it themselves. The
+    hold re-reads the config on each call, so picking a model turns the route back on.
+    """
+    from smartmemory.utils import llm as core_llm
+
+    if getattr(core_llm.llm_route_available, "_no_local_model_hold", False):
+        return
+    resolve = core_llm.llm_route_available
+
+    def llm_route_available() -> tuple[bool, str]:
+        try:
+            off = local_llm_without_model(load_config())
+        except Exception:
+            off = False  # an unreadable config falls through to core, as before
+        if off:
+            return False, NO_LOCAL_MODEL_OFF_LINE
+        return resolve()
+
+    llm_route_available._no_local_model_hold = True
+    llm_route_available.__wrapped__ = resolve
+    core_llm.llm_route_available = llm_route_available
+    log.info("LLM route held off: the local LLM provider has no model chosen")
 
 
 def _get_local_memory(
@@ -190,7 +321,9 @@ def _get_local_memory(
 
         # Core owns lite defaults and deferred placement. The wrapper only applies
         # its explicit coreference preference; ground/evolve remain opt-in.
-        profile = PipelineConfig.lite()
+        profile = PipelineConfig.lite(
+            llm_enabled=False if local_llm_without_model(cfg) else None
+        )
         profile.coreference.enabled = cfg.coreference
         profile.extraction.entity_ruler.spacy_model = cfg.spacy_model
         profile.extraction.relation_ruler.spacy_model = cfg.spacy_model
@@ -320,8 +453,8 @@ def _shutdown() -> None:
 # --- Helpers -------------------------------------------------------------------
 
 
-def _normalize_ingest_result(result) -> str:
-    """Normalize SmartMemory.ingest() return value to a plain item_id string.
+def _normalize_ingest_result(result) -> str | dict:
+    """Preserve terminal holds, otherwise normalize to an item_id string.
 
     SmartMemory.ingest() returns Union[str, Dict[str, Any]]:
       str  — when sync=True (default in Lite mode): item_id directly
@@ -331,6 +464,8 @@ def _normalize_ingest_result(result) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, dict) and "schema_version" not in result:
+        if result.get("status") == "held":
+            return result
         return result.get("item_id") or str(result)
     # Receipt arm (N-02.activate.outer-readers): a save receipt reads as its subject id, never str(receipt).
     from smartmemory_app.save_return import resolve_save_return
@@ -363,6 +498,8 @@ def llm_extraction_warning() -> str | None:
     """
     from smartmemory.utils.llm import llm_route_available
 
+    if local_llm_without_model(load_config()):
+        return NO_LOCAL_MODEL_OFF_LINE
     available, _ = llm_route_available()
     if available:
         return None
@@ -390,7 +527,7 @@ def ingest(
               including item_id, entity_ids, queued and run_id, plus an optional
               warning when core cannot route LLM extraction.
         properties: Optional user-supplied key-value properties stored in metadata.
-        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by local write
+        origin: Optional provenance tag (DIST-LITE-QUIET-1). Set by write
             surfaces (CLI sm add → "cli:add"). Threaded into core ingest via context
             so the stored item is attributed instead of falling to origin='unknown'.
 
@@ -402,31 +539,16 @@ def ingest(
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
 
-    if isinstance(mem, RemoteMemory):
-        return mem.ingest(content, memory_type)  # TODO: pass properties to remote API
     # Reserved keys that user properties must not overwrite.
     # DIST-LITE-QUIET-1 (Codex review): "origin" is reserved — it drives tier visibility
     # AND precedence guards, so it must be set only by the producer (the explicit `origin`
     # param), never via user-supplied properties (which would let a caller claim a
     # privileged origin, e.g. import:vault, and bypass attribution/tiering).
-    _RESERVED = frozenset(
-        {
-            "memory_type",
-            "node_category",
-            "item_id",
-            "content",
-            "embedding",
-            "created_at",
-            "valid_from",
-            "valid_to",
-            "origin",
-        }
-    )
     ctx: dict = {"memory_type": memory_type}
     if origin:
         ctx["origin"] = origin
     if properties:
-        dropped = _RESERVED.intersection(properties)
+        dropped = RESERVED_INGEST_PROPERTIES.intersection(properties)
         if dropped:
             log.warning(
                 "Dropped reserved ingest properties: %s", ", ".join(sorted(dropped))
@@ -434,8 +556,10 @@ def ingest(
         # Flatten user properties into context so they become top-level node
         # properties (metadata keys merge into graph node properties dict).
         for k, v in properties.items():
-            if k not in _RESERVED:
+            if k not in RESERVED_INGEST_PROPERTIES:
                 ctx[k] = v
+    if isinstance(mem, RemoteMemory):
+        return mem.ingest(content, memory_type, context=ctx)
     # Local path — acquire write lock for cross-process coordination
     data_path = _data_path if _data_path is not None else _resolve_data_dir()
     lock = _get_lock_file(data_path)
@@ -445,6 +569,8 @@ def ingest(
             from smartmemory_app.save_return import ingest_dict
 
             result = ingest_dict(result, op="ingest")
+        if isinstance(result, dict) and result.get("status") == "held":
+            return result
         if not sync and isinstance(result, dict):
             # Initialization has applied the effective provider/model settings.
             # Use core's placement resolver, not the foreground extraction status:
@@ -455,6 +581,60 @@ def ingest(
                 return {**result, "warning": warning}
             return result
     return _normalize_ingest_result(result)
+
+
+def save(call, *, memory=None):
+    """Submit one receipt-arm save call (``save_caller.SaveCall``) and return its ``SaveReturn``.
+
+    The explicit-wait, retry-key doorway (C-01.activate.save.local-adapters). It is not ``ingest``: it calls only
+    ``SmartMemory.save``, which core refuses with ``SaveNotEnabled`` until the common-receipt facade is enabled, and
+    it never falls back to ``add``/``ingest``. Local mode takes the same cross-process write lock as ``ingest``.
+    Hosted mode is refused: hosted receipts belong to the hosted-adapters step, and the hosted API is unchanged.
+
+    ``memory`` lets a caller that already holds the local ``SmartMemory`` (the MCP backend) pass it; the default is
+    the active backend.
+    """
+    from contextlib import ExitStack
+
+    from smartmemory_app.save_caller import (
+        MEMORY_UNAVAILABLE,
+        SAVE_UNAVAILABLE,
+        WRITE_LOCK_UNAVAILABLE,
+        refuse,
+        refuse_from,
+        submit,
+    )
+
+    try:
+        mem = memory if memory is not None else get_memory()
+    except Exception as exc:  # the default memory could not be opened: nothing is saved
+        refuse_from(
+            exc,
+            MEMORY_UNAVAILABLE,
+            "the local memory could not be opened",
+            "nothing was saved and ingest was not used",
+        )
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        refuse(
+            SAVE_UNAVAILABLE,
+            "hosted mode has no receipt save from this client",
+            "nothing was saved and ingest was not used",
+        )
+    stack = ExitStack()
+    try:  # only taking the lock is guarded: what submit raises (core's typed refusals) passes through unchanged
+        data_path = _data_path if _data_path is not None else _resolve_data_dir()
+        stack.enter_context(_get_lock_file(data_path))
+    except Exception as exc:  # an unusable data dir, or a lock that is held or times out, saves nothing
+        refuse_from(
+            exc,
+            WRITE_LOCK_UNAVAILABLE,
+            "the local write lock could not be taken",
+            "nothing was saved and ingest was not used",
+        )
+    with stack:
+        return submit(mem, call)
 
 
 def persist_provenance(edits) -> dict:
@@ -698,6 +878,11 @@ def search(
                  callers/contract drift never raise TypeError here.
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
+    if search_kwargs.get("origin") is not None and load_config().mode == "remote":
+        raise NotImplementedError(
+            "--origin is not supported in remote mode: the hosted search API "
+            "does not accept origin filters. Use local mode or remove --origin."
+        )
     mem = get_memory()
     # Forward documented core options. Unknown extension keys still drop, while
     # the enumerating contract test prevents known facade parameters being lost.
@@ -745,6 +930,14 @@ def search(
             all_items = _core_wildcard_rows(mem, **core_kwargs)
         else:
             all_items = _list_all_memories(mem)
+        # F3: the wildcard shortcut bypasses core search visibility on the snapshot arm. Hide raw hooks on both arms.
+        all_items = [
+            r
+            for r in all_items
+            if not (
+                r.get("origin") or r.get("metadata", {}).get("origin") or ""
+            ).startswith(("hook:observe", "hook:learn"))
+        ]
         if filters:
             all_items = [
                 r
@@ -1181,6 +1374,27 @@ def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:
         return True
 
 
+def resolve_readonly_item_id(backend, item_id: str) -> str:
+    """Resolve only read-only get prefixes by exact persisted item_id comparison."""
+    import re
+
+    if backend.get_node(item_id) is not None:
+        return item_id
+    if not re.fullmatch(r"[0-9a-fA-F]{6,}", item_id):
+        return item_id
+    with backend._lock:
+        rows = backend._conn.execute(
+            "SELECT item_id FROM nodes WHERE substr(item_id, 1, ?) = ? COLLATE NOCASE ORDER BY item_id",
+            (len(item_id), item_id),
+        ).fetchall()
+    if len(rows) > 1:
+        raise ValueError(
+            "Ambiguous item ID prefix. Use a full ID: "
+            + ", ".join(row[0] for row in rows)
+        )
+    return rows[0][0] if rows else item_id
+
+
 def get(item_id: str) -> dict:
     """Get a single memory by item_id. Returns dict in both modes.
 
@@ -1191,5 +1405,21 @@ def get(item_id: str) -> dict:
 
     if isinstance(mem, RemoteMemory):
         return mem.get(item_id) or {}  # already a dict
-    item = mem.get(item_id)
+    item = mem.get(resolve_readonly_item_id(mem._graph.backend, item_id))
     return _result_dict(item) if item else {}
+
+
+def get_mirror_state(data_dir: str | None = None):
+    """Resolve the actual Lite root without opening memory or creating config.
+
+    A running local singleton's explicit data root wins unless a caller supplies
+    another explicit root. Config/namespace may live elsewhere.
+    """
+    from smartmemory_app.mirror_state import MirrorState
+
+    path = (
+        _resolve_data_dir(data_dir)
+        if data_dir is not None or _data_path is None
+        else _data_path
+    )
+    return MirrorState(path)

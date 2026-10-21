@@ -8,12 +8,14 @@ Entry point: run_setup_tui() -> SetupResult | None
 """
 
 import os
+import sys
 import time
 
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical
+from textual.markup import escape
 from textual.screen import Screen
 from textual.widgets import (
     Button,
@@ -27,7 +29,13 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from smartmemory_app.setup import SetupResult
+from smartmemory_app.setup import NO_LOCAL_MODEL_NOTE, SetupResult
+from smartmemory_app.setup_steps import (
+    PlanStep,
+    estimate_phrase,
+    format_elapsed,
+    local_setup_plan,
+)
 
 
 # ── Provider definitions ──────────────────────────────────────────────────
@@ -57,6 +65,8 @@ _KEY_VARS = {
 }
 
 LOCAL_MODEL_PROVIDERS = {"ollama", "lmstudio"}
+NO_MODEL_ID = "__none__"
+NO_MODEL_LABEL = "none (default)  decide later"
 
 
 def _detect_keys() -> str:
@@ -82,8 +92,8 @@ class WelcomeScreen(Screen):
                 yield Static("\n[bold]Welcome to SmartMemory[/bold]\n", id="title")
                 yield Static("Where do you want to store memories?\n")
                 yield OptionList(
-                    Option("Local — on this machine, no account needed", id="local"),
-                    Option("Remote — SmartMemory hosted service", id="remote"),
+                    Option("Local: on this machine, no account needed", id="local"),
+                    Option("Remote: SmartMemory hosted service", id="remote"),
                     id="mode-list",
                 )
         yield Footer()
@@ -155,12 +165,11 @@ class ModelScreen(Screen):
                 )
                 yield LoadingIndicator(id="loader")
                 yield OptionList(id="model-list")
-                yield Button("Skip", id="skip-btn", variant="default")
+                yield Static(f"\n{NO_LOCAL_MODEL_NOTE}", id="no-model-note")
         yield Footer()
 
     def on_mount(self) -> None:
         self.query_one("#model-list", OptionList).display = False
-        self.query_one("#skip-btn", Button).display = False
         self._discover()
 
     @work(exclusive=True, group="discover")
@@ -169,29 +178,28 @@ class ModelScreen(Screen):
         loader = self.query_one("#loader", LoadingIndicator)
         status = self.query_one("#status", Static)
         model_list = self.query_one("#model-list", OptionList)
-        skip_btn = self.query_one("#skip-btn", Button)
 
         loader.display = False
+        # The default is none, so a found list never forces a pick and an
+        # unreachable provider still leaves a way forward.
+        model_list.clear_options()
+        model_list.add_option(Option(NO_MODEL_LABEL, id=NO_MODEL_ID))
         if models:
             status.update(f"Found {len(models)} models:\n")
-            model_list.clear_options()
             for m in models:
                 name = m["name"]
                 size = m.get("size", "")
                 label = f"{name:<30s} {size}" if size else name
                 model_list.add_option(Option(label, id=name))
-            model_list.display = True
         else:
             status.update(f"[yellow]Could not reach {self._provider}[/yellow]\n")
-            skip_btn.display = True
+        model_list.display = True
+        model_list.highlighted = 0
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        self.app._result.llm_model = str(event.option.id)
+        chosen = str(event.option.id)
+        self.app._result.llm_model = "" if chosen == NO_MODEL_ID else chosen
         self.app.push_screen(EmbeddingScreen())
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "skip-btn":
-            self.app.push_screen(EmbeddingScreen())
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -214,7 +222,7 @@ class EmbeddingScreen(Screen):
                 has_openai = bool(os.environ.get("OPENAI_API_KEY"))
                 if has_openai:
                     yield Static(
-                        "[green]OPENAI_API_KEY detected[/green] — defaulting to openai\n"
+                        "[green]OPENAI_API_KEY detected[/green], defaulting to openai\n"
                     )
                 options = [
                     Option(f"{pid:<10s} {desc}", id=pid)
@@ -257,6 +265,11 @@ class SummaryScreen(Screen):
                 yield Static(
                     f"  LLM:         {r.llm_provider}"
                     + (f" ({r.llm_model})" if r.llm_model else "")
+                    + (
+                        " (no local model)"
+                        if r.llm_provider in LOCAL_MODEL_PROVIDERS and not r.llm_model
+                        else ""
+                    )
                 )
                 yield Static(f"  Embeddings:  {r.embedding_provider}")
                 yield Static("")
@@ -296,29 +309,61 @@ class SummaryScreen(Screen):
 class ProgressScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
+        # CLI-SETUP-UX-1: the same numbered plan the plain CLI prints, estimates included.
+        self._plan = local_setup_plan(self.app._result.embedding_provider)
         with Center():
             with Vertical(id="progress-box"):
                 yield Static("\n[bold]Setting up SmartMemory...[/bold]\n")
-                yield Static("○ Config written", id="step-config")
-                yield Static("○ spaCy model ready", id="step-spacy")
-                if self.app._result.embedding_provider == "local":
-                    yield Static("○ Embedding model ready", id="step-embedding")
-                yield Static("○ Hooks installed", id="step-hooks")
-                yield Static("○ Skills installed", id="step-skills")
-                yield Static("○ Hooks registered", id="step-registered")
-                yield Static("○ Patterns seeded", id="step-patterns")
-                yield Static("○ SmartMemory started", id="step-daemon")
+                for index, step in enumerate(self._plan, start=1):
+                    yield Static(
+                        self._row(
+                            "●" if index == 1 else "○",
+                            index,
+                            step,
+                            estimate_phrase(step),
+                        ),
+                        id=f"step-{step.key}",
+                    )
                 yield LoadingIndicator(id="daemon-spinner")
                 yield Static("", id="daemon-detail")
                 yield Static("", id="final-status")
         yield Footer()
 
+    def _row(self, symbol: str, index: int, step: PlanStep, suffix: str) -> str:
+        """One checklist row. The counter is escaped so markup never reads it as a tag."""
+        counter = escape(f"[{index}/{len(self._plan)}]")
+        tail = f" ({suffix})" if suffix else ""
+        return f"{symbol} {counter} {step.name}{tail}"
+
+    def _step_at(self, name: str) -> tuple[int, PlanStep] | None:
+        for index, step in enumerate(getattr(self, "_plan", ()), start=1):
+            if step.name == name:
+                return index, step
+        return None
+
     def on_mount(self) -> None:
         self._setup_finished = False
         self._daemon_started_at: float | None = None
+        self._step_started = time.monotonic()
         self.query_one("#daemon-spinner", LoadingIndicator).display = False
         self.set_interval(1, self._update_daemon_elapsed)
         self._run_setup()
+
+    def _mark_step_done(self, name: str) -> None:
+        found = self._step_at(name)
+        if found is None:
+            return
+        index, step = found
+        took = format_elapsed(time.monotonic() - self._step_started)
+        self._step_started = time.monotonic()
+        self.query_one(f"#step-{step.key}", Static).update(
+            self._row("[green]✓[/green]", index, step, f"took {took}")
+        )
+        if index < len(self._plan):
+            nxt = self._plan[index]
+            self.query_one(f"#step-{nxt.key}", Static).update(
+                self._row("●", index + 1, nxt, estimate_phrase(nxt))
+            )
 
     def _set_final_status(self, status_text: str) -> None:
         self.query_one("#final-status", Static).update(status_text)
@@ -338,8 +383,19 @@ class ProgressScreen(Screen):
         if started is None:
             return
         elapsed = int(time.monotonic() - started)
+        found = self._step_at("SmartMemory started")
+        if found is None:
+            return
+        index, step = found
         self.query_one("#step-daemon", Static).update(
-            f"● Starting SmartMemory... ({elapsed}s)"
+            self._row(
+                "●",
+                index,
+                step,
+                ", ".join(
+                    part for part in (f"{elapsed}s", estimate_phrase(step)) if part
+                ),
+            )
         )
 
     def _show_daemon_log(self, line: str) -> None:
@@ -351,28 +407,15 @@ class ProgressScreen(Screen):
 
     @work(thread=True)
     def _run_setup(self) -> None:
-        step_map = {
-            "Config written": "step-config",
-            "spaCy model ready": "step-spacy",
-            "Embedding model ready": "step-embedding",
-            "Hooks installed": "step-hooks",
-            "Skills installed": "step-skills",
-            "Hooks registered": "step-registered",
-            "Patterns seeded": "step-patterns",
-        }
-
         def on_step(name: str) -> None:
-            widget_id = step_map.get(name)
-            if widget_id:
-                self.app.call_from_thread(
-                    self.query_one(f"#{widget_id}", Static).update,
-                    f"[green]✓[/green] {name}",
-                )
+            self.app.call_from_thread(self._mark_step_done, name)
 
         try:
             from smartmemory_app.setup import _apply_setup_result, _start_daemon_local
 
-            _apply_setup_result(self.app._result, on_step=on_step)
+            _apply_setup_result(
+                self.app._result, on_step=on_step, on_log=self._show_daemon_log
+            )
 
             self.app.call_from_thread(self._begin_daemon_wait)
             try:
@@ -381,10 +424,7 @@ class ProgressScreen(Screen):
                 self.app.call_from_thread(self._finish_daemon_wait)
 
             if daemon_status and daemon_status.get("status") == "ok":
-                self.app.call_from_thread(
-                    self.query_one("#step-daemon", Static).update,
-                    "[green]✓[/green] SmartMemory started",
-                )
+                self.app.call_from_thread(self._mark_step_done, "SmartMemory started")
                 status_text = '\n[bold green]SmartMemory is ready![/bold green]\n\nTry: [cyan]smartmemory add "hello world"[/cyan]\n\nPress any key to exit.'
             elif daemon_status and daemon_status.get("status") == "warming":
                 self.app._result.daemon_warming = True
@@ -393,8 +433,8 @@ class ProgressScreen(Screen):
                     "[yellow]⚠[/yellow] SmartMemory is still warming up",
                 )
                 status_text = (
-                    "\n[bold yellow]Setup is configured; SmartMemory is still warming up.[/bold yellow]"
-                    "\nCheck: [cyan]sm status[/cyan]. Additional worker startup is deferred; once warmup finishes, run [cyan]sm start --wait[/cyan]."
+                    "\n[bold yellow]Setup is configured, but SmartMemory is still warming up.[/bold yellow]"
+                    "\nCheck: [cyan]sm status[/cyan]. Additional worker startup is deferred, so once warmup finishes, run [cyan]sm start --wait[/cyan]."
                     "\n\nPress any key to exit."
                 )
             elif daemon_status and daemon_status.get("status") == "degraded":
@@ -416,9 +456,43 @@ class ProgressScreen(Screen):
                 )
                 status_text = "\n[bold red]Setup could not start SmartMemory.[/bold red]\nRun: [cyan]sm doctor[/cyan]\n\nPress any key to exit."
 
+            from smartmemory_app.config import (
+                NO_LOCAL_MODEL_OFF_LINE,
+                local_llm_without_model,
+            )
+
+            if local_llm_without_model(self.app._result):
+                status_text = status_text.replace(
+                    "\n\nPress any key to exit.",
+                    f"\n\n{escape(NO_LOCAL_MODEL_OFF_LINE)}\n\nPress any key to exit.",
+                )
             self.app.call_from_thread(self._set_final_status, status_text)
         except BaseException as e:
-            message = str(e) or e.__class__.__name__
+            import logging
+            from smartmemory_app.diagnostics import redact_credentials
+
+            from smartmemory_app.runtime_diagnostics import record_cli_crash
+            import sys
+
+            if isinstance(e, Exception):
+                record_cli_crash(e, sys.argv[1:])
+            logging.getLogger(__name__).warning(
+                "Setup TUI worker failed", exc_info=True
+            )
+            message = redact_credentials(
+                " ".join(str(e).split()) or e.__class__.__name__
+            )
+            try:
+                import click
+                from smartmemory_app.bug_report import debug_log_path
+
+                if not isinstance(e, click.ClickException):
+                    message = redact_credentials(
+                        f"{type(e).__name__}: {message[:500]}\nLog: {debug_log_path()}\n"
+                        "Run `smartmemory report --zip` and email the file to support@smartmemory.ai."
+                    )
+            except Exception:
+                pass
             self.app._setup_error = message
             self.app.call_from_thread(
                 self._set_final_status,
@@ -517,7 +591,18 @@ class SetupApp(App):
 def run_setup_tui() -> SetupResult | None:
     """Launch the Textual TUI. Returns SetupResult on success, None on cancel."""
     app = SetupApp()
-    result = app.run()
+    try:
+        result = app.run()
+    finally:
+        # Restore terminal reporting before click prompts, including on crashes.
+        try:
+            if sys.stdout.isatty():
+                sys.stdout.write(
+                    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l"
+                )
+                sys.stdout.flush()
+        except Exception:
+            pass
     if app._setup_error is not None:
         import click
 

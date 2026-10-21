@@ -1,0 +1,62 @@
+# SETUP-FRESH-CI-1: install the built CLI into a clean venv like a new user and prove it works.
+# No secrets. The remote arm talks to a fake server on 127.0.0.1, never to api.smartmemory.ai.
+name: Fresh install check
+
+on:
+  pull_request:
+    paths:
+      - "smartmemory_app/**"
+      - "pyproject.toml"
+      - "scripts/fresh_install_check.py"
+      - ".github/workflows/fresh-install.yml"
+  push:
+    branches: [main]
+    paths:
+      - "smartmemory_app/**"
+      - "pyproject.toml"
+      - "scripts/fresh_install_check.py"
+      - ".github/workflows/fresh-install.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fresh-install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fresh-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"] # add "3.11" for the oldest supported Python
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build uv
+
+      - name: Build package
+        run: |
+          set -euo pipefail
+          rm -rf dist/ build/ ./*.egg-info
+          python -m build
+
+      - name: Fresh install check
+        run: |
+          set -euo pipefail
+          wheels=(./dist/smartmemory-*.whl)
+          [ "${#wheels[@]}" -eq 1 ] || { echo "::error::expected one wheel, got ${wheels[*]}"; exit 1; }
+          python scripts/fresh_install_check.py \
+            --wheel "${wheels[0]}" \
+            --python "${{ matrix.python-version }}" \
+            --workdir "$RUNNER_TEMP"

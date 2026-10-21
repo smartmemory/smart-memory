@@ -76,6 +76,7 @@ class TestCanRunTui:
     def test_returns_true_when_all_conditions_met(self, monkeypatch):
         monkeypatch.setattr("sys.stdin", MagicMock(isatty=lambda: True))
         monkeypatch.setattr("sys.stdout", MagicMock(isatty=lambda: True))
+        monkeypatch.setattr("sys.stderr", MagicMock(isatty=lambda: True))
         monkeypatch.delenv("TERM", raising=False)
         monkeypatch.delenv("CI", raising=False)
         # textual is installed in test env
@@ -135,6 +136,7 @@ class TestApplySetupResult:
             "Config written",
             "spaCy model ready",
             "Embedding model ready",
+            "Helper models ready",  # CLI-SETUP-UX-1: counted as its own step
             "Hooks installed",
             "Skills installed",
             "Hooks registered",
@@ -206,7 +208,7 @@ class TestSetupDispatch:
             runner = CliRunner()
             runner.invoke(cli, ["setup", "--mode", "local"])
 
-        mock_click.assert_called_once_with("local", None)
+        mock_click.assert_called_once_with("local", None, None)
 
     def test_mode_local_starts_daemon_exactly_once(self):
         """--mode local must not double-start the daemon."""

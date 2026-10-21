@@ -33,6 +33,7 @@ _startup_state_lock = threading.Lock()
 _startup_status: str | None = None
 _startup_reason: str | None = None
 _last_warmup_failure: str | None = None
+_embedding_check: str | None = None
 
 
 def _set_startup_state(status: str | None, reason: str | None = None) -> None:
@@ -97,6 +98,14 @@ def _capabilities(mode: str) -> dict[str, bool]:
 def _build_app() -> FastAPI:
     app = FastAPI()
 
+    @app.exception_handler(Exception)
+    async def report_asgi_failure(request, exc):
+        from starlette.responses import PlainTextResponse
+        from smartmemory_app.crash_reporter import report_in_background
+
+        report_in_background(exc, source="asgi")
+        return PlainTextResponse("Internal Server Error", status_code=500)
+
     # Capture versions at startup — used to detect pip upgrades.
     # On every request, compare against installed versions. If different,
     # exit cleanly — launchd KeepAlive restarts with new code.
@@ -145,6 +154,41 @@ def _build_app() -> FastAPI:
 
         cfg = load_config()
         startup_status, startup_reason = _get_startup_state()
+        if cfg.mode == "remote":
+            # A local health probe proves only this proxy can answer. Opening
+            # RemoteMemory here can bootstrap hosted auth, including during stop.
+            status = startup_status or "ok"
+            response = {
+                "service": "smartmemory",
+                "status": status,
+                "pid": os.getpid(),
+                "mode": "remote",
+                "host_role": "local_proxy_viewer",
+                "local_proxy_status": status,
+                "api_url": cfg.api_url,
+                "workspace_id": cfg.team_id or None,
+                "workspace_selection": "configured"
+                if cfg.team_id
+                else "hosted_default",
+                "hosted_connectivity": "not_checked",
+                "hosted_connectivity_hint": "Run: sm status",
+                "extraction_location": "hosted",
+                "hosted_extraction": "not_checked",
+                "memories": -1,
+                "work_graph": None,
+                "reextract_offer": None,
+                "llm_provider": "hosted",
+                "llm_key_present": None,
+                "embedding_provider": "hosted",
+                "async_enrichment": {"enabled": False},
+                "capabilities": _capabilities("remote"),
+            }
+            if status == "degraded":
+                response["degraded_reason"] = (
+                    startup_reason
+                    or "Local proxy/viewer startup did not complete. Run sm doctor."
+                )
+            return response
         if startup_status in {"warming", "degraded"}:
             from smartmemory_app.config import llm_key_present
 
@@ -231,6 +275,7 @@ def _build_app() -> FastAPI:
         capabilities = _capabilities(mode)
 
         from smartmemory_app.config import llm_key_present
+        from smartmemory_app.storage import _resolve_data_dir
 
         response = {
             "service": "smartmemory",
@@ -240,6 +285,8 @@ def _build_app() -> FastAPI:
             "llm_key_present": llm_key_present(),
             "embedding_provider": cfg.embedding_provider,
             "pid": os.getpid(),
+            "embedding_check": _embedding_check,
+            "data_dir": str(_resolve_data_dir().resolve()),
             "work_graph": work_info,
             "reextract_offer": offer,
             "async_enrichment": {
@@ -275,6 +322,8 @@ def _startup_line(message: str) -> None:
 
 def _warm_backend() -> bool:
     """Warm the local backend with timed, newline-only progress reporting."""
+    global _embedding_check
+    _embedding_check = None
     from smartmemory.errors import MissingModelError
     from smartmemory_app.hf_progress import discrete_huggingface_progress
     from smartmemory_app.storage import get_memory
@@ -288,12 +337,16 @@ def _warm_backend() -> bool:
         try:
             get_memory(on_progress=_startup_line)
         except Exception as exc:
+            from smartmemory_app.crash_reporter import report_in_background
+
+            report_in_background(exc, source="daemon", handled=True)
             backend_ok = False
             reason = _safe_warmup_reason(exc)
             failure_reasons.append(reason)
             log.warning(
                 "Saved memories and startup model prerequisites are unavailable: %s",
                 reason,
+                exc_info=True,
             )
             failures = exc.exceptions if isinstance(exc, ExceptionGroup) else (exc,)
             if any(isinstance(failure, MissingModelError) for failure in failures):
@@ -314,15 +367,42 @@ def _warm_backend() -> bool:
             from smartmemory.plugins.embedding import EmbeddingService
 
             service = EmbeddingService()
-            service.embed("warmup")
+            vector = service.embed("warmup")
+            from smartmemory_app.config import load_config
+            from smartmemory_app.store_diagnostics import configured_dimension
+
+            if load_config().embedding_provider == "local":
+                expected = configured_dimension(service)
+                if (
+                    vector is None
+                    or not len(vector)
+                    or expected is not None
+                    and len(vector) != expected
+                ):
+                    raise ValueError(
+                        "Embedding warmup returned an empty or incorrectly sized vector"
+                    )
+                if expected is None:
+                    log.warning("Embedding warmup dimension could not be verified")
+                    _embedding_check = (
+                        f"Embedding runtime: warning: {service.backend_name}, "
+                        "cached startup warmup, dimension unverified"
+                    )
+                else:
+                    _embedding_check = f"Embedding runtime: OK ({service.backend_name}, cached startup warmup, {len(vector)} dimensions)"
             _startup_line(
                 f"Search model ready ({time.perf_counter() - model_started:.1f}s)"
             )
         except Exception as exc:
+            from smartmemory_app.crash_reporter import report_in_background
+
+            report_in_background(exc, source="daemon", handled=True)
             backend_ok = False
             reason = _safe_warmup_reason(exc)
             failure_reasons.append(reason)
-            log.warning("The warmed search model is unavailable: %s", reason)
+            log.warning(
+                "The warmed search model is unavailable: %s", reason, exc_info=True
+            )
             _startup_line(
                 "Warning: The search model could not start. "
                 "Run sm doctor after startup for help."
@@ -364,10 +444,14 @@ def _start_background_warmup() -> threading.Thread:
                 show_reextract_offer(log.info)
             _sync_hooks()
         except BaseException as exc:
+            from smartmemory_app.crash_reporter import report_in_background
+
+            report_in_background(exc, source="daemon", handled=True)
             reason = _safe_warmup_reason(exc)
             log.warning(
                 "Background startup failed; saved memories remain unavailable: %s",
                 reason,
+                exc_info=True,
             )
             _set_startup_state("degraded", reason)
             return
@@ -399,6 +483,15 @@ def _start_background_warmup() -> threading.Thread:
 
 def _print_llm_extraction_status() -> None:
     """Disclose the effective LLM route without hiding local extraction/enrichment."""
+    from smartmemory_app.config import load_config
+
+    if load_config().mode == "remote":
+        print(
+            "  LLM extraction: runs on the hosted service (capability not checked here).",
+            flush=True,
+        )
+        print("  Hosted connectivity: not checked here. Run: sm status", flush=True)
+        return
     from smartmemory_app.storage import apply_runtime_config, llm_extraction_warning
 
     apply_runtime_config()
@@ -409,6 +502,21 @@ def _print_llm_extraction_status() -> None:
         print("  LLM extraction: enabled (deferred)", flush=True)
 
 
+def _print_enrichment_status() -> None:
+    """Name the active enrichment host without probing either backend."""
+    from smartmemory_app.config import load_config
+
+    if load_config().mode == "remote":
+        print(
+            "Enrichment: runs on the hosted service, not in a local worker.", flush=True
+        )
+    else:
+        print(
+            "Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)",
+            flush=True,
+        )
+
+
 def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """Start the SmartMemory daemon.
 
@@ -417,7 +525,15 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """
     from smartmemory_app.storage import _shutdown, _resolve_data_dir
 
+    from smartmemory_app.runtime_diagnostics import install_daemon_diagnostics
+
     data_path = _resolve_data_dir()
+    install_daemon_diagnostics(data_path, redact_output=True)
+    from smartmemory_app.crash_reporter import flush_in_background
+    from smartmemory_app.hook_failures import consume_in_background, marker_directory
+
+    flush_in_background()
+    consume_in_background(marker_directory())
     data_path.mkdir(parents=True, exist_ok=True)
     pid_file = data_path / "daemon.pid"
 
@@ -459,9 +575,18 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # refer to the same process that serves the observed warming health response.
     pid_file.write_text(str(os.getpid()))
 
+    cleaned = False
+
     def _cleanup():
+        nonlocal cleaned
+        if cleaned:
+            return
         _shutdown()
-        pid_file.unlink(missing_ok=True)
+        if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
+            os.getpid()
+        ):
+            pid_file.unlink(missing_ok=True)
+        cleaned = True
 
     # atexit handles cleanup on normal exit AND uvicorn's graceful SIGTERM shutdown.
     # Do NOT install a custom SIGTERM handler — uvicorn needs SIGTERM to trigger
@@ -480,10 +605,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     # The ingest endpoint enqueues to a SQLite table; the worker drains it.
     # No in-process threading — avoids the _drain_running import bug and
     # keeps the daemon process stable.
-    print(
-        "Enrichment queue: SQLite-backed (run `smartmemory worker --loop` for Tier 2)",
-        flush=True,
-    )
+    _print_enrichment_status()
 
     # Warm only after all process-level lifecycle pieces are installed. The health
     # route sees the state set immediately before the thread starts; it never guesses
@@ -495,7 +617,36 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
             1.0, lambda: webbrowser.open(f"http://localhost:{port}")
         ).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app, host="127.0.0.1", port=port, log_level="warning", log_config=None
+        )
+    )
+    _run_until_stopped(server, data_path, os.getpid(), _cleanup)
+
+
+def _run_until_stopped(server, data_path: Path, pid: int, cleanup) -> None:
+    """Observe PID-specific local IPC and let uvicorn drain before closing stores."""
+    request = data_path / f".daemon.stop-{pid}"
+    finished = threading.Event()
+
+    def observe_stop():
+        while not finished.wait(0.05):
+            if request.exists():
+                server.should_exit = True
+                return
+
+    watcher = threading.Thread(
+        target=observe_stop, name="smartmemory-stop", daemon=True
+    )
+    watcher.start()
+    try:
+        server.run()
+    finally:
+        finished.set()
+        watcher.join(timeout=1)
+        cleanup()
+        request.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

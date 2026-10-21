@@ -1,5 +1,106 @@
 # Changelog — smartmemory
 
+## Unreleased
+
+### SETUP-FRESH-CI-1 (2026-10-17)
+
+- New fresh-install check for the `sm` CLI: `scripts/fresh_install_check.py` and `.github/workflows/fresh-install.yml`. It installs the built wheel into a clean venv with a throwaway `HOME`, then checks a keyless local `sm setup`, `sm doctor`, an add, search and decision round trip, the inherited `SMARTMEMORY_*` detection with poisoned variables, and a remote-mode setup against a local fake server. It prints `STEP <name> PASS|FAIL|SKIP` lines and needs no secrets. No product code changed.
+
+## 1.5.27 — 2026-10-17
+
+- Setup and first-run hardening from the 2026-10-17 demo feedback: pins `smartmemory-core==1.5.27` and `smartmemory-mcp==1.5.23`. Ships the `Unreleased` sections below: CLI-TENANT-1, LOCAL-DAEMON-1, TOUR-ASK-502-1, CLI-WORKSPACE-UX-1, CLI-ENV-DETECT-1, SETUP-DOCTOR-1, CLI-SETUP-UX-1, BENEFITS-WORDING-1, plus the SM-SETUP-BATCH-1 integration glue. The per-unit headings keep their `Unreleased` labels.
+
+## Unreleased - CLI-TENANT-1 (2026-10-17)
+
+- `sm ask` in local mode with no LLM provider key now exits non-zero before any request. The error names the missing key (the configured provider's, or all supported ones), and gives `export <KEY>=...`, `sm restart` and `sm setup`. The keyless excerpt listing moved behind `sm ask --extractive`. A daemon that answers extractively although this shell has a key now says it needs `sm restart`.
+- Remote mode: when the workspace the CLI sends (`SMARTMEMORY_TEAM_ID` or the config file) differs from the default workspace of the API key's login (`/auth/me`), every remote command prints, once per run on stderr, both workspaces, the tenant, the API URL and how to switch. An empty search, list or recall result from such a workspace says so instead of reading as "no memories". New module `smartmemory_app/preflight.py`.
+
+## Unreleased - LOCAL-DAEMON-1 (2026-10-17)
+
+- `sm setup` (local) now names what is wrong when the daemon does not come up, with a one-line fix per case: port taken by another program (names the process), daemon crashed and left `daemon.pid`, auto-start pointing at a Python that no longer exists, required model files missing, daemon up but degraded. The raw reason stays in a `Detail:` line. On success it prints `daemon running at http://127.0.0.1:<port>`.
+- `daemon.daemon_health()` returns `(ok, detail, fix)` for the doctor's daemon row. It is read-only and never raises. The logic lives in the new `daemon_diagnosis.py`.
+- `start_daemon` removes a leftover `daemon.pid` (or `.daemon.stop-<pid>` request) only when its recorded process is gone by exact pid check, and never while a daemon is answering.
+
+## Unreleased - TOUR-ASK-502-1 (2026-10-17)
+
+- `sm ask` (and the tour's ask step) no longer fails with "502 Bad Gateway" when the Claude Agent SDK happens to be installed in the same Python. A `groq` or `openai` setup now pins its own default model (`openai/gpt-oss-120b`, `OPENAI_MODEL` or `gpt-4o-mini`), as `gemini` already did, so core no longer prefers the `claude` CLI, which exits 1 when it is not logged in. `claude-agent` and `none` keep core's default. An explicit `SMARTMEMORY_LLM_MODEL` still wins.
+- `sm worker` and `smartmemory worker --loop` now apply the configured provider before running, like the daemon and the background worker already did, so Tier-2 extraction no longer goes to the Claude Agent SDK on a `groq` or `openai` setup. Both worker entry points share one helper (`worker_entry.run_configured_worker`), and a table test covers every entry point that can reach an LLM. `anthropic` and `deepseek` setups stay on core's default: core has no non-SDK route to pin them to.
+- Ask failures show their reason. The daemon's 502 detail names the error type. The tour shows `HTTP <code>: <server detail>` instead of the bare status line. The hosted `sm ask` shows the service's 502 detail (503 stays hidden, it names server settings).
+- Handled failures are reported (when crash reports are on): every daemon route that answers 5xx through `HTTPException` (except the by-design 501 of remote-proxy mode), the tour's ask failure and empty answer, the tour's "seeded content not returned" degradation, and a tour run that fails.
+
+## Unreleased - CLI-WORKSPACE-UX-1 (2026-10-17)
+
+- New `sm workspace list | create <name> | switch <name|id|auto> | current`, in both modes. Remote: the list is what the web console can select (`/memory/workspaces` minus system teams, names from `/memory/teams`), `switch` writes `team_id`, `current` compares the CLI's workspace with the console's default for the same account (`/auth/me` `default_team_id`, the field the console opens) and says MISMATCH loudly, `--check` exits 1. Local: named workspaces and a pin in `workspaces.toml` next to the config, `sm add` and `sm recall` send the pin, `list` counts the tags in the store.
+- Every memory command prints one header line on stderr naming mode, tenant and workspace (`[smartmemory] mode=... tenant=... workspace=...`). Hidden with `sm --quiet`, any `--json` flag, or `SMARTMEMORY_QUIET=1`. Never on `lifecycle` hooks. The remote tenant comes from the identity cached by the last `sm workspace` command, so the header makes no network call.
+- Fix (CLI-WORKSPACE-UX-1 round 1): the header and the request now name the same workspace. With `SMARTMEMORY_WORKSPACE_ID` set, `sm add` and `sm recall` used to print that workspace but send none (the daemon is another process and cannot see the CLI's env), so the item was stored untagged. The env var, then the pin, is now sent explicitly on both the daemon path and the daemon-down fallback, from the same resolver the header reads. A workspace you pass as a property can no longer override it: `sm add --prop workspace_id=...` is refused ("Reserved properties"), and the daemon and fallback stamp the request's workspace over any caller property.
+
+- `sm doctor` now starts with a pass/warn/fail table of what the CLI will actually use: Python and venv, config path, active mode and which source won, inherited `SMARTMEMORY_*` variables (names and the file that exports them, never values), API key presence, tenant and workspace against the web identity (`/auth/me`), LLM provider and key presence, daemon or service health and version, and graph backend. Each failing row has a one-line fix. `--json` prints the same rows. Exit code 1 on any FAIL. A check that cannot run is a WARN naming what was not checked.
+- `sm setup` runs the table at the end, and `sm tour` runs it before starting. A FAIL stops the tour and prints the fix.
+- The table reads this project's `sm env` decisions (CLI-ENV-DETECT-1) and never prints a `SMARTMEMORY_*` value: an env-set URL, workspace, team id or data dir shows as `$NAME`. A stopped daemon is a warning, since commands fall back to running in-process.
+- Review fixes (fix round 1): every row asks the resolver the CLI uses instead of re-deriving it. The hosted workspace is the one `RemoteMemory` sends (new `remote_backend.resolve_team_id`), with a WARN when the web console opens a different one. The local workspace names the source `recall_format.derive_workspace_id` used. The LLM row reports provider, model and endpoint from core `provider_pin`, `get_default_model`, the extractor's base URL and `call_llm`'s route order after the CLI's own config translation (`config.set_derived_env`, `storage.pin_llm_model`), probes that endpoint, and covers `LLM_PROVIDER`, `LLM_API_KEY`, `OPENAI_MODEL` and Bedrock. An unreadable keychain or shell profile (new `setup._profile_lookup`) turns the LLM row into a WARN that names it. Every line `sm doctor` prints, text and `--json`, including the older Network and Storage lines, shows env-sourced values as `$NAME (env)`.
+- Review fixes (fix round 2): the LLM row now reports what core would actually send. Doctor runs core's real extractor up to the network call, with sockets blocked and the send functions stubbed, and reads the model, endpoint and refusal from that run. A model rewritten by core shows as `sent as <model>`, an `EXTRACTOR_*` env override is named as `$NAME`, and a core config file core could not read turns the row into a WARN. Log records printed while doctor runs (core warnings included) mask env values the same way the table does.
+- Tests: an autouse fixture restores `SMARTMEMORY_*` variables and the `env_pin` state after every test, because applied project overrides leaked into later tests.
+
+## Unreleased - CLI-ENV-DETECT-1 (2026-10-17)
+
+- New `smartmemory_app.env_sources.inherited_vars()`: lists every `SMARTMEMORY_*` variable the process inherited, with the shell startup file and line that exported it (`~/.zshrc:42`) and this project's saved decision (`use`, `ignore`, `override` or undecided). Names only, it never reads or returns a value. `SMARTMEMORY_ENV_CHECK=0` is a meta switch and is never listed.
+- Every `smartmemory` command (setup and tour included) now checks for undecided inherited `SMARTMEMORY_*` variables. In a terminal it lists them (names and where they were exported, never values) and asks once: use them, ignore them for this project, or override them with a project value. Without a terminal it prints one WARNING line naming them and `smartmemory env`, and never prompts. Hook commands (`lifecycle`) and `doctor` stay quiet. `SMARTMEMORY_ENV_CHECK=0` turns the check off.
+- Decisions are stored per project (git top level, else the directory) in the existing user config file under `[projects."<path>"]`. `ignore` removes the variable for that project, `override` replaces it, `use` keeps it. New precedence: flag > project decision > environment > config file > default. Secrets (`*_KEY`, `*_TOKEN`) can be used or ignored but not stored as an override.
+- New `smartmemory env` (also `smartmemory config env`): list, `set NAME use|ignore|override [VALUE]`, `reset [NAME]`.
+- Fix: `smartmemory config KEY VALUE` and remote login no longer write inherited `SMARTMEMORY_*` values (team id, data dir, API URL) into the config file. `load_config(apply_env=False)` reads the file layer for read-change-save.
+- Fix: a config file that exists but cannot be read or parsed is never rewritten. `smartmemory env set/reset`, the first-command prompt, `save_config()` (setup, `config`, login) and first-run auto-config now stop with one line naming the file (`Cannot update <path>: it is not valid TOML (line N). Fix or remove it, then retry.`) instead of replacing the user's settings with defaults. The first-command prompt prints that line and your command still runs. Read-only paths are unchanged.
+- Fix: a config file with invalid UTF-8 no longer crashes read-only commands. They read it as empty and log one WARNING naming the file, the same arm as malformed TOML.
+
+## Unreleased - SETUP-DOCTOR-1 (2026-10-17)
+
+- `sm doctor` now starts with a pass/warn/fail table of what the CLI will actually use: Python and venv, config path, active mode and which source won, inherited `SMARTMEMORY_*` variables (names and the file that exports them, never values), API key presence, tenant and workspace against the web identity (`/auth/me`), LLM provider and key presence, daemon or service health and version, and graph backend. Each failing row has a one-line fix. `--json` prints the same rows. Exit code 1 on any FAIL. A check that cannot run is a WARN naming what was not checked.
+- `sm setup` runs the table at the end, and `sm tour` runs it before starting. A FAIL stops the tour and prints the fix.
+
+## Unreleased - CLI-SETUP-UX-1 (2026-10-17)
+
+- `smartmemory setup` numbers every step: `[n/N] <step> ... (about <estimate>)` before it runs, then a done or failed line with the elapsed time. Estimates are constants in the new `smartmemory_app/setup_steps.py`, measured in a clean venv with an empty cache (spaCy model about 70 s, embedding model about 2 min, helper models about 5 min). Output is plain lines, so pipes and CI logs get no control characters. On a terminal long steps also show the existing spinner.
+- Model downloads in setup now print throttled newline progress lines (`Downloading the local AI model: 12.0 MB of 86.2 MB (14%)`) by reusing `hf_progress.py`. The helper models (search and reranker) are now their own counted step instead of being folded into the embedding step.
+- The setup TUI progress screen shows the same counter, estimate and elapsed time per row. The tour title shows `[n/7]`.
+- The local model choice (ollama, lmstudio) now defaults to none, in the text prompt and as the first, highlighted row of the TUI model screen, with one line saying what you lose and how to add one later (`sm config llm_model <model name>`). The TUI Skip button is gone because none replaces it.
+- Fix: `hf_progress._DownloadBar` lacked the tqdm display methods the Hugging Face Xet reporter calls, which printed an `AttributeError` traceback during downloads.
+- Setup choice lists and TUI choice text no longer use em dashes or semicolons.
+- Fix round 1: setup prints an estimate only for steps that were measured. The daemon start and daemon stop steps have none (they touch launchd and cannot be timed safely), so they show only the real elapsed time. Choosing no model for ollama or lmstudio now really turns LLM extraction off (`llm_key_present()` is false and no placeholder key is set), and setup ends with the line that says how to turn it on. Setup asks again whether the daemon is running after the downloads, as it did before this unit. `sm tour`, `sm explore`, the setup TUI and the `sm import` progress bar start only when stdin, stdout and stderr are all terminals (`console.interactive_terminal`), so piped output holds no escape codes. Repaired the TUI warm-up message so it keeps the tested wording without a semicolon.
+- Fix round 2: a local provider (ollama, lmstudio) with no model now turns LLM extraction off everywhere, not only in the status flag. Setup sets no `OPENAI_BASE_URL` for it (that endpoint alone let core queue extraction on every save), and `apply_runtime_config` holds core's LLM route check off while no model is chosen, so a key already in your environment or the Claude Agent SDK cannot switch it back on. The daemon start line and the save warning say `LLM extraction is off until you pick a model`. `sm worker` now applies the saved provider settings first, as the background worker does, and an ollama `llm_base_url` override applies once a model is set.
+
+## Unreleased - BENEFITS-WORDING-1 (2026-10-15)
+
+- README: removed benefit claims our measurements do not support. The "under 200ms" CLI line now gives the measured warm `sm add` time (about 210 ms, version 1.5.16) and first-add time (about 0.9 s). The "2 minutes" setup time, the "4ms", "740ms" and "96.9% entity F1" figures, "no more re-explaining" and "the same mistake isn't repeated" are gone or reworded as aims. This text reaches PyPI only at the next release.
+
+## Unreleased - HUB-DOCS-LINK-1 (2026-10-15)
+
+- README: Links section now lists the SmartMemory Hub (plugin and integration marketplace, hub.smartmemory.ai).
+
+## 1.5.26 — 2026-10-09
+
+- Hotfix: pins `smartmemory-core==1.5.26`, which bounds `tree-sitter<0.26`. With tree-sitter 0.26.0, `smartmemory code bundle` on a real TypeScript tree crashed with a segfault (exit 139).
+
+## Unreleased - CODE-BUNDLE-CLI-1 (2026-10-08)
+
+- Repo references renamed `smartmemory-*` -> `smart-memory-*` in docs, scripts and config (INFRA-REPO-RENAME-1).
+
+- Final bundle fixes: partial snapshots preserve collection failure paths with colon characters, Unicode names and filename-less errors. CLI regression coverage uses real audit-hook traversal failures. Core validates every declared nested record and reports unavailable membership inputs explicitly.
+- `smartmemory code bundle <path> --repo <id> --out <file> [--language ...] [--exclude ...] [--allow-partial] [--fields full|minimal]`: writes a store-free local snapshot of a checkout (entities with `item_id`, relations with `edge_state`, source identity, `resolution_dependencies`, completeness). It never calls `get_memory`, opens no graph, vector store or embedder, and uploads nothing. The file is written atomically (temp file in the `--out` directory, then `os.replace`); a refusal creates no file and leaves an existing `--out` untouched. `--allow-partial` keeps good files when others fail to parse (exit 0, `complete=false`, a `[code:bundle] warning: incomplete` line naming the failed paths). `--out` inside the checkout and not git-ignored prints a warning. There is no `--commit-hash` flag.
+- Fix round 1: the snapshot write refuses NaN/Infinity (`allow_nan=False`, prior file kept, no temp left), and `--fields` help names the forge/stratum code-graph consumer (STRAT-CODEGRAPH-1: minimal by default there, full opt-in). The CLI default stays `full`.
+- The wrapper now depends on `smartmemory-core[typescript]` (tree-sitter TS/JS grammars moved to that extra).
+
+## Unreleased - CODE-INDEXER-HARDEN-1 U5 (2026-10-08)
+
+- CODE-INDEXER-HARDEN-1 (F25, F28, F29): hosted `prepare_code_index` stamps dirty-aware provenance (`<HEAD>-dirty-<fingerprint>` for uncommitted or untracked changes, with a WARNING) and sends `repo_identity` so the service refuses a repo name owned by a different checkout. The hosted CLI reports the server's `embeddings_generated` instead of always warning that hosted indexes have no embeddings (the warning stays for older services).
+
+## Unreleased - CODE-CALLSITE-COVERAGE-1 build
+
+- Point user-facing links at https://www.smartmemory.ai (the web app had no app.smartmemory.ai DNS until 2026-10-08, and it now only redirects to www). Filed as PLAT-APP-SUBDOMAIN-1.
+- CORE-HOLD-RECEIPT-1 round 2: Preserve held receipts through local and hosted storage, daemon, CLI, lifecycle and tour consumers. Describe searches against existing memory when no tour seed was stored.
+
+- Show shared source call-site extraction status and resolved CALLS edges separately in local and hosted code-index summaries.
+
+- Integrated FRAMEWORK with Wave B, preserving scoped liveness and diagnostic evidence.
+
 Notable, **user-facing** changes to the `smartmemory` distribution package. The wrapper is thin — it pins an exact `smartmemory-core` version and the two move in lockstep — so entries here highlight what a release *delivers* (features, fixes, security), not routine version-pin bumps. For full internal detail, see the `CHANGELOG.md` shipped in the `smartmemory-core` distribution. Loosely follows [Keep a Changelog](https://keepachangelog.com); not every patch release gets an entry.
 
 ## [Unreleased]
@@ -7,6 +108,9 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - U5.21: local `search`, filtered widening, the gate-ON wildcard window and `recall` (query, workspace and orient arms) no longer read a short page as exhaustion while core reports its answer partial (`read_gate_scan_budget_spent`, `complete` False and the other coverage entries). Gate ON they keep widening, stop at the gate's scan budget (a fetch of 1000 or more) with one named WARNING, and the wildcard cap refusal says whether core was partial or full. A core refusal that the two optional-context degrade sites (snapshot frame, decision lookup) swallow is recorded in the trace without a second WARNING (`record_hook_degradation(..., logged=)`). Gate OFF output, calls and logs are the legacy ones, and the signatures are unchanged. Not wrapped here: the raw `_graph.search_nodes` decision lookup (C-38) and the intake port binding (the flip unit).
 - U5.21 fix round 1: gate ON, every fetch of `search` (filtered loop) and `recall` (first fetch and every doubling) is clamped BEFORE the call to `min(lane_gate.DEFAULT_MAX_SCAN, read_port.MAX_PAGE_LIMIT)` (200), the widest a gated search can ask core, so recall no longer reaches 1536 and the gate-ON stop is said as a partial answer, not "candidates exhausted"; rows a callee returns past the fetch are not used. `search` and `recall` return the same plain list/str with core's partial reasons on it (`PartialRows`/`PartialText`, plus `fetch_bound` when the wrapper's own bound stopped the loop). `record_hook_degradation` loses its `logged` parameter: "already logged" is read from the exception through `smartmemory.refusal_logging`, gate ON only, so the gate OFF log is the base's. A caller-supplied count in a WARNING is rendered bounded.
 - U5.21 fix round 2: gate ON, every fetch site (`search` unfiltered and per group, filtered widening, `recall` query/workspace/orient, the orient snapshot lookup) uses core's `gated_fetch_bound`, so no row a callee returns past the fetch is matched or shown. A recall stop at the 200 bound carries `fetch_bound` whether core said partial or the page came back full (it was a plain `''`). A failed snapshot or decision lookup is carried on the answer as `snapshot_lookup_failed` / `decision_lookup_failed` instead of reading as none. OFF unchanged.
+
+- FORWARD-MERGE-2: main forward-merged into 2.0 again (wrapper release 1.5.27: sm doctor, numbered setup steps, inherited `SMARTMEMORY_*` detection, `sm workspace`, the configured-provider fixes for `ask` and the worker). No conflicts. `pyproject.toml` takes main's 1.5.27 and its core pin, because 2.0's version and pins have only ever been main's release commits. Test-only follow-up: main's new `[smartmemory] mode=... workspace=...` stderr header broke CLI output asserts, so six tests (`test_cli`, `test_why`, `test_tui`, `test_save_return_compat`, `test_work_graph_wrapper`) set `SMARTMEMORY_QUIET=1` as main's own tests do, expect `properties=None` for an empty scope, and fake a terminal for the `explore` refusal check. No product code changed.
+- FORWARD-MERGE-1: main forward-merged into 2.0 (wrapper releases 1.5.17 to 1.5.26 and the Windows, remote-parity, diagnostics, code-bundle and hold-receipt fixes). Held ingest results and the hidden hook origins on wildcard search keep working beside the U4.32 and U5.22 receipt arms.
 
 - U4.32: prepares the local save return and work status for core's save receipt, with no switch and no change while core still returns an id string. `smartmemory_app.save_return` reads either arm: a legacy id string or dict (queued, held) is returned as it is and nothing is imported, and a receipt (object or wire dict) reads as its subject id, never `str(receipt)`, with a G98 "Saved, extraction skipped" summary. An admission rejection is a typed `SaveRejected` and an unreadable or non-save receipt a typed `SaveReturnRefused`, each with one WARNING, never an id. `storage.ingest` uses it on both return paths, so an async receipt becomes the usual `{item_id, queued, run_id}` dict plus a `receipt` key. `work_graph.get_local_status`, `open_local_status`, `project_local_status` and `local_status_capability` project core's live, retained and expired run status through the actor and workspace gate: an unseen, foreign, hidden or revoked run reads as one uniform unknown, and a core without the status adapter is `LocalStatusUnavailable` (explicit, with one WARNING), never an empty status. Nothing under the legacy save path calls them yet (the adapters lane wires the callers). First status read installs core's additive `wg_*` tables on the local `memory.db`.
 
@@ -17,6 +121,144 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - U4.32 review fix 3 (tests only, rule 4): the `storage.ingest` consumer census fails closed on the dynamic-import and module-registry surface. `importlib.import_module` and `__import__` are followed under any alias (`from x import y as z`, `import x as y`, `builtins`, as a call receiver) when the module name is a constant, and anything else raises AssertionError naming file:line: a name read at run time, a relative name, the loader or `importlib`/`sys`/`builtins` held as a value, `sys.modules` used other than by a constant key, a star import of those modules, or the module name as a bare string. The two packages keep copies of the helper, pinned to one hash.
 
 - U5.22: local `sm search "*"` (wildcard) now lists intake-only items and every wildcard row carries the extraction `read_status` when `sm2_search_visibility_gate` is ON (the snapshot scan could not see receipts). Recall lines add an `[extraction_pending]`-style tag only when a status is present. Gate OFF is unchanged. On the gate-ON arm the wildcard now returns core's own merged enumeration (membership, edit and tombstone precedence, origin filters, status on every row) instead of merging onto the graph snapshot; a full window at the cap, or a core page larger than the window it was asked for, raises `WildcardEnumerationOverflowError` with one WARNING. Every storage site that serializes a core result (search, grouped search, filtered search, get, wildcard) checks the carrier first (`_result_dict`), so a malformed `read_status` is a typed `MalformedReadStatusError` with one WARNING, never `to_dict()`'s raw error or a copied stateless dict.
+
+- U4.42: adds `smartmemory_app.save_caller`, the caller seam for a receipt save, with no switch and no change to `add` or `ingest`. `build_save_call` makes one frozen `SaveCall` carrying a stable retry key (a supplied `idempotency_key` verbatim, or a minted `<seam>:<uuid4 hex>` when none is given), an explicit `wait` (`stored`, `extracted` or omitted) and the caller's own producer namespace; submitting the same call again sends the same key and request. `storage.save(call)` submits it to `SmartMemory.save` under the same write lock as `ingest` and reads the receipt with `save_return`. It never falls back to `add` or `ingest`: core's `SaveNotEnabled`, `SaveRequestError` and `IncompatibleWait` pass through unchanged, a memory with no `save`, a legacy return from `save`, and hosted mode are each one typed `SaveCallRefused` with one WARNING. Nothing on the legacy save path imports it, so there is no change until core's common-receipt facade is enabled.
+
+- U4.42 review fix (round 2): one rule tells a receipt from a legacy save return (`is_receipt_arm`): a subclass of core's `Receipt`/`ReceiptRefusal`, a lookalike named like one, a receipt from another copy of core and any mapping with `schema_version` are all the receipt arm, and every receipt is read through core's own `Receipt.to_dict` and `decode_receipt`, so a subclass can no longer hide a rejected admission. The retry snapshot is now rebuilt from plain JSON types without calling any copy hook and stored as bytes, so a caller's object can never change what a retry sends; a value that is not plain JSON, an unreadable snapshot and a `submit` of something that is not a `SaveCall` are each one typed, logged refusal. In a core without `smartmemory.refusal_logging` the cause of a refusal is chained, never rendered, so it cannot raise.
+- U4.42 review fix: a `SaveCall` now holds a deep, read-only snapshot of its request (`FrozenRequest`), so changing the dict you passed in, or anything nested in it, can no longer change what a retry sends under the same key. Every new failure on the save path is a typed `SaveCallRefused` with one WARNING and a refusal mark, never a raw exception or a second WARNING: the memory cannot be opened, the data directory cannot be resolved, the write lock cannot be taken or is held, and a request that cannot be copied. `save_return` marks its own refusals and admission rejections (`SaveReturnRefused`, `SaveRejected`) at the producer, so the boundary above does not log them again. Still dormant: no switch, no change while core returns an id string.
+- U4.42 review fix (round 3): a receipt is now recognised before its shape, so a receipt that also is a string or a mapping is still refused when it carries a rejected admission, and `resolve_save_return` always reads a receipt through core's own export. A failure that core already logged is refused without a second WARNING, and a return that cannot be inspected is refused on the first failure. No switch; nothing reaches this path until core returns a receipt.
+
+## [1.5.25] - 2026-10-09
+
+- Pins `smartmemory-core==1.5.25` (now with the `[typescript]` extra, which carries the tree-sitter TS/JS grammars).
+- New `smartmemory code bundle <path> --repo <id> --out <file>` writes a store-free local snapshot of a checkout (entities, relations, source identity, `resolution_dependencies`, completeness) without opening a memory store or uploading anything. `--fields minimal` gives the lean form, `--allow-partial` keeps good files when others fail to parse (CODE-BUNDLE-CLI-1).
+- Pins `smartmemory-mcp==1.5.21` (latest published MCP).
+- Core mirror rework (DIST-LITE-SYNC-1) ships closed by default: nothing changes for ordinary add, ingest or export.
+
+## [1.5.24] - 2026-10-08
+
+- Pins `smartmemory-core==1.5.24`: Lite (SQLite) memory never opens a Redis socket unless one is configured (CORE-LITE-REDIS-PROBE-1), plus the 2026-10-08 core security hotfixes.
+
+- `sm code index` now indexes every supported language present (Python and TypeScript/JavaScript, including `.mjs/.cjs/.mts/.cts`) by default instead of Python only; `--language` (alias `--languages`) narrows it (CODE-INDEXER-HARDEN-1 F32). Under the default, a TS/JS file that fails to extract is skipped with a warning instead of refusing the whole index; passing `--language typescript` makes such a failure refuse.
+- Prompt and session-start hooks no longer time out in Claude Code. `smartmemory lifecycle recall` and `lifecycle orient` now stop after 8 seconds (set `SMARTMEMORY_HOOK_DEADLINE` to change it). On overrun they add no context for that prompt, write a warning with per-phase timings to `hooks.log`, send at most one anonymous `hook_deadline_exceeded` event a day (no prompt text, no paths, honours `SMARTMEMORY_CRASH_REPORTS=0`) and exit cleanly. The prompt is still saved first, so the turn is remembered. The hooks also skip the daemon connection when no daemon is running, and wait at most 1.5 s to connect when one is. `smartmemory setup` now gives the SessionStart and UserPromptSubmit hooks a 15 s timeout when none is set, and keeps any timeout you chose.
+- Add a real SQLite lifecycle golden through the local API, verifying persisted rows, search, recall, clear and empty storage, with no network allowed. The four lite-mode Redis probes it catches are declared as a strict known gap (CORE-LITE-REDIS-PROBE-1).
+- Code index accepts recoverable grammar partials with visible spans and coverage, reports clean/partial/failed counts and publication outcomes, and retains successful file checkpoints for retry (CODE-PARSE-DIAGNOSTICS-1).
+- Add sm code effects for deterministic Python boundary evidence without starting a memory store (CODE-EFFECTS-ENGINE-1).
+- Verify hosted CLI bundles preserve framework kinds, export evidence and TS TESTS relations through the shared core parser (CODE-FRAMEWORK-SEMANTICS-1).
+
+- Hosted code upload bundles preserve lexical identity, source spans and call confidence, including unresolved source references (CODE-EDGE-CONFIDENCE-1).
+
+- CODE-INGEST-SURFACES-1: hosted code indexing uses core bundle preparation and complete dataclass serialization while preserving language selection and client-side parsing.
+
+- Mirror groundwork (DIST-LITE-SYNC-1): the packaged mirror contract schema now matches the current contract, including the per-item `schema_changed_during_write` report flag.
+
+## [1.5.23] - 2026-10-05
+
+- On Windows, `*` and `?` in arguments such as `sm search "*"` are passed through literally instead of being expanded to file names.
+
+## [1.5.22] - 2026-10-05
+
+- Default local search hides raw hook transcripts. Use --origin PREFIX to inspect a producer in direct or daemon mode. Hosted mode clearly refuses this unsupported filter before connecting.
+- Custom local embedding models warm successfully when their configured dimension is unavailable, with an explicit unverified-dimension warning. Runtime names now resolve the correct model files, while known dimension mismatches still fail startup.
+- Semantic-hop planner notices use the executing daemon's key status, or local key status for direct search, and appear only after a successful search.
+- Doctor treats verified healthy daemon and worker store owners as OK, retains contention and stale-owner warnings, and omits repair hints on healthy keyring and disk checks.
+- Doctor records separate probe timings and budgets, reuses a healthy daemon's verified embedding warmup for the configured store, and reports slow cold-start timeouts as incomplete checks.
+- Inline add accepts arbitrary property options before or after quoted text, including --key=value, while retaining reserved, duplicate and missing-value validation. Split text prompts users to quote it or use --all - stdin.
+- Search prints full IDs, offers --json with complete fields, marks truncated previews, and supports --full bodies. Local read-only get resolves unique ID prefixes of at least six hex characters and lists candidates on ambiguity. Remote get asks for the full ID.
+- sm help and sm help COMMAND forward to Click help. Keyless local semantic-hop searches show and log their heuristic-planner fallback.
+- Restart prints worker-stop, daemon-stop, start/spawn and ready timings, including partial failures. Detached daemon stdio defaults to UTF-8 while preserving a user-selected encoding.
+- Extractive `sm ask --reasoning` displays the returned graph relations using the same format as synthesized answers.
+- Local `sm ask` without an LLM key returns clearly labelled extractive memory excerpts with full IDs, types and dates. Empty results exit successfully. Configured LLM failures keep their existing errors.
+- Groundwork for Lite → hosted mirroring (DIST-LITE-SYNC-1 U2, no user command yet): a local mirror state store (`mirror.sqlite3`) holds the pairing, frozen pending snapshots, receipts and per-key baselines, refuses deletes after a database replacement or restore until an explicit re-pair, and lets only one mirror apply run at a time. `sm reset` now keeps `okf_namespace.json` and any mirror state.
+
+## [1.5.21] - 2026-10-04
+
+- Remote lifecycle hooks run the in-process engine directly, skipping the local daemon attempt while preserving local daemon acceleration and fail-open behaviour.
+- Remote `sm add --prop key=value` delivers user properties through hosted ingest context and refuses reserved producer/scope keys. Remote `sm search '*' --prop key=value` uses one exact list filter, with filtered pagination. Semantic property search and unsupported combinations remain explicit refusals.
+- Local `sm status` explains that memories live only on this machine, outside the cloud account, and reports the saved memory count even when the daemon is stopped or warming. `sm status --json` adds explicit local-only disclosure fields while preserving backend status fields.
+- Remote `sm start`, `stop` and `restart` disclose their local proxy/viewer scope, configured API and workspace. Proxy health and extraction messages distinguish local readiness from unchecked hosted connectivity and capability, with `sm status` as the hosted access check.
+- Remote lifecycle observe, distill and learn now deliver producer origin, requested memory type and properties through hosted ingest. Reserved property keys cannot override producer fields, and the service retains authority over workspace scope.
+- Remote `sm search '*'` lists scoped memories with `--top-k` page limits, `--offset` continuation and surfaced service errors.
+- Remote `sm code index` parses the checkout locally and uploads code entities and relations to the configured hosted workspace. Repo and request-size caps are explicit, failed replacements report uncertainty, and uploads never delete the previous index first. Incomplete directory traversal refuses replacement and reports failed paths, preserving the prior index. Hosted indexing reports that vector embeddings are unavailable.
+
+### Install troubleshooting
+
+- Handled setup, model warmup, store busy and reset failures use the anonymous crash reporter, shared opt-out and privacy filtering. User cancellations and ordinary usage errors are excluded. Failed setup prints bounded doctor guidance and a report ID or reporting status.
+- Hook shells record failed lifecycle commands without launching a reporter. The next CLI consumes each hook and exit code once per install per day. Doctor shows recent hook failures and repair guidance.
+- First-run checks validate the package's Python requirement and native vector/embedding imports, then cache successful checks per installed version. Failed native checks retry and report once.
+- Doctor inspects SQLite and vector snapshots without repairing them, checks dimensions/counts, detects active or stale locks, tests cached embeddings offline, and checks keyring, Git Bash, disk space and daemon port owners. Expensive probes run in a bounded child process.
+- Explicit `smartmemory warm` now returns an actionable failure when a loader fails instead of announcing successful warmup.
+- Reports go through a durable outbox: written (already privacy-filtered) before sending, removed only after confirmed delivery, retried at the next interactive command or daemon start, capped in size, with corrupt files quarantined. Opting out deletes queued reports unsent.
+- Redaction now also covers private API/proxy hosts (config, environment, OS proxy settings, URLs passed to setup), any user's profile path, and the current username, without altering report field names.
+- Lifecycle hooks never run diagnostics, flush the outbox or send reports. All six hooks write failure markers to `~/.smartmemory`, including installs with a custom data directory.
+- Doctor never sends, never consumes hook markers, never takes the store write lock, and shows pending hook failures and queued reports read-only.
+- Model warmup and setup report a real failure when the embedding or reranker loader fails.
+
+## [1.5.20] - 2026-10-04
+
+- Windows wrapper and standalone MCP environments now use the same canonical credential file and lock. A newer legacy credential migrates before its source is removed, so account rotations survive reads across environments.
+- Remote setup honors `--api-url` and the effective configured endpoint for validation and persistence. Unattended setup accepts `SMARTMEMORY_API_KEY`.
+- Windows setup and MCP login share one credential fallback. Credential updates lock writers and verify a protected current-SID-only temporary file before writing any key, preserving the previous key on ACL failure. Legacy MCP credentials migrate once and are removed.
+- Direct daemon startup retains its absolute lifecycle deadline. Git Bash executable and hook script paths both escape shell expansions.
+- Windows Claude hooks use a validated absolute Git Bash path and setup refuses missing or broken Git Bash.
+- Direct `get` emits ISO timestamps using the same JSON encoder as the API.
+- Direct writes wait up to 30 seconds (configurable), report busy stores clearly, and never replay a write after a dropped daemon response.
+- Store reset checks live owners and every file before mutation. Windows deletion holds exclusive handles and reports retained files as failure.
+- Windows detached launches request terminal-job breakaway and no console window, with an explicit warning if breakaway is denied.
+- Daemon startup rotates an oversized `daemon-output.log` before opening the child output handle (5 MiB default, one previous log).
+- Local diagnostics skip the SmartMemory API probe. Remote diagnostics use the effective configured API URL, including support zip.
+- Support exports redact raw, slash-separated and JSON-escaped Windows profile paths and omit absolute config paths.
+- Include lightweight Requests SOCKS support and document UTF-8 piping for PowerShell 5.1.
+
+## [1.5.19] - 2026-10-03
+
+- Pins smartmemory-core 1.5.19 and smartmemory-mcp 1.5.19 (MCP lists its tools without opening the local store).
+
+- Stop confirms that daemon health has disappeared before clearing its PID marker, and launchd shutdown polling leaves time for worker termination within the lifecycle deadline.
+- Windows daemon and legacy-worker liveness checks inspect processes without signalling them.
+- Stop verifies daemon and worker identity through portable process inspection and preserves markers when ownership cannot be established.
+- Daemon shutdown requests let the HTTP server drain and close storage before bounded termination, with a warning if forced shutdown cannot confirm the final flush.
+- Restart and stop retire orphan core workers even when the daemon is absent.
+- Session state updates replace existing files safely and serialize concurrent saves on Windows.
+- Codex MCP configuration escapes Windows executable paths and validates TOML before writing.
+- Clear reports retained storage files as a failure and skips reseeding and success events after a partial reset.
+- Piped memories and lifecycle JSON decode as UTF-8 independently of the Windows locale, with explicit invalid-input errors.
+- Claude settings and shell profiles use UTF-8 during setup and removal.
+- Workspace identity decodes Git repository roots as UTF-8, preserving Unicode paths.
+- Background daemon, core worker and capture launches use native Windows detachment flags and redirect stdin.
+- Diagnostic logs coordinate rotation across processes and release file handles between records. Daemon console output uses a separate file.
+- Windows setup explains that login startup and automatic crash recovery require manual `sm start`.
+- Windows API-key setup uses the credential store and provides PowerShell environment instructions, with a warning when persistence fails.
+- Doctor provides native Windows virtual-environment repair commands without shell activation.
+
+- Windows lifecycle hooks use quoted forward-slash paths and repair older registrations when setup is rerun. CLI and hook streams use UTF-8 so Unicode memory text and doctor status marks print safely.
+- Releases automatically update the exact MCP dependency pin to the latest published version before building, keeping installs reproducible and the MCP server current.
+
+- Remote `sm ask`, add, search, recall, get and status use the hosted service directly. Ask uses hosted LLM credentials, reports API and quota failures clearly, and also works through the remote viewer proxy. Local store maintenance commands explain their local-only scope.
+- Windows setup uses text prompts and the guided tour and graph explorer TUIs are skipped until fully tested. Set `SMARTMEMORY_FORCE_TUI=1` to test the TUIs.
+- Automatic anonymous crash reports cover CLI failures, daemon process and thread
+  failures, HTTP 500 errors and degraded warmup. Reports remove credentials, memory
+  bodies and home-directory names, with persistent deduplication and daily limits.
+  Disable with `SMARTMEMORY_CRASH_REPORTS=0` or config `crash_reports = false`.
+- `smartmemory report [MESSAGE] --send` previews the support upload and asks for
+  confirmation (`--yes` skips the prompt). Failed sends save a local support zip.
+  CLI crashes show the report ID, and first-run setup discloses automatic reporting.
+
+## [1.5.18] - 2026-10-03
+
+- CLI failures now save redacted tracebacks and command context to `cli-debug.log`
+  and show a short support instruction. `SMARTMEMORY_DEBUG=1` restores terminal tracebacks.
+- Setup logs model preparation context and gives timeout and mirror recovery guidance.
+  Daemon warm-up and uncaught process/thread failures retain redacted tracebacks in `daemon.log`.
+- `smartmemory doctor` checks network reachability, proxies, model cache, daemon health
+  and storage. `smartmemory report --zip [PATH]` creates one redacted local support file.
+
+## [1.5.17] - 2026-10-03
+
+- Pins `smartmemory-core==1.5.17`: **Windows saves work again.** Every `sm add` on Windows failed with `OSError: [Errno 9] Bad file descriptor` while flushing the vector index (a regression from 2026-09-26).
+- `sm tour` no longer crashes with `httpx.ReadTimeout` on a slow first start. It waits for the local server to finish warming up instead of treating the first health reply as ready, and reports a failed warmup in plain words.
+- Hook capture and lesson saves no longer try to fsync a directory on Windows, which Windows does not allow.
+- Model downloads during setup wait up to 300 s per read (`HF_HUB_DOWNLOAD_TIMEOUT`, was ~10 s) unless you set your own value.
 
 ## [1.5.16] - 2026-10-01
 
@@ -55,6 +297,10 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 - Pins `smartmemory-core==1.4.116` (decision listings keep `context_snapshot`: supersede/retract reason).
 
 ## Unreleased
+
+- Show unknown for hosted code counts and outcomes absent from the server response, including transport failures (CODE-PARSE-DIAGNOSTICS-1).
+
+- Retain hosted code-index failure bodies and print clean, partial and failed counts with the server publication outcome on CLI failures (CODE-PARSE-DIAGNOSTICS-1).
 
 ### Fixed
 

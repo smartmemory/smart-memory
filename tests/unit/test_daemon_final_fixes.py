@@ -149,26 +149,20 @@ def test_sqlite_lock_does_not_delay_stop_signals(
     writer.start()
     signals = []
     running = True
-    real_kill = daemon.os.kill
 
-    def kill(pid, sig):
+    def terminate(pid, timeout):
         nonlocal running
-        if pid == 434343:
-            signals.append(sig)
-            if sig == signal.SIGTERM:
-                running = False
-        else:
-            return real_kill(pid, sig)
+        signals.append(signal.SIGTERM)
+        running = False
+        return True
 
-    def run(command, **kwargs):
-        if command[0] == "ps":
-            return subprocess.CompletedProcess(
-                command, 0, "python -m smartmemory_app.worker_entry", ""
-            )
-        return launchd.run(command, **kwargs)
-
-    monkeypatch.setattr(daemon.os, "kill", kill)
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(spawn, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        spawn,
+        "process_cmdline",
+        lambda pid: ["python", "-m", "smartmemory_app.worker_entry"],
+    )
+    monkeypatch.setattr(spawn, "terminate_process", terminate)
     monkeypatch.setattr(spawn, "worker_is_running", lambda data: running)
     (data / ".worker.pid").write_text("434343")
     launchd.loaded = True

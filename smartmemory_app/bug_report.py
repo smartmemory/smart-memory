@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from smartmemory_app.diagnostics import redact_credentials
+
 
 _MAX_LOG_LINES = 2_000
 _MAX_LOG_BYTES = 512 * 1024
@@ -116,20 +118,22 @@ def format_bug_report(
 
     effective_test_id = test_id or f"CLI-{timestamp_id}"
     effective_test_title = test_title or test_id or "Ad-hoc CLI report"
-    return "\n".join(
-        (
-            "Bug Report",
-            f"Test ID: {effective_test_id}",
-            f"Test title: {effective_test_title}",
-            f"Severity: {severity}",
-            f"Environment: {environment.browser_info}",
-            f"Timestamp: {timestamp_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}",
-            "",
-            "Steps / actual outcome:",
-            message,
-            "",
-            f"Debug log path: {effective_log_path}",
-            f"Debug log preview:{preview}",
+    return redact_credentials(
+        "\n".join(
+            (
+                "Bug Report",
+                f"Test ID: {effective_test_id}",
+                f"Test title: {effective_test_title}",
+                f"Severity: {severity}",
+                f"Environment: {environment.browser_info}",
+                f"Timestamp: {timestamp_utc.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                "",
+                "Steps / actual outcome:",
+                message,
+                "",
+                f"Debug log path: {effective_log_path}",
+                f"Debug log preview:{preview}",
+            )
         )
     )
 

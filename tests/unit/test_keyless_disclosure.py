@@ -64,6 +64,7 @@ def test_cli_keeps_uuid_on_stdout_and_disclosure_on_stderr(monkeypatch, availabl
     if not available:
         response["warning"] = warning
     monkeypatch.setattr("smartmemory_app.cli._daemon_request", lambda *a, **k: response)
+    monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
     result = CliRunner().invoke(cli, ["add", "Alice leads Atlas"])
 
     assert result.exit_code == 0, result.output
@@ -176,6 +177,7 @@ def test_effective_config_disclosure_through_storage_api_and_cli(
     monkeypatch.setattr("smartmemory_app.cli._daemon_request", request)
     with patch.dict("os.environ", {"BROWSER": "true", **credentials}, clear=True):
         storage.apply_runtime_config()
+        monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
         result = CliRunner().invoke(cli, ["add", "Alice leads Atlas"])
 
     assert result.exit_code == 0, result.output
@@ -206,6 +208,8 @@ def test_stdin_batch_prints_disclosure_once(monkeypatch, available):
     if not available:
         response["warning"] = warning
     monkeypatch.setattr("smartmemory_app.cli._daemon_request", lambda *a, **k: response)
+
+    monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
 
     result = CliRunner().invoke(cli, ["add", "-"], input="first\nsecond\n")
 

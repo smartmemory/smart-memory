@@ -205,12 +205,23 @@ def test_doctor_fails_just_below_floor(runner):
     assert "1.4.38 is too old" in result.output
 
 
-def test_doctor_fails_when_core_missing(runner):
+@pytest.mark.parametrize(
+    "platform,interpreter",
+    [("linux", ".venv/bin/python"), ("win32", ".\\.venv\\Scripts\\python.exe")],
+)
+def test_doctor_fails_when_core_missing(runner, monkeypatch, platform, interpreter):
+    monkeypatch.setattr(cli_mod.sys, "platform", platform)
     with patch("importlib.metadata.version", _fake_pkg_version(None)):
         result = runner.invoke(cli, ["doctor"])
     assert result.exit_code == 1
     assert "smartmemory-core is not installed" in result.output
-    assert "pip install smartmemory" in result.output
+    assert "Reinstall in a clean venv:\n" in result.output
+    assert (
+        "    python -m venv .venv\n"
+        f"    {interpreter} -m pip install --upgrade smartmemory\n"
+    ) in result.output
+    assert "source " not in result.output
+    assert "All checks passed." not in result.output
 
 
 def test_doctor_fails_on_old_python(runner, monkeypatch):
@@ -278,7 +289,7 @@ def test_setup_proceeds_on_healthy_core(runner, tmp_path):
         result = runner.invoke(setup_cmd, ["--mode", "local"])
 
     assert result.exit_code == 0, result.output
-    setup_click.assert_called_once_with("local", None)
+    setup_click.assert_called_once_with("local", None, None)
 
 
 def test_setup_warns_but_proceeds_when_socks_proxy_support_is_missing(
@@ -308,7 +319,7 @@ def test_setup_warns_but_proceeds_when_socks_proxy_support_is_missing(
         in result.output
     )
     assert "pip install httpx[socks]" in result.output
-    setup_click.assert_called_once_with("local", None)
+    setup_click.assert_called_once_with("local", None, None)
 
 
 def test_setup_preflight_raises_click_exception(runner):

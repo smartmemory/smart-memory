@@ -275,16 +275,7 @@ class TestRecallRoute:
 
 
 class TestAsk:
-    def test_requires_llm_key_without_generating_a_fallback(self, client, monkeypatch):
-        """Question answering is unavailable, rather than invented, without a provider key."""
-        import smartmemory_app.local_api as local_api
-
-        monkeypatch.setattr(local_api, "llm_key_present", lambda: False)
-
-        response = client.post("/ask", json={"question": "What did we decide?"})
-
-        assert response.status_code == 503
-        assert "requires a configured LLM key" in response.json()["detail"]
+    # Keyless extractive responses now exercise real storage in tests/cli/test_ask_extractive.py.
 
     @pytest.mark.parametrize(
         "error",
@@ -587,3 +578,23 @@ class TestIngestCorePlacement:
         assert fake.call_args.kwargs.get("sync") is False, (
             "sync=False preserves the core work-graph result dict"
         )
+
+
+class TestIngestWorkspaceStamp:
+    def test_stamped_workspace_beats_a_caller_property(self, client):
+        """CLI-WORKSPACE-UX-1 F-3: body.workspace_id wins over properties.workspace_id."""
+        fake = MagicMock(return_value={"item_id": "itm_ws", "entity_ids": {}})
+        with patch("smartmemory_app.storage.ingest", fake):
+            r = client.post(
+                "/ingest",
+                json={
+                    "content": "hello",
+                    "workspace_id": "ws_stamped000000",
+                    "properties": {"workspace_id": "ws_sneaky000001", "k": "v"},
+                },
+            )
+        assert r.status_code == 200
+        assert fake.call_args.kwargs["properties"] == {
+            "workspace_id": "ws_stamped000000",
+            "k": "v",
+        }

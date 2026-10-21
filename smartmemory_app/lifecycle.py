@@ -19,6 +19,8 @@ from inspect import signature
 from pathlib import Path
 from typing import Any
 
+from filelock import FileLock, Timeout
+
 from smartmemory_app import recall_format
 from smartmemory_app.lifecycle_config import LifecycleConfig, RecallStrategy
 from smartmemory_app.recall_format import (
@@ -218,6 +220,19 @@ class MemoryLifecycle:
         self._save_state()
         return output
 
+    def capture_prompt(self, prompt: str) -> None:
+        """Persist the prompt for distill pairing before any recall work starts.
+
+        The recall hook runs under a deadline (HOOK-DEADLINE) and exits hard on
+        overrun, so the one thing distill needs from this turn is saved first.
+        ``recall`` still captures it too, for callers that skip this step (the
+        daemon's lifecycle API).
+        """
+        if not self._config.enabled:
+            return
+        self._current_user_turn = prompt
+        self._save_state()
+
     @_traced_injection
     def recall(self, prompt: str, cwd: str | None = None) -> str:
         """Phase 2: Per-prompt recall — always captures prompt, optionally injects context.
@@ -304,14 +319,17 @@ class MemoryLifecycle:
             # origin MUST be the explicit kwarg — it is a reserved key stripped from
             # `properties` (DIST-LITE-QUIET-1), so the old properties= form silently
             # stored origin="unknown". (CORE-CODE-PROVENANCE-1 Phase 2a fix.)
-            ingest(
+            receipt = ingest(
                 text,
                 memory_type="episodic",
                 origin="hook:observe",
                 properties={"workspace_id": derive_workspace_id(cwd)},
             )
-            self._observation_count += 1
-            self._save_state()
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                log.warning("Observation held: %s", receipt.get("reason"))
+            else:
+                self._observation_count += 1
+                self._save_state()
         except Exception as e:
             log.warning("Observe ingest failed; tool observation lost: %s", e)
 
@@ -357,7 +375,7 @@ class MemoryLifecycle:
                 "Provenance persist failed; code-authorship evidence lost: %s", e
             )
 
-    def distill(self, response: str, cwd: str | None = None) -> None:
+    def distill(self, response: str, cwd: str | None = None) -> dict | None:
         """Phase 4: Pair assistant response with stored prompt, save turn pair.
 
         Called by Stop hook with last_assistant_message.
@@ -378,12 +396,15 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(
+            receipt = ingest(
                 pair,
                 memory_type="pending",
                 origin="lifecycle:distill",
                 properties={"workspace_id": derive_workspace_id(cwd)},
             )
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                log.warning("Turn pair held: %s", receipt.get("reason"))
+                return receipt
         except Exception as e:
             log.warning("Distill ingest failed; turn pair lost: %s", e)
 
@@ -391,7 +412,7 @@ class MemoryLifecycle:
         self._current_user_turn = None
         self._save_state()
 
-    def learn(self, tool_name: str, error: str, cwd: str | None = None) -> None:
+    def learn(self, tool_name: str, error: str, cwd: str | None = None) -> dict | None:
         """Phase 5: Capture tool failure as episodic memory."""
         if not self._config.enabled or not self._config.learn_from_errors:
             return
@@ -401,12 +422,15 @@ class MemoryLifecycle:
         from smartmemory_app.storage import ingest
 
         try:
-            ingest(
+            receipt = ingest(
                 text,
                 memory_type="episodic",
                 origin="hook:learn",
                 properties={"workspace_id": derive_workspace_id(cwd)},
             )
+            if isinstance(receipt, dict) and receipt.get("status") == "held":
+                log.warning("Error memory held: %s", receipt.get("reason"))
+                return receipt
         except Exception as e:
             log.warning("Learn ingest failed; error memory lost: %s", e)
 
@@ -601,9 +625,13 @@ class MemoryLifecycle:
         try:
             path = self._state_path()
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data))
-            tmp.rename(path)
-        except OSError as e:
+            with FileLock(str(path.with_suffix(".lock")), timeout=2):
+                try:
+                    tmp.write_text(json.dumps(data), encoding="utf-8")
+                    tmp.replace(path)
+                finally:
+                    tmp.unlink(missing_ok=True)
+        except (OSError, Timeout) as e:
             record_hook_degradation(
                 "Failed to save session state; current session updates lost", e
             )
