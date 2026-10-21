@@ -13,6 +13,7 @@ POST /vector/query       → /memory/vector/query     (WEB-VECTOR-SEARCH-TAB-1 U
 GET  /vector/stats       → /memory/vector/stats
 GET  /vector/items/{id}  → /memory/vector/items/{id}
 GET  /vector/missing     → /memory/vector/missing
+GET  /vector/projection  → /memory/vector/projection  (VEC-TAB-U6: 2D/3D map coordinates, ids only)
 GET  /{id}/neighbors     → /memory/{id}/neighbors  (BEFORE /{id} — declaration order matters; DIST-OBSIDIAN-LITE-1: each neighbor carries direction)
 GET  /{id}               → /memory/{id}
 PATCH /{id}              → /memory/{id}            (DIST-OBSIDIAN-LITE-1: CORE-CRUD-UPDATE-1 contract)
@@ -406,7 +407,7 @@ class VectorQueryRequest(BaseModel):
     include_embedding: bool = False
 
 
-def _vector_read(method: str, *args, **kwargs) -> dict:
+def _vector_read(facade_method: str, /, *args, **kwargs) -> dict:
     """Call one core ``vector_*`` facade read and map its typed errors to the contract's statuses.
 
     400 malformed request, 404 unknown collection / item not visible / no vector (``detail``
@@ -428,9 +429,19 @@ def _vector_read(method: str, *args, **kwargs) -> dict:
             status_code=501,
             detail="vector inspection not available in remote-proxy mode",
         )
+    read = getattr(mem, facade_method, None)
+    if not callable(read):
+        log.warning(
+            "Vector read %s unavailable: the installed smartmemory-core has no such facade method",
+            facade_method,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail=f"{facade_method} is not available in the installed smartmemory-core",
+        )
     try:
         with _rw_lock:
-            return getattr(mem, method)(*args, **kwargs)
+            return read(*args, **kwargs)
     except VectorRequestError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except VectorNotFound as e:
@@ -438,7 +449,7 @@ def _vector_read(method: str, *args, **kwargs) -> dict:
     except VectorCapabilityUnsupported as e:
         raise HTTPException(status_code=501, detail=str(e)) from e
     except (VectorSubstrateError, MissingModelError) as e:
-        log.warning("Vector read %s failed: %s", method, e)
+        log.warning("Vector read %s failed: %s", facade_method, e)
         raise HTTPException(status_code=503, detail=str(e)) from e
 
 
@@ -470,6 +481,26 @@ def vector_missing(
     """One page of memories semantic recall cannot reach (``total`` exact on Lite)."""
     return _vector_read(
         "vector_missing", limit=limit, cursor=cursor, collection=collection
+    )
+
+
+@api.get("/vector/projection")
+def vector_projection(
+    dims: str = "3",
+    method: str = "pca",
+    limit: Optional[str] = None,
+    collection: str = "memory",
+) -> dict:
+    """In-scope vectors projected to 2D/3D (VEC-TAB-U6): coordinates and ids, never vectors.
+
+    Params stay strings like the hosted route, so a bad ``dims``/``limit`` is the core's 400, not a 422.
+    """
+    return _vector_read(
+        "vector_projection",
+        dims=dims,
+        method=method,
+        limit=limit,
+        collection=collection,
     )
 
 

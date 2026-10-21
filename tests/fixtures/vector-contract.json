@@ -1,5 +1,5 @@
 {
-  "_fixture_source": "copy of smart-memory-docs docs/features/WEB-VECTOR-SEARCH-TAB-1/vector-contract.json at origin/main (VEC-TAB-U3, 2026-10-21); CI has no docs checkout, so tests/test_local_api_vector.py reads this copy. Re-copy when the contract changes.",
+  "_fixture_source": "copy of smart-memory-docs docs/features/WEB-VECTOR-SEARCH-TAB-1/vector-contract.json at the VEC-TAB-U6 docs branch (2026-10-21, adds routes.projection); CI has no docs checkout, so tests/test_local_api_vector.py reads this copy. Re-copy when the contract changes.",
   "_source": "design.md",
   "_roadmap": "../../ROADMAP.md#web-vector-search-tab-1",
   "feature": "WEB-VECTOR-SEARCH-TAB-1",
@@ -102,6 +102,25 @@
       "errors": {
         "501": "backend does not implement missing_vector_ids (stats.capabilities.missing_list = false)"
       }
+    },
+    "projection": {
+      "method": "GET",
+      "path": "/memory/vector/projection",
+      "lite_alias": "GET /vector/projection",
+      "scope_policy": "team_required",
+      "added_by": "VEC-TAB-U6",
+      "request": {
+        "dims": "integer, 2 | 3, default 3",
+        "method": "\"pca\" | \"umap\", default \"pca\"; umap only when the server enables it (SMARTMEMORY_VECTOR_PROJECTION_UMAP and umap-learn installed), else 501",
+        "limit": "integer, default 2000, clamped to 2000 server-side; beyond it the backend samples deterministically",
+        "collection": "string, default \"memory\""
+      },
+      "response": "ProjectionResponse",
+      "errors": {
+        "400": "dims not 2 or 3; unknown method; non-integer limit",
+        "501": "method umap not enabled here; backend cannot sample vectors (stats.capabilities.projection = false)",
+        "503": "VectorSubstrateError"
+      }
     }
   },
   "types": {
@@ -151,6 +170,25 @@
       "origin": "string | null",
       "created_at": "string | null",
       "reason": "\"no_row\" | \"row_without_vector\" | \"type_not_searchable\" \u2014 the last comes from embedding_policy.type_is_searchable and is informational, not a defect"
+    },
+    "ProjectionResponse": {
+      "method": "\"pca\" | \"umap\"",
+      "dims": "integer",
+      "space": "SpaceRef",
+      "points": "ProjectionPoint[] ordered by item_id; the caller's in-scope vectors only",
+      "total": "integer | null: in-scope rows with a vector, the population the sample was drawn from",
+      "sampled": "boolean: true when total > limit",
+      "limit": "integer: the clamped limit applied",
+      "explained_variance": "number[] | null: per-axis explained variance ratio (pca), null for umap",
+      "warnings": "string[]",
+      "cached": "boolean: served from the per-scope cache (keyed by collection location, tenant, workspace, user, mode; invalidated on a vector write)"
+    },
+    "ProjectionPoint": {
+      "item_id": "string",
+      "coords": "number[dims], each in [-1, 1], 6 decimals; deterministic for the same in-scope vectors",
+      "memory_type": "string | null",
+      "title": "string | null",
+      "has_graph_node": "boolean"
     }
   },
   "errors": {
@@ -163,13 +201,15 @@
   "core_surface": {
     "backend_abc_additions": {
       "describe()": "-> VectorBackendInfo{backend, single_tenant, dimension, model_id, count, capabilities}; abstract-with-default: base returns backend=class name, dimension/model_id None, count=self.count()",
-      "missing_vector_ids(limit, cursor)": "-> (ids, next_cursor); base raises NotImplementedError (reported as capability false, never an empty list)"
+      "missing_vector_ids(limit, cursor)": "-> (ids, next_cursor); base raises NotImplementedError (reported as capability false, never an empty list)",
+      "sample_vectors(limit, filters, context)": "-> VectorSample(rows, total); scoped, deterministic, at most limit embeddings read (VEC-TAB-U6). describe().capabilities.projection reports whether it works"
     },
     "facade_methods": [
       "vector_query",
       "vector_stats",
       "vector_inspect",
-      "vector_missing"
+      "vector_missing",
+      "vector_projection"
     ],
     "manager": "smartmemory.managers.vector_inspect.VectorInspectManager"
   },
@@ -178,13 +218,15 @@
       "vector_query(text=None, embedding=None, top_k=10, memory_type=None, origin_prefix=None, collection='memory', include_embedding=False)",
       "vector_stats()",
       "vector_inspect(item_id, top_k=10, collection='memory', include_embedding=False)",
-      "vector_missing(limit=50, cursor=None, collection='memory')"
+      "vector_missing(limit=50, cursor=None, collection='memory')",
+      "vector_projection(dims=3, method='pca', limit=None, collection='memory')"
     ],
     "js": [
       "client.vector.query({text, embedding, topK, memoryType, originPrefix, collection, includeEmbedding})",
       "client.vector.stats()",
       "client.vector.inspect(itemId, {topK, collection, includeEmbedding})",
-      "client.vector.missing({limit, cursor, collection})"
+      "client.vector.missing({limit, cursor, collection})",
+      "client.vector.projection({dims, method, limit, collection})"
     ]
   }
 }

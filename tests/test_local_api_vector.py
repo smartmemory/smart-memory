@@ -93,7 +93,17 @@ def assert_missing(resp: dict) -> None:
         _assert_shape(item, TYPES["MissingItem"], "missing.item")
 
 
+def assert_projection(resp: dict) -> None:
+    _assert_shape(resp, TYPES["ProjectionResponse"], "projection")
+    _assert_shape(resp["space"], TYPES["SpaceRef"], "projection.space")
+    for point in resp["points"]:
+        _assert_shape(point, TYPES["ProjectionPoint"], "projection.point")
+        assert len(point["coords"]) == resp["dims"]
+        assert all(-1.0 <= c <= 1.0 for c in point["coords"])
+
+
 SHAPES = {
+    "projection": assert_projection,
     "query": assert_query,
     "stats": assert_stats,
     "inspect": assert_inspect,
@@ -382,10 +392,12 @@ def test_typed_core_errors_never_become_an_empty_page(monkeypatch, exc, status):
         ("get", "/memory/vector/stats", {}),
         ("get", "/memory/vector/items/x", {}),
         ("get", "/memory/vector/missing", {}),
+        ("get", "/memory/vector/projection", {}),
     ):
         resp = getattr(client, method)(path, **kwargs)
         assert resp.status_code == status, (path, resp.text)
-        assert "items" not in resp.json() and "hits" not in resp.json()
+        body = resp.json()
+        assert "items" not in body and "hits" not in body and "points" not in body
 
 
 def test_remote_proxy_mode_answers_501(monkeypatch):
@@ -399,6 +411,74 @@ def test_remote_proxy_mode_answers_501(monkeypatch):
     app.mount("/memory", local_api.api)
     resp = TestClient(app).get("/memory/vector/stats")
     assert resp.status_code == 501 and "remote-proxy" in resp.json()["detail"]
+
+
+# ---------- VEC-TAB-U6: /vector/projection ----------
+_HAS_PROJECTION = hasattr(VectorInspectManager, "vector_projection")
+needs_projection = pytest.mark.skipif(
+    not _HAS_PROJECTION,
+    reason="installed smartmemory-core predates VEC-TAB-U6 vector_projection; runs once core ships it",
+)
+
+# One row per case: (name, query params, status, detail fragment or the dims every point carries).
+PROJECTION_ROWS = [
+    ("default-3d", {}, 200, 3),
+    ("2d", {"dims": "2"}, 200, 2),
+    ("limit-1-samples", {"limit": "1"}, 200, 3),
+    ("dims-4", {"dims": "4"}, 400, "dims"),
+    ("dims-not-int", {"dims": "x"}, 400, "dims"),
+    ("limit-not-int", {"limit": "many"}, 400, "integer"),
+    ("method-unknown", {"method": "tsne"}, 400, "method"),
+    ("umap-not-enabled", {"method": "umap"}, 501, "umap"),
+    ("unknown-collection", {"collection": "nope"}, 404, "unknown_collection"),
+]
+
+
+@needs_projection
+@pytest.mark.parametrize(
+    "name,params,status,expect", PROJECTION_ROWS, ids=[r[0] for r in PROJECTION_ROWS]
+)
+def test_projection_route_on_a_usearch_store(
+    client, world, seeded, monkeypatch, name, params, status, expect
+):
+    monkeypatch.delenv("SMARTMEMORY_VECTOR_PROJECTION_UMAP", raising=False)
+    resp = client.get("/memory/vector/projection", params=params)
+    assert resp.status_code == status, resp.text
+    if status != 200:
+        assert expect in str(resp.json()["detail"]).lower()
+        return
+    body = resp.json()
+    assert_projection(body)
+    assert body["dims"] == expect
+    assert "embedding" not in json.dumps(body)  # coordinates and ids only
+    ids = [p["item_id"] for p in body["points"]]
+    assert ids == sorted(ids) and set(ids) <= set(seeded) | {"item-005"}
+    if name == "limit-1-samples":
+        assert body["sampled"] is True and len(ids) == 1 and body["limit"] == 1
+    # Deterministic and the facade's own body: a second read returns the same points (from the cache).
+    again = client.get("/memory/vector/projection", params=params).json()
+    assert again["points"] == body["points"] and again["cached"] is True
+    direct = world.manager.vector_projection(
+        **{k: v for k, v in params.items() if k != "collection"}
+    )
+    assert direct["points"] == body["points"]
+
+
+def test_projection_on_a_core_without_the_facade_answers_501(monkeypatch, caplog):
+    class _OldCore:  # an installed smartmemory-core from before VEC-TAB-U6
+        def vector_stats(self):
+            return {}
+
+    monkeypatch.setattr(local_api, "_get_mem", lambda: _OldCore())
+    app = FastAPI()
+    app.mount("/memory", local_api.api)
+    resp = TestClient(app).get("/memory/vector/projection")
+    assert resp.status_code == 501
+    assert "vector_projection" in resp.json()["detail"]
+    assert any(
+        r.levelname == "WARNING" and "vector_projection unavailable" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------- doctor and /vector/stats agree ----------
