@@ -1108,16 +1108,24 @@ def unbound(tmp_path, monkeypatch, caplog):
 
 
 def test_a_gate_refusal_propagates_from_search_and_is_logged_once(unbound, caplog):
-    """Gate ON with no intake port bound: core refuses. The wrapper must not answer with an empty list."""
+    """Gate ON, an admission door open (the Lite intake table exists) and only the empty default port bound
+    (U20.BIND1: every host binds that port at construction, so a bare host no longer refuses): core refuses.
+    The wrapper must not answer with an empty list."""
+    backend = unbound._graph.backend
+    with backend._lock:
+        backend._conn.execute("CREATE TABLE sm2_intake (id TEXT)")
     with switch_override(SWITCH, True), pytest.raises(PendingFacadeUnavailable):
         storage.search("atlas", top_k=3)
     core_logger = "smartmemory.search.pending_facade"
-    # a refusal row: the COMPLETE list, every logger. The origin's line once, nothing from the wrapper.
-    assert full_log(caplog) == [
+    # a refusal row: the list minus the closed NOISE list (the refusal now lands after the legacy-path switch
+    # WARNING). The origin's line once, nothing from the wrapper.
+    assert answer_log(caplog) == [
         (
             core_logger,
             "WARNING",
-            "Pending facade read refused: intake port and workspace visibility authority are not bound",
+            "Pending facade read refused: the Lite intake table sm2_intake exists, so pending rows can be admitted, "
+            "but the bound intake port is the empty construction default; bind the Lite intake store with "
+            "bind_pending_reads",
         )
     ]
 
