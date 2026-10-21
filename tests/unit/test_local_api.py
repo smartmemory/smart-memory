@@ -22,7 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from smartmemory_app.local_api import api
-from smartmemory_app.config import LLM_KEY_ENV_VARS
+from smartmemory_app.config import LLM_KEY_ENV_VARS, SmartMemoryConfig
 
 
 @pytest.fixture()
@@ -293,6 +293,12 @@ class TestAsk:
         llm.call_llm = MagicMock(side_effect=error)
         monkeypatch.setitem(sys.modules, "smartmemory.utils.llm", llm)
         monkeypatch.setattr(local_api, "llm_key_present", lambda: True)
+        # CLI-TOUR-LLM-ROUTE-1: provider none is no LLM, so the SDK path needs a provider and its key.
+        monkeypatch.setenv("GROQ_API_KEY", "bogus-not-a-real-key")
+        monkeypatch.setattr(
+            "smartmemory_app.config.load_config",
+            lambda: SmartMemoryConfig(mode="local", llm_provider="groq"),
+        )
         monkeypatch.setattr(local_api, "_search_items", lambda body: [])
         monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
 

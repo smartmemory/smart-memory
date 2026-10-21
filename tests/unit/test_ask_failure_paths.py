@@ -69,14 +69,18 @@ def _raise(exc):
 
 
 ASK_ROWS = [
-    # (id, call_llm, search raises, status, detail fragment, reported source, handled)
+    # (id, call_llm, search raises, status, detail fragment, reported source, handled, raw reported)
+    # "raw reported" is True when the report carries the raw exception (coded path), False when it is an HTTPException.
+    # CLI-TOUR-LLM-ROUTE-1: a provider failure is a coded plain message; the raw
+    # exception is what gets reported and never reaches the terminal.
     (
         "provider_error",
         _raise(RuntimeError("Not logged in · Please run /login")),
         None,
         502,
-        "Unable to answer with the configured LLM: RuntimeError: Not logged in",
+        "The request failed. The full error is in ~/.smartmemory/daemon.log.",
         "daemon",
+        True,
         True,
     ),
     (
@@ -87,6 +91,7 @@ ASK_ROWS = [
         "The configured LLM returned no answer",
         "daemon",
         True,
+        False,
     ),
     (
         "missing_openai",
@@ -96,6 +101,7 @@ ASK_ROWS = [
         "Python dependency 'openai' is missing",
         "daemon",
         True,
+        False,
     ),
     (
         "unhandled_route_error",
@@ -105,24 +111,34 @@ ASK_ROWS = [
         None,
         "asgi",
         False,
+        False,
     ),
 ]
 
 
 @pytest.mark.parametrize(
-    "call_llm,search_error,status,detail,source,handled",
+    "call_llm,search_error,status,detail,source,handled,raw_reported",
     [row[1:] for row in ASK_ROWS],
     ids=[row[0] for row in ASK_ROWS],
 )
 def test_daemon_ask_failure_shows_detail_and_reports(
-    monkeypatch, reports, call_llm, search_error, status, detail, source, handled
+    monkeypatch,
+    reports,
+    call_llm,
+    search_error,
+    status,
+    detail,
+    source,
+    handled,
+    raw_reported,
 ):
+    monkeypatch.setenv("GROQ_API_KEY", "bogus-not-a-real-key")
     import smartmemory.utils.llm as core_llm
 
     from smartmemory_app import local_api
     from smartmemory_app.viewer_server import _build_app
 
-    save_config(SmartMemoryConfig(mode="local", daemon_port=PORT))
+    save_config(SmartMemoryConfig(mode="local", daemon_port=PORT, llm_provider="groq"))
     monkeypatch.setattr(local_api, "llm_key_present", lambda: True)
 
     def search(_body):
@@ -147,8 +163,13 @@ def test_daemon_ask_failure_shows_detail_and_reports(
     assert kind == "exception"
     assert kwargs["source"] == source
     assert kwargs.get("handled", False) is handled
-    if handled:
+    if handled and not raw_reported:
         assert exc.status_code == status
+    if raw_reported:  # the coded path reports the raw exception, never shows it
+        assert isinstance(exc, RuntimeError) and "Not logged in" in str(exc)
+        body = response.json()
+        assert body["code"] == "llm_request_failed"
+        assert "Not logged in" not in response.text and "RuntimeError" not in response.text
 
 
 HANDLED_STATUS_ROWS = [
