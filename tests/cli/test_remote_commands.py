@@ -219,6 +219,7 @@ def test_remote_ask_invalid_success_is_not_an_answer(hosted, body):
 
 def test_local_ask_unchanged(hosted, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_MODE", "local")
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")  # none means no LLM (CLI-TOUR-LLM-ROUTE-1)
     # Hermetic: without this the result depends on the machine's keychain or shell key (review-r1 M1).
     monkeypatch.setattr(preflight, "_stored_llm_key_present", lambda: True)
     calls = []
