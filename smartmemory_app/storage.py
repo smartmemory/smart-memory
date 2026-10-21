@@ -583,6 +583,60 @@ def ingest(
     return _normalize_ingest_result(result)
 
 
+def save(call, *, memory=None):
+    """Submit one receipt-arm save call (``save_caller.SaveCall``) and return its ``SaveReturn``.
+
+    The explicit-wait, retry-key doorway (C-01.activate.save.local-adapters). It is not ``ingest``: it calls only
+    ``SmartMemory.save``, which core refuses with ``SaveNotEnabled`` until the common-receipt facade is enabled, and
+    it never falls back to ``add``/``ingest``. Local mode takes the same cross-process write lock as ``ingest``.
+    Hosted mode is refused: hosted receipts belong to the hosted-adapters step, and the hosted API is unchanged.
+
+    ``memory`` lets a caller that already holds the local ``SmartMemory`` (the MCP backend) pass it; the default is
+    the active backend.
+    """
+    from contextlib import ExitStack
+
+    from smartmemory_app.save_caller import (
+        MEMORY_UNAVAILABLE,
+        SAVE_UNAVAILABLE,
+        WRITE_LOCK_UNAVAILABLE,
+        refuse,
+        refuse_from,
+        submit,
+    )
+
+    try:
+        mem = memory if memory is not None else get_memory()
+    except Exception as exc:  # the default memory could not be opened: nothing is saved
+        refuse_from(
+            exc,
+            MEMORY_UNAVAILABLE,
+            "the local memory could not be opened",
+            "nothing was saved and ingest was not used",
+        )
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        refuse(
+            SAVE_UNAVAILABLE,
+            "hosted mode has no receipt save from this client",
+            "nothing was saved and ingest was not used",
+        )
+    stack = ExitStack()
+    try:  # only taking the lock is guarded: what submit raises (core's typed refusals) passes through unchanged
+        data_path = _data_path if _data_path is not None else _resolve_data_dir()
+        stack.enter_context(_get_lock_file(data_path))
+    except Exception as exc:  # an unusable data dir, or a lock that is held or times out, saves nothing
+        refuse_from(
+            exc,
+            WRITE_LOCK_UNAVAILABLE,
+            "the local write lock could not be taken",
+            "nothing was saved and ingest was not used",
+        )
+    with stack:
+        return submit(mem, call)
+
+
 def persist_provenance(edits) -> dict:
     """Persist a `SessionEdits` batch (CORE-CODE-PROVENANCE-1 Phase 2a) under the
     SAME cross-process write lock as ingest(), so concurrent detached hooks for the
