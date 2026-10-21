@@ -1221,9 +1221,11 @@ def _core_dry_run() -> _CoreCall:
     call = _CoreCall()
     real_key_for = core_llm.request_api_key_for_model
 
-    def key_for(model, api_base=None):  # call_llm calls it once, with its chosen model
+    # CLI-TOUR-LLM-ROUTE-1: forward every argument. Core added a keyword `step`
+    # and the old (model, api_base) fake raised TypeError on every doctor run.
+    def key_for(model=None, *args, **kwargs):  # call_llm calls it with its chosen model
         call.chosen = call.chosen or (model or "")
-        return real_key_for(model, api_base)
+        return real_key_for(model, *args, **kwargs)
 
     def terminal(route: str):
         def stop(*args, **kwargs):
@@ -1477,24 +1479,16 @@ def _llm_route(ctx: Context, cfg) -> LlmRoute:
 def check_llm(ctx: Context, context: str = "doctor") -> Row:
     from smartmemory_app.config import (
         LLM_KEY_ENV_VARS,
+        NO_LLM_PROVIDER_OFF_LINE,
         NO_LOCAL_MODEL_OFF_LINE,
         _LOCAL_OPENAI_PROVIDERS,
+        llm_provider_none,
         local_llm_without_model,
     )
 
     cfg = _config(ctx)
     if cfg.mode == "remote":
         return Row("LLM", PASS, "hosted: the SmartMemory service supplies the LLM")
-    try:
-        route = _llm_route(ctx, cfg)
-    except Exception as exc:
-        log.warning("doctor could not resolve the LLM route: %s", type(exc).__name__)
-        return Row(
-            "LLM",
-            WARN,
-            f"not checked: the LLM provider, model and endpoint could not be resolved ({type(exc).__name__})",
-            "Run: sm report to send the details.",
-        )
     where_keys: dict[str, list[str]] = {}
     unread_all: set[str] = set()
     for name in LLM_KEY_ENV_VARS:
@@ -1502,6 +1496,35 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
         unread_all.update(unread)
         if found:
             where_keys[name] = found
+    if llm_provider_none(cfg):
+        # CLI-TOUR-LLM-ROUTE-1: none means no LLM; the daemon blocks every send.
+        inherited = ", ".join(where_keys) or "none"
+        return Row(
+            "LLM",
+            WARN,
+            f"{NO_LLM_PROVIDER_OFF_LINE}. Inherited provider keys (not used): {inherited}.",
+            "Run: sm setup (or sm config llm_provider groq), then sm restart",
+        )
+    try:
+        route = _llm_route(ctx, cfg)
+    except Exception as exc:
+        log.warning(
+            "doctor could not resolve the LLM route: %s: %s", type(exc).__name__, exc
+        )
+        try:  # frames go to the crash report, never to the terminal
+            from smartmemory_app import crash_reporter
+
+            crash_reporter.report_in_background(exc, source="doctor", handled=True)
+        except Exception:
+            log.warning("doctor: crash report for the LLM route failure was not sent")
+        return Row(
+            "LLM",
+            WARN,
+            f"not checked: doctor could not work out which LLM provider {cfg.llm_provider}, "
+            f"model {cfg.llm_model or '(provider default)'} and endpoint would be used. "
+            "Nothing was sent to any LLM provider.",
+            "Run: sm report --send so we can see it, then sm doctor",
+        )
     if ctx.environ.get("LLM_API_KEY"):  # core's key for a pinned provider
         where_keys["LLM_API_KEY"] = ["env"]
     unread_all.update(route.unread)  # a core config read core swallowed (R2-H3)

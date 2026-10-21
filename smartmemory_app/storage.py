@@ -27,11 +27,14 @@ if TYPE_CHECKING:
     from smartmemory_app.remote_backend import RemoteMemory
 
 from smartmemory_app.config import (
+    NO_LLM_PROVIDER_OFF_LINE,
     NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
     UnconfiguredError,
     _detect_and_migrate,
     is_configured,
+    llm_off,
+    llm_provider_none,
     load_config,
     local_llm_without_model,
     set_derived_env,
@@ -191,8 +194,10 @@ def apply_runtime_config() -> SmartMemoryConfig:
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
     pin_llm_model(cfg)
-    if local_llm_without_model(cfg):
+    if llm_off(cfg):
         _hold_llm_route_off()
+    if llm_provider_none(cfg):
+        _block_llm_transport()
     return cfg
 
 
@@ -278,17 +283,61 @@ def _hold_llm_route_off() -> None:
 
     def llm_route_available() -> tuple[bool, str]:
         try:
-            off = local_llm_without_model(load_config())
+            cfg = load_config()
         except Exception:
-            off = False  # an unreadable config falls through to core, as before
-        if off:
+            cfg = None  # an unreadable config falls through to core, as before
+        if cfg is not None and llm_provider_none(cfg):
+            return False, NO_LLM_PROVIDER_OFF_LINE
+        if cfg is not None and local_llm_without_model(cfg):
             return False, NO_LOCAL_MODEL_OFF_LINE
         return resolve()
 
     llm_route_available._no_local_model_hold = True
     llm_route_available.__wrapped__ = resolve
     core_llm.llm_route_available = llm_route_available
-    log.info("LLM route held off: the local LLM provider has no model chosen")
+    log.info("LLM route held off: no LLM provider, or a local one with no model chosen")
+
+
+def _block_llm_transport() -> None:
+    """Make every core call_llm send path raise while llm_provider is none.
+
+    CLI-TOUR-LLM-ROUTE-1: the route hold above stops the Lite save from queueing
+    LLM extraction, but ``call_llm`` (sm ask, re-extraction) never asks it, and core
+    has no "none" pin, so an inherited OPENAI_API_KEY was sent to api.openai.com.
+    The three functions that send (the same ones doctor's dry run stops) are
+    replaced in core's module, which call_llm reads at call time. Each re-reads the
+    config, so choosing a provider and restarting turns them back on.
+    """
+    from smartmemory.utils import llm as core_llm
+
+    from smartmemory_app.llm_errors import LlmProviderNone
+
+    for name in ("call_openai_chat", "_call_claude_agent", "_call_bedrock_converse"):
+        real = getattr(core_llm, name, None)
+        if real is None:
+            log.warning(
+                "No-LLM guard: core has no %s, that send path is not blocked", name
+            )
+            continue
+        if getattr(real, "_no_llm_provider_block", False):
+            continue
+
+        def blocked(*args, _real=real, _name=name, **kwargs):
+            try:
+                off = llm_provider_none(load_config())
+            except Exception:
+                off = True  # fail closed: provider none was configured at start
+            if off:
+                log.warning(
+                    "LLM call refused before sending (%s): llm_provider is none", _name
+                )
+                raise LlmProviderNone()
+            return _real(*args, **kwargs)
+
+        blocked._no_llm_provider_block = True
+        blocked.__wrapped__ = real
+        setattr(core_llm, name, blocked)
+    log.info("LLM send paths blocked: llm_provider is none")
 
 
 def _get_local_memory(
@@ -320,9 +369,7 @@ def _get_local_memory(
 
         # Core owns lite defaults and deferred placement. The wrapper only applies
         # its explicit coreference preference; ground/evolve remain opt-in.
-        profile = PipelineConfig.lite(
-            llm_enabled=False if local_llm_without_model(cfg) else None
-        )
+        profile = PipelineConfig.lite(llm_enabled=False if llm_off(cfg) else None)
         profile.coreference.enabled = cfg.coreference
         profile.extraction.entity_ruler.spacy_model = cfg.spacy_model
         profile.extraction.relation_ruler.spacy_model = cfg.spacy_model
@@ -493,7 +540,10 @@ def llm_extraction_warning() -> str | None:
     """
     from smartmemory.utils.llm import llm_route_available
 
-    if local_llm_without_model(load_config()):
+    cfg = load_config()
+    if llm_provider_none(cfg):
+        return NO_LLM_PROVIDER_OFF_LINE
+    if local_llm_without_model(cfg):
         return NO_LOCAL_MODEL_OFF_LINE
     available, _ = llm_route_available()
     if available:
