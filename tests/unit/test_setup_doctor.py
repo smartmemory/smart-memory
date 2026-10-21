@@ -374,10 +374,27 @@ CASES = [
     ),
     # LLM
     ("llm-remote", {"config": REMOTE_CFG}, "llm", PASS, "hosted"),
-    ("llm-none-no-key", {}, "llm", WARN, "so sm ask and LLM extraction are off"),
+    # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, whatever key the shell holds.
+    (
+        "llm-none-no-key",
+        {},
+        "llm",
+        WARN,
+        "No LLM is configured (llm_provider none): extraction is rules-only and sm ask lists matching memories. Turn it on with: sm setup. Inherited provider keys (not used): none.",
+    ),
     (
         "llm-none-env-key",
         {"environ": {"GROQ_API_KEY": "g"}},
+        "llm",
+        WARN,
+        "Inherited provider keys (not used): GROQ_API_KEY.",
+    ),
+    (
+        "llm-groq-env-key",
+        {
+            "config": LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+            "environ": {"GROQ_API_KEY": "g"},
+        },
         "llm",
         PASS,
         "GROQ_API_KEY yes (env)",
@@ -402,6 +419,18 @@ CASES = [
     ),
     (
         "llm-keychain-unreadable",
+        {
+            "config": LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+            "environ": {"GROQ_API_KEY": "g"},
+            "keyring": {"GROQ_API_KEY": CheckUnavailable("OS keychain (KeyringError)")},
+        },
+        "llm",
+        WARN,
+        "Not checked: OS keychain (KeyringError)",
+    ),
+    (
+        # the provider-none branch returns before row(); it must still name the unread source.
+        "llm-none-keychain-unreadable",
         {
             "environ": {"GROQ_API_KEY": "g"},
             "keyring": {"GROQ_API_KEY": CheckUnavailable("OS keychain (KeyringError)")},
@@ -449,6 +478,7 @@ CASES = [
     (
         "llm-daemon-without-key",
         {
+            "config": LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
             "environ": {"GROQ_API_KEY": "g"},
             "daemon": {**OK_DAEMON, "llm_key_present": False},
         },
@@ -1353,7 +1383,7 @@ def _probe_r2_h1a(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         environ={"LLM_PROVIDER": canary, "OPENAI_API_KEY": "sk-synthetic"},
-        config=LOCAL_CFG + '[local]\nllm_provider = "none"\n',
+        config=LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
     )
     seen = []
     for args in (["doctor"], ["doctor", "--json"]):
@@ -1437,7 +1467,12 @@ def _probe_r2_h2b(monkeypatch, tmp_path):
 def _probe_r2_h3(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.json").mkdir()
-    ctx = build(monkeypatch, tmp_path, environ={"OPENAI_API_KEY": "sk-synthetic"})
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={"OPENAI_API_KEY": "sk-synthetic"},
+        config=LOCAL_CFG + '[local]\nllm_provider = "openai"\n',
+    )
     got = doctor.check_llm(ctx)
     named = f"core config {tmp_path / 'config.json'}"
     assert got.status == WARN, got

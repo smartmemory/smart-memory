@@ -1499,10 +1499,13 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
     if llm_provider_none(cfg):
         # CLI-TOUR-LLM-ROUTE-1: none means no LLM; the daemon blocks every send.
         inherited = ", ".join(where_keys) or "none"
+        unread_note = (  # a source doctor could not read is named for none too (H5)
+            f" Not checked: {', '.join(sorted(unread_all))}." if unread_all else ""
+        )
         return Row(
             "LLM",
             WARN,
-            f"{NO_LLM_PROVIDER_OFF_LINE}. Inherited provider keys (not used): {inherited}.",
+            f"{NO_LLM_PROVIDER_OFF_LINE}. Inherited provider keys (not used): {inherited}.{unread_note}",
             "Run: sm setup (or sm config llm_provider groq), then sm restart",
         )
     try:
