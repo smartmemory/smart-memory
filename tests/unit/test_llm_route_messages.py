@@ -51,7 +51,12 @@ ROWS = [
         None,
         200,
         "llm_provider_none",
-        ["No LLM is configured", "Nothing was sent", "sm setup", "sm config llm_provider groq"],
+        [
+            "No LLM is configured",
+            "Nothing was sent",
+            "sm setup",
+            "sm config llm_provider groq",
+        ],
     ),
     (
         "none-bogus-openai-key",
@@ -123,7 +128,12 @@ ROWS = [
         RAW_TYPE_ERROR,
         502,
         "llm_route_unresolved",
-        ["could not be resolved", "nothing was sent", "sm config llm_provider", "sm restart"],
+        [
+            "could not be resolved",
+            "nothing was sent",
+            "sm config llm_provider",
+            "sm restart",
+        ],
     ),
     (
         "groq-network-error",
@@ -196,7 +206,9 @@ def _client(monkeypatch, provider, exc):
     from smartmemory_app import local_api
     from smartmemory_app.viewer_server import _build_app
 
-    save_config(SmartMemoryConfig(mode="local", daemon_port=PORT, llm_provider=provider))
+    save_config(
+        SmartMemoryConfig(mode="local", daemon_port=PORT, llm_provider=provider)
+    )
     mem = MagicMock()
     mem.ask.return_value = dict(EXTRACTIVE)
     monkeypatch.setattr(local_api, "_get_mem", lambda: mem)

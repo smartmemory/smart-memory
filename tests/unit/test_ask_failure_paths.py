@@ -169,7 +169,9 @@ def test_daemon_ask_failure_shows_detail_and_reports(
         assert isinstance(exc, RuntimeError) and "Not logged in" in str(exc)
         body = response.json()
         assert body["code"] == "llm_request_failed"
-        assert "Not logged in" not in response.text and "RuntimeError" not in response.text
+        assert (
+            "Not logged in" not in response.text and "RuntimeError" not in response.text
+        )
 
 
 HANDLED_STATUS_ROWS = [
