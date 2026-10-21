@@ -27,7 +27,11 @@ def lite(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "smartmemory.utils.llm.llm_route_available", lambda: (False, "test")
     )
-    cfg = config.SmartMemoryConfig(mode="local", data_dir=str(tmp_path))
+    # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so the offer test needs a provider;
+    # the route mock above still decides whether one is reachable.
+    cfg = config.SmartMemoryConfig(
+        mode="local", data_dir=str(tmp_path), llm_provider="groq"
+    )
     monkeypatch.setattr(config, "load_config", lambda: cfg)
     monkeypatch.setattr(storage, "load_config", lambda: cfg)
     monkeypatch.setattr(storage, "is_configured", lambda: True)

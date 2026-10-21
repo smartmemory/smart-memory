@@ -193,9 +193,16 @@ class TourRequestError(httpx.HTTPStatusError):
 def _http_error_reason(response: httpx.Response) -> str:
     """``HTTP <code>: <server detail>``; falls back to the body, then the reason phrase."""
     try:
-        detail = response.json().get("detail")
+        body = response.json()
+        detail = body.get("detail")
     except Exception:
-        detail = None
+        body, detail = None, None
+    from smartmemory_app.llm_errors import render as _render_llm_failure
+
+    # CLI-TOUR-LLM-ROUTE-1: a coded LLM failure is shown as its plain message,
+    # without the "HTTP 502:" prefix.
+    if (message := _render_llm_failure(body)) is not None:
+        return message
     if detail and not isinstance(detail, str):
         detail = json.dumps(detail)
     if not detail:
@@ -529,12 +536,25 @@ class TourArcDriver:
                 "SmartMemory tour: sm ask failed (%s), showing the command only.", exc
             )
             _report_degraded("ask", str(exc), exc)
+            try:
+                body = exc.response.json()  # type: ignore[attr-defined]
+            except Exception:
+                body = None
+            from smartmemory_app.llm_errors import render as _render_llm_failure
+
+            if (message := _render_llm_failure(body)) is not None:
+                return message  # CLI-TOUR-LLM-ROUTE-1: the plain message, unwrapped
             return f"(ask unavailable: {exc})"
         answer = response.get("answer") if isinstance(response, dict) else None
         if not isinstance(answer, str) or not answer.strip():
             logger.warning("SmartMemory tour: sm ask returned no answer.")
             _report_degraded("ask", "ask returned no answer")
             return "(ask returned no answer)"
+        from smartmemory_app.llm_errors import render as _render_llm_failure
+
+        notice = _render_llm_failure(response)  # CLI-TOUR-LLM-ROUTE-1
+        if notice is not None:
+            return f"{answer.strip()}\n\n{notice}"
         return answer.strip()
 
     def _emit(

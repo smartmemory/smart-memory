@@ -6,10 +6,26 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 
+def _write_config(tmp_path, monkeypatch, provider):
+    from smartmemory_app import config
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        f'[smartmemory]\nmode = "local"\n[local]\nllm_provider = "{provider}"\n'
+    )
+    monkeypatch.setattr(config, "config_path", lambda: cfg_path)
+
+
+@pytest.fixture
+def llm_on(tmp_path, monkeypatch):
+    """CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so a test that means "LLM on" says groq."""
+    _write_config(tmp_path, monkeypatch, "groq")
+
+
 @pytest.mark.parametrize("available", [False, True])
 @pytest.mark.parametrize("sync", [False, True])
 def test_storage_discloses_effective_local_route(
-    tmp_path, monkeypatch, caplog, available, sync
+    tmp_path, monkeypatch, caplog, available, sync, llm_on
 ):
     from smartmemory_app import storage
 
@@ -73,7 +89,7 @@ def test_cli_keeps_uuid_on_stdout_and_disclosure_on_stderr(monkeypatch, availabl
 
 
 @pytest.mark.parametrize("available", [False, True])
-def test_boot_banner_uses_effective_route(monkeypatch, capsys, available):
+def test_boot_banner_uses_effective_route(monkeypatch, capsys, available, llm_on):
     from smartmemory_app import storage, viewer_server
 
     configured = False
@@ -99,6 +115,29 @@ def test_boot_banner_uses_effective_route(monkeypatch, capsys, available):
         assert "ruler extraction and local enrichers still run" in output
         assert "smartmemory setup" in output
     assert "entity extraction and enrichment are off" not in output
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_provider_none_discloses_no_llm_even_when_core_finds_a_route(
+    tmp_path, monkeypatch, capsys, available
+):
+    """An inherited key makes core's route resolvable, but provider none sends nothing."""
+    from smartmemory_app import storage, viewer_server
+    from smartmemory_app.config import NO_LLM_PROVIDER_OFF_LINE
+
+    _write_config(tmp_path, monkeypatch, "none")
+    monkeypatch.setenv("OPENAI_API_KEY", "bogus-inherited-key")
+    monkeypatch.setattr(storage, "apply_runtime_config", lambda: None)
+    monkeypatch.setattr(
+        "smartmemory.utils.llm.llm_route_available",
+        lambda: (available, "effective core route"),
+    )
+    assert storage.llm_extraction_warning() == NO_LLM_PROVIDER_OFF_LINE
+    viewer_server._print_llm_extraction_status()
+    output = capsys.readouterr().out
+    assert NO_LLM_PROVIDER_OFF_LINE in output
+    assert "LLM extraction: enabled" not in output
+    assert "bogus-inherited-key" not in output
 
 
 @pytest.mark.parametrize(

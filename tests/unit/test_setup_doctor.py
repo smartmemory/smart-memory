@@ -374,10 +374,27 @@ CASES = [
     ),
     # LLM
     ("llm-remote", {"config": REMOTE_CFG}, "llm", PASS, "hosted"),
-    ("llm-none-no-key", {}, "llm", WARN, "so sm ask and LLM extraction are off"),
+    # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, whatever key the shell holds.
+    (
+        "llm-none-no-key",
+        {},
+        "llm",
+        WARN,
+        "No LLM is configured (llm_provider none): extraction is rules-only and sm ask lists matching memories. Turn it on with: sm setup. Inherited provider keys (not used): none.",
+    ),
     (
         "llm-none-env-key",
         {"environ": {"GROQ_API_KEY": "g"}},
+        "llm",
+        WARN,
+        "Inherited provider keys (not used): GROQ_API_KEY.",
+    ),
+    (
+        "llm-groq-env-key",
+        {
+            "config": LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+            "environ": {"GROQ_API_KEY": "g"},
+        },
         "llm",
         PASS,
         "GROQ_API_KEY yes (env)",
@@ -402,6 +419,18 @@ CASES = [
     ),
     (
         "llm-keychain-unreadable",
+        {
+            "config": LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+            "environ": {"GROQ_API_KEY": "g"},
+            "keyring": {"GROQ_API_KEY": CheckUnavailable("OS keychain (KeyringError)")},
+        },
+        "llm",
+        WARN,
+        "Not checked: OS keychain (KeyringError)",
+    ),
+    (
+        # the provider-none branch returns before row(); it must still name the unread source.
+        "llm-none-keychain-unreadable",
         {
             "environ": {"GROQ_API_KEY": "g"},
             "keyring": {"GROQ_API_KEY": CheckUnavailable("OS keychain (KeyringError)")},
@@ -449,6 +478,7 @@ CASES = [
     (
         "llm-daemon-without-key",
         {
+            "config": LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
             "environ": {"GROQ_API_KEY": "g"},
             "daemon": {**OK_DAEMON, "llm_key_present": False},
         },
@@ -1353,7 +1383,7 @@ def _probe_r2_h1a(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         environ={"LLM_PROVIDER": canary, "OPENAI_API_KEY": "sk-synthetic"},
-        config=LOCAL_CFG + '[local]\nllm_provider = "none"\n',
+        config=LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
     )
     seen = []
     for args in (["doctor"], ["doctor", "--json"]):
@@ -1437,7 +1467,12 @@ def _probe_r2_h2b(monkeypatch, tmp_path):
 def _probe_r2_h3(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.json").mkdir()
-    ctx = build(monkeypatch, tmp_path, environ={"OPENAI_API_KEY": "sk-synthetic"})
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ={"OPENAI_API_KEY": "sk-synthetic"},
+        config=LOCAL_CFG + '[local]\nllm_provider = "openai"\n',
+    )
     got = doctor.check_llm(ctx)
     named = f"core config {tmp_path / 'config.json'}"
     assert got.status == WARN, got
@@ -1679,3 +1714,45 @@ def test_unreadable_healthy_sqlite_is_cannot_check(monkeypatch, tmp_path):
     assert doctor.check_graph(ctx).status == PASS
     assert result.status == WARN, "permission prevents checking a healthy SQLite store"
     assert "not checked:" in result.detail
+
+
+def test_llm_route_resolves_against_installed_core(monkeypatch, tmp_path):
+    """CLI-TOUR-LLM-ROUTE-1: the old ``step=`` TypeError came from calling core's route."""
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        config=LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+    )
+    doctor._llm_route(ctx, doctor._config(ctx))  # must not raise
+    detail = row(ctx, "llm").detail
+    assert "TypeError" not in detail, detail
+
+
+def test_llm_route_crash_is_plain_and_reported(monkeypatch, tmp_path):
+    """A route failure gives a plain WARN and the frames go to the crash report only."""
+    from smartmemory_app import crash_reporter
+
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        config=LOCAL_CFG + '[local]\nllm_provider = "groq"\n',
+    )
+
+    def raise_(*_a, **_k):
+        raise RuntimeError("secret detail")
+
+    seen = []
+    monkeypatch.setattr(doctor, "_llm_route", raise_)
+    monkeypatch.setattr(
+        crash_reporter,
+        "report_in_background",
+        lambda exc, **kw: seen.append((exc, kw)),
+    )
+    got = row(ctx, "llm")
+    text = f"{got.detail} {got.fix}"
+    assert got.status == WARN, got
+    assert "Nothing was sent to any LLM provider" in text
+    assert "sm report --send" in text
+    assert "secret detail" not in text
+    assert len(seen) == 1 and isinstance(seen[0][0], RuntimeError)
+    assert seen[0][1] == {"source": "doctor", "handled": True}

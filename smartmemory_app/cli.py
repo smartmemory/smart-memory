@@ -320,9 +320,15 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
         except httpx.HTTPStatusError as e:
             # Surface server errors (e.g. 501 for unsupported filters) to caller
             try:
-                detail = e.response.json().get("detail", str(e))
+                body = e.response.json()
+                detail = body.get("detail", str(e))
             except Exception:
-                detail = str(e)
+                body, detail = None, str(e)
+            from smartmemory_app.llm_errors import render as _render_llm_failure
+
+            # CLI-TOUR-LLM-ROUTE-1: a coded LLM failure already says where to look.
+            if (message := _render_llm_failure(body)) is not None:
+                raise click.ClickException(message)
             if e.response.status_code >= 500:
                 raise click.ClickException(f"{detail}  (check {_DAEMON_LOG_HINT})")
             raise click.ClickException(detail)
@@ -2272,6 +2278,11 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
         raise click.ClickException("SmartMemory returned an invalid ask response.")
 
     if result.get("mode") == "extractive" and result.get("synthesized") is False:
+        from smartmemory_app.llm_errors import render as _render_llm_failure
+
+        notice = _render_llm_failure(result)  # CLI-TOUR-LLM-ROUTE-1
+        if notice is not None and not extractive:
+            raise click.ClickException(notice)
         if not extractive and cfg.mode != "remote":
             from smartmemory_app.preflight import daemon_missing_key_error
 

@@ -110,6 +110,35 @@ def local_llm_without_model(cfg) -> bool:
     ).lower() in LOCAL_MODEL_PROVIDERS and not cfg.llm_model
 
 
+# CLI-TOUR-LLM-ROUTE-1: said when llm_provider is none, by `sm status` and the route hold.
+NO_LLM_PROVIDER_OFF_LINE = (
+    "No LLM is configured (llm_provider none): extraction is rules-only and sm ask "
+    "lists matching memories. Turn it on with: sm setup"
+)
+
+
+def llm_provider_none(cfg) -> bool:
+    """True when llm_provider is none and no model or endpoint is set: no LLM at all.
+
+    CLI-TOUR-LLM-ROUTE-1 (owner: "none means no LLM"). Core has no "none" value:
+    with no model, ``get_default_model()`` picks one by which key is in the
+    environment and falls through to ``gpt-4o-mini`` with an inherited
+    OPENAI_API_KEY, so a provider-none user reached api.openai.com. Every gate that
+    honours ``local_llm_without_model`` honours this too (``llm_off``). An explicit
+    ``llm_model`` or ``llm_base_url`` still turns the LLM on, as before.
+    """
+    return (
+        (cfg.llm_provider or "none").lower() == "none"
+        and not cfg.llm_model
+        and not getattr(cfg, "llm_base_url", "")
+    )
+
+
+def llm_off(cfg) -> bool:
+    """True when no LLM call may be made: provider none, or a local provider with no model."""
+    return local_llm_without_model(cfg) or llm_provider_none(cfg)
+
+
 class UnconfiguredError(RuntimeError):
     """Raised by storage.get_memory() when no config exists and auto-migration fails.
 
@@ -370,11 +399,11 @@ def llm_key_present() -> bool:
     Used by health (and so `sm status`), the search disclosure and `ask`. It is not
     the queue gate: Lite saves and the core worker ask core's
     ``llm_route_available()``, which ``storage.apply_runtime_config`` holds off when
-    a local provider has no model. Checks all of LLM_KEY_ENV_VARS, so a
+    a local provider has no model or llm_provider is none (``llm_off``). Checks all of LLM_KEY_ENV_VARS, so a
     user configured with Anthropic or DeepSeek is recognised — not just GROQ/OpenAI.
     """
     try:
-        if local_llm_without_model(load_config()):
+        if llm_off(load_config()):
             return False
     except Exception:
         pass  # an unreadable config falls through to the key check, as before
