@@ -9,6 +9,10 @@ POST /search             → /memory/search           (DAEMON-1: semantic search
 GET  /recall             → /memory/recall           (DAEMON-1: session context)
 POST /clear              → /memory/clear
 POST /reindex            → /memory/reindex          (re-embed all with current model)
+POST /vector/query       → /memory/vector/query     (WEB-VECTOR-SEARCH-TAB-1 U3: NN query; shapes = vector-contract.json)
+GET  /vector/stats       → /memory/vector/stats
+GET  /vector/items/{id}  → /memory/vector/items/{id}
+GET  /vector/missing     → /memory/vector/missing
 GET  /{id}/neighbors     → /memory/{id}/neighbors  (BEFORE /{id} — declaration order matters; DIST-OBSIDIAN-LITE-1: each neighbor carries direction)
 GET  /{id}               → /memory/{id}
 PATCH /{id}              → /memory/{id}            (DIST-OBSIDIAN-LITE-1: CORE-CRUD-UPDATE-1 contract)
@@ -381,6 +385,109 @@ def recall_endpoint(
             strict=strict,
         )
     return {"context": context}
+
+
+# ---------------------------------------------------------------------------
+# WEB-VECTOR-SEARCH-TAB-1 U3: read-only vector visibility. The Lite twins of
+# /memory/vector/* in the hosted service. Bodies are the core facade's
+# vector_* returns unchanged (smartmemory.managers.vector_inspect), so Lite and
+# the service share one shape: docs/features/WEB-VECTOR-SEARCH-TAB-1/vector-contract.json.
+# Declared before the /{memory_id} routes; every route is a read.
+# ---------------------------------------------------------------------------
+
+
+class VectorQueryRequest(BaseModel):
+    text: Optional[str] = None
+    embedding: Optional[list[float]] = None
+    top_k: Optional[int] = 10  # the core manager clamps to 50, never rejects
+    memory_type: Optional[str] = None
+    origin_prefix: Optional[str] = None
+    collection: str = "memory"
+    include_embedding: bool = False
+
+
+def _vector_read(method: str, *args, **kwargs) -> dict:
+    """Call one core ``vector_*`` facade read and map its typed errors to the contract's statuses.
+
+    400 malformed request, 404 unknown collection / item not visible / no vector (``detail``
+    carries the contract token), 501 capability missing (remote-proxy mode too), 503
+    substrate or embedder failure. Nothing is ever turned into an empty page.
+    """
+    from smartmemory.managers.vector_inspect import (
+        VectorCapabilityUnsupported,
+        VectorNotFound,
+        VectorRequestError,
+    )
+    from smartmemory.stores.vector.errors import VectorSubstrateError
+
+    mem = _get_mem()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        raise HTTPException(
+            status_code=501,
+            detail="vector inspection not available in remote-proxy mode",
+        )
+    try:
+        with _rw_lock:
+            return getattr(mem, method)(*args, **kwargs)
+    except VectorRequestError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except VectorNotFound as e:
+        raise HTTPException(status_code=404, detail=e.detail) from e
+    except VectorCapabilityUnsupported as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except (VectorSubstrateError, MissingModelError) as e:
+        log.warning("Vector read %s failed: %s", method, e)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@api.post("/vector/query")
+def vector_query(body: VectorQueryRequest) -> dict:
+    """Nearest in-scope neighbours of ``text`` (embedded here) or a raw ``embedding``."""
+    return _vector_read(
+        "vector_query",
+        text=body.text,
+        embedding=body.embedding,
+        top_k=body.top_k,
+        memory_type=body.memory_type,
+        origin_prefix=body.origin_prefix,
+        collection=body.collection,
+        include_embedding=body.include_embedding,
+    )
+
+
+@api.get("/vector/stats")
+def vector_stats() -> dict:
+    """Backend, embedder, per-collection counts, capabilities and drift warnings."""
+    return _vector_read("vector_stats")
+
+
+@api.get("/vector/missing")
+def vector_missing(
+    limit: int = 50, cursor: Optional[str] = None, collection: str = "memory"
+) -> dict:
+    """One page of memories semantic recall cannot reach (``total`` exact on Lite)."""
+    return _vector_read(
+        "vector_missing", limit=limit, cursor=cursor, collection=collection
+    )
+
+
+@api.get("/vector/items/{item_id}")
+def vector_item(
+    item_id: str,
+    top_k: int = 10,
+    collection: str = "memory",
+    include_embedding: bool = False,
+) -> dict:
+    """One item's vector row and its nearest neighbours (never the full vector)."""
+    return _vector_read(
+        "vector_inspect",
+        item_id,
+        top_k=top_k,
+        collection=collection,
+        include_embedding=include_embedding,
+    )
 
 
 @api.get("/{memory_id}/neighbors")

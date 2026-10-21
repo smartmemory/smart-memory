@@ -69,6 +69,33 @@ def _item_count(data_dir: Path) -> int | None:
         ).fetchone()[0]
 
 
+def describe_snapshot(state: dict, rows: int | None):
+    """`UsearchVectorBackend.describe()` answered from one collection's committed state.
+
+    Opening the real backend creates files, migrates legacy snapshots and waits on the
+    daemon's write lock (measured 2026-10-21: an empty directory gained `memory.fts.db`,
+    and a held writer blocked construction 5.26 s against this probe's ~1 s budget), so the
+    doctor reads the state read-only and borrows the backend class's own `describe()` over
+    it. Name, tenancy, capabilities and the dimension/model fields therefore come from the
+    one implementation `/vector/stats` uses (`tests/test_local_api_vector.py` pins equality).
+    `state` is the `vec_state_*` rows, `rows` the `vec_meta_*` membership count or None.
+    """
+    import threading
+
+    from smartmemory.stores.vector.backends.usearch import UsearchVectorBackend
+
+    class _Snapshot(UsearchVectorBackend):
+        def __init__(self):  # no files, no SQLite connection: state only
+            self._lock = threading.RLock()
+            self._dim = json.loads(state.get("dim", "null"))
+            self._model_id = json.loads(state.get("model_id", "null"))
+
+        def count(self):
+            return rows
+
+    return _Snapshot().describe()
+
+
 def vector_rows(data_dir: Path, expected_dimension: int | None) -> list[str]:
     """Discover collection paths from committed usearch state, including reindex snapshots."""
     from usearch.index import Index
@@ -84,10 +111,21 @@ def vector_rows(data_dir: Path, expected_dimension: int | None) -> list[str]:
                 quoted = table.replace('"', '""')
                 state = dict(db.execute(f'SELECT k, v FROM "{quoted}"'))
                 filename = json.loads(state.get("index_file", "null"))
-                dimension = json.loads(state.get("dim", "null"))
                 if filename is not None and Path(filename).name != filename:
                     raise ValueError("Invalid index filename in vector state")
-                collections.append((filename, dimension, state.get("collection_name")))
+                meta = f"vec_meta_{table[len('vec_state_') :]}".replace('"', '""')
+                try:
+                    membership = db.execute(
+                        f'SELECT count(*) FROM "{meta}"'
+                    ).fetchone()[0]
+                except sqlite3.OperationalError:
+                    membership = (
+                        None  # state without its membership table: unknown, not fatal
+                    )
+                info = describe_snapshot(state, membership)
+                collections.append(
+                    (filename, info.dimension, state.get("collection_name"))
+                )
     # Legacy snapshots with no committed state are inspected without migration.
     if not collections:
         collections = [
