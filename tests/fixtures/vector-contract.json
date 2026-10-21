@@ -1,0 +1,190 @@
+{
+  "_fixture_source": "copy of smart-memory-docs docs/features/WEB-VECTOR-SEARCH-TAB-1/vector-contract.json at origin/main (VEC-TAB-U3, 2026-10-21); CI has no docs checkout, so tests/test_local_api_vector.py reads this copy. Re-copy when the contract changes.",
+  "_source": "design.md",
+  "_roadmap": "../../ROADMAP.md#web-vector-search-tab-1",
+  "feature": "WEB-VECTOR-SEARCH-TAB-1",
+  "version": "0.1",
+  "principles": {
+    "backend_neutral": "Every field here is produced through smartmemory.stores.vector.backends.base.VectorBackend. No route, delegate, SDK or UI may name FalkorDB or USearch; `backend` is an opaque string the backend reports about itself.",
+    "read_only": "All routes are reads. The only write-adjacent action (reindex) stays on the existing /memory/reindex path and is NOT part of this contract.",
+    "scoped": "Every count, hit and item is in-scope for the caller's MemoryScopeProvider (workspace by default, user under USER isolation). Collection-wide totals are reported only when the backend declares `single_tenant: true` (Lite USearch)."
+  },
+  "routes": {
+    "query": {
+      "method": "POST",
+      "path": "/memory/vector/query",
+      "lite_alias": "POST /vector/query",
+      "scope_policy": "team_required",
+      "request": {
+        "text": "string | null \u2014 embedded server-side with the configured embedder; exactly one of text / embedding is required",
+        "embedding": "number[] | null \u2014 raw query vector; must match space.dimension or 400",
+        "top_k": "integer, default 10, max 50 (server clamps, never rejects)",
+        "memory_type": "string | null \u2014 equality filter on hit.memory_type",
+        "origin_prefix": "string | null \u2014 prefix filter on hit.origin (same semantics as search(origin=...))",
+        "collection": "string, default \"memory\" \u2014 a collection name from stats.collections[].name; unknown -> 404",
+        "include_embedding": "boolean, default false \u2014 when true each hit carries `embedding_preview` (first 16 floats), never the full vector"
+      },
+      "response": {
+        "query": {
+          "mode": "\"text\" | \"embedding\"",
+          "dimension": "integer",
+          "space": "SpaceRef"
+        },
+        "hits": "VectorHit[] (ordered by score desc, length <= top_k)",
+        "truncated": "boolean \u2014 true when the backend candidate ceiling was hit before top_k in-scope hits were found",
+        "timing_ms": {
+          "embed": "number | null",
+          "search": "number"
+        }
+      }
+    },
+    "stats": {
+      "method": "GET",
+      "path": "/memory/vector/stats",
+      "lite_alias": "GET /vector/stats",
+      "scope_policy": "team_required",
+      "request": {},
+      "response": {
+        "backend": "string \u2014 VectorBackend.describe().backend (e.g. \"falkordb\", \"usearch\"; opaque to clients)",
+        "single_tenant": "boolean \u2014 true when the collection holds only this scope's rows (Lite)",
+        "capabilities": {
+          "scope_pushdown": "boolean \u2014 VectorBackend.supports_scope_pushdown",
+          "scoped_exact": "boolean \u2014 VectorBackend.supports_scoped_exact",
+          "missing_list": "boolean \u2014 backend implements missing_vector_ids(); false means /missing returns 501"
+        },
+        "embedder": {
+          "model_id": "string \u2014 configured embedder (EmbeddingService.local_model_name() canonical id)",
+          "dimension": "integer | null \u2014 configured dimension (probe), null when the embedder is unavailable"
+        },
+        "collections": "CollectionStats[]",
+        "scope": {
+          "workspace_id": "string",
+          "user_id": "string | null",
+          "isolation": "\"WORKSPACE\" | \"USER\" | \"TENANT\""
+        },
+        "warnings": "string[] \u2014 e.g. dimension drift between embedder.dimension and a collection's index dimension"
+      }
+    },
+    "inspect": {
+      "method": "GET",
+      "path": "/memory/vector/items/{item_id}",
+      "lite_alias": "GET /vector/items/{item_id}",
+      "scope_policy": "team_required",
+      "request": {
+        "top_k": "integer, default 10, max 20 \u2014 neighbour count",
+        "collection": "string, default \"memory\"",
+        "include_embedding": "boolean, default false"
+      },
+      "response": {
+        "item": "VectorItem",
+        "neighbours": "VectorHit[] \u2014 excludes the item itself, ordered by score desc",
+        "space": "SpaceRef"
+      },
+      "errors": {
+        "404": "item not visible to the caller, or no vector row (body.detail = \"no_vector\" when the memory exists but has no embedding)"
+      }
+    },
+    "missing": {
+      "method": "GET",
+      "path": "/memory/vector/missing",
+      "lite_alias": "GET /vector/missing",
+      "scope_policy": "team_required",
+      "request": {
+        "limit": "integer, default 50, max 200",
+        "cursor": "string | null \u2014 opaque, from the previous page's next_cursor",
+        "collection": "string, default \"memory\""
+      },
+      "response": {
+        "items": "MissingItem[] \u2014 ordered by item_id",
+        "next_cursor": "string | null",
+        "total": "integer | null \u2014 in-scope count of missing rows when the backend can count cheaply, else null"
+      },
+      "errors": {
+        "501": "backend does not implement missing_vector_ids (stats.capabilities.missing_list = false)"
+      }
+    }
+  },
+  "types": {
+    "SpaceRef": {
+      "collection": "string",
+      "model_id": "string | null \u2014 the model the collection's vectors were written with when the backend records it (USearch state model_id), else null",
+      "dimension": "integer | null \u2014 the live index dimension (FalkorVectorBackend.live_index_dimension / USearch Index.ndim)"
+    },
+    "CollectionStats": {
+      "name": "string \u2014 \"memory\" (StoreConfig.embed content vectors) or the structure-aware collection; names come from the backend, never hard-coded in clients",
+      "count": "integer \u2014 in-scope vector rows (scoped_count when supported, else post-filtered count)",
+      "index_count": "integer | null \u2014 collection-wide rows; present only when single_tenant",
+      "space": "SpaceRef",
+      "missing_count": "integer | null \u2014 in-scope memories with no usable vector, null when uncounted"
+    },
+    "VectorHit": {
+      "item_id": "string",
+      "score": "number \u2014 similarity in [0, 1], higher is better (FalkorDB cosine distance is normalised 1 - d; USearch cosine likewise)",
+      "memory_type": "string | null",
+      "origin": "string | null",
+      "title": "string | null",
+      "snippet": "string | null \u2014 first 200 chars of content, in-scope memory join; null when the vector row has no graph twin",
+      "created_at": "string | null \u2014 ISO-8601",
+      "space": "SpaceRef",
+      "has_graph_node": "boolean \u2014 false marks an orphan vector (row without a memory node)",
+      "embedding_preview": "number[16] | absent"
+    },
+    "VectorItem": {
+      "item_id": "string",
+      "memory_type": "string | null",
+      "origin": "string | null",
+      "title": "string | null",
+      "content": "string | null \u2014 full content from the memory node (scope-checked)",
+      "created_at": "string | null",
+      "vector": {
+        "present": "boolean \u2014 VectorStore.has_vector(item_id)",
+        "dimension": "integer | null",
+        "node_ids": "string[]",
+        "chunk_ids": "string[]",
+        "metadata": "object \u2014 the stored vector metadata minus the embedding and minus tenant/user/workspace ids",
+        "embedding_preview": "number[16] | absent"
+      }
+    },
+    "MissingItem": {
+      "item_id": "string",
+      "memory_type": "string | null",
+      "origin": "string | null",
+      "created_at": "string | null",
+      "reason": "\"no_row\" | \"row_without_vector\" | \"type_not_searchable\" \u2014 the last comes from embedding_policy.type_is_searchable and is informational, not a defect"
+    }
+  },
+  "errors": {
+    "400": "neither or both of text/embedding; embedding dimension != space.dimension (detail names both numbers)",
+    "403": "scope error (X-SM-Scope-Error header, same as other routes)",
+    "404": "unknown collection; item not visible; no vector row",
+    "501": "capability not implemented by the active backend (never silently empty)",
+    "503": "VectorSubstrateError from the backend is surfaced, never converted to an empty page (CORE-VECTOR-SPACE-1)"
+  },
+  "core_surface": {
+    "backend_abc_additions": {
+      "describe()": "-> VectorBackendInfo{backend, single_tenant, dimension, model_id, count, capabilities}; abstract-with-default: base returns backend=class name, dimension/model_id None, count=self.count()",
+      "missing_vector_ids(limit, cursor)": "-> (ids, next_cursor); base raises NotImplementedError (reported as capability false, never an empty list)"
+    },
+    "facade_methods": [
+      "vector_query",
+      "vector_stats",
+      "vector_inspect",
+      "vector_missing"
+    ],
+    "manager": "smartmemory.managers.vector_inspect.VectorInspectManager"
+  },
+  "sdk": {
+    "python": [
+      "vector_query(text=None, embedding=None, top_k=10, memory_type=None, origin_prefix=None, collection='memory', include_embedding=False)",
+      "vector_stats()",
+      "vector_inspect(item_id, top_k=10, collection='memory', include_embedding=False)",
+      "vector_missing(limit=50, cursor=None, collection='memory')"
+    ],
+    "js": [
+      "client.vector.query({text, embedding, topK, memoryType, originPrefix, collection, includeEmbedding})",
+      "client.vector.stats()",
+      "client.vector.inspect(itemId, {topK, collection, includeEmbedding})",
+      "client.vector.missing({limit, cursor, collection})"
+    ]
+  }
+}
