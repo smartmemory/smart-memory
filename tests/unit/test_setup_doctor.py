@@ -616,6 +616,11 @@ CASES = [
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 def test_doctor_row(case, monkeypatch, tmp_path):
+    import smartmemory.utils.llm as core_llm
+
+    # Whether the Agent SDK imports is a property of the machine, not of the row
+    # (CLI-PROVIDER-ROUTE-1 made a claude-agent row depend on it): pin it present.
+    monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: True)
     _id, kwargs, key, status, text = case
     result = row(build(monkeypatch, tmp_path, **kwargs), key)
     assert result.status == status, result
@@ -1756,3 +1761,65 @@ def test_llm_route_crash_is_plain_and_reported(monkeypatch, tmp_path):
     assert "secret detail" not in text
     assert len(seen) == 1 and isinstance(seen[0][0], RuntimeError)
     assert seen[0][1] == {"source": "doctor", "handled": True}
+
+
+# CLI-PROVIDER-ROUTE-1: the Anthropic family names its own endpoint, with or without a key.
+# (id, llm_provider, environ, status, text that must appear, text that must not)
+ANTHROPIC_ROUTE_ROWS = [
+    (
+        "anthropic-no-key",
+        "anthropic",
+        {"OPENAI_API_KEY": "sk-decoy"},
+        FAIL,
+        "endpoint https://api.anthropic.com/v1/",
+        "api.openai.com",
+    ),
+    (
+        "anthropic-key",
+        "anthropic",
+        {"ANTHROPIC_API_KEY": "sk-ant-synthetic"},
+        PASS,
+        "endpoint https://api.anthropic.com/v1/",
+        "api.openai.com",
+    ),
+    (
+        "claude-agent-no-sdk-no-key",
+        "claude-agent",
+        {"OPENAI_API_KEY": "sk-decoy"},
+        FAIL,
+        "pip install 'smartmemory-core[claude]'",
+        "api.openai.com",
+    ),
+    (
+        "claude-agent-no-sdk-key",
+        "claude-agent",
+        {"ANTHROPIC_API_KEY": "sk-ant-synthetic"},
+        PASS,
+        "endpoint https://api.anthropic.com/v1/",
+        "not supported",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "provider, environ, status, must, must_not",
+    [r[1:] for r in ANTHROPIC_ROUTE_ROWS],
+    ids=[r[0] for r in ANTHROPIC_ROUTE_ROWS],
+)
+def test_anthropic_family_doctor_row_names_the_anthropic_endpoint(
+    monkeypatch, tmp_path, provider, environ, status, must, must_not
+):
+    import smartmemory.utils.llm as core_llm
+
+    monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: False)
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ=environ,
+        config=LOCAL_CFG + f'[local]\nllm_provider = "{provider}"\n',
+    )
+    got = doctor.check_llm(ctx)
+    text = f"{got.detail} {got.fix}"
+    assert got.status == status, got
+    assert must in text, got
+    assert must_not not in text, got

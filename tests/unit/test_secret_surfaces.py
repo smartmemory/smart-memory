@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from smartmemory_app.config import LLM_PROVIDER_KEY_ENV
+
 KEY = "sk-test-PROBE123"
 MARK = b"PROBE123"
 
@@ -996,13 +998,10 @@ def test_redact_credentials_without_secrets_is_unchanged():
 
 _TYPED = "postland-synthetic-not-a-real-credential-112233"
 _STORED = "postland-stored-not-a-real-credential-445566"
-_KEY_ENVVARS = {
-    "groq": "GROQ_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-}
+# One row per provider that takes a key, read from the table `sm setup` offers (deepseek is
+# not a supported provider since CLI-PROVIDER-ROUTE-1, so the prompt rejects it).
+_KEY_ENVVARS = LLM_PROVIDER_KEY_ENV
+
 # (id, provider, a key is already stored)
 PROMPT_ROWS = [
     (f"{provider}-{mode}", provider, mode == "replace")

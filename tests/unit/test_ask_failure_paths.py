@@ -382,15 +382,12 @@ PROVIDER_ROWS = [
     ("openai", "", None, "gpt-4o-mini"),
     ("openai", "", "gpt-4.1-mini", "gpt-4.1-mini"),
     ("groq", "llama-3.3-70b-versatile", None, "llama-3.3-70b-versatile"),
-    ("claude-agent", "", None, None),  # core's own default (the SDK) stays
+    # claude-agent / anthropic / deepseek come from LLM_PROVIDER_TABLE (CLI-PROVIDER-ROUTE-1):
+    # claude-agent pins the SDK alias, anthropic pins a claude-* id that core now routes to
+    # api.anthropic.com with ANTHROPIC_API_KEY, deepseek is not a supported provider (no pin).
+    ("claude-agent", "", None, "sonnet"),
     ("none", "", None, None),
-    # anthropic: the SDK route (the `claude` CLI honours ANTHROPIC_API_KEY) is the
-    # only one core can serve. Without the SDK, a claude-* id reaches
-    # call_openai_chat with no key and no base_url (api.openai.com), so pinning it
-    # would swap a working route for a broken one. Left on core's default.
-    ("anthropic", "", None, None),
-    # deepseek: core's llm.py has no DeepSeek route (only evaluation/judge.py), so
-    # there is no default model to pin. Left on core's default.
+    ("anthropic", "", None, "claude-haiku-4-5-20251001"),
     ("deepseek", "", None, None),
 ]
 
