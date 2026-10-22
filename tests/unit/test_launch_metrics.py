@@ -106,6 +106,9 @@ def test_launch_metrics_remote_targets_hosted_url_and_key(monkeypatch):
 
 
 def test_launch_metrics_local_bypasses_proxy(monkeypatch):
+    # The suite exports SMARTMEMORY_DAEMON_PORT (CLI-TEST-HOST-ISOLATION-1); this test
+    # is about the port saved in the config file.
+    monkeypatch.delenv("SMARTMEMORY_DAEMON_PORT")
     requests = []
     options = install_transport(
         monkeypatch, lambda request: requests.append(request) or httpx.Response(200)

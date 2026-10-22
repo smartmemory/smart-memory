@@ -89,7 +89,7 @@ class TestLaunchdRecovery:
             patch.object(daemon, "_pid_file", return_value=MagicMock()),
         ):
             daemon.stop_daemon()
-        assert booted == ["ai.smartmemory.worker", "ai.smartmemory.daemon"]
+        assert booted == [daemon._LAUNCHD_WORKER_LABEL, daemon._LAUNCHD_DAEMON_LABEL]
 
 
 class TestStartupLogStreaming:
