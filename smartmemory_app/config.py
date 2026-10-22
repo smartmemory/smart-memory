@@ -543,26 +543,30 @@ def set_api_key(key: str) -> None:
     Secret Service backend. Callers should tell users to set SMARTMEMORY_API_KEY
     as the env var fallback if this warns.
     """
+    from smartmemory_app.keyring_guard import set_secret
+
     try:
-        import keyring
-
-        keyring.set_password("smartmemory", "api_key", key)
-    except Exception:
-        if sys.platform == "win32":
-            from smartmemory_app.windows_credentials import store_key
-
-            # Failure to restrict the DACL is fatal. Never persist an exposed key.
-            store_key(key)
-            warnings.warn(
-                "OS keychain unavailable. API key stored in a user-only Windows credential file.",
-                stacklevel=2,
-            )
+        if set_secret(
+            "api_key", key, where="SMARTMEMORY_API_KEY or the Windows credential file"
+        ):
             return
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        from smartmemory_app.windows_credentials import store_key
+
+        # Failure to restrict the DACL is fatal. Never persist an exposed key.
+        store_key(key)
         warnings.warn(
-            "OS keychain unavailable: API key not persisted. "
-            "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",
+            "OS keychain unavailable. API key stored in a user-only Windows credential file.",
             stacklevel=2,
         )
+        return
+    warnings.warn(
+        "OS keychain unavailable: API key not persisted. "
+        "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",
+        stacklevel=2,
+    )
 
 
 def _detect_and_migrate() -> bool:

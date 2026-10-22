@@ -60,6 +60,7 @@ def test_hook_cap_table(tmp_path, script, env, running, load1, expect_skip):
     _fakes(tmp_path / "bin", marker)
     run_env = {
         "HOME": str(home),
+        "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
         "FAKE_PGREP_N": str(running),
         "FAKE_LOAD1": load1,

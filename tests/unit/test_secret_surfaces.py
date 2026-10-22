@@ -19,6 +19,9 @@ import pytest
 
 from smartmemory_app.config import SmartMemoryConfig
 
+# These tests patch keyring.set_password themselves; the autouse null backend would skip the write (CLI-KEYRING-NULL-GUARD-1).
+pytestmark = pytest.mark.usefixtures("keyring_writes_enabled")
+
 KEY = "sk-test-PROBE123"
 # CLI-DAEMON-KEY-PRECEDENCE-1: the loader reads only the selected provider's key; these tests store a Groq key.
 _GROQ_CFG = SmartMemoryConfig(mode="local", llm_provider="groq")

@@ -31,6 +31,7 @@ from xml.sax.saxutils import escape
 import click
 
 from smartmemory_app import console as _console
+from smartmemory_app.keyring_guard import keyring_disabled, set_secret
 from smartmemory_app.install_check import (
     PROXY_ENV_VARS,
     SOCKS_PROXY_ERROR,
@@ -800,10 +801,12 @@ def _persist_env_var(name: str, value: str) -> None:
     os.environ[name] = value
     if sys.platform == "win32":
         try:
-            import keyring
-
-            keyring.set_password("smartmemory", name, value)
-            click.echo("  Stored in Windows credential store for the daemon.")
+            if set_secret(name, value, where="this setup process"):
+                click.echo("  Stored in Windows credential store for the daemon.")
+            else:
+                click.echo(
+                    "  OS credential store disabled. The key is only set for this setup session."
+                )
         except Exception as exc:
             logger.warning(
                 "Credential persistence failed, key is only available in this setup process: %s",
@@ -951,7 +954,7 @@ def _ask_local_choices() -> dict:
     if key_envvar:
         # Check env, then keychain, then shell profile
         existing = os.environ.get(key_envvar, "").strip()
-        if not existing:
+        if not existing and not keyring_disabled():
             try:
                 import keyring
 
@@ -984,10 +987,12 @@ def _ask_local_choices() -> dict:
             # Windows persistence and shell guidance are handled above.
             if sys.platform != "win32":
                 try:
-                    import keyring
-
-                    keyring.set_password("smartmemory", key_envvar, api_key.strip())
-                    click.echo("  Also stored in OS keychain.")
+                    if set_secret(key_envvar, api_key.strip()):
+                        click.echo("  Also stored in OS keychain.")
+                    else:
+                        click.echo(
+                            "  OS keychain disabled. Key kept in your shell profile only."
+                        )
                 except Exception as exc:
                     logger.warning(
                         "OS credential store unavailable, using shell profile: %s",
@@ -1442,12 +1447,18 @@ def _daemon_can_read_key(name: str, value: str) -> bool:
     A key that only lives in this shell's env is stored in the OS keychain, the same
     place ``sm setup`` puts a key you type. Never raises. The key is never logged.
     """
+    if keyring_disabled():
+        logger.warning(
+            "OS keychain disabled: %s is not stored in it, the daemon can only read it from the shell profile.",
+            name,
+        )
+        return _read_env_from_profile(name) == value
     try:
         import keyring
 
         if keyring.get_password("smartmemory", name) == value:
             return True
-        keyring.set_password("smartmemory", name, value)
+        set_secret(name, value)
         # A store that accepts a write but does not hand it back (a null backend)
         # has not saved the key, so only the read-back counts.
         if keyring.get_password("smartmemory", name) == value:

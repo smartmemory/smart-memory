@@ -32,6 +32,9 @@ from smartmemory_app import (
 from smartmemory_app.console import read_utf8_stdin
 from smartmemory_app.runtime_diagnostics import SharedRotatingFileHandler
 
+# These tests patch keyring.set_password themselves; the autouse null backend would skip the write (CLI-KEYRING-NULL-GUARD-1).
+pytestmark = pytest.mark.usefixtures("keyring_writes_enabled")
+
 
 @pytest.fixture(autouse=True)
 def isolate(tmp_path, monkeypatch):

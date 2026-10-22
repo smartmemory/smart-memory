@@ -119,6 +119,10 @@ def isolated_support_diagnostics(provider_env_leak_guard, monkeypatch, tmp_path)
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # No login keychain exists under a redirected HOME: a real keyring write would pop a
+    # macOS "Keychain Not Found" dialog (CLI-KEYRING-NULL-GUARD-1). Tests that exercise the
+    # write path patch keyring.set_password and use the keyring_writes_enabled fixture.
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
     monkeypatch.setenv("APPDATA", str(home / "appdata"))
     from smartmemory_app import (
         bug_report,
@@ -229,3 +233,10 @@ def real_home_report_leak_gate():
     assert not gained, (
         "Tests leaked reporting content into the real home: " + ", ".join(gained)
     )
+
+
+@pytest.fixture
+def keyring_writes_enabled(monkeypatch):
+    """Let setup's keyring write sites reach a patched ``keyring.set_password``."""
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    monkeypatch.delenv("SMARTMEMORY_NO_KEYRING", raising=False)
