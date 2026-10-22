@@ -2,9 +2,10 @@
 
 ## Unreleased
 
-### DAEMON-9014-CRASH-DIAG-1 port to 2.0 (2026-10-26, HOOK-WRITE-QUEUE-1 daemon-exit diagnosis)
+### DAEMON-9014-CRASH-DIAG-1 + CLI-TEST-HOST-ISOLATION-1 port to 2.0 (2026-10-26, HOOK-WRITE-QUEUE-1 daemon-exit diagnosis)
 
 - `sm stop` (and anything else that stops the daemon or worker) no longer switches off a background job it did not install (DAEMON-9014-CRASH-DIAG-1). macOS keys background jobs by user, not by home folder, so a process running with a different HOME (a test suite, a second install) saw your real `ai.smartmemory.daemon` job and booted it out; that is how the local daemon died twice on 2026-10-22 during test runs. A job now counts as ours only when `launchctl print` shows it loaded from this HOME's `~/Library/LaunchAgents/<label>.plist` (symlinks resolved); any other job is left running with one WARNING naming both paths. Covers `stop_daemon`, the worker stop and the legacy-worker retirement. Table test `tests/unit/test_launchd_ownership.py`.
+- CLI tests can no longer touch the machine owner's real daemon, HOME or launchd job (CLI-TEST-HOST-ISOLATION-1). Every test gets a port reserved in `~/.ports` as `cliTest` and exported as `SMARTMEMORY_DAEMON_PORT` (released on teardown, failure path too), scratch launchd job labels, a `launchctl` shim that fails any call naming a real label, a bind guard on 9014/9015, the setup module's import-time paths pointed at the isolated HOME, and every process a test starts stopped at teardown. `tests/unit/test_host_isolation.py` proves each site. `viewer_server.main()` with no port now serves the configured port (`SMARTMEMORY_DAEMON_PORT`, config, then 9014) instead of a hard-coded 9014. Cause found: `daemon.stop_daemon()` and `_stop_workers()` ask launchd about `ai.smartmemory.daemon`/`worker` whatever HOME is, so a test that ran them unmocked booted out the real job.
 
 ### HOOK-CAPTURE-NO-LLM-LANDED-TEST-FU-1 (2026-10-26)
 

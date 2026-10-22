@@ -569,12 +569,18 @@ def _print_enrichment_status() -> None:
         )
 
 
-def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
+def main(port: int | None = None, open_browser: bool = True) -> None:
     """Start the SmartMemory daemon.
 
     Starts HTTP serving while the memory backend warms in a background thread.
     ``/health`` reports ``warming`` until model/backend setup has really finished.
+    No ``port`` means the configured one (``SMARTMEMORY_DAEMON_PORT``, then the
+    config file, then ``DEFAULT_PORT``), never a hard-coded 9014 (CLI-TEST-HOST-ISOLATION-1).
     """
+    if port is None:
+        from smartmemory_app.config import load_config
+
+        port = load_config().daemon_port
     from smartmemory_app.storage import _shutdown, _resolve_data_dir
 
     from smartmemory_app.runtime_diagnostics import install_daemon_diagnostics
