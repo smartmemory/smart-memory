@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests import _host_isolation as host_isolation
+
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
 # Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
@@ -209,6 +211,89 @@ def restore_smartmemory_env(provider_env_leak_guard):
             del os.environ[name]
     os.environ.update(before)
     env_pin._applied, env_sources._pre_pin_names = state
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cli_test_port():
+    """One port per pytest process, registered in ~/.ports as cliTest (CLI-TEST-HOST-ISOLATION-1).
+
+    Released on teardown whether the session passed or failed, and a listener still
+    on it is stopped and reported.
+    """
+    port, registered = host_isolation.reserve_test_port()
+    try:
+        yield port
+    finally:
+        problems = host_isolation.release_test_port(port, registered)
+    assert not problems, "; ".join(problems)
+
+
+@pytest.fixture(autouse=True)
+def host_isolation_guard(
+    isolated_support_diagnostics, monkeypatch, tmp_path_factory, cli_test_port
+):
+    """No test reaches the owner's real daemon port, HOME or launchd job.
+
+    Port: SMARTMEMORY_DAEMON_PORT is the reserved test port (config, the daemon and
+    the viewer all honour it), and a bind to 9014/9015 fails the test.
+    launchd: the daemon module's job labels are scratch names, and a launchctl shim is
+    first on PATH, so a call from the test or from any process it spawns is logged,
+    answered "no such service", and fails the test unless it only prints or boots out
+    a scratch label.
+    The setup module's import-time paths are re-pointed at the isolated HOME.
+    Processes the test started are stopped at teardown.
+    """
+    import socket
+    import subprocess
+    import uuid
+
+    from smartmemory_app import daemon as daemon_mod
+    from smartmemory_app import setup as setup_mod
+
+    home = Path(os.environ["HOME"])
+    # A scratch job name: the daemon's stop/start paths ask launchd about these labels
+    # whatever HOME is, so the real ai.smartmemory.daemon/worker must never reach it.
+    token = uuid.uuid4().hex[:8]
+    monkeypatch.setattr(
+        daemon_mod,
+        "_LAUNCHD_DAEMON_LABEL",
+        f"{host_isolation.TEST_LABEL_PREFIX}{token}.daemon",
+    )
+    monkeypatch.setattr(
+        daemon_mod,
+        "_LAUNCHD_WORKER_LABEL",
+        f"{host_isolation.TEST_LABEL_PREFIX}{token}.worker",
+    )
+    monkeypatch.setenv("SMARTMEMORY_DAEMON_PORT", str(cli_test_port))
+    monkeypatch.setattr(setup_mod, "DATA_DIR", home / ".smartmemory")
+    monkeypatch.setattr(setup_mod, "CLAUDE_DIR", home / ".claude")
+    monkeypatch.setattr(
+        setup_mod, "LAUNCH_AGENTS_DIR", home / "Library" / "LaunchAgents"
+    )
+
+    # Beside tmp_path, not in it: tests list and assert on their own tmp_path.
+    guard_dir = tmp_path_factory.mktemp("host-isolation")
+    launchctl_log = guard_dir / "launchctl-calls.log"
+    shim = host_isolation.install_launchctl_shim(
+        guard_dir / "bin",
+        launchctl_log,
+        loaded=os.environ.get("SM_TEST_LAUNCHCTL_LOADED") == "1",
+    )
+    monkeypatch.setenv("PATH", f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    binds: list[str] = []
+    spawned: list = []
+    monkeypatch.setattr(socket.socket, "bind", host_isolation.bind_guard(binds))
+    monkeypatch.setattr(
+        subprocess.Popen, "__init__", host_isolation.tracking_popen_init(spawned, shim)
+    )
+    try:
+        yield host_isolation.HostGuard(cli_test_port, launchctl_log, binds, shim)
+    finally:
+        host_isolation.stop_spawned(spawned)
+    calls = host_isolation.real_launchctl_calls(launchctl_log)
+    assert not calls, "test called launchctl (real launchd job): " + "; ".join(calls)
+    assert not binds, "test bound the owner's real daemon port: " + "; ".join(binds)
 
 
 @pytest.fixture(scope="session", autouse=True)
