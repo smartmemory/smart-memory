@@ -1190,7 +1190,13 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
                 ) from exc
         from smartmemory_app.warm import warm_models
 
-        warm_models(reranker=False, strict=True)
+        try:
+            warm_models(reranker=False, strict=True, repair_hint=None)
+        except Exception as exc:
+            # Setup cannot tell the user to run setup; name the cause and a way out.
+            raise RuntimeError(
+                f"{str(exc).rstrip('. ')}. {_warm_failure_hint(service)}"
+            ) from exc
         if missing:
             click.echo(f"Downloaded local embedding model {model!r}.")
         else:
@@ -1206,6 +1212,20 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
             os.environ.pop("SMARTMEMORY_EMBEDDING_PROVIDER", None)
         else:
             os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = previous
+
+
+def _warm_failure_hint(service) -> str:
+    """What to try after the embedder downloaded but would not load (CLI-SETUP-CIRCULAR-EMBED-1)."""
+    try:
+        backend = service.backend_name or ""
+    except Exception:
+        backend = ""
+    if backend.startswith("torch/"):
+        return (
+            "The torch runtime could not load the model. To use the ONNX runtime for this run, "
+            "set SMARTMEMORY_EMBEDDING_BACKEND=onnx and run sm setup again, or repair the torch install."
+        )
+    return "Run sm doctor for details."
 
 
 def _ensure_lazy_models() -> None:
