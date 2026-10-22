@@ -139,6 +139,10 @@ def _port() -> int:
 # /`sm restart` from picking up a config change (e.g. a local→remote mode switch).
 # These helpers make stop bootout the launchd job and start bootstrap it. All are
 # no-ops off macOS / when no plist is installed, so the subprocess path is intact.
+# launchd labels are per user, not per HOME: a process with another HOME (a test,
+# a second install) sees the real job under the same label. A job counts as ours
+# only when launchd loaded it from this HOME's plist, so stop never boots out a
+# job it did not install (DAEMON-9014-CRASH-DIAG-1).
 _LAUNCHD_DAEMON_LABEL = "ai.smartmemory.daemon"
 _LAUNCHD_WORKER_LABEL = "ai.smartmemory.worker"
 
@@ -147,8 +151,27 @@ def _launchd_plist_path(label: str) -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 
+_LAUNCHD_PATH_LINE = re.compile(r"^\s*path = (.+?)\s*$", re.MULTILINE)
+
+
+def _launchd_job_is_ours(label: str, printed: str) -> bool:
+    """True only when `launchctl print` shows the job loaded from this HOME's plist."""
+    match = _LAUNCHD_PATH_LINE.search(printed or "")
+    plist = _launchd_plist_path(label)
+    if match and os.path.realpath(match[1]) == os.path.realpath(plist):
+        return True
+    log.warning(
+        "launchd job %s is loaded from %s, not from this HOME's %s: "
+        "treating it as not ours, no bootout",
+        label,
+        match[1] if match else "no plist path",
+        plist,
+    )
+    return False
+
+
 def _launchd_loaded(label: str) -> bool:
-    """True if a launchd job with this label is currently loaded (macOS only)."""
+    """True if launchd has this label loaded from this HOME's plist (macOS only)."""
     if sys.platform != "darwin":
         return False
     r = _run_command(
@@ -157,7 +180,7 @@ def _launchd_loaded(label: str) -> bool:
         text=True,
     )
     if r.returncode == 0:
-        return True
+        return _launchd_job_is_ours(label, r.stdout)
     if r.returncode == 113 and "Could not find service" in r.stderr:
         return False
     if r.returncode == 112 and "Could not find domain for user gui:" in r.stderr:
@@ -670,7 +693,7 @@ def _retire_legacy_agent() -> bool:
     ):
         return False
     state = _legacy_agent_state()
-    if state is None:
+    if state is None or not _launchd_job_is_ours(_LAUNCHD_WORKER_LABEL, state):
         return False
     match = re.search(r"^\s*pid = (\d+)\s*$", state, re.MULTILINE)
     pid = int(match[1]) if match else None
