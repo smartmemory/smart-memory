@@ -512,6 +512,13 @@ def test_launchd_worker_reads_each_key_from_the_keychain(name, monkeypatch):
     """The worker's launchd entry has no key in its plist, so it loads it itself."""
     from smartmemory_app import config, worker_entry
 
+    # The loader reads only the selected provider's key (CLI-DAEMON-KEY-PRECEDENCE-1).
+    provider = next(p for p, env in config.PROVIDER_KEY_ENV.items() if env == name)
+    monkeypatch.setattr(
+        config,
+        "load_config",
+        lambda *a, **k: config.SmartMemoryConfig(mode="local", llm_provider=provider),
+    )
     for var in config.LLM_KEY_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr("sys.argv", ["worker_entry", "--data-dir", "unused"])

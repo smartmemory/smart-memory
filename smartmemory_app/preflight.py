@@ -19,32 +19,40 @@ from typing import Any
 
 import click
 
-from smartmemory_app.config import LLM_KEY_ENV_VARS
+from smartmemory_app.config import (
+    LLM_KEY_ENV_VARS,
+    PROVIDER_KEY_ENV,
+    load_config,
+    present_key_names,
+)
 
 log = logging.getLogger(__name__)
 
-# llm_provider (as setup writes it) -> the env var that provider reads.
-_PROVIDER_KEY_ENV = {
-    "groq": "GROQ_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-}
+# llm_provider (as setup writes it) -> the env var that provider reads (one table, in config).
+_PROVIDER_KEY_ENV = PROVIDER_KEY_ENV
 
 # Remote paths whose empty result looks like "no memories" but may mean "wrong workspace".
 _LISTING_PATHS = ("/memory/search", "/memory/list", "/memory/recall")
 _workspace_warned: set[tuple[str, str]] = set()
 
 
-def _stored_llm_key_present() -> bool:
-    """Whether the daemon would find a key in the keychain or shell profile.
+def _selected_key_names() -> tuple[str, ...]:
+    """The key names the configured provider reads, as the daemon loads them (config.present_key_names)."""
+    try:
+        return present_key_names(load_config())
+    except Exception:
+        return LLM_KEY_ENV_VARS  # an unreadable config: any key counts, as before
 
-    The daemon loads keys env, then keychain, then shell profile at boot
+
+def _stored_llm_key_present() -> bool:
+    """Whether the daemon would find the selected provider's key in the keychain or shell profile.
+
+    The daemon loads that key env, then keychain, then shell profile at boot
     (viewer_server.main), so a key missing from this shell's env can still be live.
+    A stored key for a provider that is not selected does not count: the daemon never loads it.
     Only presence is returned, never a value.
     """
-    for name in LLM_KEY_ENV_VARS:
+    for name in _selected_key_names():
         try:
             import keyring
 
@@ -63,7 +71,10 @@ def _stored_llm_key_present() -> bool:
 
 
 def llm_key_available() -> bool:
-    return any(os.environ.get(k) for k in LLM_KEY_ENV_VARS) or _stored_llm_key_present()
+    return (
+        any(os.environ.get(k) for k in _selected_key_names())
+        or _stored_llm_key_present()
+    )
 
 
 def _missing_key_names(provider: str) -> str:
