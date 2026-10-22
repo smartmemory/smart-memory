@@ -229,7 +229,9 @@ def test_get_api_key_env_wins_over_keychain(monkeypatch):
 # ── set_api_key ───────────────────────────────────────────────────────────────
 
 
-def test_set_api_key_warns_does_not_raise_when_keychain_unavailable():
+def test_set_api_key_warns_does_not_raise_when_keychain_unavailable(
+    keyring_writes_enabled,
+):
     with (
         patch("keyring.set_password", side_effect=Exception("no keychain")),
         warnings.catch_warnings(record=True) as w,
