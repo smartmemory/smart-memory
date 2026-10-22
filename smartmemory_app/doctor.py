@@ -682,7 +682,7 @@ def _ready(ctx: Context) -> tuple:
 
 
 def _conda_env_kind(prefix: str) -> Optional[str]:
-    """"env" for a dedicated conda env, "base" for the shared conda root, else None.
+    """ "env" for a dedicated conda env, "base" for the shared conda root, else None.
 
     A conda env is not a ``python -m venv`` venv: ``sys.prefix == sys.base_prefix``
     inside it, so the venv test alone calls every conda user "not isolated". The

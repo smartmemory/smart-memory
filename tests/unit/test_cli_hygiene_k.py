@@ -34,9 +34,23 @@ PYTHON_ROWS = [
     # The tester's repro: conda env, sys.prefix == sys.base_prefix.
     ("conda-env", "conda-env", True, (3, 11, 17), PASS, "conda env"),
     ("conda-base", "conda-base", True, (3, 11, 17), WARN, "shared conda base"),
-    ("conda-base-condabin", "conda-base-condabin-only", True, (3, 11, 17), WARN, "shared conda base"),
+    (
+        "conda-base-condabin",
+        "conda-base-condabin-only",
+        True,
+        (3, 11, 17),
+        WARN,
+        "shared conda base",
+    ),
     # Pre-existing arms stay as they were.
-    ("system-python", "system", True, (3, 11, 17), WARN, "not in a virtual environment"),
+    (
+        "system-python",
+        "system",
+        True,
+        (3, 11, 17),
+        WARN,
+        "not in a virtual environment",
+    ),
     ("venv", "venv", False, (3, 11, 17), PASS, "venv"),
     # A conda env on a Python SmartMemory cannot run is still a FAIL.
     ("conda-env-old-python", "conda-env", True, (3, 10, 4), FAIL, "needs 3.11"),
@@ -60,7 +74,12 @@ def test_python_row_knows_conda(row, tmp_path):
 
 # ── C. "warming" says the daemon is unusable while it serves adds ───────────
 
-WARMING_HEALTH = {"service": "smartmemory", "status": "warming", "mode": "lite", "pid": 7}
+WARMING_HEALTH = {
+    "service": "smartmemory",
+    "status": "warming",
+    "mode": "lite",
+    "pid": 7,
+}
 
 
 def _diagnosis_fix(tmp_path) -> str:
@@ -92,7 +111,9 @@ WARMING_SURFACES = [
 ]
 
 
-@pytest.mark.parametrize("surface", WARMING_SURFACES, ids=[s[0] for s in WARMING_SURFACES])
+@pytest.mark.parametrize(
+    "surface", WARMING_SURFACES, ids=[s[0] for s in WARMING_SURFACES]
+)
 def test_warming_text_says_adds_and_searches_work(surface, tmp_path, monkeypatch):
     from smartmemory_app.daemon_diagnosis import WARMING_NOTE
 
