@@ -93,7 +93,9 @@ def test_remote_setup_validates_and_persists_custom_api(
         thread.join()
 
 
-def test_windows_keyring_unavailable_uses_protected_file(monkeypatch, tmp_path):
+def test_windows_keyring_unavailable_uses_protected_file(
+    monkeypatch, tmp_path, keyring_writes_enabled
+):
     from types import SimpleNamespace
     import keyring
     from smartmemory_app import config, windows_credentials

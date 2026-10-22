@@ -37,7 +37,10 @@ def _wizard_key_step(monkeypatch):
 
     monkeypatch.setattr(sys, "platform", "linux")
     for name in ("GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
+        # setenv before delenv: delenv on an absent name records nothing to restore, so the
+        # wizard's own os.environ write would leak out of the test (provider env leak guard).
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     command = click.command()(setup._ask_local_choices)
     result = CliRunner().invoke(command, input=f"n\ngroq\n{KEY}\nlocal\nsm\n\n")
     assert result.exit_code == 0, result.output

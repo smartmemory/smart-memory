@@ -431,7 +431,7 @@ _KEY_SOURCES = [
     ids=[row[0] for row in _KEY_SOURCES],
 )
 def test_installed_plists_never_hold_the_key(
-    env, keychain, legacy, writes, tmp_path, monkeypatch, capsys
+    env, keychain, legacy, writes, tmp_path, monkeypatch, capsys, keyring_writes_enabled
 ):
     launch_agents = tmp_path / "LaunchAgents"
     monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", launch_agents)
@@ -471,7 +471,7 @@ def test_installed_plists_never_hold_the_key(
 
 
 def test_key_that_cannot_reach_the_daemon_is_a_visible_warning(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, keyring_writes_enabled
 ):
     monkeypatch.setattr("smartmemory_app.setup.LAUNCH_AGENTS_DIR", tmp_path / "LA")
     monkeypatch.setenv("GROQ_API_KEY", _PLIST_KEY)
@@ -520,7 +520,9 @@ def test_launchd_worker_reads_each_key_from_the_keychain(name, monkeypatch):
         lambda *a, **k: config.SmartMemoryConfig(mode="local", llm_provider=provider),
     )
     for var in config.LLM_KEY_ENV_VARS:
-        monkeypatch.delenv(var, raising=False)
+        # setenv before delenv so monkeypatch restores what the worker loads from the keychain
+        monkeypatch.setenv(var, "")
+        monkeypatch.delenv(var)
     monkeypatch.setattr("sys.argv", ["worker_entry", "--data-dir", "unused"])
     monkeypatch.setattr(
         worker_entry, "_resolve_data_dir", lambda d=None: Path("unused")
