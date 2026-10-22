@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### DAEMON-9014-CRASH-DIAG-1 port to 2.0 (2026-10-26, HOOK-WRITE-QUEUE-1 daemon-exit diagnosis)
+
+- `sm stop` (and anything else that stops the daemon or worker) no longer switches off a background job it did not install (DAEMON-9014-CRASH-DIAG-1). macOS keys background jobs by user, not by home folder, so a process running with a different HOME (a test suite, a second install) saw your real `ai.smartmemory.daemon` job and booted it out; that is how the local daemon died twice on 2026-10-22 during test runs. A job now counts as ours only when `launchctl print` shows it loaded from this HOME's `~/Library/LaunchAgents/<label>.plist` (symlinks resolved); any other job is left running with one WARNING naming both paths. Covers `stop_daemon`, the worker stop and the legacy-worker retirement. Table test `tests/unit/test_launchd_ownership.py`.
+
 ### HOOK-CAPTURE-NO-LLM-LANDED-TEST-FU-1 (2026-10-26)
 
 - test(capture): `tests/integration/test_hook_capture_no_llm.py` passes 5/5 under the isolated no-credential, outbound-TCP-denied, ports-pinned-to-1 run (HOOK-CAPTURE-NO-LLM-LANDED-TEST-FU-1). The 2.0 fixture writes under the store's own minted Lite workspace instead of an unrelated synthetic one (writes no longer raise `EffectScopeMismatch`). Both lines pin every backend to loopback port 1 in the fixture, stop counting those refused connects as LLM calls (any other TCP connect still counts and fails the row), and drain through `worker_entry.run_configured_worker` so `stage:enrich` boxes finish. No production change.

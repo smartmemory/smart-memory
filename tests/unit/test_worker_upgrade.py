@@ -486,7 +486,7 @@ def test_legacy_launchd_without_pidfile(tmp_path, monkeypatch, caplog, bootout_o
         plist = tmp_path / f"{daemon._LAUNCHD_WORKER_LABEL}.plist"
         plist.write_text("from smartmemory_app.enrichment_worker import main; main()")
         monkeypatch.setattr(daemon.sys, "platform", "darwin")
-        states = iter([f"state = running\npid = {process.pid}\n", None])
+        states = iter([f"path = {plist}\nstate = running\npid = {process.pid}\n", None])
         monkeypatch.setattr(daemon, "_legacy_agent_state", lambda: next(states))
 
         def bootout(label):
