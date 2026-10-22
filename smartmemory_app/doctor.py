@@ -65,13 +65,9 @@ STEERING_VARS = frozenset(
     }
 )
 
-_PROVIDER_KEYS = {
-    "groq": "GROQ_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-}
+from smartmemory_app.config import LLM_PROVIDER_KEY_ENV  # noqa: E402
+
+_PROVIDER_KEYS = LLM_PROVIDER_KEY_ENV
 
 _DEFAULT_PORT = 9014
 
@@ -1640,9 +1636,9 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
             )
     elif provider != "none":
         return row(
-            WARN,
-            f"{route_text}. That provider is not one doctor knows how to check. Keys: {keys_text}.",
-            "Run: sm config llm_provider to see the supported values.",
+            FAIL,
+            f"llm_provider {provider!r} is not supported, so core uses its own default model and endpoint ({route_text}).",
+            "Run: sm setup, or sm config llm_provider to see the supported values.",
         )
     elif not where_keys:
         return row(

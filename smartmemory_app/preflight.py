@@ -19,18 +19,12 @@ from typing import Any
 
 import click
 
-from smartmemory_app.config import LLM_KEY_ENV_VARS
+from smartmemory_app.config import LLM_KEY_ENV_VARS, LLM_PROVIDER_KEY_ENV
 
 log = logging.getLogger(__name__)
 
 # llm_provider (as setup writes it) -> the env var that provider reads.
-_PROVIDER_KEY_ENV = {
-    "groq": "GROQ_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-}
+_PROVIDER_KEY_ENV = LLM_PROVIDER_KEY_ENV
 
 # Remote paths whose empty result looks like "no memories" but may mean "wrong workspace".
 _LISTING_PATHS = ("/memory/search", "/memory/list", "/memory/recall")

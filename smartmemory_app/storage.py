@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from smartmemory_app.remote_backend import RemoteMemory
 
 from smartmemory_app.config import (
+    LLM_PROVIDER_TABLE,
     NO_LLM_PROVIDER_OFF_LINE,
     NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
@@ -254,13 +255,17 @@ def _provider_default_model(provider: str | None, environ=None) -> str | None:
     """
     env = os.environ if environ is None else environ
     provider = (provider or "").lower()
-    if provider == "gemini":
-        return "gemini/gemini-2.0-flash"
-    if provider == "groq":
-        return "openai/gpt-oss-120b"  # core's Groq default (is_groq_model routes it)
     if provider == "openai":
         return env.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
-    return None
+    if provider and provider not in LLM_PROVIDER_TABLE:
+        log.warning(
+            "llm_provider %r is not supported (supported: %s), so no model is pinned and core "
+            "falls back to its own default model and endpoint. Run: sm setup",
+            provider,
+            ", ".join(LLM_PROVIDER_TABLE),
+        )
+        return None
+    return LLM_PROVIDER_TABLE.get(provider, (None, None))[1]
 
 
 def _hold_llm_route_off() -> None:
