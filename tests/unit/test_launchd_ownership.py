@@ -17,9 +17,15 @@ import pytest
 
 from smartmemory_app import daemon
 
-DAEMON = daemon._LAUNCHD_DAEMON_LABEL
-WORKER = daemon._LAUNCHD_WORKER_LABEL
+# Rows name a job by role. The label is read from the daemon module when a test runs:
+# the autouse host_isolation_guard patches it to a scratch label per test, so a label
+# captured at import time would never match the one the code under test asks about.
+ROLE_ATTR = {"daemon": "_LAUNCHD_DAEMON_LABEL", "worker": "_LAUNCHD_WORKER_LABEL"}
 FOREIGN = "/Users/someone-else/Library/LaunchAgents/{label}.plist"
+
+
+def label_of(role):
+    return getattr(daemon, ROLE_ATTR[role])
 
 
 class FakeLaunchd:
@@ -66,14 +72,14 @@ def launchd(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path / "data"))
     (tmp_path / "data").mkdir()
-    agents = daemon._launchd_plist_path(DAEMON).parent
+    agents = daemon._launchd_plist_path(label_of("daemon")).parent
     agents.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(daemon, "_retire_legacy_workers", lambda **kw: False)
     monkeypatch.setattr(daemon, "_stop_core_worker", lambda: None)
     monkeypatch.setattr(daemon, "is_running", lambda require_healthy=True: False)
 
     def install(origins):
-        fake = FakeLaunchd(origins)
+        fake = FakeLaunchd({label_of(role): o for role, o in origins.items()})
         monkeypatch.setattr(subprocess, "run", fake.run)
         return fake
 
@@ -90,8 +96,8 @@ LOADED_ROWS = [
 
 @pytest.mark.parametrize("origin,expected", LOADED_ROWS)
 def test_loaded_means_loaded_from_this_home(launchd, origin, expected):
-    launchd({DAEMON: origin})
-    assert daemon._launchd_loaded(DAEMON) is expected
+    launchd({"daemon": origin})
+    assert daemon._launchd_loaded(label_of("daemon")) is expected
 
 
 def test_symlinked_home_still_matches(launchd, monkeypatch, tmp_path):
@@ -100,25 +106,25 @@ def test_symlinked_home_still_matches(launchd, monkeypatch, tmp_path):
     link = tmp_path / "link-home"
     link.symlink_to(real)
     monkeypatch.setenv("HOME", str(link))
-    fake = launchd({DAEMON: "ours"})
+    fake = launchd({"daemon": "ours"})
     monkeypatch.setattr(
         fake,
         "printed",
         lambda label: f"\tpath = {real}/Library/LaunchAgents/{label}.plist\n",
     )
-    assert daemon._launchd_loaded(DAEMON) is True
+    assert daemon._launchd_loaded(label_of("daemon")) is True
 
 
-# call site, labels loaded with their origin, labels that must be booted out
+# call site, job roles loaded with their origin, roles that must be booted out
 SITE_ROWS = [
-    ("stop_daemon", {DAEMON: "ours", WORKER: "ours"}, {DAEMON, WORKER}),
-    ("stop_daemon", {DAEMON: "foreign", WORKER: "foreign"}, set()),
-    ("stop_daemon", {DAEMON: "foreign"}, set()),
-    ("stop_daemon", {DAEMON: "no-path", WORKER: "no-path"}, set()),
-    ("stop_workers", {WORKER: "ours"}, {WORKER}),
-    ("stop_workers", {WORKER: "foreign"}, set()),
-    ("retire_legacy_agent", {WORKER: "ours"}, {WORKER}),
-    ("retire_legacy_agent", {WORKER: "foreign"}, set()),
+    ("stop_daemon", {"daemon": "ours", "worker": "ours"}, {"daemon", "worker"}),
+    ("stop_daemon", {"daemon": "foreign", "worker": "foreign"}, set()),
+    ("stop_daemon", {"daemon": "foreign"}, set()),
+    ("stop_daemon", {"daemon": "no-path", "worker": "no-path"}, set()),
+    ("stop_workers", {"worker": "ours"}, {"worker"}),
+    ("stop_workers", {"worker": "foreign"}, set()),
+    ("retire_legacy_agent", {"worker": "ours"}, {"worker"}),
+    ("retire_legacy_agent", {"worker": "foreign"}, set()),
 ]
 
 
@@ -128,7 +134,7 @@ def test_destructive_sites_only_boot_out_our_jobs(
 ):
     fake = launchd(origins)
     if site == "retire_legacy_agent":
-        daemon._launchd_plist_path(WORKER).write_text("enrichment_worker.main()")
+        daemon._launchd_plist_path(label_of("worker")).write_text("enrichment_worker.main()")
         monkeypatch.setattr(daemon, "_wait_legacy_exit", lambda pid: None)
     with caplog.at_level(logging.WARNING, logger=daemon.__name__):
         {
@@ -136,8 +142,10 @@ def test_destructive_sites_only_boot_out_our_jobs(
             "stop_workers": daemon._stop_workers,
             "retire_legacy_agent": daemon._retire_legacy_agent,
         }[site]()
-    assert set(origins) - set(fake.origins) == booted
-    for label, origin in origins.items():
+    gone = {role for role in origins if label_of(role) not in fake.origins}
+    assert gone == booted
+    for role, origin in origins.items():
+        label = label_of(role)
         if origin != "ours":
             assert label in fake.origins, f"{label} ({origin}) was booted out"
             assert any(
