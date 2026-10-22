@@ -190,7 +190,7 @@ sm viewer                      # Open the knowledge graph in your browser
 sm explore                     # Walk the knowledge graph in the terminal
 sm status                      # Daemon health and memory count
 sm config                      # View settings
-sm clear                       # Start over (deletes all memories)
+sm clear                       # Start over (deletes all memories; stops and restarts the daemon for you)
 ```
 
 In remote mode, `sm search '*' --top-k 20` lists a page of memories in your

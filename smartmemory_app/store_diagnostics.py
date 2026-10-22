@@ -2,11 +2,15 @@
 
 import contextlib
 import json
+import logging
 import os
 import shutil
+import socket
 import sqlite3
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 REINDEX = "Fix: smartmemory admin reindex (re-embeds saved items)"
 LEXICAL = "Fix: smartmemory rebuild --lexical"
@@ -339,9 +343,39 @@ def dependency_rows(data_dir: Path):
             ". Fix: free disk space, then smartmemory setup" if free < 1024**3 else ""
         )
         yield f"Free disk {name}: {'warning: <1 GB' if free < 1024**3 else 'OK'} ({free // (1024**2)} MiB){hint}"
+    yield from daemon_port_rows(load_config().daemon_port)
+
+
+def _port_probe_row(port: int) -> str:
+    """Identify the port's holder without listing other processes' sockets.
+
+    macOS lets only root list system-wide sockets, so ``psutil.net_connections``
+    raises AccessDenied for an ordinary user even when the holder is our own
+    daemon. A loopback connect says whether anything listens, and the daemon's
+    ``/health`` reply says whether that something is SmartMemory.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        listening = probe.connect_ex(("127.0.0.1", port)) == 0
+    if not listening:
+        return f"Daemon port: OK ({port}, free)"
+    from smartmemory_app.daemon import _health_response
+
+    try:
+        health = _health_response(2).json()
+    except Exception:
+        health = {}
+    if health.get("service") == "smartmemory":
+        return f"Daemon port: OK ({port}, SmartMemory listener)"
+    return (
+        f"Daemon port: warning: {port} is in use by a process that does not answer as SmartMemory. "
+        f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
+    )
+
+
+def daemon_port_rows(port: int):
     import psutil
 
-    port = load_config().daemon_port
     try:
         listeners = [
             c
@@ -364,7 +398,20 @@ def dependency_rows(data_dir: Path):
                 )
         if not listeners:
             yield f"Daemon port: OK ({port}, free)"
+    except psutil.AccessDenied as exc:
+        log.warning(
+            "Daemon port %s: system-wide socket listing denied (%s, macOS needs root); "
+            "identifying the holder by connect probe and /health instead",
+            port,
+            exc,
+        )
+        yield _port_probe_row(port)
     except (psutil.Error, OSError) as exc:
+        log.warning(
+            "Daemon port %s: socket listing failed (%s); the port holder is not identified",
+            port,
+            type(exc).__name__,
+        )
         yield (
             f"Daemon port: warning: owner unavailable ({type(exc).__name__}). "
             f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"

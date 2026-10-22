@@ -34,7 +34,7 @@ def _store_files(data_path: Path) -> list[Path]:
 
 def _refusal(detail: str) -> RuntimeError:
     return RuntimeError(
-        f"Store reset refused: {detail}. Run smartmemory stop first and disconnect MCP clients."
+        f"Store reset refused: {detail}. Run smartmemory stop and disconnect MCP clients that hold the store, then retry."
     )
 
 
