@@ -16,6 +16,11 @@ _REAL_RUN = subprocess.run
 _REAL_POPEN = subprocess.Popen
 
 
+def launchd_print(label, state):
+    """`launchctl print` text for a job loaded from this HOME's plist."""
+    return f"path = {daemon._launchd_plist_path(label)}\n{state}"
+
+
 @pytest.fixture
 def launchd(tmp_path, monkeypatch):
     platform.platform()  # Cache stdlib platform probing before mocking subprocess.
@@ -88,7 +93,10 @@ def launchd(tmp_path, monkeypatch):
                             self.loaded = False
                             self.events.append("removed")
                     if self.loaded:
-                        out = "state = SIGTERMed" if self.pending else "state = running"
+                        out = launchd_print(
+                            daemon._LAUNCHD_DAEMON_LABEL,
+                            "state = SIGTERMed" if self.pending else "state = running",
+                        )
                     else:
                         rc, err = 113, "Could not find service"
             elif action in ("bootout", "unload"):
@@ -284,7 +292,7 @@ def test_worker_disappears_after_second_inspection(launchd, monkeypatch):
                 return subprocess.CompletedProcess(
                     command,
                     rc,
-                    "state = SIGTERMed",
+                    launchd_print(daemon._LAUNCHD_WORKER_LABEL, "state = SIGTERMed"),
                     "Could not find service" if rc else "",
                 )
             if command[1] == "bootout":
