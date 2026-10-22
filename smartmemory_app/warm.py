@@ -41,11 +41,33 @@ def is_warm() -> bool:
         return False
 
 
-def warm_models(*, reranker: bool = True, strict: bool = False) -> None:
+REPAIR_HINT = "Run smartmemory setup to repair the local runtime/model cache."
+
+
+def _not_loaded(what: str, cause: BaseException | None, repair_hint: str | None) -> str:
+    """One message that names the real cause; the hint is dropped where it would be circular."""
+    message = f"{what} could not be loaded"
+    if cause is not None:
+        message += f": {cause}"
+    elif repair_hint is None:
+        message += " (the loader reported no cause; see the log for warnings)"
+    return f"{message}. {repair_hint}" if repair_hint else message
+
+
+def warm_models(
+    *,
+    reranker: bool = True,
+    strict: bool = False,
+    repair_hint: str | None = REPAIR_HINT,
+) -> None:
     """Synchronously load the local embedder (and optionally the reranker).
 
     Background callers retain lazy loading. The explicit CLI uses strict mode
     so a failed loader cannot announce successful model warmup.
+
+    ``repair_hint`` is appended to the failure text. ``smartmemory setup`` passes
+    ``None``: telling a user who is already in setup to run setup is circular, so it
+    shows the real cause (and its own hint) instead.
     """
     failures = []
     try:
@@ -55,12 +77,16 @@ def warm_models(*, reranker: bool = True, strict: bool = False) -> None:
         needs_local = service.provider in {"local", "huggingface"} or (
             service.provider == "openai" and not service.api_key
         )
-        if service.warm():
+        try:
+            loaded = service.warm(strict=True)
+        except Exception as cause:
+            raise RuntimeError(
+                _not_loaded("Embedding model", cause, repair_hint)
+            ) from cause
+        if loaded:
             logger.debug("Embedder warmed")
         elif needs_local:
-            raise RuntimeError(
-                "Embedding model could not be loaded. Run smartmemory setup to repair the local runtime/model cache."
-            )
+            raise RuntimeError(_not_loaded("Embedding model", None, repair_hint))
     except Exception as e:
         logger.warning("Embedder warm failed: %s", e)
         failures.append(e)

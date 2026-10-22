@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sys
 import time
 import threading
 from pathlib import Path
@@ -12,7 +13,14 @@ from smartmemory_app.crash_reporter import report_exception
 
 log = logging.getLogger(__name__)
 HOOKS = frozenset({"orient", "recall", "observe", "learn", "distill", "persist"})
-HINT = "Fix: smartmemory setup (repairs hook registration). Ensure its venv Scripts/bin directory is on Git Bash PATH."
+_HINT_BASE = "Fix: smartmemory setup (repairs hook registration)."
+
+
+def hint(platform: str | None = None) -> str:
+    """Recovery text for a failed hook; Git Bash is a Windows-only shell (CLI-SETUP-CIRCULAR-EMBED-1)."""
+    if (platform or sys.platform) == "win32":
+        return f"{_HINT_BASE} Ensure its venv Scripts directory is on Git Bash PATH."
+    return f"{_HINT_BASE} Ensure its venv bin directory is on the PATH your shell hooks use."
 
 
 class HookShellError(RuntimeError):
@@ -131,8 +139,10 @@ def recent_failures(data_dir: Path) -> list[str]:
                     and fields[2].isdecimal()
                 ):
                     recent.add(f"{fields[0]} exit {fields[1]}")
-        return [f"Hooks: warning: {key}. {HINT}" for key in sorted(recent)] or [
+        return [f"Hooks: warning: {key}. {hint()}" for key in sorted(recent)] or [
             "Hooks: OK, no recent shell failures"
         ]
     except (OSError, ValueError) as error:
-        return [f"Hooks: warning: history unavailable ({type(error).__name__}). {HINT}"]
+        return [
+            f"Hooks: warning: history unavailable ({type(error).__name__}). {hint()}"
+        ]
