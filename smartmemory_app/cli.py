@@ -23,6 +23,7 @@ from smartmemory_app.daemon import (
     STOP_TIMEOUT,
     bounded_lifecycle,
 )
+from smartmemory_app.daemon_diagnosis import WARMING_NOTE
 from smartmemory_app.remote_cli import require_local
 from smartmemory_app.diagnostics import redact_credentials
 from smartmemory_app import scope_header as _scope_header
@@ -887,6 +888,7 @@ def _report_start_status(
         return
     if info.get("status") == "warming":
         click.echo("SmartMemory is warming up.")
+        click.echo(WARMING_NOTE)
         click.echo("Check readiness with: sm status")
         return
     if info.get("status") == "degraded":
@@ -1241,7 +1243,8 @@ def status_cmd(as_json: bool) -> None:
     status = info.get("status", "?")
     click.echo(f"SmartMemory daemon: {status}")
     if status == "warming":
-        click.echo("  Models are still loading. Check again with: sm status")
+        click.echo(f"  Models are still loading. {WARMING_NOTE}")
+        click.echo("  Check again with: sm status")
         return
     if status == "degraded":
         reason = info.get("degraded_reason") or "No reason was reported."

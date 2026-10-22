@@ -505,6 +505,7 @@ def test_start_returns_on_observed_warming_by_default(runner):
 
     assert result.exit_code == 0, result.output
     assert "SmartMemory is warming up." in result.output
+    assert "requests wait for the load" in result.output
     assert "SmartMemory is ready." not in result.output
     assert start_daemon.call_args.kwargs["wait_until_ready"] is False
 
