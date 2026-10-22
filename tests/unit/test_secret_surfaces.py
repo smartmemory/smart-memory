@@ -17,7 +17,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from smartmemory_app.config import SmartMemoryConfig
+
 KEY = "sk-test-PROBE123"
+# CLI-DAEMON-KEY-PRECEDENCE-1: the loader reads only the selected provider's key; these tests store a Groq key.
+_GROQ_CFG = SmartMemoryConfig(mode="local", llm_provider="groq")
 MARK = b"PROBE123"
 
 _ENV_NAMES = (
@@ -146,7 +150,7 @@ def test_plist_paths(case, monkeypatch, plist_env, caplog):
     if case in ("fresh", "rewrite", "proxy", "old-plist-only"):
         monkeypatch.delenv("GROQ_API_KEY", raising=False)
         with contextlib.redirect_stdout(io.StringIO()):
-            config.load_llm_keys_from_stores()
+            config.load_llm_keys_from_stores(_GROQ_CFG)
         assert os.environ.get("GROQ_API_KEY") == KEY, "key lost when plist is rewritten"
 
 
@@ -404,7 +408,7 @@ def test_env_present_unmigratable_key_keeps_legacy_files(
     preserved = all((agents / n).read_bytes() == before[n] for n in names)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with contextlib.redirect_stdout(io.StringIO()):
-        config.load_llm_keys_from_stores()
+        config.load_llm_keys_from_stores(_GROQ_CFG)
     reloaded = bool(os.environ.get("GROQ_API_KEY"))
     assert preserved or reloaded, "only persistent copy was replaced without migration"
 
@@ -437,7 +441,7 @@ def _assert_key_invariant(expect, agents, before, output, monkeypatch):
         assert "GROQ_API_KEY" not in _plist_env(agents, name)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with contextlib.redirect_stdout(io.StringIO()):
-        config.load_llm_keys_from_stores()
+        config.load_llm_keys_from_stores(_GROQ_CFG)
     assert os.environ.get("GROQ_API_KEY", "") == expect
 
 

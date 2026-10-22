@@ -49,7 +49,8 @@ def test_semantic_keyless_notice_logged_and_visible(monkeypatch, caplog, keyed):
     monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     for name in LLM_KEY_ENV_VARS:
         monkeypatch.setenv(name, "")
-    monkeypatch.setenv("OPENAI_API_KEY", "test_F1b_unused_key" if keyed else "")
+    # CLI-DAEMON-KEY-PRECEDENCE-1: only the selected provider's own key counts as keyed.
+    monkeypatch.setenv("GROQ_API_KEY", "test_F1b_unused_key" if keyed else "")
     monkeypatch.setattr(cli, "_memory_request", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_prepare_direct_access", lambda **kw: None)
     monkeypatch.setattr("smartmemory_app.storage.search", lambda *a, **kw: [])
