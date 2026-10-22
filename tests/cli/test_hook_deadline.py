@@ -294,6 +294,7 @@ def test_real_process_exits_zero_within_deadline_plus_one(tmp_path):
     env.update(
         {
             "HOME": str(tmp_path / "home"),
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
             "USERPROFILE": str(tmp_path / "home"),
             "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
             "SMARTMEMORY_DATA_DIR": str(tmp_path / "data"),

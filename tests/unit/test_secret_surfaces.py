@@ -17,6 +17,9 @@ from types import SimpleNamespace
 
 import pytest
 
+# These tests patch keyring.set_password themselves; the autouse null backend would skip the write (CLI-KEYRING-NULL-GUARD-1).
+pytestmark = pytest.mark.usefixtures("keyring_writes_enabled")
+
 KEY = "sk-test-PROBE123"
 MARK = b"PROBE123"
 
