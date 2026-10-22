@@ -149,6 +149,7 @@ def handled_install_failure(
             "queued": "Automatic crash report queued for the next CLI or daemon start.",
             "disabled": "Automatic crash reporting disabled (SMARTMEMORY_CRASH_REPORTS=0 or config).",
             "suppressed": "Automatic crash report suppressed (duplicate or rate limit).",
+            "expected": "Expected condition, not a crash: no report sent.",
             "failed": "Automatic crash report could not be sent. Run smartmemory report --zip.",
         }.get(result.status, f"Report ID {result.report_id}")
         click.echo(notice, err=True)

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 from smartmemory_app import (
+    bug_report,
     crash_reporter as reporter,
     hook_failures,
     cli as cli_module,
@@ -229,6 +230,10 @@ def test_hook_consumer_exit_after_enqueue_recovers_marker(monkeypatch, tmp_path)
     markers = home / ".smartmemory"
     markers.mkdir(parents=True)
     monkeypatch.setattr(hook_failures, "marker_directory", lambda: markers)
+    # Default config: the data dir is ~/.smartmemory, the same place as the
+    # markers, in the subprocess (real resolution) and in this process alike.
+    monkeypatch.setattr(reporter, "debug_log_path", lambda: markers / "cli-debug.log")
+    monkeypatch.setattr(bug_report, "debug_log_path", lambda: markers / "cli-debug.log")
     (markers / "hook-failures.tsv").write_text("recall\t127\t0\n")
     driver = tmp_path / "interrupted-hook.py"
     driver.write_text(

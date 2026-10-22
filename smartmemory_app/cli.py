@@ -3435,6 +3435,12 @@ def report_cmd(
                 click.echo(
                     f"Support report queued for the next CLI or daemon start. Support zip: {path}"
                 )
+            elif result.status == "capped":
+                from smartmemory_app.report_outbox import MANUAL_DAILY_CAP
+
+                click.echo(
+                    f"Daily limit of {MANUAL_DAILY_CAP} support reports reached for this install. Support zip: {path}"
+                )
             else:
                 click.echo(f"Could not send. Support zip: {path}")
             click.echo("Email this file to support@smartmemory.ai.")

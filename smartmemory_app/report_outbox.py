@@ -15,20 +15,50 @@ log = logging.getLogger(__name__)
 MAX_REPORTS = 50
 MAX_AGE = 14 * 86400
 MAX_CORRUPT = 10
+# Per install per UTC day, counted inside the overall 20/day cap.
+MANUAL_DAILY_CAP = 5
+DAILY_CAP = 20
 # At least twice the report transport's 5-second timeout, with contention headroom.
 CLAIM_LEASE_SECONDS = 60
 
 
-def directory() -> Path:
+class ManualCapReached(Exception):
+    """The install already sent MANUAL_DAILY_CAP manual support reports today."""
+
+
+def directory(data_dir: Path | None = None) -> Path:
+    """Beside the install id, so one install id has exactly one outbox and cap.
+
+    The install id lives in the configured data dir (``SMARTMEMORY_DATA_DIR``),
+    so the dedupe/cap state must too. Under ``$HOME`` it was per HOME: processes
+    with different HOMEs and one data dir shared an id but not the cap.
+    """
+    if data_dir is None:
+        from smartmemory_app import bug_report
+
+        data_dir = bug_report.debug_log_path().parent
+    return Path(data_dir) / "report-outbox"
+
+
+def legacy_directory() -> Path:
+    """Where outboxes lived before the move: under the shell-marker HOME dir."""
     from smartmemory_app.hook_failures import marker_directory
 
     return marker_directory() / "report-outbox"
 
 
+def roots() -> list[Path]:
+    """The current outbox, plus an existing legacy one so its reports still drain."""
+    current, legacy = directory(), legacy_directory()
+    return [current, legacy] if legacy != current and legacy.is_dir() else [current]
+
+
 def queued_count() -> int:
     """Read-only, including in-flight and expired entries until a sender prunes."""
-    root = directory()
-    return len(list(root.glob("*.json"))) + len(list(root.glob("*.sending")))
+    return sum(
+        len(list(root.glob("*.json"))) + len(list(root.glob("*.sending")))
+        for root in roots()
+    )
 
 
 def _atomic(path: Path, value: dict) -> None:
@@ -75,6 +105,8 @@ def _state(root: Path, name: str) -> dict:
                 and isinstance(state.get("day"), str)
                 and type(state.get("count")) is int
                 and state["count"] >= 0
+                and type(state.get("manual", 0)) is int
+                and state.get("manual", 0) >= 0
                 and _timestamps(state.get("recent"))
             )
         else:
@@ -184,9 +216,20 @@ def _pending(root: Path) -> list[Path]:
     return pending
 
 
-def enqueue(payload: dict, fingerprint: str, dedupe_seconds: int) -> tuple[dict, bool]:
-    """Persist first, then reserve. A pending/in-flight identity is reused."""
-    root = directory()
+def enqueue(
+    payload: dict,
+    fingerprint: str,
+    dedupe_seconds: int,
+    *,
+    data_dir: Path | None = None,
+    manual: bool = False,
+) -> tuple[dict, bool]:
+    """Persist first, then reserve. A pending/in-flight identity is reused.
+
+    ``manual`` reports (``report --send``) also count against MANUAL_DAILY_CAP and
+    raise ManualCapReached past it. Crash reports are not blocked by it.
+    """
+    root = directory(data_dir)
     root.mkdir(parents=True, exist_ok=True)
     with FileLock(str(root / ".queue.lock"), timeout=0.1):
         files = _pending(root)
@@ -200,9 +243,12 @@ def enqueue(payload: dict, fingerprint: str, dedupe_seconds: int) -> tuple[dict,
         recent = {k: v for k, v in state["recent"].items() if now - v < 86400}
         day = time.strftime("%Y-%m-%d", time.gmtime(now))
         count = state["count"] if state["day"] == day else 0
+        manual_count = state.get("manual", 0) if state["day"] == day else 0
+        if manual and manual_count >= MANUAL_DAILY_CAP:
+            raise ManualCapReached(MANUAL_DAILY_CAP)
         if (
             fingerprint in recent and now - recent[fingerprint] < dedupe_seconds
-        ) or count >= 20:
+        ) or count >= DAILY_CAP:
             return payload, False
         claims = len(list(root.glob("*.sending")))
         if claims >= MAX_REPORTS:
@@ -212,14 +258,20 @@ def enqueue(payload: dict, fingerprint: str, dedupe_seconds: int) -> tuple[dict,
         _atomic(root / (fingerprint + ".json"), {"payload": payload, "created": now})
         recent[fingerprint] = now
         _atomic(
-            root / ".reservations", {"day": day, "count": count + 1, "recent": recent}
+            root / ".reservations",
+            {
+                "day": day,
+                "count": count + 1,
+                "manual": manual_count + int(manual),
+                "recent": recent,
+            },
         )
         return payload, True
 
 
-def flush(post, allowed) -> set[str]:
+def flush(post, allowed, root: Path | None = None) -> set[str]:
     """One mutation lock, immutable claims, no network work under the lock."""
-    root = directory()
+    root = root or directory()
     if not root.exists():
         return set()
     delivered = set()
@@ -285,8 +337,10 @@ def flush(post, allowed) -> set[str]:
 
 def was_delivered(report_id: str) -> bool:
     """Receipt lookup with malformed bookkeeping recovery under the queue lock."""
-    root = directory()
-    if not root.exists():
-        return False
-    with FileLock(str(root / ".queue.lock"), timeout=0.1):
-        return report_id in _state(root, ".delivered")
+    for root in roots():
+        if not root.exists():
+            continue
+        with FileLock(str(root / ".queue.lock"), timeout=0.1):
+            if report_id in _state(root, ".delivered"):
+                return True
+    return False

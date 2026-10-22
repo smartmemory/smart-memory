@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 
 from smartmemory_app.bug_report import debug_log_path, gather_environment
+from smartmemory_app.expected_exceptions import is_expected
 from smartmemory_app.report_privacy import (
     private_text,
     endpoint_inventory,
@@ -38,23 +39,31 @@ def bounded_report(call, *args, **kwargs) -> ReportResult:
     return call(*args, **kwargs)
 
 
-def flush_outbox() -> set[str]:
+def flush_outbox(data_dir: Path | None = None) -> set[str]:
+    """Flush the outbox beside the install id, plus any legacy one under HOME."""
     from smartmemory_app import report_outbox
 
+    delivered: set[str] = set()
     try:
-        return report_outbox.flush(_post, enabled)
+        roots = [report_outbox.directory(data_dir)]
+        roots += [r for r in report_outbox.roots() if r not in roots]
+        for root in roots:
+            delivered |= report_outbox.flush(_post, enabled, root)
     except Exception as exc:
         log.warning("Report outbox unavailable (%s)", type(exc).__name__)
-        return set()
+    return delivered
 
 
 def flush_in_background(
-    report_id: str | None = None, *, wait: float = 0.1
+    report_id: str | None = None,
+    *,
+    wait: float = 0.1,
+    data_dir: Path | None = None,
 ) -> ReportResult:
     results = []
 
     def run():
-        results.append(flush_outbox())
+        results.append(flush_outbox(data_dir))
 
     thread = threading.Thread(target=run, name="smartmemory-report-outbox", daemon=True)
     thread.start()
@@ -182,6 +191,7 @@ def _capture(
     dedupe_seconds: int = 600,
     hosts: tuple[str, ...] | None = None,
     wait: float = 0.4,
+    manual: bool = False,
 ) -> ReportResult:
     key = os.environ.get("SMARTMEMORY_CRASH_REPORT_KEY", PUBLIC_PROJECT_KEY)
     if not key.startswith("phc_"):
@@ -201,12 +211,22 @@ def _capture(
     }
     from smartmemory_app import report_outbox
 
-    payload, accepted = report_outbox.enqueue(
-        payload, fingerprint or uuid.uuid4().hex, dedupe_seconds
-    )
+    try:
+        # Same data_dir as the install id above: one id, one outbox, one cap.
+        payload, accepted = report_outbox.enqueue(
+            payload,
+            fingerprint or uuid.uuid4().hex,
+            dedupe_seconds,
+            data_dir=data_dir,
+            manual=manual,
+        )
+    except report_outbox.ManualCapReached:
+        return ReportResult("capped")
     if not accepted:
         return ReportResult("suppressed")
-    return flush_in_background(payload["properties"]["report_id"], wait=wait)
+    return flush_in_background(
+        payload["properties"]["report_id"], wait=wait, data_dir=data_dir
+    )
 
 
 def report_exception(
@@ -221,6 +241,8 @@ def report_exception(
     dedupe_seconds: int = 600,
 ) -> ReportResult:
     try:
+        if is_expected(exc):
+            return ReportResult("expected")  # Not a crash: nothing is captured.
         if not enabled():
             flush_outbox()
             return ReportResult("disabled")
@@ -354,7 +376,7 @@ def send_support_report(texts: dict[str, str]) -> ReportResult:
                 "log_tail_daemon": texts["daemon.log"],
             }
         )
-        return _capture("smartmemory_support_report", properties, data_dir)
+        return _capture("smartmemory_support_report", properties, data_dir, manual=True)
     except Exception as error:
         log.warning("Support report unavailable (%s)", type(error).__name__)
         return ReportResult("failed")

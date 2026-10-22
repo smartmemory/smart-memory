@@ -76,7 +76,8 @@ def consume_failures(data_dir: Path) -> None:
                     HookShellError(signature),
                     source="hook-shell",
                     args=["lifecycle"],
-                    data_dir=data_dir,
+                    # Reports use the install id's location, not the HOME marker
+                    # dir, so the daily cap is shared with every other source.
                     handled=True,
                     dedupe_key=f"hook:{hook}:{code}:{time.strftime('%Y-%m-%d', time.gmtime(now))}",
                     dedupe_seconds=86400,
