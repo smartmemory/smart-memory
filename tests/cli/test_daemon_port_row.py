@@ -97,7 +97,9 @@ def test_port_row_when_socket_listing_is_refused(
     monkeypatch.setattr("smartmemory_app.daemon._port", lambda: port)
     _deny(monkeypatch, error)
     try:
-        with caplog.at_level(logging.WARNING, logger="smartmemory_app.store_diagnostics"):
+        with caplog.at_level(
+            logging.WARNING, logger="smartmemory_app.store_diagnostics"
+        ):
             rows = list(daemon_port_rows(port))
     finally:
         if httpd:
@@ -127,11 +129,15 @@ def test_port_row_unchanged_when_listing_works(monkeypatch, listeners, expected)
     port = _free_port()
     fixed = [c._replace(laddr=Addr("127.0.0.1", port)) for c in listeners]
     monkeypatch.setattr(psutil, "net_connections", lambda kind="tcp": fixed)
-    assert list(daemon_port_rows(port)) == ["Daemon port: " + expected.format(port=port) + (
-        ". Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
-        if listeners
-        else ""
-    )]
+    assert list(daemon_port_rows(port)) == [
+        "Daemon port: "
+        + expected.format(port=port)
+        + (
+            ". Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
+            if listeners
+            else ""
+        )
+    ]
 
 
 def test_real_listing_never_reports_owner_unavailable_for_a_free_port():

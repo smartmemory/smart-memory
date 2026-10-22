@@ -4011,7 +4011,9 @@ def _restart_after_clear() -> None:
             num_workers=1, message="Restarting SmartMemory", wait_until_ready=False
         )
     except Exception as exc:
-        log.warning("Daemon did not restart after sm clear: %s: %s", type(exc).__name__, exc)
+        log.warning(
+            "Daemon did not restart after sm clear: %s: %s", type(exc).__name__, exc
+        )
         click.echo(
             f"Warning: the store was cleared but SmartMemory did not restart "
             f"({type(exc).__name__}). Run: sm start",
