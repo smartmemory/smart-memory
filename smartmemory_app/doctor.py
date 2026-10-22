@@ -685,16 +685,48 @@ def _ready(ctx: Context) -> tuple:
 # ── rows ────────────────────────────────────────────────────────────────────
 
 
+def _conda_env_kind(prefix: str) -> Optional[str]:
+    """"env" for a dedicated conda env, "base" for the shared conda root, else None.
+
+    A conda env is not a ``python -m venv`` venv: ``sys.prefix == sys.base_prefix``
+    inside it, so the venv test alone calls every conda user "not isolated". The
+    interpreter's own prefix is the evidence (``conda-meta`` exists in every conda
+    prefix), not the shell's CONDA_* variables, which a script or cron job lacks.
+    """
+    root = Path(prefix)
+    try:
+        if not (root / "conda-meta").is_dir():
+            return None
+        # The root install holds the other envs and the conda front end.
+        shared = (root / "envs").is_dir() or (root / "condabin").is_dir()
+    except OSError:
+        return None
+    return "base" if shared else "env"
+
+
 def check_python(ctx: Context) -> Row:
     version = ".".join(str(part) for part in ctx.python_version)
-    in_venv = ctx.prefix != ctx.base_prefix
-    where = f"venv {ctx.prefix}" if in_venv else f"system Python {ctx.executable}"
+    conda = _conda_env_kind(ctx.prefix) if ctx.prefix == ctx.base_prefix else None
+    in_venv = ctx.prefix != ctx.base_prefix or conda == "env"
+    if conda == "env":
+        where = f"conda env {ctx.prefix}"
+    elif in_venv:
+        where = f"venv {ctx.prefix}"
+    else:
+        where = f"system Python {ctx.executable}"
     if tuple(ctx.python_version[:2]) < (3, 11):
         return Row(
             "Python",
             FAIL,
             f"{version} ({where}). SmartMemory needs 3.11 or newer.",
             "Install Python 3.11+, then reinstall SmartMemory in a fresh venv.",
+        )
+    if conda == "base":
+        return Row(
+            "Python",
+            WARN,
+            f"{version}, in the shared conda base environment ({ctx.executable})",
+            "Install in its own env (conda create -n smartmemory python=3.11) or with pipx or uv tool, so other projects cannot change its packages.",
         )
     if not in_venv:
         return Row(
@@ -1740,11 +1772,13 @@ def _check_daemon(ctx: Context) -> Row:
             "Run: sm restart. If it stays degraded, run: sm report",
         )
     if status == "warming":
+        from smartmemory_app.daemon_diagnosis import WARMING_NOTE
+
         return Row(
             "Local daemon",
             WARN,
             f"still loading models on {port}",
-            "Wait a minute, then run: sm status",
+            f"{WARMING_NOTE} Check again in a minute: sm status",
         )
     if status != "ok":
         return Row(

@@ -19,6 +19,15 @@ from pathlib import Path
 from typing import NamedTuple
 
 
+#: What a user may do while the daemon reports "warming". Adds and searches are not
+#: refused: they queue behind the model load (storage._init_lock), so the status is
+#: "not fully loaded", never "unusable" (CLI-HYGIENE-K-1).
+WARMING_NOTE = (
+    "You can keep using sm add and sm search: requests wait for the load, "
+    "so the first ones can be slow."
+)
+
+
 class Diagnosis(NamedTuple):
     klass: str
     ok: bool
@@ -79,8 +88,8 @@ def diagnose(f: DaemonFacts) -> Diagnosis:
             return Diagnosis(
                 "warming",
                 False,
-                f"daemon at {addr} is still warming up and not ready yet",
-                "Wait about a minute, then run: sm status",
+                f"daemon at {addr} is still warming up (models loading)",
+                f"{WARMING_NOTE} Check again in a minute: sm status",
             )
         reason = str(health.get("degraded_reason") or "")
         if _MISSING_MODEL.search(reason):

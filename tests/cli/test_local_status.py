@@ -10,6 +10,7 @@ import pytest
 from click.testing import CliRunner
 
 from smartmemory_app import cli as cli_module, config, daemon
+from smartmemory_app.daemon_diagnosis import WARMING_NOTE
 from smartmemory_app.local_status import local_memory_count
 
 
@@ -105,6 +106,7 @@ def test_local_status_discloses_persisted_count(
             assert "should be running, but it is not responding" in result.output
         elif state == "warming":
             assert "Models are still loading" in result.output
+            assert WARMING_NOTE in result.output
         elif state == "degraded":
             assert "Run: sm doctor" in result.output
         else:
