@@ -1,4 +1,4 @@
-"""Normalize arbitrary add properties before Click chooses positional text."""
+"""Normalize arbitrary property flags before Click chooses the positional argument."""
 
 import re
 
@@ -8,7 +8,16 @@ _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _CLOCK = re.compile(r"\d{2}:\d{2}(:\d{2}(\.\d+)?)?([zZ]|[+-]\d{2}:?\d{2})?")
 
 
-class AddCommand(click.Command):
+class PropertyCommand(click.Command):
+    """Command whose unknown ``--key value`` flags become ``--prop key=value``.
+
+    The rewrite runs before Click binds the positional, so a property flag may sit
+    before or after it. ``max_positionals`` is the count the command accepts.
+    """
+
+    max_positionals = 1
+    positional_error = "Multiple arguments. Quote the value."
+
     def parse_args(self, ctx, args):
         known = {
             option: parameter
@@ -46,16 +55,17 @@ class AddCommand(click.Command):
                 normalized.append(token)
                 positionals.append(token)
             index += 1
-        if len(positionals) > 1:
-            raise click.UsageError(
-                "Multiple TEXT words. Quote the text or use --all - with stdin.", ctx
-            )
+        if len(positionals) > self.max_positionals:
+            raise click.UsageError(self.positional_error, ctx)
         return super().parse_args(ctx, normalized)
 
 
-class SearchCommand(click.Command):
-    """Search command: folds an unquoted DATE TIME --since/--until value into one token."""
+class AddCommand(PropertyCommand):
+    positional_error = "Multiple TEXT words. Quote the text or use --all - with stdin."
 
+
+class SearchCommand(PropertyCommand):
+    positional_error = "Multiple QUERY words. Quote the query."
     time_options = ("--since", "--until")
 
     def parse_args(self, ctx, args):

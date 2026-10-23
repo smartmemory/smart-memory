@@ -134,10 +134,8 @@ from smartmemory_app.install_check import (  # noqa: E402
 )
 
 
-def _parse_extra_props(
-    args: list[str], explicit: tuple[str, ...] = ()
-) -> dict[str, str]:
-    """Parse Click extra args (--key value pairs) into a property dict."""
+def _parse_props(explicit: tuple[str, ...] = ()) -> dict[str, str]:
+    """Parse --prop key=value pairs (PropertyCommand already rewrote --key value)."""
     props = {}
     for prop in explicit:
         key, separator, value = prop.partition("=")
@@ -146,22 +144,6 @@ def _parse_extra_props(
         if key in props:
             raise click.ClickException(f"Invalid or duplicate property: {key}.")
         props[key] = value
-    i = 0
-    while i < len(args):
-        if (
-            args[i].startswith("--")
-            and i + 1 < len(args)
-            and not args[i + 1].startswith("--")
-        ):
-            key = args[i][2:]
-            if not key or key in props:
-                raise click.ClickException(f"Invalid or duplicate property: {key}.")
-            props[key] = args[i + 1]
-            i += 2
-        else:
-            raise click.ClickException(
-                f"Unsupported property option or missing value: {args[i]}."
-            )
     return props
 
 
@@ -1508,10 +1490,7 @@ def _prepare_direct_access(*, download: bool = False) -> None:
 @cli.command(
     "add",
     cls=AddCommand,
-    context_settings=dict(
-        ignore_unknown_options=True,
-        allow_extra_args=True,
-    ),
+    context_settings=dict(ignore_unknown_options=True),
 )
 @click.argument("text", default="-")
 @click.option(
@@ -1548,12 +1527,13 @@ def add_cmd(
         smartmemory add --all - < document.txt     # whole file
         echo "some text" | smartmemory add -
 
-    Supports arbitrary property flags: --project atlas --domain legal
+    Supports arbitrary property flags, before or after the text:
+        smartmemory add --project atlas --domain legal "Alice leads Atlas"
     """
     import sys
     from smartmemory_app.storage import USER_RESERVED_PROPERTIES
 
-    props = _parse_extra_props(ctx.args, explicit_props)
+    props = _parse_props(explicit_props)
     reserved = USER_RESERVED_PROPERTIES.intersection(props)
     if reserved:
         from smartmemory_app.config import load_config
@@ -1832,10 +1812,7 @@ def retag_cmd(
 @cli.command(
     "search",
     cls=SearchCommand,
-    context_settings=dict(
-        ignore_unknown_options=True,
-        allow_extra_args=True,
-    ),
+    context_settings=dict(ignore_unknown_options=True),
 )
 @click.argument("query")
 @click.option("--top-k", default=5, show_default=True)
@@ -1903,7 +1880,9 @@ def search_cmd(
 ) -> None:
     """Search memories by semantic similarity. Use '*' to list all.
 
-    Supports property filters: --project atlas --domain legal
+    Supports property filters, before or after the query:
+        smartmemory search --project atlas --domain legal "who leads it"
+        smartmemory search "who leads it" --project atlas
     """
     from smartmemory.search import resolve_search_window
 
@@ -1934,7 +1913,7 @@ def search_cmd(
     if hop_strategy is not None:
         hop_options["hop_strategy"] = hop_strategy
     window = _search_window(resolve_search_window, since, until)
-    props = _parse_extra_props(ctx.args, explicit_props)
+    props = _parse_props(explicit_props)
     body: dict = {"query": query, "top_k": top_k, **window, **hop_options}
     if origin is not None:
         body["origin"] = origin
