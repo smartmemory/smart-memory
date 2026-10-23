@@ -3,7 +3,7 @@
 import pytest
 from click.testing import CliRunner
 
-from smartmemory_app.cli import add_cmd, cli, _parse_extra_props
+from smartmemory_app.cli import add_cmd, cli, _parse_props
 
 
 @pytest.mark.parametrize(
@@ -19,9 +19,7 @@ from smartmemory_app.cli import add_cmd, cli, _parse_extra_props
 def test_property_normalized_before_text(args):
     with add_cmd.make_context("add", args) as context:
         assert context.params["text"] == "whole text"
-        assert _parse_extra_props(context.args, context.params["explicit_props"]) == {
-            "project": "atlas"
-        }
+        assert _parse_props(context.params["explicit_props"]) == {"project": "atlas"}
 
 
 def test_terminator_keeps_option_like_text():

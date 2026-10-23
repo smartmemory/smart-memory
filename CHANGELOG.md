@@ -196,6 +196,8 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- CLI-SEARCH-PROP-ORDER-1: `sm search --project X "query"` (property flags before the query) no longer errors with "Unsupported property option or missing value". Property flags now work in any position on every property-taking command (`add`, `search`) through one shared `PropertyCommand`; `--help` shows the flag-first order.
+
 ## [1.5.25] - 2026-10-09
 
 - Pins `smartmemory-core==1.5.25` (now with the `[typescript]` extra, which carries the tree-sitter TS/JS grammars).
