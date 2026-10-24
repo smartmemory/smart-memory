@@ -279,7 +279,10 @@ def test_worker_entry_applies_persisted_config(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     observed = []
 
-    def run(data_dir, *, idle_exit, lease):
+    def run(data_dir, *, idle_exit, lease, v2=None):
+        assert (
+            v2 is None
+        )  # U20.S1-HANDLERS: the admission switch chain is OFF, so the legacy drain alone
         observed.append((data_dir, idle_exit, lease, provider_env()))
 
     monkeypatch.setattr("smartmemory.pipeline.work_graph.worker.run_worker", run)
