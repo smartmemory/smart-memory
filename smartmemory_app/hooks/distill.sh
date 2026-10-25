@@ -7,7 +7,7 @@ PHASE=distill
 # write happens here and no process is started (local mode): the daemon is the one consumer
 # (smartmemory_app/hook_consumer.py) and writes jobs in order per session, with retries and a
 # dead/ folder. While the daemon is down jobs wait; past SMARTMEMORY_HOOK_QUEUE_MAX queued jobs
-# (default 5000) the new payload is shed with a WARNING in hooks.log. The other loss path is a
+# (default 2000, counted only while no consumer is running) the new payload is shed with a WARNING in hooks.log. The other loss path is a
 # queue that cannot be written ("payload lost"). Pure bash on purpose: a Python start alone
 # costs more than the hook's 50 ms budget. The three write hooks share this body.
 HOOK_DATA_DIR="${SMARTMEMORY_DATA_DIR:-$HOME/.smartmemory}"
@@ -30,17 +30,25 @@ if [ ! -d "$QUEUE_DIR/queue" ] || [ ! -d "$QUEUE_DIR/payloads" ] || [ ! -d "$HOO
     mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR" "$QUEUE_DIR/queue" "$QUEUE_DIR/payloads" 2>/dev/null ||
         lost "cannot create $QUEUE_DIR"
 fi
-# Depth cap: one directory read (a glob), no subprocess.
-QUEUE_MAX="${SMARTMEMORY_HOOK_QUEUE_MAX:-5000}"
-shopt -s nullglob
-QUEUED=("$QUEUE_DIR"/queue/*.json)
-shopt -u nullglob
-if [ "${#QUEUED[@]}" -ge "$QUEUE_MAX" ] 2>/dev/null; then
-    cat >/dev/null
-    echo "WARNING: lifecycle $PHASE payload shed: hook queue holds ${#QUEUED[@]} jobs (cap $QUEUE_MAX); is the daemon running? (HOOK-WRITE-QUEUE-1)" >>"$HOOK_LOG" 2>/dev/null
-    exit 0
+# Depth cap, checked only when no live consumer holds worker.pid (the daemon writes it): a
+# glob over a deep queue costs ~200 ms at 5000 jobs, so the steady state skips it. No subprocess.
+WORKER_PID=
+[ -f "$QUEUE_DIR/worker.pid" ] && IFS= read -r WORKER_PID <"$QUEUE_DIR/worker.pid"
+if [ -z "$WORKER_PID" ] || ! kill -0 "$WORKER_PID" 2>/dev/null; then
+    WORKER_PID=
+    QUEUE_MAX="${SMARTMEMORY_HOOK_QUEUE_MAX:-2000}"
+    LC_ALL=C
+    shopt -s nullglob
+    QUEUED=("$QUEUE_DIR"/queue/*.json)
+    shopt -u nullglob
+    unset LC_ALL
+    if [ "${#QUEUED[@]}" -ge "$QUEUE_MAX" ] 2>/dev/null; then
+        cat >/dev/null
+        echo "WARNING: lifecycle $PHASE payload shed: hook queue holds ${#QUEUED[@]} jobs (cap $QUEUE_MAX) and no consumer is running; is the daemon up? (HOOK-WRITE-QUEUE-1)" >>"$HOOK_LOG" 2>/dev/null
+        exit 0
+    fi
+    QUEUED=()
 fi
-QUEUED=()
 set -o noclobber
 for _ in 1 2 3; do
     JOB_ID="$$-$RANDOM$RANDOM"
@@ -85,9 +93,7 @@ mv -f "$RECORD_TMP" "$QUEUE_DIR/queue/$JOB_ID.$PHASE.json" 2>>"$HOOK_LOG" || los
 # start the remote drainer only when worker.pid names no live process (the drainer rescans
 # after it clears worker.pid, so this record is never stranded).
 if [ -f "$QUEUE_DIR/remote-drain" ]; then
-    WORKER_PID=
-    [ -f "$QUEUE_DIR/worker.pid" ] && IFS= read -r WORKER_PID <"$QUEUE_DIR/worker.pid"
-    if [ -z "$WORKER_PID" ] || ! kill -0 "$WORKER_PID" 2>/dev/null; then
+    if [ -z "$WORKER_PID" ]; then # no live drainer when the cap check ran
         {
             smartmemory lifecycle drain-hooks --dir "$QUEUE_DIR"
             HOOK_EXIT=$?
