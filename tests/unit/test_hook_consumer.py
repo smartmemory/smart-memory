@@ -446,6 +446,36 @@ def spill_stays_when_the_queue_write_fails(root, env, writer):
 
 ZERO = {"queue": 0, "running": 0, "dead": 0}
 
+
+def copied_queue_never_touches_the_original(root, env, writer):
+    # A queue copied to another data dir (a harness backlog snapshot) still names the original's payload
+    # files by absolute path. Consuming the copy reads and removes its own files, never the original's.
+    warnings = _Warnings()
+    orig = capture_queue.hook_queue_dir(root.parent.parent / "orig" / "hook-queue")
+    _record(orig, "8000-1", "learn", "s", "copied")
+    snapshot = orig / "payloads" / "8000-1.learn.state.json"
+    snapshot.write_text("{}")
+    record_path = orig / "queue" / "8000-1.learn.json"
+    record = json.loads(record_path.read_text())
+    record["state_snapshot"] = str(snapshot)
+    record_path.write_text(json.dumps(record) + "\n")
+    for sub in ("payloads", "queue"):
+        for path in (orig / sub).iterdir():
+            (root / sub / path.name).write_bytes(path.read_bytes())
+    _run_daemon(
+        root,
+        writer,
+        lambda: writer.calls == ["copied"] and capture_queue.hook_counts(root) == ZERO,
+    ).stop()
+    warnings.close()
+    return {
+        "calls": writer.calls,
+        "original_left": sorted(p.name for p in (orig / "payloads").iterdir()),
+        "copy_left": sorted(p.name for p in (root / "payloads").iterdir()),
+        "warned": sum("outside this queue" in line for line in warnings.lines),
+    }
+
+
 ROWS = [
     (
         backlog_drains_on_start,
@@ -533,6 +563,15 @@ ROWS = [
     (
         spill_crash_between_adopt_and_delete_writes_once,
         {"calls": ["once"], "spill_left": []},
+    ),
+    (
+        copied_queue_never_touches_the_original,
+        {
+            "calls": ["copied"],
+            "original_left": ["8000-1.learn.json", "8000-1.learn.state.json"],
+            "copy_left": [],
+            "warned": 1,
+        },
     ),
 ]
 

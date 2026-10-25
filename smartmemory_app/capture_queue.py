@@ -588,6 +588,37 @@ def _payload_session(path: str | None) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+_foreign_payload_roots: set[str] = set()
+
+
+def _contain_payloads(root: Path, record: dict) -> None:
+    """Point a record's payload files into this queue's own ``payloads/``.
+
+    The hooks write absolute paths. A queue copied to another data dir still names the
+    original's files, and reading and then unlinking them would delete another queue's data.
+    Every producer writes the files next to the record (``<root>/payloads/<name>``), so
+    resolve them by name.
+    """
+    own = root / "payloads"
+    for key in ("payload_path", "state_snapshot"):
+        value = record.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        local = own / Path(value).name
+        if os.path.abspath(value) == os.path.abspath(local):
+            continue
+        if str(root) not in _foreign_payload_roots:
+            _foreign_payload_roots.add(str(root))
+            log.warning(
+                "Hook queue %s: a record names %s outside this queue; reading payloads from %s "
+                "instead (one warning per queue)",
+                root,
+                value,
+                own,
+            )
+        record[key] = str(local)
+
+
 def hook_jobs(root: Path, subdir: str = "queue") -> list[dict]:
     """Records in ``subdir`` oldest first. Each carries ``_path`` and an order key ``queued_ns``.
 
@@ -616,6 +647,7 @@ def hook_jobs(root: Path, subdir: str = "queue") -> list[dict]:
             )
             _dead_letter_path(root, path, "record has no known phase")
             continue
+        _contain_payloads(root, record)
         record.setdefault("queued_ns", mtime_ns)
         if not record.get("session_id"):
             record["session_id"] = (
