@@ -25,6 +25,7 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "SMARTMEMORY_NO_WARM": "1",
+        "SMARTMEMORY_CAPTURE_LLM": "1",
         "GROQ_API_KEY": "fake-only",
         "SMARTMEMORY_HOOK_TRACE": str(tmp_path / "trace.jsonl"),
     }.items():

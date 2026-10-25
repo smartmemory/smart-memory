@@ -63,6 +63,8 @@ def test_capture_replays_raw_fixture_and_persists_kind(
     mem = environment
     monkeypatch.setenv("GROQ_API_KEY", "fixture-only")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     calls = []

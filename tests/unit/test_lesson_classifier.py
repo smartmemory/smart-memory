@@ -22,6 +22,8 @@ def replay(monkeypatch, tmp_path):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "ws")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     calls = []
 
     def install(name):

@@ -35,6 +35,8 @@ def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
     for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
 
     def make_memory():
         return create_lite_memory(
@@ -152,6 +154,8 @@ def test_three_session_lifecycle_and_fresh_injection(tmp_path, monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     contents = [
         "Deployment rule X requires approval from team A.",
         "Deployment rule X requires approval from team B.",
