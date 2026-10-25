@@ -7,10 +7,12 @@ runs one action, and checks what was written, what is left, and what was logged.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -140,8 +142,11 @@ def backlog_drains_on_start(root, env, writer):
         )
     _run_daemon(root, writer, lambda: len(writer.calls) == 4).stop()
     return {
-        "calls": sorted(writer.calls, key=lambda n: n[1]),
+        "calls": sorted(
+            writer.calls
+        ),  # sessions run in parallel: only per-session order holds
         "a_order": [c for c in writer.calls if c[0] == "a"],
+        "b_order": [c for c in writer.calls if c[0] == "b"],
     }
 
 
@@ -190,7 +195,178 @@ def hook_sheds_past_the_cap(root, env, writer):
     return {
         "calls": writer.calls,
         "shed_warning": "WARNING: lifecycle distill payload shed" in log,
+        "shed_names": "session test_hc_hook tool Bash;" in log,  # what was lost (L4)
         "payloads_left": len(list((root / "payloads").iterdir())),
+    }
+
+
+def cap_ignores_a_pid_that_is_no_consumer(root, env, writer):
+    # A worker.pid reused by another process after a daemon crash must not switch the cap off (L6);
+    # a live smartmemory consumer pid does.
+    _record(root, "8000-1", "observe", "s", "q1")
+    _record(root, "8000-2", "observe", "s", "q2")
+    (root / "worker.pid").write_text(f"{os.getpid()}\n")  # alive, but pytest
+    _hook(env, "observe", "shed-by-cap", SMARTMEMORY_HOOK_QUEUE_MAX="2")
+    shed = len(list((root / "queue").glob("*.json")))
+    consumer_like = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            "smartmemory_app.viewer_server",
+        ]
+    )
+    try:
+        (root / "worker.pid").write_text(f"{consumer_like.pid}\n")
+        _hook(env, "observe", "queued-past-cap", SMARTMEMORY_HOOK_QUEUE_MAX="2")
+        queued = len(list((root / "queue").glob("*.json")))
+    finally:
+        consumer_like.kill()
+        consumer_like.wait()
+    (root / "worker.pid").unlink()
+    log = (Path(env["SMARTMEMORY_DATA_DIR"]) / "hooks.log").read_text()
+    _run_daemon(root, writer, lambda: len(writer.calls) == 3).stop()
+    return {
+        "queue_after_foreign_pid": shed,
+        "queue_after_consumer_pid": queued,
+        "shed_lines": log.count("payload shed"),
+        "calls": sorted(writer.calls),
+    }
+
+
+def poison_spill_name_is_dead_lettered_and_the_consumer_lives(root, env, writer):
+    # M2: a name that matches the pattern but holds no valid date used to raise out of consume.
+    warnings = _Warnings()
+    spill = capture_queue.hook_spill_dir(root)
+    spill.mkdir()
+    (spill / "20261399T999999000000Z-1-observe.json").write_text("{}")
+    _spill(root, 1, "observe", "s", "good")
+    _record(root, "5500-1", "observe", "t", "after")
+    consumer = _run_daemon(root, writer, lambda: len(writer.calls) == 2)
+    alive = consumer.thread.is_alive()
+    consumer.stop()
+    warnings.close()
+    return {
+        "calls": sorted(writer.calls),
+        "alive": alive,
+        "dead": os.listdir(root / "dead"),
+        "warned": sum("is malformed" in line for line in warnings.lines),
+    }
+
+
+def _failing_writes(match):
+    """Patch the queue's record writer to raise for the paths ``match`` picks; returns the undo."""
+    original = capture_queue._write_json_atomic
+
+    def write(path, record):
+        error = match(Path(path), record)
+        if error:
+            raise OSError(error, os.strerror(error), str(path))
+        original(path, record)
+
+    capture_queue._write_json_atomic = write
+    return lambda: setattr(capture_queue, "_write_json_atomic", original)
+
+
+def enospc_on_claim_dead_letters_the_job_and_the_consumer_lives(root, env, writer):
+    # M2: claim's record write on a full disk used to kill the thread. Now: retried with backoff,
+    # dead-lettered by rename after max_attempts (3), other sessions keep draining.
+    warnings = _Warnings()
+    _record(root, "6000-1", "observe", "s", "full")
+    _record(root, "6000-2", "observe", "t", "other")
+    undo = _failing_writes(
+        lambda p, record: errno.ENOSPC if p.name == "6000-1.observe.json" else 0
+    )
+    try:
+        consumer = _run_daemon(
+            root,
+            writer,
+            lambda: writer.calls == ["other"]
+            and (root / "dead" / "6000-1.observe.json").exists(),
+        )
+        alive = consumer.thread.is_alive()
+        consumer.stop()
+    finally:
+        undo()
+        warnings.close()
+    return {
+        "calls": writer.calls,
+        "alive": alive,
+        "dead": os.listdir(root / "dead"),
+        "warned_first": sum("claim failed" in line for line in warnings.lines),
+        "warned_dead": sum(
+            "dead-lettered after 3 failed claim" in line for line in warnings.lines
+        ),
+    }
+
+
+class _FailsFor(Writer):
+    def __init__(self, bad: str) -> None:
+        super().__init__()
+        self.bad = bad
+
+    def __call__(self, job: dict) -> None:
+        if (
+            json.loads(Path(job["payload_path"]).read_text())["tool_input"]["n"]
+            == self.bad
+        ):
+            raise RuntimeError("Store down")
+        super().__call__(job)
+
+
+def eacces_on_settle_dead_letters_the_job_and_the_consumer_lives(root, env, writer):
+    # M2: a failed job whose requeue write is refused (EACCES) used to kill the thread in _settle.
+    warnings = _Warnings()
+    writer = _FailsFor("bad")
+    _record(root, "7000-1", "observe", "s", "bad")
+    _record(root, "7000-2", "observe", "t", "other")
+    undo = _failing_writes(  # the requeue write (it carries last_error), not the claim
+        lambda p, record: errno.EACCES
+        if p.name == "7000-1.observe.json" and "last_error" in record
+        else 0
+    )
+    try:
+        consumer = _run_daemon(
+            root,
+            writer,
+            lambda: writer.calls == ["other"]
+            and (root / "dead" / "7000-1.observe.json").exists(),
+        )
+        alive = consumer.thread.is_alive()
+        consumer.stop()
+    finally:
+        undo()
+        warnings.close()
+    return {
+        "calls": writer.calls,
+        "alive": alive,
+        "dead": os.listdir(root / "dead"),
+        "running": os.listdir(root / "running"),
+        "warned_first": sum("requeue failed" in line for line in warnings.lines),
+        "warned_dead": sum(
+            "dead-lettered after 3 failed requeue" in line for line in warnings.lines
+        ),
+    }
+
+
+def persistent_spill_failure_warns_once(root, env, writer):
+    # L1: a spill that cannot be written warns once and backs off, not once per 0.01 s pass.
+    warnings = _Warnings()
+    _spill(root, 1, "observe", "s", "late")
+    (root / "payloads").chmod(0o500)
+    try:
+        consumer = _run_daemon(root, writer, lambda: True)
+        time.sleep(1.5)
+    finally:
+        (root / "payloads").chmod(0o700)
+    deadline = time.monotonic() + 10
+    while writer.calls != ["late"] and time.monotonic() < deadline:
+        time.sleep(0.05)
+    consumer.stop()
+    warnings.close()
+    return {
+        "calls": writer.calls,
+        "warned": sum("not adopted" in line for line in warnings.lines),
     }
 
 
@@ -273,7 +449,11 @@ ZERO = {"queue": 0, "running": 0, "dead": 0}
 ROWS = [
     (
         backlog_drains_on_start,
-        {"calls": ["a1", "b1", "a2", "b2"], "a_order": ["a1", "a2"]},
+        {
+            "calls": ["a1", "a2", "b1", "b2"],
+            "a_order": ["a1", "a2"],
+            "b_order": ["b1", "b2"],
+        },
     ),
     (orphan_in_running_is_retried, {"calls": ["orphan"]}),
     (store_busy_is_retried_not_lost, {"calls": ["busy"]}),
@@ -281,8 +461,56 @@ ROWS = [
     (hook_starts_no_process_in_local_mode, {"spawned": False, "calls": ["local"]}),
     (
         hook_sheds_past_the_cap,
-        {"calls": ["kept-1", "kept-2"], "shed_warning": True, "payloads_left": 0},
+        {
+            "calls": ["kept-1", "kept-2"],
+            "shed_warning": True,
+            "shed_names": True,
+            "payloads_left": 0,
+        },
     ),
+    (
+        cap_ignores_a_pid_that_is_no_consumer,
+        {
+            "queue_after_foreign_pid": 2,
+            "queue_after_consumer_pid": 3,
+            "shed_lines": 1,
+            "calls": ["q1", "q2", "queued-past-cap"],
+        },
+    ),
+    (
+        poison_spill_name_is_dead_lettered_and_the_consumer_lives,
+        {
+            "calls": ["after", "good"],
+            "alive": True,
+            "dead": ["spill-20261399T999999000000Z-1-observe.json"],
+            "warned": 1,
+            "_left": {"queue": 0, "running": 0, "dead": 1},
+        },
+    ),
+    (
+        enospc_on_claim_dead_letters_the_job_and_the_consumer_lives,
+        {
+            "calls": ["other"],
+            "alive": True,
+            "dead": ["6000-1.observe.json"],
+            "warned_first": 1,
+            "warned_dead": 1,
+            "_left": {"queue": 0, "running": 0, "dead": 1},
+        },
+    ),
+    (
+        eacces_on_settle_dead_letters_the_job_and_the_consumer_lives,
+        {
+            "calls": ["other"],
+            "alive": True,
+            "dead": ["7000-1.observe.json"],
+            "running": [],
+            "warned_first": 1,
+            "warned_dead": 1,
+            "_left": {"queue": 0, "running": 0, "dead": 1},
+        },
+    ),
+    (persistent_spill_failure_warns_once, {"calls": ["late"], "warned": 1}),
     (spill_is_adopted_and_drained, {"calls": ["spill-1", "spill-2"], "spill_left": []}),
     (spill_keeps_time_order_with_queued_jobs, {"calls": ["a1", "a2", "a3"]}),
     (

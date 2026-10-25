@@ -185,6 +185,8 @@ def test_copy_hooks_updates_on_upgrade(tmp_path):
     # New version in source
     (hooks_src / "orient.sh").write_text("#!/bin/bash\n# v2 — new logic")
 
+    running = old.open()  # a hook bash is reading at the moment of the swap
+
     with (
         patch("smartmemory_app.setup.HOOKS_SRC", hooks_src),
         patch("smartmemory_app.setup.CLAUDE_DIR", tmp_path),
@@ -194,6 +196,10 @@ def test_copy_hooks_updates_on_upgrade(tmp_path):
         _copy_hooks()
 
     assert old.read_text() == "#!/bin/bash\n# v2 — new logic"
+    # Published by rename, not rewritten in place: the running reader still sees v1 whole.
+    with running:
+        assert running.read() == "#!/bin/bash\n# v1 — old logic"
+    assert sorted(p.name for p in hooks_dest.iterdir()) == ["smartmemory-orient.sh"]
 
 
 def test_seed_data_dir_honours_env_var(tmp_path, monkeypatch):
