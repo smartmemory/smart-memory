@@ -293,9 +293,8 @@ def consume(
                             continue
                         try:
                             claimed = queue.claim_hook_job(root, job)
-                        except (
-                            OSError
-                        ) as exc:  # full disk, permissions: the record stays queued
+                        except OSError as exc:
+                            # full disk, permissions: the record stays queued
                             troubled = True
                             queue.hook_io_failure(
                                 root, job, "claim", exc, max_attempts=max_attempts
