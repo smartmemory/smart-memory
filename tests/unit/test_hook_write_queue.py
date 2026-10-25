@@ -22,7 +22,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from smartmemory_app import capture_queue, cli, hook_consumer, storage
+from smartmemory_app import capture_queue, cli, hook_consumer, lifecycle_api, storage
 from smartmemory_app.lifecycle import STRICT_KEY, USER_TURN_KEY, WORKSPACE_KEY
 from smartmemory_app.lifecycle import MemoryLifecycle
 
@@ -111,7 +111,10 @@ def recorder(monkeypatch: pytest.MonkeyPatch):
             with lock:
                 active[session] -= 1
 
+    # Patch both bindings: lifecycle_api imports run_phase by name, so a fake set only on
+    # lifecycle would freeze into lifecycle_api if it were first imported under the patch.
     monkeypatch.setattr("smartmemory_app.lifecycle.run_phase", fake)
+    monkeypatch.setattr(lifecycle_api, "run_phase", fake)
     monkeypatch.setattr(
         "smartmemory_app.lifecycle_api._get_lifecycle", lambda body: None
     )
