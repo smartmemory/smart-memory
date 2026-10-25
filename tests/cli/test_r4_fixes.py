@@ -92,6 +92,9 @@ def test_every_hook_missing_cli_toml_spaces(tmp_path, hook):
     env = os.environ.copy()
     env.update(HOME=str(home), USERPROFILE=str(home), PATH="/usr/bin:/bin")
     env.pop("SMARTMEMORY_DATA_DIR", None)
+    # Remote mode: the write hooks start the drainer, so a missing CLI leaves a marker.
+    (home / ".smartmemory/hook-queue").mkdir(parents=True)
+    (home / ".smartmemory/hook-queue/remote-drain").touch()
     script = Path(hook_failures.__file__).parent / "hooks" / f"{hook}.sh"
     p = subprocess.run(
         ["bash", str(script)],

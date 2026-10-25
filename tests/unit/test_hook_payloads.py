@@ -43,6 +43,10 @@ def hook_stub(tmp_path, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
     for name in ("OUTPUT", "ARGS", "DONE"):
         monkeypatch.setenv(f"STUB_{name}", str(tmp_path / name.lower()))
+    # Only remote mode still starts a drainer from the hook (HOOK-WRITE-QUEUE-1: in local
+    # mode the daemon is the one consumer); these tests exercise that spawn path.
+    (tmp_path / "data/hook-queue").mkdir(parents=True)
+    (tmp_path / "data/hook-queue/remote-drain").touch()
     return tmp_path
 
 
