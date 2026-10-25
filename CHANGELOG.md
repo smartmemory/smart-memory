@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### DAEMON-HEALTH-STARVE-1 (2026-10-25)
+
+- fix(daemon): the `/lifecycle/*` routes (orient, recall, observe, distill, learn, persist) were `async def` handlers that ran synchronous store, embedding and write-lock work on the event loop, so one hook call stalled every request and `/health` never answered while hooks were flowing. They now run on a bounded `smartmemory-lifecycle` thread pool (`SMARTMEMORY_LIFECYCLE_THREADS`, default 4), separate from the threadpool that serves `/health` and the viewer. `/lifecycle/status` is a sync route.
+- fix(daemon): `/health` counted memories by serializing the whole graph under the viewer lock on every probe. The Lite backend now answers with one `SELECT COUNT(*)`; other backends keep the old path.
+
 ### HOOK-WRITE-QUEUE-1 (2026-10-25)
 
 - fix(hooks): the observe, learn and distill hooks no longer write to the store or drop payloads under load. Each hook appends its payload to a durable queue under `<data dir>/hook-queue/` in pure bash (no Python start) and returns; HOOK-LOAD-CAP-1's "skipped under load" branches are deleted. A drainer, `smartmemory lifecycle drain-hooks`, started by the hook only when no drainer is alive, writes the jobs through the same `MemoryLifecycle` phases, oldest first and one at a time per session, at most `SMARTMEMORY_HOOK_DRAIN_MAX` (default 3) at once. A failed write is retried with backoff and moved to `hook-queue/dead/` after `SMARTMEMORY_HOOK_MAX_ATTEMPTS` (default 5), with a WARNING. Remote mode goes through the same queue. The one loss path left is a queue that cannot be written, logged as `payload lost` in `hooks.log`. Distill pairs the response with the prompt snapshotted when the Stop hook fired. Persist (SessionEnd) is unchanged.
