@@ -41,6 +41,8 @@ def lite_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setenv("SMARTMEMORY_NO_WARM", "1")
+    # Core's update-check thread would dial out (through a system proxy, too) and trip the connect trap.
+    monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
     # An LLM route exists: the condition the fix must hold under.
     monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", "gsk_fake_hook_capture_no_llm")
