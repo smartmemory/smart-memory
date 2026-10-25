@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The observe, learn and distill hooks no longer throw away a payload when too many are already running (HOOK-SPILL-INTERIM-1). Over the concurrency cap (HOOK-LOAD-CAP-1) the hook now writes the payload as one JSON file (`{"v":1,"phase","ts","pid","payload"}`) into `<data dir>/hook-spill/`, written under a `.tmp-` name and renamed so a reader never sees a half file, with sortable names (`<UTC microseconds>-<pid>-<phase>.json`) so a later drain can replay them in arrival order. The folder is capped at 20000 files and 500 MB (`SMARTMEMORY_HOOK_SPILL_MAX_FILES`, `SMARTMEMORY_HOOK_SPILL_MAX_BYTES`); past the cap the payload is dropped with a `spill full: dropped` WARNING in `hooks.log`. A spill failure logs a WARNING and the hook still exits 0. `SMARTMEMORY_HOOK_SPILL=0` restores the old discard and its `skipped` log line. Nothing drains the folder yet (HOOK-WRITE-QUEUE-1 will). Tests: `tests/unit/test_hook_load_cap.py` (spill assertions on the cap table, plus a spill table for order, both caps, non-JSON and empty payloads).
+
 ## 1.5.30 (2026-10-22)
 
 CLI 1.x cut for the fixes found in team member K's CLI testing (CLI-TESTER-K-1). Needs `smartmemory-core` 1.5.30 (pinned exactly). Units in this release: CLI-DAEMON-KEY-PRECEDENCE-1, CLI-SETUP-CIRCULAR-EMBED-1, CLI-HYGIENE-K-1, CLI-CLEAR-DAEMON-1, CLI-KEYRING-NULL-GUARD-1, CLI-PROVIDER-ROUTE-1, CLI-TEST-HOST-ISOLATION-1, CLI-SEARCH-EMBED-NULL-1 (core side: weak semantic hits are scored by the reranker instead of dropped) and DAEMON-9014-CRASH-DIAG-1, plus CLI-REPORT-NOISE-1 and the Lite `/memory/vector/projection` route (VEC-TAB-U6).
