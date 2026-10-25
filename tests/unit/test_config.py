@@ -1,14 +1,13 @@
 """Unit tests for smartmemory_app.config — DIST-LITE-5."""
+
 import os
 import warnings
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from smartmemory_app.config import (
     SmartMemoryConfig,
-    UnconfiguredError,
     _detect_and_migrate,
     config_path,
     get_api_key,
@@ -37,6 +36,7 @@ def isolated_config(tmp_path, monkeypatch):
         "SMARTMEMORY_API_KEY",
         "SMARTMEMORY_API_URL",
         "SMARTMEMORY_TEAM_ID",
+        "SMARTMEMORY_WORKSPACE_ID",
         "SMARTMEMORY_DATA_DIR",
         "SMARTMEMORY_LLM_PROVIDER",
         "SMARTMEMORY_LLM_MODEL",
@@ -82,13 +82,15 @@ def test_load_config_reads_mode():
 
 
 def test_load_config_reads_local_fields():
-    save_config(SmartMemoryConfig(
-        mode="local",
-        coreference=True,
-        llm_provider="groq",
-        llm_model="llama3",
-        data_dir="~/custom",
-    ))
+    save_config(
+        SmartMemoryConfig(
+            mode="local",
+            coreference=True,
+            llm_provider="groq",
+            llm_model="llama3",
+            data_dir="~/custom",
+        )
+    )
     cfg = load_config()
     assert cfg.coreference is True
     assert cfg.llm_provider == "groq"
@@ -110,9 +112,12 @@ def test_load_config_invalid_toml_warns_and_returns_unconfigured():
 def test_load_config_invalid_mode_in_file_warns_and_returns_unconfigured():
     """A typo in mode= inside the config file warns and returns mode=None."""
     import tomli_w
+
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(tomli_w.dumps({"smartmemory": {"mode": "remtoe"}}), encoding="utf-8")
+    path.write_text(
+        tomli_w.dumps({"smartmemory": {"mode": "remtoe"}}), encoding="utf-8"
+    )
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         cfg = load_config()
@@ -147,6 +152,29 @@ def test_load_config_data_dir_env_overrides_file(monkeypatch):
     assert cfg.data_dir == "/tmp/mydata"
 
 
+# MCP-WORKSPACE-ENV-PRECEDENCE-1: smartmemory-mcp reads cfg.team_id only after its own
+# env rule, which is correct only while this overlay copies SMARTMEMORY_TEAM_ID and
+# nothing else. Columns: WORKSPACE env, TEAM env -> load_config().team_id; the file
+# holds "ws-file" and apply_env=False must always return it.
+TEAM_OVERLAY_ROWS = [
+    ("", "", "ws-file"),
+    ("", "ws-old", "ws-old"),
+    ("ws-new", "", "ws-file"),
+    ("ws-new", "ws-old", "ws-old"),
+]
+
+
+@pytest.mark.parametrize(("workspace_env", "team_env", "expected"), TEAM_OVERLAY_ROWS)
+def test_load_config_overlays_only_the_team_env_onto_team_id(
+    monkeypatch, workspace_env, team_env, expected
+):
+    save_config(SmartMemoryConfig(mode="remote", team_id="ws-file"))
+    monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", workspace_env)
+    monkeypatch.setenv("SMARTMEMORY_TEAM_ID", team_env)
+    assert load_config().team_id == expected
+    assert load_config(apply_env=False).team_id == "ws-file"
+
+
 # ── save_config ───────────────────────────────────────────────────────────────
 
 
@@ -156,7 +184,6 @@ def test_save_config_creates_directory_with_restricted_perms():
     path = config_path()
     assert path.exists()
     # Directory should be owner-accessible only (0o700)
-    import stat
     mode = path.parent.stat().st_mode & 0o777
     assert mode == 0o700
 
@@ -164,6 +191,7 @@ def test_save_config_creates_directory_with_restricted_perms():
 def test_save_config_omits_smartmemory_table_when_unconfigured():
     save_config(SmartMemoryConfig(mode=None))
     import tomllib
+
     raw = tomllib.loads(config_path().read_text())
     assert "smartmemory" not in raw
 
@@ -251,6 +279,7 @@ def test_ollama_provider_sets_openai_compatible_env(monkeypatch):
     OPENAI_API_KEY (so llm_key_present() flips true and the daemon runs Tier-2),
     and SMARTMEMORY_LLM_MODEL from llm_model — all consumed by the OpenAI path."""
     from smartmemory_app.config import llm_key_present
+
     monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "ollama")
     monkeypatch.setenv("SMARTMEMORY_LLM_MODEL", "dolphin-phi:latest")
     with patch.dict(os.environ, {}, clear=False):  # roll back load_config's setdefault
@@ -302,8 +331,14 @@ def test_cloud_provider_is_noop(monkeypatch):
 
 def test_llm_base_url_round_trips_through_save(monkeypatch):
     """llm_base_url persists via save_config → load_config."""
-    save_config(SmartMemoryConfig(mode="local", llm_provider="ollama",
-                                  llm_model="qwen2.5:7b", llm_base_url="http://h:11434/v1"))
+    save_config(
+        SmartMemoryConfig(
+            mode="local",
+            llm_provider="ollama",
+            llm_model="qwen2.5:7b",
+            llm_base_url="http://h:11434/v1",
+        )
+    )
     with patch.dict(os.environ, {}, clear=False):
         cfg = load_config()
         assert cfg.llm_base_url == "http://h:11434/v1"

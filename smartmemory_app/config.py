@@ -351,6 +351,11 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
         cfg.api_url = url
     if os.environ.get("SMARTMEMORY_API_KEY"):
         cfg.api_key_set = True  # presence satisfies the configured check
+    # The CLI's remote workspace. SMARTMEMORY_WORKSPACE_ID is not overlaid here: in the
+    # CLI it names the local daemon workspace (scope_header.local_override). The
+    # smartmemory-mcp server applies its own env rule before cfg.team_id
+    # (SMARTMEMORY_WORKSPACE_ID, then SMARTMEMORY_TEAM_ID, then this file value;
+    # MCP-WORKSPACE-ENV-PRECEDENCE-1), and saves with apply_env=False.
     if tid := os.environ.get("SMARTMEMORY_TEAM_ID"):
         cfg.team_id = tid
     if d := os.environ.get("SMARTMEMORY_DATA_DIR"):

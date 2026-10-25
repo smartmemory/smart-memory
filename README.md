@@ -735,7 +735,8 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_MODE` | `local` or `remote`, overrides config file |
 | `SMARTMEMORY_API_KEY` | API key for remote mode, bypasses keychain |
 | `SMARTMEMORY_API_URL` | Remote API URL (default: `https://api.smartmemory.ai`) |
-| `SMARTMEMORY_TEAM_ID` | Team/workspace ID for remote mode |
+| `SMARTMEMORY_TEAM_ID` | Workspace ID for remote CLI commands, overrides the config file |
+| `SMARTMEMORY_WORKSPACE_ID` | CLI: the local-mode workspace (overrides `sm workspace switch` and the folder). MCP server: the remote workspace, and it wins over `SMARTMEMORY_TEAM_ID` when both are set (one WARNING names both) |
 | `SMARTMEMORY_DATA_DIR` | Local data directory (default: `~/.smartmemory`) |
 | `SMARTMEMORY_LLM_PROVIDER` | LLM provider for local enrichment |
 | `SMARTMEMORY_EMBEDDING_PROVIDER` | Embedding provider (`local`, `openai`, `ollama`) |
