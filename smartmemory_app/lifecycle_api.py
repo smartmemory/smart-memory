@@ -11,7 +11,7 @@ import logging
 
 from fastapi import APIRouter, Request
 
-from smartmemory_app.lifecycle import MemoryLifecycle, run_phase
+from smartmemory_app.lifecycle import MemoryLifecycle, as_text
 from smartmemory_app.lifecycle_config import LifecycleConfig
 
 log = logging.getLogger(__name__)
@@ -72,21 +72,34 @@ async def recall(request: Request):
 @lifecycle_router.post("/observe")
 async def observe(request: Request):
     body = await request.json()
-    run_phase(_get_lifecycle(body), "observe", body)
+    lc = _get_lifecycle(body)
+    lc.observe(
+        tool_name=body.get("tool_name", "unknown"),
+        tool_input=body.get("tool_input", {}),
+        tool_result=as_text(body.get("tool_response")),
+        transcript_path=body.get("transcript_path"),
+        cwd=body.get("cwd"),
+    )
     return {"status": "ok"}
 
 
 @lifecycle_router.post("/distill")
 async def distill(request: Request):
     body = await request.json()
-    run_phase(_get_lifecycle(body), "distill", body)
+    lc = _get_lifecycle(body)
+    lc.distill(response=body.get("last_assistant_message", ""), cwd=body.get("cwd"))
     return {"status": "ok"}
 
 
 @lifecycle_router.post("/learn")
 async def learn(request: Request):
     body = await request.json()
-    run_phase(_get_lifecycle(body), "learn", body)
+    lc = _get_lifecycle(body)
+    lc.learn(
+        tool_name=body.get("tool_name", "unknown"),
+        error=as_text(body.get("error") or body.get("tool_response")),
+        cwd=body.get("cwd"),
+    )
     return {"status": "ok"}
 
 

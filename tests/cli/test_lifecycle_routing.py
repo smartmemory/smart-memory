@@ -86,9 +86,6 @@ def test_local_still_tries_daemon_and_falls_back(
                 "tool_result": json.dumps(body["tool_response"]),
                 "transcript_path": body["transcript_path"],
                 "cwd": body["cwd"],
-                # HOOK-WRITE-QUEUE-1: a direct CLI call is not a queued job: not strict, no pin.
-                "workspace_id": None,
-                "strict": False,
             }
         elif phase == "distill":
             assert kwargs["response"] == body["last_assistant_message"]

@@ -2,10 +2,6 @@
 
 ## Unreleased
 
-### HOOK-WRITE-QUEUE-1 (2026-10-25)
-
-- fix(hooks): the observe, learn and distill hooks no longer write to the store or drop payloads under load. Each hook appends its payload to a durable queue under `<data dir>/hook-queue/` in pure bash (no Python start) and returns; HOOK-LOAD-CAP-1's "skipped under load" branches are deleted. A drainer, `smartmemory lifecycle drain-hooks`, started by the hook only when no drainer is alive, writes the jobs through the same `MemoryLifecycle` phases, oldest first and one at a time per session, at most `SMARTMEMORY_HOOK_DRAIN_MAX` (default 3) at once. A failed write is retried with backoff and moved to `hook-queue/dead/` after `SMARTMEMORY_HOOK_MAX_ATTEMPTS` (default 5), with a WARNING. Remote mode goes through the same queue. The one loss path left is a queue that cannot be written, logged as `payload lost` in `hooks.log`. Distill pairs the response with the prompt snapshotted when the Stop hook fired. Persist (SessionEnd) is unchanged.
-
 ## 1.5.30 (2026-10-22)
 
 CLI 1.x cut for the fixes found in team member K's CLI testing (CLI-TESTER-K-1). Needs `smartmemory-core` 1.5.30 (pinned exactly). Units in this release: CLI-DAEMON-KEY-PRECEDENCE-1, CLI-SETUP-CIRCULAR-EMBED-1, CLI-HYGIENE-K-1, CLI-CLEAR-DAEMON-1, CLI-KEYRING-NULL-GUARD-1, CLI-PROVIDER-ROUTE-1, CLI-TEST-HOST-ISOLATION-1, CLI-SEARCH-EMBED-NULL-1 (core side: weak semantic hits are scored by the reranker instead of dropped) and DAEMON-9014-CRASH-DIAG-1, plus CLI-REPORT-NOISE-1 and the Lite `/memory/vector/projection` route (VEC-TAB-U6).
