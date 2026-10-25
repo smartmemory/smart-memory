@@ -270,18 +270,18 @@ def _strip(job: dict) -> dict:
 def claim_hook_job(root: Path, job: dict) -> dict | None:
     """Move a queued record into running/; None when it is gone (another claimant).
 
-    Any other ``OSError`` (disk full, permissions) propagates: the consumer hands it to
-    ``hook_io_failure`` and backs off, the record stays in queue/.
+    A bare rename: no bytes are written, so a full disk cannot fail the claim and the file's
+    mtime survives (``hook_jobs`` derives ``queued_ns`` from it, and ``fail_hook_job`` persists
+    it on the first requeue). Any other ``OSError`` (permissions) propagates: the consumer
+    hands it to ``hook_io_failure`` and backs off, the record stays in queue/.
     """
     source = Path(job["_path"])
     target = root / "running" / source.name
-    record = {**_strip(job), "claimed_at": time.time()}
     try:
-        _write_json_atomic(source, record)  # persist queued_ns before the move
         source.rename(target)
     except FileNotFoundError:
         return None
-    return {**record, "_path": str(target)}
+    return {**_strip(job), "_path": str(target)}
 
 
 def _remove_payloads(job: dict) -> None:
@@ -470,6 +470,82 @@ def recover_running(root: Path, *, max_attempts: int) -> int:
             )
         recovered += 1
     return recovered
+
+
+def requeue_dead_hooks(
+    root: str | Path | None = None,
+    names: list[str] | None = None,
+    dry_run: bool = False,
+) -> list[tuple[str, str, str]]:
+    """Move hook ``dead/`` records back to ``queue/`` with a fresh attempt count.
+
+    Returns (action, file name, detail). ``requeued`` keeps ``queued_ns`` so the job takes its
+    old place in its session's order. ``skipped`` covers a ``spill-*`` file (a malformed spill
+    envelope, not a job), a record with no known phase, a payload that is gone, and a name that
+    is already in queue/ or running/. ``unknown`` is a requested name not in dead/. ``names``
+    limits the move (file names, ``.json`` optional).
+    """
+    root = hook_queue_dir(root)
+    dead = {p.name: p for p in (root / "dead").glob("*.json")}
+    wanted = (
+        [n if n.endswith(".json") else f"{n}.json" for n in dict.fromkeys(names)]
+        if names
+        else sorted(dead)
+    )
+    out: list[tuple[str, str, str]] = []
+    for name in wanted:
+        path = dead.get(name)
+        if path is None:
+            out.append(("unknown", name, "not in dead/"))
+            continue
+        if name.startswith("spill-"):
+            out.append(("skipped", name, "malformed spill file, not a job record"))
+            continue
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            out.append(("skipped", name, f"unreadable record: {exc}"))
+            continue
+        if not isinstance(record, dict) or record.get("phase") not in HOOK_PHASES:
+            out.append(("skipped", name, "record has no known phase"))
+            continue
+        _contain_payloads(root, record)
+        missing = [
+            k
+            for k in ("payload_path", "state_snapshot")
+            if record.get(k) and not Path(record[k]).exists()
+        ]
+        if missing:
+            out.append(("skipped", name, f"{', '.join(missing)} is gone"))
+            continue
+        if any((root / sub / name).exists() for sub in ("queue", "running")):
+            out.append(("skipped", name, "already in queue/ or running/"))
+            continue
+        if not dry_run:
+            for key in ("attempts", "last_error", "failed_at"):
+                record.pop(key, None)
+            record.setdefault("queued_ns", path.stat().st_mtime_ns)
+            _write_json_atomic(root / "queue" / name, record)
+            path.unlink(missing_ok=True)
+        out.append(("requeued", name, str(record.get("session_id") or "")))
+    return out
+
+
+def run_requeue_dead_hooks(
+    names: list[str] | None, dry_run: bool, root: str | Path | None = None
+) -> int:
+    """CLI body of ``sm lifecycle requeue-hooks``. One line per record, exit 1 on an unknown name."""
+    done = requeue_dead_hooks(root, names, dry_run)
+    for action, name, detail in done:
+        print(f"{'would ' if dry_run else ''}{action} {name}: {detail}")
+    tally = {
+        a: sum(d[0] == a for d in done) for a in ("requeued", "skipped", "unknown")
+    }
+    print(
+        f"{len(done)} record(s): {tally['requeued']} requeued, {tally['skipped']} "
+        f"skipped, {tally['unknown']} unknown."
+    )
+    return 1 if tally["unknown"] else 0
 
 
 def hook_counts(root: str | Path | None = None) -> dict[str, int]:

@@ -2758,6 +2758,36 @@ def lifecycle_drain(timeout: float) -> None:
     raise SystemExit(code)
 
 
+@lifecycle_group.command("requeue-hooks")
+@click.option(
+    "--name",
+    "names",
+    multiple=True,
+    help="Only this dead/ file name (repeatable). An unknown name is reported, exit 1.",
+)
+@click.option("--dry-run", is_flag=True, help="List the records, move nothing.")
+@click.option(
+    "--dir",
+    "queue_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Hook queue directory (default <data dir>/hook-queue).",
+)
+def lifecycle_requeue_hooks(
+    names: tuple[str, ...], dry_run: bool, queue_dir: str | None
+) -> None:
+    """Move dead-lettered observe/learn/distill hook jobs back to the hook queue once.
+
+    One line per record. The attempt count restarts, the job keeps its place in its
+    session's order. Malformed spill files and records whose payload is gone are skipped.
+    The daemon's consumer picks the jobs up; this starts nothing.
+    """
+    require_local("sm lifecycle requeue-hooks")
+    from smartmemory_app.capture_queue import run_requeue_dead_hooks
+
+    raise SystemExit(run_requeue_dead_hooks(list(names) or None, dry_run, queue_dir))
+
+
 @lifecycle_group.command("reclassify")
 @click.option(
     "--cwd",
