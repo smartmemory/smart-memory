@@ -302,8 +302,9 @@ def test_remote_recall_receives_card_exclusions(environment, monkeypatch):
 
 
 def test_status_surfaces_card_config(environment, monkeypatch):
-    import asyncio
     from click.testing import CliRunner
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
     from smartmemory_app import cli, lifecycle_api
 
     config = {"rules_card_enabled": False, "rules_card_budget": 345}
@@ -313,7 +314,12 @@ def test_status_surfaces_card_config(environment, monkeypatch):
     assert "Rules card enabled: False" in result.output
     assert "Rules card budget: 345 tokens" in result.output
     monkeypatch.setattr(lifecycle_api, "_load_lifecycle_config", lambda: config)
-    result = asyncio.run(lifecycle_api.status())
+    # DAEMON-HEALTH-STARVE-1 made the handler sync (FastAPI runs it off the loop): call the route.
+    app = FastAPI()
+    app.include_router(lifecycle_api.lifecycle_router)
+    response = TestClient(app).get("/status")
+    assert response.status_code == 200
+    result = response.json()
     assert result["rules_card_enabled"] is False
     assert result["rules_card_budget"] == 345
 
