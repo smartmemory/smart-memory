@@ -31,11 +31,21 @@ if [ ! -d "$QUEUE_DIR/queue" ] || [ ! -d "$QUEUE_DIR/payloads" ] || [ ! -d "$HOO
         lost "cannot create $QUEUE_DIR"
 fi
 # Depth cap, checked only when no live consumer holds worker.pid (the daemon writes it): a
-# glob over a deep queue costs ~200 ms at 5000 jobs, so the steady state skips it. No subprocess.
+# glob over a deep queue costs ~200 ms at 5000 jobs, so the steady state skips it. The pid
+# counts only while it is alive AND is a smartmemory consumer (the daemon or the remote
+# drainer), so a pid reused after a daemon crash does not switch the cap off (one ps, ~3 ms).
 WORKER_PID=
 [ -f "$QUEUE_DIR/worker.pid" ] && IFS= read -r WORKER_PID <"$QUEUE_DIR/worker.pid"
-if [ -z "$WORKER_PID" ] || ! kill -0 "$WORKER_PID" 2>/dev/null; then
+if [ -n "$WORKER_PID" ] && kill -0 "$WORKER_PID" 2>/dev/null; then
+    WORKER_CMD=$(ps -p "$WORKER_PID" -o command= 2>/dev/null)
+    case $WORKER_CMD in
+    *smartmemory_app.viewer_server* | *" lifecycle drain-hooks"*) ;;
+    *) WORKER_PID= ;;
+    esac
+else
     WORKER_PID=
+fi
+if [ -z "$WORKER_PID" ]; then
     QUEUE_MAX="${SMARTMEMORY_HOOK_QUEUE_MAX:-2000}"
     LC_ALL=C
     shopt -s nullglob
@@ -43,8 +53,17 @@ if [ -z "$WORKER_PID" ] || ! kill -0 "$WORKER_PID" 2>/dev/null; then
     shopt -u nullglob
     unset LC_ALL
     if [ "${#QUEUED[@]}" -ge "$QUEUE_MAX" ] 2>/dev/null; then
+        # Name what is lost: session and tool from the head of the payload, then drain stdin.
+        HEAD=
+        IFS= read -r -d '' -n 4096 HEAD
         cat >/dev/null
-        echo "WARNING: lifecycle $PHASE payload shed: hook queue holds ${#QUEUED[@]} jobs (cap $QUEUE_MAX) and no consumer is running; is the daemon up? (HOOK-WRITE-QUEUE-1)" >>"$HOOK_LOG" 2>/dev/null
+        SHED_SESSION=-
+        SHED_TOOL=-
+        re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_-]+)"'
+        [[ $HEAD =~ $re ]] && SHED_SESSION=${BASH_REMATCH[1]}
+        re='"tool_name"[[:space:]]*:[[:space:]]*"([A-Za-z0-9_.:-]+)"'
+        [[ $HEAD =~ $re ]] && SHED_TOOL=${BASH_REMATCH[1]}
+        echo "WARNING: lifecycle $PHASE payload shed: session $SHED_SESSION tool $SHED_TOOL; hook queue holds ${#QUEUED[@]} jobs (cap $QUEUE_MAX) and no consumer is running; is the daemon up? (HOOK-WRITE-QUEUE-1)" >>"$HOOK_LOG" 2>/dev/null
         exit 0
     fi
     QUEUED=()

@@ -562,10 +562,21 @@ def hook_queue_dir(root: str | Path | None = None) -> Path:
     return root
 
 
+def _discard(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _write_json_atomic(path: Path, record: dict) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(json.dumps(record), encoding="utf-8")
-    temporary.replace(path)
+    try:
+        temporary.write_text(json.dumps(record), encoding="utf-8")
+        temporary.replace(path)
+    except BaseException:
+        _discard(temporary)  # a full disk leaves no half temp file behind
+        raise
 
 
 def _payload_session(path: str | None) -> str | None:
@@ -621,7 +632,11 @@ def _strip(job: dict) -> dict:
 
 
 def claim_hook_job(root: Path, job: dict) -> dict | None:
-    """Move a queued record into running/; None when it is gone (another claimant)."""
+    """Move a queued record into running/; None when it is gone (another claimant).
+
+    Any other ``OSError`` (disk full, permissions) propagates: the consumer hands it to
+    ``hook_io_failure`` and backs off, the record stays in queue/.
+    """
     source = Path(job["_path"])
     target = root / "running" / source.name
     record = {**_strip(job), "claimed_at": time.time()}
@@ -694,16 +709,129 @@ def fail_hook_job(
     return "requeued"
 
 
+# Per-job count of failed queue file operations (claim, requeue, dead-letter, complete).
+# A full disk or a permission error must not kill the one consumer: the operation is
+# retried after a backoff and, past ``max_attempts``, the record moves to dead/ by a
+# rename (which needs no new bytes on a full disk).
+_io_failures: dict[str, int] = {}
+
+
+def hook_io_failure(
+    root: Path,
+    job: dict,
+    action: str,
+    error: BaseException,
+    *,
+    max_attempts: int,
+    dead_letter: bool = True,
+) -> str:
+    """Count a failed queue file operation on ``job``. Returns ``retry``, ``dead`` or ``dropped``.
+
+    WARNING on the first failure of a job, and once more when it gives up. ``dead_letter=False``
+    (the job already wrote, only its record could not be removed) gives up by leaving the record
+    where it is: the next daemon start writes it again, a duplicate but never a loss.
+    """
+    path = Path(job["_path"])
+    key = str(path)
+    count = _io_failures.get(key, 0) + 1
+    _io_failures[key] = count
+    if count == 1:
+        log.warning(
+            "Hook %s job %s (session %s): %s failed, retried after a backoff: %s: %s",
+            job.get("phase"),
+            path.name,
+            job.get("session_id"),
+            action,
+            type(error).__name__,
+            error,
+        )
+    if count < max_attempts:
+        return "retry"
+    _io_failures.pop(key, None)
+    if not dead_letter:
+        log.warning(
+            "Hook %s job %s (session %s) was written but its record could not be removed after %d attempts; "
+            "it stays in %s and the next daemon start writes it a second time: %s",
+            job.get("phase"),
+            path.name,
+            job.get("session_id"),
+            count,
+            path.parent.name,
+            error,
+        )
+        return "dropped"
+    try:
+        path.rename(root / "dead" / path.name)
+    except FileNotFoundError:
+        return "dropped"
+    except OSError as exc:
+        _io_failures[key] = (
+            max_attempts - 1
+        )  # try the rename again after the next backoff
+        log.warning(
+            "Hook %s job %s (session %s) not moved to dead/ either (%s); it stays in %s and is retried",
+            job.get("phase"),
+            path.name,
+            job.get("session_id"),
+            exc,
+            path.parent.name,
+        )
+        return "retry"
+    log.warning(
+        "Hook %s job %s (session %s) dead-lettered after %d failed %s attempts, its write is lost until requeued by hand: %s: %s",
+        job.get("phase"),
+        path.name,
+        job.get("session_id"),
+        count,
+        action,
+        type(error).__name__,
+        error,
+    )
+    return "dead"
+
+
+def hook_io_ok(job: dict) -> None:
+    """A queue file operation on ``job`` succeeded: forget its failure count."""
+    _io_failures.pop(job.get("_path", ""), None)
+
+
 def recover_running(root: Path, *, max_attempts: int) -> int:
-    """Records left in running/ by a dead worker count one attempt and go back to the queue."""
+    """Records left in running/ by a dead worker count one attempt and go back to the queue.
+
+    A record whose requeue cannot be written (full disk) is renamed back to queue/ as it is
+    (attempt not counted); one that cannot even be renamed stays in running/ with a WARNING.
+    """
     recovered = 0
     for job in hook_jobs(root, "running"):
-        fail_hook_job(
-            root,
-            job,
-            "worker exited while the job was running",
-            max_attempts=max_attempts,
-        )
+        try:
+            fail_hook_job(
+                root,
+                job,
+                "worker exited while the job was running",
+                max_attempts=max_attempts,
+            )
+        except OSError as exc:
+            source = Path(job["_path"])
+            try:
+                source.rename(root / "queue" / source.name)
+            except OSError as again:
+                log.warning(
+                    "Hook %s job %s (session %s) left in running/ by a dead worker could not be requeued "
+                    "(%s, then %s); it waits there until the next start",
+                    job.get("phase"),
+                    source.name,
+                    job.get("session_id"),
+                    exc,
+                    again,
+                )
+                continue
+            log.warning(
+                "Hook %s job %s (session %s) requeued from running/ without its attempt count: %s",
+                job.get("phase"),
+                source.name,
+                job.get("session_id"),
+                exc,
+            )
         recovered += 1
     return recovered
 
@@ -725,6 +853,31 @@ def hook_counts(root: str | Path | None = None) -> dict[str, int]:
 _SPILL_NAME = re.compile(r"^(\d{8}T\d{12}Z)-(\d+)-(observe|learn|distill)\.json$")
 
 
+# L1: a persistent spill failure (full disk, a file that cannot be renamed) warns once per
+# file and kind, and a failed write or listing backs the whole pass off (1 s doubling to
+# 60 s per spill folder), so a 0.1 s consumer loop does not flood an unrotated daemon.log.
+_spill_warned: set[tuple[str, str]] = set()
+_spill_backoff: dict[str, tuple[float, float]] = {}  # spill dir -> (retry at, delay)
+_SPILL_BACKOFF_MAX = 60.0
+
+
+def _spill_warn_once(path: Path, kind: str, message: str, *args) -> None:
+    key = (str(path), kind)
+    if key in _spill_warned:
+        log.debug(message, *args)
+        return
+    if len(_spill_warned) > 10000:
+        _spill_warned.clear()
+    _spill_warned.add(key)
+    log.warning(message, *args)
+
+
+def _spill_back_off(spill_dir: Path) -> None:
+    _, delay = _spill_backoff.get(str(spill_dir), (0.0, 0.0))
+    delay = min(_SPILL_BACKOFF_MAX, max(1.0, delay * 2))
+    _spill_backoff[str(spill_dir)] = (time.monotonic() + delay, delay)
+
+
 def hook_spill_dir(root: Path) -> Path:
     """The spill folder sits next to ``hook-queue`` in the data dir (the spill hooks' rule)."""
     return Path(root).parent / "hook-spill"
@@ -732,11 +885,15 @@ def hook_spill_dir(root: Path) -> Path:
 
 def _write_durable(path: Path, text: str) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    with open(temporary, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+    except BaseException:
+        _discard(temporary)
+        raise
     directory = os.open(path.parent, os.O_RDONLY)
     try:
         os.fsync(directory)
@@ -750,7 +907,9 @@ def _spill_ns(stamp: str) -> int:
 
 
 def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
-    log.warning(
+    _spill_warn_once(
+        path,
+        "malformed",
         "Hook spill file %s is malformed, moving it to %s/dead/spill-%s; its write is lost until requeued by hand: %s",
         path.name,
         root,
@@ -759,9 +918,16 @@ def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
     )
     try:
         path.rename(root / "dead" / f"spill-{path.name}")
+    except FileNotFoundError:
+        pass
     except OSError as exc:
-        log.warning(
-            "Hook spill file %s not moved to dead/ (%s): %s", path.name, exc, error
+        _spill_warn_once(
+            path,
+            "dead-rename",
+            "Hook spill file %s not moved to dead/ (%s), it is skipped on every pass until it can be: %s",
+            path.name,
+            exc,
+            error,
         )
 
 
@@ -771,8 +937,13 @@ def adopt_spill(root: Path, spill_dir: Path | None = None) -> int:
     A spill file is deleted only after its payload and queue record are fsynced, and
     the job is named after the spill file, so a crash between the two leaves a record
     that the next pass recognises: the spill file is then deleted, never queued twice.
+    No file can stop the consumer: an I/O error keeps the file for a later pass (after
+    a backoff), any other error moves it to dead/ with a WARNING.
     """
     spill_dir = Path(spill_dir) if spill_dir else hook_spill_dir(root)
+    retry_at, _ = _spill_backoff.get(str(spill_dir), (0.0, 0.0))
+    if time.monotonic() < retry_at:
+        return 0
     try:
         names = sorted(
             n
@@ -782,87 +953,38 @@ def adopt_spill(root: Path, spill_dir: Path | None = None) -> int:
     except FileNotFoundError:
         return 0
     except OSError as exc:
-        log.warning(
-            "Hook spill folder %s unreadable, spilled payloads wait: %s", spill_dir, exc
+        _spill_warn_once(
+            spill_dir,
+            "list",
+            "Hook spill folder %s unreadable, spilled payloads wait: %s",
+            spill_dir,
+            exc,
         )
+        _spill_back_off(spill_dir)
         return 0
     adopted = 0
     for name in names:
         path = spill_dir / name
-        match = _SPILL_NAME.match(name)
-        if match is None:
-            _dead_letter_spill(
-                root, path, "spill file name does not match <ts>-<pid>-<phase>.json"
-            )
-            continue
-        stamp, pid, phase = match.groups()
-        job_name = f"spill-{stamp}-{pid}.{phase}.json"
-        if any(
-            (root / sub / job_name).exists() for sub in ("queue", "running", "dead")
-        ):
-            path.unlink(missing_ok=True)  # adopted before a crash; its job is queued
-            continue
         try:
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            continue
-        except (OSError, UnicodeDecodeError, ValueError) as exc:
-            _dead_letter_spill(root, path, f"unreadable spill file: {exc}")
-            continue
-        if (
-            not isinstance(envelope, dict)
-            or envelope.get("v") != 1
-            or envelope.get("phase") != phase
-            or "payload" not in envelope
-        ):
-            _dead_letter_spill(
-                root, path, "spill envelope is not v1 with this phase and a payload"
-            )
-            continue
-        payload = envelope["payload"]
-        body = payload if isinstance(payload, dict) else {}
-        session = body.get("session_id")
-        cwd = body.get("cwd")
-        payload_path = root / "payloads" / job_name
-        record = {
-            "v": 1,
-            "phase": phase,
-            "session_id": session if isinstance(session, str) and session else None,
-            "cwd": cwd if isinstance(cwd, str) else None,
-            "workspace_id": None,
-            "payload_path": str(payload_path),
-            "state_snapshot": None,
-            "queued_ns": _spill_ns(stamp),
-            "spill": name,
-        }
-        try:
-            _write_durable(payload_path, json.dumps(payload))
-            _write_durable(root / "queue" / job_name, json.dumps(record) + "\n")
+            outcome = _adopt_one(root, spill_dir, path)
         except OSError as exc:
-            log.warning(
-                "Hook spill file %s not adopted, it stays in %s for the next pass: %s",
+            _spill_warn_once(
+                path,
+                "io",
+                "Hook spill file %s not adopted, it stays in %s for a later pass: %s",
                 name,
                 spill_dir,
                 exc,
             )
-            return adopted
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            log.warning(
-                "Hook spill file %s is queued as %s but was not deleted; if its job finishes first, "
-                "the next pass queues it a second time: %s",
-                name,
-                job_name,
-                exc,
-            )
-        adopted += 1
-        if phase == "distill":
-            log.warning(
-                "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none); "
-                "its response is stored unpaired with its prompt",
-                name,
-            )
+            _spill_back_off(spill_dir)
+            break
+        except Exception as exc:  # noqa: BLE001 - a poison file must never stop the consumer
+            _dead_letter_spill(root, path, f"{type(exc).__name__}: {exc}")
+            continue
+        if outcome:
+            adopted += 1
+    else:
+        _spill_backoff.pop(str(spill_dir), None)
     if adopted:
         log.info(
             "Adopted %d hook spill file(s) from %s into the hook queue",
@@ -870,6 +992,96 @@ def adopt_spill(root: Path, spill_dir: Path | None = None) -> int:
             spill_dir,
         )
     return adopted
+
+
+def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
+    """Queue one spill file; True when it was adopted. Raises ``OSError`` to keep it for later."""
+    name = path.name
+    match = _SPILL_NAME.match(name)
+    if match is None:
+        _dead_letter_spill(
+            root, path, "spill file name does not match <ts>-<pid>-<phase>.json"
+        )
+        return False
+    stamp, pid, phase = match.groups()
+    try:
+        queued_ns = _spill_ns(stamp)
+    except ValueError as exc:
+        _dead_letter_spill(root, path, f"spill file name has no valid UTC time: {exc}")
+        return False
+    job_name = f"spill-{stamp}-{pid}.{phase}.json"
+    if any((root / sub / job_name).exists() for sub in ("queue", "running", "dead")):
+        try:
+            path.unlink(missing_ok=True)  # adopted before a crash; its job is queued
+        except OSError as exc:
+            _spill_warn_once(
+                path,
+                "guard-unlink",
+                "Hook spill file %s is already queued as %s but cannot be deleted, it is skipped: %s",
+                name,
+                job_name,
+                exc,
+            )
+        return False
+    try:
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        _dead_letter_spill(root, path, f"unreadable spill file: {exc}")
+        return False
+    if (
+        not isinstance(envelope, dict)
+        or envelope.get("v") != 1
+        or envelope.get("phase") != phase
+        or "payload" not in envelope
+    ):
+        _dead_letter_spill(
+            root, path, "spill envelope is not v1 with this phase and a payload"
+        )
+        return False
+    payload = envelope["payload"]
+    body = payload if isinstance(payload, dict) else {}
+    session = body.get("session_id")
+    cwd = body.get("cwd")
+    payload_path = root / "payloads" / job_name
+    record = {
+        "v": 1,
+        "phase": phase,
+        "session_id": session if isinstance(session, str) and session else None,
+        "cwd": cwd if isinstance(cwd, str) else None,
+        "workspace_id": None,
+        "payload_path": str(payload_path),
+        "state_snapshot": None,
+        "queued_ns": queued_ns,
+        "spill": name,
+    }
+    payload_text = json.dumps(
+        payload
+    )  # a non-serialisable payload dead-letters before any write
+    _write_durable(
+        payload_path, payload_text
+    )  # OSError: the file stays for a later pass
+    _write_durable(root / "queue" / job_name, json.dumps(record) + "\n")
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        _spill_warn_once(
+            path,
+            "unlink",
+            "Hook spill file %s is queued as %s but was not deleted; if its job finishes first, "
+            "the next pass queues it a second time: %s",
+            name,
+            job_name,
+            exc,
+        )
+    if phase == "distill":
+        log.warning(
+            "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none); "
+            "its response is stored unpaired with its prompt",
+            name,
+        )
+    return True
 
 
 if __name__ == "__main__":

@@ -37,6 +37,14 @@ DEFAULT_HOOK_PARALLEL = 3
 DEFAULT_HOOK_MAX_ATTEMPTS = 5
 DEFAULT_HOOK_IDLE_EXIT = 20.0
 LOCK_RETRY_SECONDS = 5.0
+# M2: a failing loop pass (full disk, permissions, an unexpected error) backs off from
+# 0.5 s doubling to 30 s and the consumer keeps running; a clean pass resets it.
+ERROR_BACKOFF_MIN = 0.5
+ERROR_BACKOFF_MAX = 30.0
+
+
+def _next_backoff(delay: float) -> float:
+    return min(ERROR_BACKOFF_MAX, max(ERROR_BACKOFF_MIN, delay * 2))
 
 
 def _env_number(name: str, default, cast, minimum):
@@ -107,8 +115,15 @@ def execute_hook_job(job: dict) -> None:
 def _write_pid(root: Path) -> None:
     pid_path = root / "worker.pid"
     temporary = pid_path.with_name(f".worker.pid.{os.getpid()}.tmp")
-    temporary.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    temporary.replace(pid_path)
+    try:
+        temporary.write_text(f"{os.getpid()}\n", encoding="utf-8")
+        temporary.replace(pid_path)
+    except OSError as exc:
+        log.warning(
+            "Hook queue %s: worker.pid not written (%s); the hooks see no consumer and apply the depth cap",
+            root,
+            exc,
+        )
 
 
 def _clear_pid(root: Path) -> None:
@@ -132,24 +147,49 @@ def _holder_alive(root: Path) -> bool:
     return pid_alive(pid)
 
 
-def _settle(root: Path, inflight: dict, max_attempts: int) -> int:
+def _settle(root: Path, inflight: dict, max_attempts: int) -> tuple[int, bool]:
+    """Record the outcome of finished jobs. Returns (jobs settled, whether any record write failed).
+
+    A record that cannot be written (full disk, permissions) keeps its job in ``inflight``,
+    so its session stays busy and it is settled again after the consumer's backoff.
+    """
     finished = 0
+    troubled = False
     for future in [f for f in inflight if f.done()]:
-        job = inflight.pop(future)
-        finished += 1
+        job = inflight[future]
+        error = future.exception()
+        action = "complete" if error is None else "requeue"
         try:
-            future.result()
-        except queue.PermanentHookError as exc:
-            queue.fail_hook_job(
-                root, job, str(exc), max_attempts=max_attempts, permanent=True
+            if error is None:
+                queue.complete_hook_job(job)
+            elif isinstance(error, queue.PermanentHookError):
+                queue.fail_hook_job(
+                    root, job, str(error), max_attempts=max_attempts, permanent=True
+                )
+            else:  # every other failure is retried
+                queue.fail_hook_job(
+                    root,
+                    job,
+                    f"{type(error).__name__}: {error}",
+                    max_attempts=max_attempts,
+                )
+        except Exception as exc:  # noqa: BLE001 - a settle failure must not kill the consumer
+            troubled = True
+            outcome = queue.hook_io_failure(
+                root,
+                job,
+                action,
+                exc,
+                max_attempts=max_attempts,
+                dead_letter=error is not None,
             )
-        except Exception as exc:  # noqa: BLE001 - every other failure is retried
-            queue.fail_hook_job(
-                root, job, f"{type(exc).__name__}: {exc}", max_attempts=max_attempts
-            )
+            if outcome == "retry":
+                continue
         else:
-            queue.complete_hook_job(job)
-    return finished
+            queue.hook_io_ok(job)
+        inflight.pop(future)
+        finished += 1
+    return finished, troubled
 
 
 def consume(
@@ -205,56 +245,103 @@ def consume(
                 return 0
     finished = 0
     try:
-        queue.recover_running(root, max_attempts=max_attempts)
+        try:
+            queue.recover_running(root, max_attempts=max_attempts)
+        except Exception:  # noqa: BLE001 - orphans wait in running/ for the next start
+            log.warning(
+                "Hook queue %s: recovering running/ failed; those jobs wait for the next start",
+                root,
+                exc_info=True,
+            )
         _write_pid(root)
         inflight: dict = {}
         idle_since = None
+        backoff = 0.0
         with ThreadPoolExecutor(
             max_workers=parallel, thread_name_prefix="smartmemory-hook-job"
         ) as pool:
             while True:
-                finished += _settle(root, inflight, max_attempts)
-                if stop.is_set():
-                    if not inflight:
-                        return finished
-                    wait(list(inflight), timeout=poll, return_when=FIRST_COMPLETED)
-                    continue
-                queue.adopt_spill(
-                    root
-                )  # HOOK-SPILL-INTERIM-1's spilled payloads join the queue
-                pending = queue.hook_jobs(root)
-                busy = {job["session_id"] for job in inflight.values()}
-                now = time.time()
-                for job in pending:
-                    if len(inflight) >= parallel:
-                        break
-                    session = job["session_id"]
-                    if session in busy:
+                try:
+                    settled, troubled = _settle(root, inflight, max_attempts)
+                    finished += settled
+                    if stop.is_set():
+                        if not inflight:
+                            return finished
+                        if troubled:  # a done job whose record cannot be written yet
+                            time.sleep(poll)
+                        else:
+                            wait(
+                                list(inflight),
+                                timeout=poll,
+                                return_when=FIRST_COMPLETED,
+                            )
                         continue
-                    busy.add(session)  # only the oldest job of a session may start
-                    if job.get("not_before", 0) > now:
+                    queue.adopt_spill(
+                        root
+                    )  # HOOK-SPILL-INTERIM-1's spilled payloads join the queue
+                    pending = queue.hook_jobs(root)
+                    busy = {job["session_id"] for job in inflight.values()}
+                    now = time.time()
+                    for job in pending:
+                        if len(inflight) >= parallel:
+                            break
+                        session = job["session_id"]
+                        if session in busy:
+                            continue
+                        busy.add(session)  # only the oldest job of a session may start
+                        if job.get("not_before", 0) > now:
+                            continue
+                        try:
+                            claimed = queue.claim_hook_job(root, job)
+                        except (
+                            OSError
+                        ) as exc:  # full disk, permissions: the record stays queued
+                            troubled = True
+                            queue.hook_io_failure(
+                                root, job, "claim", exc, max_attempts=max_attempts
+                            )
+                            continue
+                        if claimed is not None:
+                            queue.hook_io_ok(job)
+                            inflight[pool.submit(execute, claimed)] = claimed
+                    if troubled:
+                        backoff = _next_backoff(backoff)
+                        stop.wait(backoff)
                         continue
-                    claimed = queue.claim_hook_job(root, job)
-                    if claimed is not None:
-                        inflight[pool.submit(execute, claimed)] = claimed
-                if inflight:
-                    idle_since = None
-                    wait(list(inflight), timeout=poll, return_when=FIRST_COMPLETED)
-                    continue
-                if pending or idle_exit is None:
-                    idle_since = None
-                    stop.wait(poll)  # backoff-delayed jobs only, or the daemon idling
-                    continue
-                idle_since = idle_since or time.monotonic()
-                if time.monotonic() - idle_since < idle_exit:
-                    time.sleep(poll)
-                    continue
-                _clear_pid(root)
-                if queue.hook_jobs(root):
-                    _write_pid(root)
-                    idle_since = None
-                    continue
-                return finished
+                    backoff = 0.0
+                    if inflight:
+                        idle_since = None
+                        wait(list(inflight), timeout=poll, return_when=FIRST_COMPLETED)
+                        continue
+                    if pending or idle_exit is None:
+                        idle_since = None
+                        stop.wait(
+                            poll
+                        )  # backoff-delayed jobs only, or the daemon idling
+                        continue
+                    idle_since = idle_since or time.monotonic()
+                    if time.monotonic() - idle_since < idle_exit:
+                        time.sleep(poll)
+                        continue
+                    _clear_pid(root)
+                    if queue.hook_jobs(root):
+                        _write_pid(root)
+                        idle_since = None
+                        continue
+                    return finished
+                except Exception:  # noqa: BLE001 - one bad pass must not end the one consumer
+                    first = backoff == 0.0
+                    backoff = _next_backoff(backoff)
+                    if (
+                        first or backoff >= ERROR_BACKOFF_MAX
+                    ):  # first of a streak, then every 30 s
+                        log.warning(
+                            "Hook queue consumer pass failed on %s; retrying in %.1fs, jobs wait on disk",
+                            root,
+                            backoff,
+                            exc_info=True,
+                        )
+                    stop.wait(backoff)
     finally:
         _clear_pid(root)
         lock.release()
@@ -301,13 +388,19 @@ class DaemonConsumer:
         )
 
     def _run(self) -> None:
-        try:
-            consume(self.root, stop=self._stop, idle_exit=None, **self._kwargs)
-        except Exception:  # noqa: BLE001 - a dead consumer strands every hook write
-            log.warning(
-                "Hook queue consumer stopped on an error; hook jobs wait on disk until the daemon restarts",
-                exc_info=True,
-            )
+        delay = 1.0
+        while not self._stop.is_set():
+            try:
+                consume(self.root, stop=self._stop, idle_exit=None, **self._kwargs)
+                return
+            except Exception:  # noqa: BLE001 - a dead consumer strands every hook write
+                log.warning(
+                    "Hook queue consumer stopped on an error; restarting it in %.0fs, hook jobs wait on disk",
+                    delay,
+                    exc_info=True,
+                )
+                self._stop.wait(delay)
+                delay = min(60.0, delay * 2)
 
     def start(self) -> "DaemonConsumer":
         set_remote_drain(False, self.root)
