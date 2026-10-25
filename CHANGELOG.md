@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### HOOK-WRITE-QUEUE-REMOTE-EXIT-FU-1 (2026-10-26)
+
+- fix(hooks): in remote mode the last observe, learn or distill job no longer waits forever when the remote drainer exits while the hook is still reading its payload (HOOK-WRITE-QUEUE-REMOTE-EXIT-FU-1). The hooks read `worker.pid` once, before stdin, and reused that value after publishing the job to decide whether to start a drainer. A drainer that cleared its pid, rescanned an empty queue and exited during that window left the new job queued with no drainer and no WARNING until another hook fired. The hooks now read and check `worker.pid` again after the publish (`live_consumer` in `smartmemory_app/hooks/{observe,learn,distill}.sh`), which closes the handshake: the drainer clears its pid before its last scan and the hook publishes before its last pid read, so one of the two always sees the other. The early read still gates the depth cap. Local mode (no `remote-drain` marker) does no second read and starts nothing. Test: `test_drainer_exit_during_stdin_starts_a_replacement` in `tests/unit/test_hook_write_queue.py` (a real `consume` loop as the drainer, one row per phase plus a still-alive drainer row and a local-mode row).
+
 ### DAEMON-9014-CRASH-DIAG-1 + CLI-TEST-HOST-ISOLATION-1 port to 2.0 (2026-10-26, HOOK-WRITE-QUEUE-1 daemon-exit diagnosis)
 
 - `sm stop` (and anything else that stops the daemon or worker) no longer switches off a background job it did not install (DAEMON-9014-CRASH-DIAG-1). macOS keys background jobs by user, not by home folder, so a process running with a different HOME (a test suite, a second install) saw your real `ai.smartmemory.daemon` job and booted it out; that is how the local daemon died twice on 2026-10-22 during test runs. A job now counts as ours only when `launchctl print` shows it loaded from this HOME's `~/Library/LaunchAgents/<label>.plist` (symlinks resolved); any other job is left running with one WARNING naming both paths. Covers `stop_daemon`, the worker stop and the legacy-worker retirement. Table test `tests/unit/test_launchd_ownership.py`.

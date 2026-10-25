@@ -30,21 +30,25 @@ if [ ! -d "$QUEUE_DIR/queue" ] || [ ! -d "$QUEUE_DIR/payloads" ] || [ ! -d "$HOO
     mkdir -p "$HOOK_DATA_DIR" "$HOOK_MARKER_DIR" "$QUEUE_DIR/queue" "$QUEUE_DIR/payloads" 2>/dev/null ||
         lost "cannot create $QUEUE_DIR"
 fi
-# Depth cap, checked only when no live consumer holds worker.pid (the daemon writes it): a
-# glob over a deep queue costs ~200 ms at 5000 jobs, so the steady state skips it. The pid
-# counts only while it is alive AND is a smartmemory consumer (the daemon or the remote
-# drainer), so a pid reused after a daemon crash does not switch the cap off (one ps, ~3 ms).
-WORKER_PID=
-[ -f "$QUEUE_DIR/worker.pid" ] && IFS= read -r WORKER_PID <"$QUEUE_DIR/worker.pid"
-if [ -n "$WORKER_PID" ] && kill -0 "$WORKER_PID" 2>/dev/null; then
-    WORKER_CMD=$(ps -p "$WORKER_PID" -o command= 2>/dev/null)
-    case $WORKER_CMD in
-    *smartmemory_app.viewer_server* | *" lifecycle drain-hooks"*) ;;
-    *) WORKER_PID= ;;
-    esac
-else
+# WORKER_PID becomes the pid in worker.pid while it is alive AND is a smartmemory consumer
+# (the daemon or the remote drainer), else empty, so a pid reused after a daemon crash does
+# not count (one ps, ~3 ms).
+live_consumer() {
     WORKER_PID=
-fi
+    [ -f "$QUEUE_DIR/worker.pid" ] && IFS= read -r WORKER_PID <"$QUEUE_DIR/worker.pid"
+    if [ -n "$WORKER_PID" ] && kill -0 "$WORKER_PID" 2>/dev/null; then
+        WORKER_CMD=$(ps -p "$WORKER_PID" -o command= 2>/dev/null)
+        case $WORKER_CMD in
+        *smartmemory_app.viewer_server* | *" lifecycle drain-hooks"*) ;;
+        *) WORKER_PID= ;;
+        esac
+    else
+        WORKER_PID=
+    fi
+}
+# Depth cap, checked only when no live consumer holds worker.pid (the daemon writes it): a
+# glob over a deep queue costs ~200 ms at 5000 jobs, so the steady state skips it.
+live_consumer
 if [ -z "$WORKER_PID" ]; then
     QUEUE_MAX="${SMARTMEMORY_HOOK_QUEUE_MAX:-2000}"
     LC_ALL=C
@@ -109,10 +113,14 @@ printf '{"v":1,"phase":"%s","session_id":%s,"cwd":%s,"workspace_id":%s,"payload_
     lost "cannot write the queue record"
 mv -f "$RECORD_TMP" "$QUEUE_DIR/queue/$JOB_ID.$PHASE.json" 2>>"$HOOK_LOG" || lost "cannot publish the queue record"
 # Published. Local mode: the daemon picks it up, nothing to start. Remote mode has no daemon:
-# start the remote drainer only when worker.pid names no live process (the drainer rescans
-# after it clears worker.pid, so this record is never stranded).
+# start the remote drainer only when worker.pid names no live consumer. Read it again here,
+# after the publish, never the value from the cap check: the drainer clears worker.pid, then
+# rescans, then exits, and it may have done all three while this hook waited on stdin. A live
+# pid read after the publish means that rescan is still ahead and sees this record; an empty
+# one means start a drainer (HOOK-WRITE-QUEUE-REMOTE-EXIT-FU-1).
 if [ -f "$QUEUE_DIR/remote-drain" ]; then
-    if [ -z "$WORKER_PID" ]; then # no live drainer when the cap check ran
+    live_consumer
+    if [ -z "$WORKER_PID" ]; then
         {
             smartmemory lifecycle drain-hooks --dir "$QUEUE_DIR"
             HOOK_EXIT=$?
