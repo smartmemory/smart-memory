@@ -268,35 +268,41 @@ def _failing_writes(match):
     return lambda: setattr(capture_queue, "_write_json_atomic", original)
 
 
-def enospc_on_claim_dead_letters_the_job_and_the_consumer_lives(root, env, writer):
-    # M2: claim's record write on a full disk used to kill the thread. Now: retried with backoff,
-    # dead-lettered by rename after max_attempts (3), other sessions keep draining.
-    warnings = _Warnings()
+def enospc_on_every_queue_write_leaves_claims_working(root, env, writer):
+    # L3: claim is a bare rename, so a full disk cannot fail it or dead-letter a healthy job.
+    # Every record write raises ENOSPC; both jobs still run and finish, nothing lands in dead/.
     _record(root, "6000-1", "observe", "s", "full")
     _record(root, "6000-2", "observe", "t", "other")
-    undo = _failing_writes(
-        lambda p, record: errno.ENOSPC if p.name == "6000-1.observe.json" else 0
-    )
+    undo = _failing_writes(lambda p, record: errno.ENOSPC)
     try:
         consumer = _run_daemon(
-            root,
-            writer,
-            lambda: writer.calls == ["other"]
-            and (root / "dead" / "6000-1.observe.json").exists(),
+            root, writer, lambda: sorted(writer.calls) == ["full", "other"]
         )
         alive = consumer.thread.is_alive()
         consumer.stop()
     finally:
         undo()
-        warnings.close()
     return {
-        "calls": writer.calls,
+        "calls": sorted(writer.calls),
         "alive": alive,
         "dead": os.listdir(root / "dead"),
-        "warned_first": sum("claim failed" in line for line in warnings.lines),
-        "warned_dead": sum(
-            "dead-lettered after 3 failed claim" in line for line in warnings.lines
-        ),
+    }
+
+
+def claim_keeps_the_record_bytes_and_mtime(root, env, writer):
+    # L3: the claimed record is the file as published (queued_ns comes from its mtime).
+    _record(root, "6500-1", "observe", "s", "x")
+    path = root / "queue" / "6500-1.observe.json"
+    os.utime(path, ns=(1_700_000_000_000_000_000,) * 2)
+    before = path.read_bytes()
+    (job,) = capture_queue.hook_jobs(root)
+    claimed = capture_queue.claim_hook_job(root, job)
+    target = root / "running" / "6500-1.observe.json"
+    return {
+        "bytes_same": target.read_bytes() == before,
+        "mtime_kept": target.stat().st_mtime_ns == 1_700_000_000_000_000_000,
+        "queued_ns": claimed["queued_ns"],
+        "gone_from_queue": not path.exists(),
     }
 
 
@@ -518,14 +524,17 @@ ROWS = [
         },
     ),
     (
-        enospc_on_claim_dead_letters_the_job_and_the_consumer_lives,
+        enospc_on_every_queue_write_leaves_claims_working,
+        {"calls": ["full", "other"], "alive": True, "dead": []},
+    ),
+    (
+        claim_keeps_the_record_bytes_and_mtime,
         {
-            "calls": ["other"],
-            "alive": True,
-            "dead": ["6000-1.observe.json"],
-            "warned_first": 1,
-            "warned_dead": 1,
-            "_left": {"queue": 0, "running": 0, "dead": 1},
+            "bytes_same": True,
+            "mtime_kept": True,
+            "queued_ns": 1_700_000_000_000_000_000,
+            "gone_from_queue": True,
+            "_left": {"queue": 0, "running": 1, "dead": 0},
         },
     ),
     (
