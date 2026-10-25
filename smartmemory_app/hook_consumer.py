@@ -208,8 +208,10 @@ def consume(
     queue order, at most ``parallel`` sessions at once. Returns jobs finished.
     ``idle_exit=None`` never exits on idle (the daemon). With an idle exit (the
     remote drainer) the handshake with the hooks, which spawn a drainer only when
-    worker.pid names no live process, holds: the holder unlinks worker.pid, then
-    rescans before it exits, so a record published meanwhile is never stranded.
+    worker.pid, read after they publish, names no live process, holds: the holder
+    unlinks worker.pid, then rescans before it exits, so a record published meanwhile
+    is never stranded (HOOK-WRITE-QUEUE-REMOTE-EXIT-FU-1: a pid read before the
+    publish proves nothing).
     """
     root = queue.hook_queue_dir(root)
     stop = stop or threading.Event()

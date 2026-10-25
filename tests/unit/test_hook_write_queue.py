@@ -13,6 +13,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -480,6 +481,102 @@ def test_remote_mode_goes_through_the_queue(env, monkeypatch):
         "running": 0,
         "dead": 0,
     }
+
+
+# ── Probe 5b: the drainer exits while the hook reads stdin (REMOTE-EXIT-FU-1) ───────
+
+# A real consume() loop stands in for the drainer. It ends when its stdin closes (the stop
+# path clears worker.pid exactly as the idle exit does) and records the jobs it ran. The two
+# trailing argv words make `ps` name it as the remote drainer, as the hooks check.
+DRAINER = (
+    "import sys, threading; from smartmemory_app.hook_consumer import consume; "
+    "stop = threading.Event(); "
+    "threading.Thread(target=lambda: (sys.stdin.read(), stop.set()), daemon=True).start(); "
+    "consume(sys.argv[1], stop=stop, poll=0.01, "
+    "execute=lambda job: open(sys.argv[2], 'a').write(job['phase'] + '\\n'))"
+)
+
+# phase, remote marker, drainer exits during stdin, replacement drainer started, jobs the old drainer ran
+DRAINER_EXIT_ROWS = [
+    ("observe", True, True, True, ()),
+    ("learn", True, True, True, ()),
+    ("distill", True, True, True, ()),
+    ("observe", True, False, False, ("observe",)),  # still alive at publication: it takes the job
+    ("observe", False, True, False, ()),  # local mode: the daemon is the one consumer, never a spawn
+]
+
+
+def _wait_for(predicate, what: str) -> None:
+    deadline = time.monotonic() + 10
+    while not predicate():
+        assert time.monotonic() < deadline, what
+        time.sleep(0.005)
+
+
+@pytest.mark.parametrize("phase,remote,exits,spawned,ran", DRAINER_EXIT_ROWS)
+def test_drainer_exit_during_stdin_starts_a_replacement(
+    phase, remote, exits, spawned, ran, env, tmp_path
+):
+    root = capture_queue.hook_queue_dir(queue_root(env))
+    if remote:
+        hook_consumer.set_remote_drain(True, root)
+    ran_file = tmp_path / "drainer-ran"
+    stub_calls = tmp_path / "stub-calls"
+    app_root = str(HOOKS.parents[1])
+    drainer_env = {
+        **env,
+        "PYTHONPATH": os.pathsep.join(filter(None, (app_root, env.get("PYTHONPATH")))),
+    }
+    drainer = subprocess.Popen(
+        [sys.executable, "-c", DRAINER, str(root), str(ran_file), "lifecycle", "drain-hooks"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=drainer_env,
+    )
+    hook = None
+    try:
+        _wait_for(
+            lambda: (root / "worker.pid").is_file()
+            and (root / "worker.pid").read_text().strip() == str(drainer.pid),
+            "the drainer never wrote worker.pid",
+        )
+        hook = subprocess.Popen(
+            ["bash", str(HOOKS / f"{phase}.sh")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        # The payload file exists only after the hook's worker.pid check: it now waits on stdin.
+        _wait_for(lambda: any((root / "payloads").glob("*.json")), "the hook never reached stdin")
+        assert drainer.poll() is None, "the drainer must be alive at the hook's first pid check"
+        if exits:
+            _, err = drainer.communicate(b"", timeout=10)  # stdin EOF: the drainer exits
+            assert drainer.returncode == 0, err
+            assert not (root / "worker.pid").exists()
+        _, err = hook.communicate(
+            json.dumps({"session_id": "test_hwq_remote_exit", "tool_name": "Bash"}), timeout=10
+        )
+        assert hook.returncode == 0, err
+        if spawned:
+            _wait_for(stub_calls.exists, "the hook did not start a replacement drainer")
+            assert stub_calls.read_text() == f"lifecycle drain-hooks --dir {root}\n"
+            assert capture_queue.hook_counts(root) == {"queue": 1, "running": 0, "dead": 0}
+        if not exits:
+            _wait_for(lambda: ran_file.exists(), "the live drainer never ran the published job")
+            _, err = drainer.communicate(b"", timeout=10)  # stdin EOF: the drainer exits
+            assert drainer.returncode == 0, err
+            assert capture_queue.hook_counts(root) == {"queue": 0, "running": 0, "dead": 0}
+        time.sleep(0.2)  # a background spawn the hook should not have made has landed by now
+        assert stub_calls.exists() is spawned
+        assert tuple(ran_file.read_text().splitlines() if ran_file.exists() else ()) == ran
+    finally:
+        for process in (hook, drainer):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
 
 
 # ── Probe 6: hook wall time under 50 ms per phase (median of 20) ─────────────────────
