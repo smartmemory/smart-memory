@@ -78,7 +78,7 @@ if [ -z "$WORKER_PID" ] || ! kill -0 "$WORKER_PID" 2>/dev/null; then
         smartmemory lifecycle drain-hooks --dir "$QUEUE_DIR"
         HOOK_EXIT=$?
         if [ "$HOOK_EXIT" -ne 0 ]; then
-            printf '%s\t%s\t%s\n' 'drain-hooks' "$HOOK_EXIT" "${EPOCHSECONDS:-0}" >>"$HOOK_MARKER_DIR/hook-failures.tsv"
+            printf '%s\t%s\t%s\n' "$PHASE" "$HOOK_EXIT" "${EPOCHSECONDS:-0}" >>"$HOOK_MARKER_DIR/hook-failures.tsv"
         fi
     } </dev/null >/dev/null 2>>"$HOOK_LOG" &
     disown

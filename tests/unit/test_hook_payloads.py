@@ -112,7 +112,7 @@ def test_async_hook_returns_before_slow_failing_cli(
         wait_for(lambda: (hook_stub / "done").exists())
     failures = hook_stub / "home/.smartmemory/hook-failures.tsv"
     wait_for(failures.exists)
-    assert failures.read_text().startswith("drain-hooks\t1\t")
+    assert failures.read_text().startswith(f"{Path(script).stem}\t1\t")
 
 
 @pytest.mark.parametrize("script", ASYNC_HOOKS)
