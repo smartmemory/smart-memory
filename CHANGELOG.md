@@ -6,6 +6,10 @@
 
 - feat(worker): `worker_entry.run_configured_worker` passes core's switch-gated `v2=lite_v2_worker_config(data_dir)`; None (the legacy drain, unchanged) while `sm2_save_local_admission` is OFF, the default. An older core without `lite_handlers` logs one WARNING and runs the legacy drain.
 
+### REL-CALLERS-PROMPTS-1 (2026-10-24)
+
+- The `/ingest` and `/remember` skills (`smartmemory_app/skills/ingest.md`, `remember.md`) call `memory_save` instead of the deleted `memory_ingest` and `memory_add` MCP tools (G140, no aliases), and report the save status (`saved`, `queued`, `held`, `failed`) with the item id. Prose only, no code changed.
+
 ### SETUP-FRESH-CI-1 (2026-10-17)
 
 - New fresh-install check for the `sm` CLI: `scripts/fresh_install_check.py` and `.github/workflows/fresh-install.yml`. It installs the built wheel into a clean venv with a throwaway `HOME`, then checks a keyless local `sm setup`, `sm doctor`, an add, search and decision round trip, the inherited `SMARTMEMORY_*` detection with poisoned variables, and a remote-mode setup against a local fake server. It prints `STEP <name> PASS|FAIL|SKIP` lines and needs no secrets. No product code changed.
