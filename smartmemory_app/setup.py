@@ -999,6 +999,11 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
     # DIST-AGENT-HOOKS-1: Wire hooks for remote mode too.
     # Hooks call CLI which falls back to remote API via storage dispatch.
     _copy_hooks()
+    # HOOK-WRITE-QUEUE-1: no daemon in remote mode, so the write hooks start the
+    # remote drainer (`smartmemory lifecycle drain-hooks`) for their queued jobs.
+    from smartmemory_app.hook_consumer import set_remote_drain
+
+    set_remote_drain(True)
     _copy_skills()
     _register_hooks()
     click.echo("Lifecycle hooks installed. Auto-recall and observation active.")
