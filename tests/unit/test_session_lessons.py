@@ -25,6 +25,8 @@ def lesson_env(monkeypatch, tmp_path):
     for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     mem = Mock()
     mem.find_decision_conflicts.return_value = []
     mem.search.return_value = []
@@ -133,6 +135,8 @@ def test_retry_degraded_receipt_adds_lessons_without_reimport(lesson_env, monkey
     capture_worker.run()
     assert queue.jobs()[-1]["degradation"]
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE")
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     receipt = capture_worker.import_capture(job)
     assert receipt["unchanged"]
     assert receipt["lesson_ids"] == ["lesson-0"]

@@ -23,19 +23,29 @@ def _memory():
     from smartmemory.tools.factory import create_lite_memory
 
     # Explicit offline capture uses the existing Tier 1 pipeline, not another
-    # extractor. Production capture is pinned to Groq, never subscription billing.
+    # extractor. HOOK-CAPTURE-NO-LLM-1: otherwise capture is internal ingestion and
+    # runs core's costless profile (no LLM extraction, deferred or inline, whatever
+    # keys the environment holds). SMARTMEMORY_CAPTURE_LLM=1 opts in to the previous
+    # pipeline, pinned to Groq, never subscription billing.
     offline = os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") == "1"
-    if not offline:
+    if offline:
+        profile = PipelineConfig.tier1()
+    elif queue.capture_llm_opted_in():
         if not os.environ.get("GROQ_API_KEY"):
-            raise RuntimeError("Transcript capture requires GROQ_API_KEY")
+            raise RuntimeError(
+                "Transcript capture with SMARTMEMORY_CAPTURE_LLM=1 requires GROQ_API_KEY"
+            )
         os.environ["LLM_PROVIDER"] = "groq"
         os.environ["LLM_API_KEY"] = os.environ["GROQ_API_KEY"]
         os.environ["OPENAI_BASE_URL"] = "https://api.groq.com/openai/v1"
         os.environ["SMARTMEMORY_LLM_MODEL"] = "openai/gpt-oss-120b"
+        profile = PipelineConfig.lite()
+    else:
+        profile = PipelineConfig.costless()
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = "local"
     return create_lite_memory(
         data_dir=str(queue.capture_dir().parent),
-        pipeline_profile=PipelineConfig.tier1() if offline else PipelineConfig.lite(),
+        pipeline_profile=profile,
     )
 
 

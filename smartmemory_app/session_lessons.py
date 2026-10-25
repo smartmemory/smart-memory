@@ -234,6 +234,15 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
             return {"lesson_ids": ids, "lessons_unchanged": True}
         if os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") == "1":
             raise RuntimeError("offline capture disables LLM session lessons")
+        from smartmemory_app.capture_queue import CAPTURE_LLM_ENV, capture_llm_opted_in
+
+        if not capture_llm_opted_in():
+            # HOOK-CAPTURE-NO-LLM-1: every lesson step is an LLM call (reasoning extraction,
+            # constraint classifier, lifecycle classification). capture_lessons logs this as
+            # the job's WARNING degradation; the transcript itself is imported costless.
+            raise RuntimeError(
+                f"costless capture makes no LLM call, so session lessons are off ({CAPTURE_LLM_ENV}=1 opts in)"
+            )
         if not os.environ.get("GROQ_API_KEY"):
             raise RuntimeError("session lessons require GROQ_API_KEY")
         # Independently pin this call too: never inherit another provider/key.

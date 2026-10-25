@@ -16,6 +16,16 @@ from smartmemory.utils.process import spawn_detached
 
 log = logging.getLogger(__name__)
 
+#: HOOK-CAPTURE-NO-LLM-1 (owner 2026-10-20, "captures too"): transcript capture is internal ingestion and runs the
+#: costless profile (rules extraction, local enrichers, no LLM, no session lessons). Only ``1`` opts in to the
+#: previous Groq-pinned pipeline and LLM session lessons, the explicit per-source opt-in and the rollback.
+CAPTURE_LLM_ENV = "SMARTMEMORY_CAPTURE_LLM"
+
+
+def capture_llm_opted_in() -> bool:
+    """Whether transcript capture may call an LLM (extraction and session lessons). Default no."""
+    return os.environ.get(CAPTURE_LLM_ENV, "").strip() == "1"
+
 
 def capture_dir() -> Path:
     from smartmemory_app.config import load_config
