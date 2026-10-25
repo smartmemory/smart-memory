@@ -4,6 +4,7 @@
 
 ### U20.S1-HOOK-STORE-WORKSPACE-REFUSAL-1 (2026-10-25)
 
+- test(hooks): `tests/integration/test_hook_write_route_lite.py` golden rows (observe, learn and distill land a project-tagged memory through the route on a real Lite store) lose their strict xfail: core 2.0 ruling (a), `workspace_bind.lite_owner_scope`, lands them.
 - fix(hooks): `POST /lifecycle/observe`, `/learn` and `/distill` no longer answer `{"status": "ok"}` when the write was lost. The route runs the phase strict; a failed store answers 500 with `{"status": "error", "phase", "lost", "error"}` and logs one WARNING `Lifecycle <phase> write failed; <what> not stored: <error>` (the CLI caller then runs the phase in-process, as for any daemon failure). Test: `tests/integration/test_hook_write_route_lite.py` (real Lite store; the three "a hook write lands a memory" golden rows are strict xfail on core 2.0 until the U20.S1 scope-bind producer fix).
 
 ### HOOK-WRITE-QUEUE-1 (2026-10-25)

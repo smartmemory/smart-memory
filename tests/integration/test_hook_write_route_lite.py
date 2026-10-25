@@ -4,8 +4,8 @@ One table over the three hook write phases (observe, learn, distill) and two out
 
 - ``lands``: the golden row. ``POST /lifecycle/<phase>`` with a project ``cwd`` on a real SQLite Lite
   store (no mocks of the save arm) answers 200 and leaves one memory carrying the hook's origin and the
-  project tag ``derive_workspace_id(cwd)``. Strict xfail on core 2.0 while U20.S1's admitted effect scope
-  refuses every project-tagged row (the producer fix is a security decision, see the unit's report).
+  project tag ``derive_workspace_id(cwd)``. Needs core 2.0 with ruling (a) (a Lite owner effect scope does
+  not bind by row stamp, ``workspace_bind.lite_owner_scope``); before it every project-tagged row was refused.
 - ``lost``: a store that fails is never ``{"status": "ok"}``: the route answers 500, names the phase and
   what was lost, and logs one WARNING naming it.
 """
@@ -24,15 +24,6 @@ import smartmemory_app.config as config
 import smartmemory_app.storage as storage
 from smartmemory_app.recall_format import derive_workspace_id
 
-PRODUCER_PENDING = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "U20.S1-HOOK-STORE-WORKSPACE-REFUSAL-1: core 2.0 binds the Lite admitted effect scope to the "
-        "lite_<hex> authority workspace and refuses every project-tagged row; producer fix pending a "
-        "security decision"
-    ),
-)
-
 # (phase, origin the stored memory carries, what the route says was lost)
 PHASES = {
     "observe": ("hook:observe", "tool observation"),
@@ -41,9 +32,9 @@ PHASES = {
 }
 
 ROWS = [
-    pytest.param("observe", "lands", marks=PRODUCER_PENDING, id="observe-lands"),
-    pytest.param("learn", "lands", marks=PRODUCER_PENDING, id="learn-lands"),
-    pytest.param("distill", "lands", marks=PRODUCER_PENDING, id="distill-lands"),
+    pytest.param("observe", "lands", id="observe-lands"),
+    pytest.param("learn", "lands", id="learn-lands"),
+    pytest.param("distill", "lands", id="distill-lands"),
     pytest.param("observe", "lost", id="observe-lost"),
     pytest.param("learn", "lost", id="learn-lost"),
     pytest.param("distill", "lost", id="distill-lost"),
