@@ -223,8 +223,8 @@ def restore_smartmemory_env(provider_env_leak_guard):
 def cli_test_port():
     """One port per pytest process, registered in ~/.ports as cliTest (CLI-TEST-HOST-ISOLATION-1).
 
-    Released on teardown whether the session passed or failed, and a listener still
-    on it is stopped and reported.
+    Released on teardown whether the session passed or failed. A listener still on it
+    is reported, and stopped only if this session started it (never an unrelated process).
     """
     port, registered = host_isolation.reserve_test_port()
     try:
