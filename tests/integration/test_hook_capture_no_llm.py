@@ -25,6 +25,20 @@ ENTITY_TEXT = (
 )
 
 
+# Every database backend is pinned to this dead loopback port, so optional non-LLM plumbing (Redis progress
+# streams, the ruler hot-reload) is refused at once and never reaches a live service. Only these connects are
+# not counted: nothing can listen on port 1, and no model is reachable there. Any other TCP connect is an
+# outbound call and is counted as an LLM entry point.
+DEAD_BACKEND = ("127.0.0.1", 1)
+BACKEND_ENV = (
+    "GRAPH_DB",
+    "FALKORDB",
+    "REDIS",
+    "CACHE_REDIS",
+    "MONGODB",
+)
+
+
 class LLMTrap(RuntimeError):
     """Raised by every trapped LLM entry point; the call is also recorded."""
 
@@ -46,6 +60,9 @@ def lite_env(tmp_path, monkeypatch):
     # An LLM route exists: the condition the fix must hold under.
     monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", "gsk_fake_hook_capture_no_llm")
+    for prefix in BACKEND_ENV:
+        monkeypatch.setenv(f"{prefix}_HOST", DEAD_BACKEND[0])
+        monkeypatch.setenv(f"{prefix}_PORT", str(DEAD_BACKEND[1]))
     for name in (
         "SMARTMEMORY_CAPTURE_OFFLINE",
         "SMARTMEMORY_INGEST_AI_SUMMARY",
@@ -98,6 +115,8 @@ def llm_calls(monkeypatch):
 
     def connect(sock, address):
         if sock.family in (socket.AF_INET, socket.AF_INET6):
+            if tuple(address[:2]) == DEAD_BACKEND:
+                raise ConnectionRefusedError(f"pinned dead backend {address}")
             calls.append(f"connect:{address}")
             raise LLMTrap(f"egress {address}")
         return real_connect(sock, address)
@@ -245,9 +264,10 @@ def test_internal_notes_make_no_llm_call(
 
     calls = request.getfixturevalue("llm_calls")
     write(tmp_path)
-    from smartmemory.pipeline.work_graph.worker import run_worker
+    # The wrapper's own worker entry: it passes core's v2 config, so v2 boxes (stage:enrich) are drained too.
+    from smartmemory_app.worker_entry import run_configured_worker
 
-    assert run_worker(lite_env, idle_exit=0.5, lease=30) == 0
+    assert run_configured_worker(lite_env, idle_exit=0.5, lease=30) == 0
     assert calls == [], f"{label}: LLM entry points reached: {calls}"
     boxes = _box_kinds(db)
     assert boxes, f"{label}: no work-graph run was planned"
