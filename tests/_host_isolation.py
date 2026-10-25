@@ -15,6 +15,7 @@ this module to guarantee it:
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import re
 import socket
@@ -29,6 +30,13 @@ PORT_APP = "cliTest"
 _PORT_CHECK = Path.home() / ".claude" / "scripts" / "port_check.py"
 
 TEST_LABEL_PREFIX = "ai.smartmemory.test."
+
+log = logging.getLogger(__name__)
+
+# Every Popen this pytest process started (tracking_popen_init). A listener is this
+# session's to signal only when it is one of these and still unreaped: an unreaped child's
+# pid cannot be reused, so pid alone identifies it. Port numbers prove nothing.
+_SESSION_SPAWNED: list = []
 
 SHIM_BODY = """#!/bin/sh
 # CLI-TEST-HOST-ISOLATION-1: tests never reach the real launchd. Every call is logged;
@@ -65,8 +73,16 @@ class HostIsolationViolation(OSError):
     """A test tried to bind a real daemon port."""
 
 
+class RegistryToolError(RuntimeError):
+    """The registry tool is installed but could not run (launch failure or timeout)."""
+
+
 def _port_check(*args: str) -> int | None:
-    """Run the registry tool. None when it is absent (CI), else its exit code."""
+    """Run the registry tool. None only when it is absent (CI, documented quiet skip).
+
+    An installed tool that fails to launch or times out is not absent: it raises
+    RegistryToolError so the caller cannot proceed as if nothing were reserved.
+    """
     if not _PORT_CHECK.is_file():
         return None
     try:
@@ -75,8 +91,10 @@ def _port_check(*args: str) -> int | None:
             capture_output=True,
             timeout=30,
         ).returncode
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RegistryToolError(
+            f"registry tool {_PORT_CHECK} failed on {' '.join(args)}: {exc!r}"
+        ) from exc
 
 
 def _free_port() -> int:
@@ -94,7 +112,13 @@ def reserve_test_port() -> tuple[int, bool]:
         port = _free_port()
         if port in REAL_DAEMON_PORTS:
             continue
-        code = _port_check(str(port), "--reserve", PORT_APP)
+        try:
+            code = _port_check(str(port), "--reserve", PORT_APP)
+        except RegistryToolError as exc:
+            log.warning("test port %s was not reserved in ~/.ports: %s", port, exc)
+            raise RuntimeError(
+                f"test port {port} cannot be reserved: the registry tool is installed but failed"
+            ) from exc
         if code is None:
             return port, False
         if code == 0:
@@ -102,12 +126,37 @@ def reserve_test_port() -> tuple[int, bool]:
     raise RuntimeError("no free test port could be reserved in ~/.ports")
 
 
-def release_test_port(port: int, registered: bool) -> list[str]:
-    """Release the registration and stop anything still listening. Returns problems."""
+def owned_pids(procs: list | None = None) -> set[int]:
+    """Pids of still-running (unreaped) processes this session started."""
+    pool = _SESSION_SPAWNED if procs is None else procs
+    return {p.pid for p in pool if getattr(p, "pid", None) and p.poll() is None}
+
+
+def release_test_port(
+    port: int, registered: bool, owned: set[int] | None = None
+) -> list[str]:
+    """Release the registration and stop what this session left listening. Returns problems.
+
+    Only a pid in ``owned`` (default: owned_pids()) is signalled. Any other listener may be
+    an unrelated process that took the port after _free_port() closed it, so it is reported
+    and left alone.
+    """
     problems: list[str] = []
-    if registered and _port_check("--release", str(port), "--app", PORT_APP) != 0:
-        problems.append(f"port {port} was not released from ~/.ports ({PORT_APP})")
+    if registered:
+        try:
+            code = _port_check("--release", str(port), "--app", PORT_APP)
+        except RegistryToolError as exc:
+            log.warning("test port %s was not released from ~/.ports: %s", port, exc)
+            code = None
+        if code != 0:
+            problems.append(f"port {port} was not released from ~/.ports ({PORT_APP})")
+    mine = owned_pids() if owned is None else owned
     for pid in listener_pids(port):
+        if pid not in mine:
+            problems.append(
+                f"pid {pid} is listening on test port {port} but this session did not start it: not signalled"
+            )
+            continue
         problems.append(f"pid {pid} was still listening on test port {port}")
         try:
             os.kill(pid, 15)
@@ -175,6 +224,8 @@ def tracking_popen_init(spawned: list, shim: Path):
             args = [str(shim), *args[1:]]
         real_init(self, args, *rest, **kwargs)
         spawned.append(self)
+        _SESSION_SPAWNED[:] = [p for p in _SESSION_SPAWNED if p.poll() is None]
+        _SESSION_SPAWNED.append(self)
 
     return init
 
