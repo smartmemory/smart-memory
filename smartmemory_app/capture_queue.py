@@ -490,9 +490,9 @@ def requeue_dead_hooks(
     """Move hook ``dead/`` records back to ``queue/`` with a fresh attempt count.
 
     Returns (action, file name, detail). ``requeued`` keeps ``queued_ns`` so the job takes its
-    old place in its session's order. ``skipped`` covers a ``spill-*`` file (a malformed spill
-    envelope, not a job), a record with no known phase, a payload that is gone, and a name that
-    is already in queue/ or running/. ``unknown`` is a requested name not in dead/. ``names``
+    old place in its session's order. ``skipped`` covers a raw ``spill-*`` file (a malformed spill
+    envelope, not a job; an adopted spill job requeues like any other), a record with no known
+    phase, a payload that is gone, and a name that is already in queue/ or running/. ``unknown`` is a requested name not in dead/. ``names``
     limits the move (file names, ``.json`` optional).
     """
     root = hook_queue_dir(root)
@@ -508,13 +508,26 @@ def requeue_dead_hooks(
         if path is None:
             out.append(("unknown", name, "not in dead/"))
             continue
-        if name.startswith("spill-"):
-            out.append(("skipped", name, "malformed spill file, not a job record"))
-            continue
+        is_spill = name.startswith("spill-")
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            out.append(("skipped", name, f"unreadable record: {exc}"))
+            detail = (
+                "malformed spill file, not a job record"
+                if is_spill
+                else f"unreadable record: {exc}"
+            )
+            out.append(("skipped", name, detail))
+            continue
+        # ``spill-`` is also the name of an adopted spill job (``_adopt_one``), a real job record
+        # that carries ``spill`` and ``payload_path``; only a raw envelope dead-lettered by
+        # ``_dead_letter_spill`` lacks them.
+        if is_spill and not (
+            isinstance(record, dict)
+            and isinstance(record.get("spill"), str)
+            and record.get("payload_path")
+        ):
+            out.append(("skipped", name, "malformed spill file, not a job record"))
             continue
         if not isinstance(record, dict) or record.get("phase") not in HOOK_PHASES:
             out.append(("skipped", name, "record has no known phase"))

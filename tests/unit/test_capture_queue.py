@@ -281,3 +281,51 @@ def test_requeue_hooks_table(capsys):
         False,
         False,
     )
+
+
+def test_requeue_adopted_spill_jobs_table(capsys):
+    root = queue.hook_queue_dir()
+    spill = queue.hook_spill_dir(root)
+    spill.mkdir(parents=True, exist_ok=True)
+    stamps = ["20261025T100001000000Z", "20261025T100002000000Z"]
+    for stamp in stamps:
+        envelope = {"v": 1, "phase": "observe", "payload": {"session_id": "s1"}}
+        (spill / f"{stamp}-7-observe.json").write_text(json.dumps(envelope))
+    assert queue.adopt_spill(root) == 2
+    for job in queue.hook_jobs(root):  # a real claim, then attempts exhausted
+        claimed = queue.claim_hook_job(root, job)
+        assert queue.fail_hook_job(root, claimed, "down", max_attempts=1) == "dead"
+    adopted = [f"spill-{stamp}-7.observe.json" for stamp in stamps]
+    # raw envelopes dead-lettered by _dead_letter_spill: one whose name looks adopted
+    raw = {"v": 1, "phase": "observe", "payload": {}}
+    lookalike = root / "dead" / "spill-20261025T100003000000Z-8.observe.json"
+    lookalike.write_text(json.dumps(raw))
+    (root / "dead" / "spill-20261025T100004000000Z-9-observe.json").write_text("{")
+    malformed = [
+        ("skipped", "spill-20261025T100003000000Z-8.observe.json"),
+        ("skipped", "spill-20261025T100004000000Z-9-observe.json"),
+    ]
+    rows = [
+        # names, expected (action, name) list, queue after, dead after
+        ([adopted[1]], [("requeued", adopted[1])], [adopted[1]], 3),
+        (None, [("requeued", adopted[0])] + malformed, adopted, 2),
+    ]
+    got = []
+    for names, expected, queued, dead in rows:
+        capsys.readouterr()
+        queue.run_requeue_dead_hooks(names, False)
+        lines = capsys.readouterr().out.splitlines()[:-1]
+        got.append(
+            (
+                [tuple(ln.split(":")[0].split()) for ln in lines] == expected,
+                sorted(p.name for p in (root / "queue").glob("*.json")) == queued,
+                len(list((root / "dead").glob("*.json"))) == dead,
+            )
+        )
+    assert got == [(True, True, True)] * len(rows)
+    record = json.loads((root / "queue" / adopted[0]).read_text())
+    assert (record["queued_ns"], "attempts" in record, "last_error" in record) == (
+        queue._spill_ns(stamps[0]),
+        False,
+        False,
+    )
