@@ -1102,6 +1102,11 @@ def _remote_login(api_key: str | None, api_url: str | None = None) -> str:
         mode="remote", api_url=api_url, api_key_set=True, team_id=team_id
     )
     save_config(cfg)
+    # HOOK-WRITE-QUEUE-1: no daemon in remote mode, so the write hooks start the
+    # remote drainer (`smartmemory lifecycle drain-hooks`) for their queued jobs.
+    from smartmemory_app.hook_consumer import set_remote_drain
+
+    set_remote_drain(True)
     return team_id
 
 
