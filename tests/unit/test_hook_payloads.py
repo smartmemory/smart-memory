@@ -53,6 +53,14 @@ def wait_for(predicate):
         time.sleep(0.02)
 
 
+def queued(hook_stub, script):
+    """The one queue record a write hook published, and its payload bytes (HOOK-WRITE-QUEUE-1)."""
+    queue = hook_stub / "data/hook-queue"
+    (record_path,) = (queue / "queue").glob(f"*.{Path(script).stem}.json")
+    record = json.loads(record_path.read_text())
+    return record, Path(record["payload_path"]).read_bytes()
+
+
 @pytest.mark.parametrize("script", ASYNC_HOOKS)
 @pytest.mark.parametrize("size", [32, 200_000])
 @pytest.mark.parametrize("bash", BASHES)
@@ -66,11 +74,17 @@ def test_async_hook_preserves_exact_payload(script, size, bash, hook_stub):
         check=False,
     )
     assert result.returncode == 0
+    record, queued_bytes = queued(hook_stub, script)
+    assert queued_bytes == payload
+    assert record["phase"] == Path(script).stem
     wait_for(lambda: (hook_stub / "done").exists())
-    assert (hook_stub / "output").read_bytes() == payload
-    assert (hook_stub / "args").read_text() == f"lifecycle {Path(script).stem}\n"
+    queue = hook_stub / "data/hook-queue"
+    assert (hook_stub / "args").read_text() == f"lifecycle drain-hooks --dir {queue}\n"
+    assert (
+        hook_stub / "output"
+    ).read_bytes() == b""  # the drainer reads the queue, not stdin
     assert "stub diagnostic" in (hook_stub / "data/hooks.log").read_text()
-    wait_for(lambda: not list((hook_stub / "data/tmp").glob("*")))
+    assert not list((queue / "queue").glob(".*.tmp"))
 
 
 @pytest.mark.parametrize("script", ASYNC_HOOKS)
@@ -93,45 +107,34 @@ def test_async_hook_returns_before_slow_failing_cli(
         assert result.returncode == 0
         assert elapsed < 2
         assert not (hook_stub / "done").exists()
+        assert queued(hook_stub, script)[0]["session_id"] == "slow"
     finally:
         wait_for(lambda: (hook_stub / "done").exists())
-        wait_for(lambda: not list((hook_stub / "data/tmp").glob("*")))
+    failures = hook_stub / "home/.smartmemory/hook-failures.tsv"
+    wait_for(failures.exists)
+    assert failures.read_text().startswith("drain-hooks\t1\t")
 
 
 @pytest.mark.parametrize("script", ASYNC_HOOKS)
 @pytest.mark.parametrize("bash", BASHES)
-def test_async_hook_purges_only_stale_payloads(script, bash, hook_stub):
-    temp_dir = hook_stub / "data/tmp"
-    temp_dir.mkdir(parents=True)
-    stale_files = [
-        temp_dir / f"{phase}.ABC123" for phase in ("observe", "learn", "distill")
-    ]
-    unrelated = temp_dir / "unrelated.ABC123"
-    wrong_suffix = temp_dir / "observe.ABC1234"
-    fresh = temp_dir / "learn.FRESH1"
-    for path in (*stale_files, unrelated, wrong_suffix, fresh):
-        path.write_text("private payload")
-    old = time.time() - 2 * 60 * 60
-    for path in (*stale_files, unrelated, wrong_suffix):
-        os.utime(path, (old, old))
-
+def test_async_hook_keeps_payloads_only_in_the_queue(script, bash, hook_stub):
+    """The write hooks no longer stage payloads in data/tmp; they write only the queue and hooks.log."""
     result = subprocess.run(
         [str(bash), str(HOOKS_DIR / script)],
-        input=b'{"session_id": "purge"}\n',
+        input=b'{"session_id": "where"}\n',
         capture_output=True,
         timeout=10,
         check=False,
     )
     assert result.returncode == 0
     wait_for(lambda: (hook_stub / "done").exists())
-    wait_for(
-        lambda: sorted(temp_dir.iterdir()) == sorted((unrelated, wrong_suffix, fresh))
-    )
-    assert all(not path.exists() for path in stale_files)
-    assert (
-        "WARNING: purged 3 stale lifecycle hook payload file(s)"
-        in (hook_stub / "data/hooks.log").read_text()
-    )
+    written = {
+        path.relative_to(hook_stub / "data").parts[0]
+        for path in (hook_stub / "data").rglob("*")
+        if path.is_file()
+    }
+    assert written <= {"hook-queue", "hooks.log"}
+    assert not (hook_stub / "data/tmp").exists()
 
 
 @pytest.mark.parametrize("script", ["orient.sh", "recall.sh", "persist.sh"])

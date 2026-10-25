@@ -273,13 +273,23 @@ def test_hook_script_logs_stderr_and_exits_zero(
         timeout=5,
     )
     assert result.returncode == 0
+    # HOOK-WRITE-QUEUE-1: the write hooks enqueue, then start `lifecycle drain-hooks`.
+    marker = (
+        "failure-drain-hooks"
+        if phase in ("observe", "learn", "distill")
+        else f"failure-{phase}"
+    )
+
+    def log_text():  # the write hooks create hooks.log only when something is logged
+        path = log_dir / "hooks.log"
+        return path.read_text() if path.exists() else ""
 
     def wait_for_log_count(expected):
         deadline = time.monotonic() + 5
-        while (log_dir / "hooks.log").read_text().count(f"failure-{phase}") < expected:
+        while log_text().count(marker) < expected:
             assert time.monotonic() < deadline, "Background hook did not log failure"
             time.sleep(0.02)
-        assert (log_dir / "hooks.log").read_text().count(f"failure-{phase}") == expected
+        assert log_text().count(marker) == expected
 
     wait_for_log_count(1)
     again = subprocess.run(

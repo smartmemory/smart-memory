@@ -2639,77 +2639,90 @@ def lifecycle_recall() -> None:
     _run_hook_with_deadline("lifecycle recall", _recall_work)
 
 
+def run_lifecycle_phase(
+    phase: str,
+    body: dict,
+    *,
+    strict: bool = False,
+    workspace_id: str | None = None,
+    user_turn: str | None = None,
+) -> None:
+    """Run one hook write phase: warm daemon first (local mode), else in-process.
+
+    The CLI commands below and the hook queue drainer (HOOK-WRITE-QUEUE-1,
+    ``capture_worker.run_hook_job``) both come through here, so a queued write
+    runs exactly the code a direct ``smartmemory lifecycle <phase>`` runs.
+    """
+    from smartmemory_app.lifecycle import (
+        STRICT_KEY,
+        USER_TURN_KEY,
+        WORKSPACE_KEY,
+        MemoryLifecycle,
+        run_phase,
+    )
+
+    request = dict(body)
+    if strict:
+        request[STRICT_KEY] = True
+    if workspace_id:
+        request[WORKSPACE_KEY] = workspace_id
+    if user_turn is not None:
+        request[USER_TURN_KEY] = user_turn
+    if _lifecycle_request(f"/lifecycle/{phase}", request) is not None:
+        return
+
+    from smartmemory_app.lifecycle_config import LifecycleConfig
+
+    lc = MemoryLifecycle(
+        body.get("session_id", "unknown"),
+        LifecycleConfig.from_config(_load_lifecycle_toml()),
+    )
+    run_phase(lc, phase, request)
+
+
 @lifecycle_group.command("observe")
 def lifecycle_observe() -> None:
     """Observe phase: capture tool call."""
     body = _read_lifecycle_payload("observe")
-    if body is None:
-        return
-
-    if _lifecycle_request("/lifecycle/observe", body) is not None:
-        return
-
-    session_id = body.get("session_id", "unknown")
-
-    from smartmemory_app.lifecycle import MemoryLifecycle
-    from smartmemory_app.lifecycle_config import LifecycleConfig
-
-    lc = MemoryLifecycle(
-        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-    )
-    lc.observe(
-        tool_name=body.get("tool_name", "unknown"),
-        tool_input=body.get("tool_input", {}),
-        tool_result=_as_text(body.get("tool_response")),
-        transcript_path=body.get("transcript_path"),
-        cwd=body.get("cwd"),
-    )
+    if body is not None:
+        run_lifecycle_phase("observe", body)
 
 
 @lifecycle_group.command("distill")
 def lifecycle_distill() -> None:
     """Distill phase: pair response with stored prompt."""
     body = _read_lifecycle_payload("distill")
-    if body is None:
-        return
-
-    if _lifecycle_request("/lifecycle/distill", body) is not None:
-        return
-
-    session_id = body.get("session_id", "unknown")
-
-    from smartmemory_app.lifecycle import MemoryLifecycle
-    from smartmemory_app.lifecycle_config import LifecycleConfig
-
-    lc = MemoryLifecycle(
-        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-    )
-    lc.distill(response=body.get("last_assistant_message", ""), cwd=body.get("cwd"))
+    if body is not None:
+        run_lifecycle_phase("distill", body)
 
 
 @lifecycle_group.command("learn")
 def lifecycle_learn() -> None:
     """Learn phase: capture error pattern."""
     body = _read_lifecycle_payload("learn")
-    if body is None:
-        return
+    if body is not None:
+        run_lifecycle_phase("learn", body)
 
-    if _lifecycle_request("/lifecycle/learn", body) is not None:
-        return
 
-    session_id = body.get("session_id", "unknown")
+@lifecycle_group.command("drain-hooks")
+@click.option(
+    "--dir",
+    "queue_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Hook queue directory (default <data dir>/hook-queue).",
+)
+def lifecycle_drain_hooks(queue_dir: str | None) -> None:
+    """Write queued observe/learn/distill hook payloads, then exit when idle.
 
-    from smartmemory_app.lifecycle import MemoryLifecycle
-    from smartmemory_app.lifecycle_config import LifecycleConfig
+    Started by the hooks themselves when no drainer is alive (HOOK-WRITE-QUEUE-1).
+    Prints the queue counts it leaves behind.
+    """
+    from smartmemory_app.capture_queue import hook_counts
+    from smartmemory_app.capture_worker import run_hooks
 
-    lc = MemoryLifecycle(
-        session_id, LifecycleConfig.from_config(_load_lifecycle_toml())
-    )
-    lc.learn(
-        tool_name=body.get("tool_name", "unknown"),
-        error=_as_text(body.get("error") or body.get("tool_response")),
-        cwd=body.get("cwd"),
-    )
+    run_hooks(queue_dir)
+    click.echo(json.dumps(hook_counts(queue_dir)))
 
 
 @lifecycle_group.command("persist")

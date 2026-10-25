@@ -298,8 +298,15 @@ class MemoryLifecycle:
         tool_result: str,
         transcript_path: str | None = None,
         cwd: str | None = None,
+        *,
+        workspace_id: str | None = None,
+        strict: bool = False,
     ) -> None:
         """Phase 3: Capture tool call as observation. Async via storage.ingest().
+
+        ``workspace_id`` is the pin the hook saw (HOOK-WRITE-QUEUE-1: the queue
+        drainer serves every session, so its own env is not the job's). ``strict``
+        re-raises a failed episodic write so the queue retries it.
 
         Augmented (CORE-CODE-PROVENANCE-1 Phase 2a): for Edit/Write/MultiEdit, ALSO
         persist full-payload code-authorship evidence (tier-4, hidden) anchored to
@@ -323,7 +330,7 @@ class MemoryLifecycle:
                 text,
                 memory_type="episodic",
                 origin="hook:observe",
-                properties={"workspace_id": derive_workspace_id(cwd)},
+                properties={"workspace_id": workspace_id or derive_workspace_id(cwd)},
             )
             if isinstance(receipt, dict) and receipt.get("status") == "held":
                 log.warning("Observation held: %s", receipt.get("reason"))
@@ -331,6 +338,9 @@ class MemoryLifecycle:
                 self._observation_count += 1
                 self._save_state()
         except Exception as e:
+            if strict:
+                log.warning("Observe ingest failed; the queued job will retry: %s", e)
+                raise
             log.warning("Observe ingest failed; tool observation lost: %s", e)
 
         # CORE-CODE-PROVENANCE-1 Phase 2a — durable code-authorship evidence, in its
@@ -375,17 +385,30 @@ class MemoryLifecycle:
                 "Provenance persist failed; code-authorship evidence lost: %s", e
             )
 
-    def distill(self, response: str, cwd: str | None = None) -> dict | None:
+    def distill(
+        self,
+        response: str,
+        cwd: str | None = None,
+        *,
+        workspace_id: str | None = None,
+        user_turn: str | None = None,
+        strict: bool = False,
+    ) -> dict | None:
         """Phase 4: Pair assistant response with stored prompt, save turn pair.
 
-        Called by Stop hook with last_assistant_message.
+        Called by Stop hook with last_assistant_message. A queued distill
+        (HOOK-WRITE-QUEUE-1) passes ``user_turn``, the prompt the session state
+        held when the Stop hook fired, and consumes the stored prompt only if it
+        is still that one: a later prompt captured meanwhile is kept.
         """
         if not self._config.enabled or not self._config.distill_turns:
             return
 
         self._last_assistant_message = response
 
-        user_turn = self._current_user_turn or ""
+        queued = user_turn is not None
+        if not queued:
+            user_turn = self._current_user_turn or ""
         if not user_turn and not response:
             self._save_state()
             return
@@ -400,19 +423,31 @@ class MemoryLifecycle:
                 pair,
                 memory_type="pending",
                 origin="lifecycle:distill",
-                properties={"workspace_id": derive_workspace_id(cwd)},
+                properties={"workspace_id": workspace_id or derive_workspace_id(cwd)},
             )
             if isinstance(receipt, dict) and receipt.get("status") == "held":
                 log.warning("Turn pair held: %s", receipt.get("reason"))
                 return receipt
         except Exception as e:
+            if strict:
+                log.warning("Distill ingest failed; the queued job will retry: %s", e)
+                raise
             log.warning("Distill ingest failed; turn pair lost: %s", e)
 
         # Clear current turn (consumed)
-        self._current_user_turn = None
+        if not queued or (self._current_user_turn or "") == user_turn:
+            self._current_user_turn = None
         self._save_state()
 
-    def learn(self, tool_name: str, error: str, cwd: str | None = None) -> dict | None:
+    def learn(
+        self,
+        tool_name: str,
+        error: str,
+        cwd: str | None = None,
+        *,
+        workspace_id: str | None = None,
+        strict: bool = False,
+    ) -> dict | None:
         """Phase 5: Capture tool failure as episodic memory."""
         if not self._config.enabled or not self._config.learn_from_errors:
             return
@@ -426,12 +461,15 @@ class MemoryLifecycle:
                 text,
                 memory_type="episodic",
                 origin="hook:learn",
-                properties={"workspace_id": derive_workspace_id(cwd)},
+                properties={"workspace_id": workspace_id or derive_workspace_id(cwd)},
             )
             if isinstance(receipt, dict) and receipt.get("status") == "held":
                 log.warning("Error memory held: %s", receipt.get("reason"))
                 return receipt
         except Exception as e:
+            if strict:
+                log.warning("Learn ingest failed; the queued job will retry: %s", e)
+                raise
             log.warning("Learn ingest failed; error memory lost: %s", e)
 
     def persist(
@@ -661,3 +699,41 @@ class MemoryLifecycle:
             except OSError as exc:
                 log.warning("Failed to clean stale session state %s: %s", f, exc)
         return deleted
+
+
+# Queue job keys a drained hook payload carries to the CLI or daemon (HOOK-WRITE-QUEUE-1).
+# Namespaced so they can never collide with a Claude Code hook field.
+STRICT_KEY = "smartmemory_strict"
+WORKSPACE_KEY = "smartmemory_workspace_id"
+USER_TURN_KEY = "smartmemory_user_turn"
+
+
+def run_phase(lc: MemoryLifecycle, phase: str, body: dict) -> None:
+    """Map a hook payload onto a write phase: the one mapping the CLI and the daemon API share."""
+    common = {
+        "cwd": body.get("cwd"),
+        "workspace_id": body.get(WORKSPACE_KEY),
+        "strict": body.get(STRICT_KEY) is True,
+    }
+    if phase == "observe":
+        lc.observe(
+            tool_name=body.get("tool_name", "unknown"),
+            tool_input=body.get("tool_input", {}),
+            tool_result=as_text(body.get("tool_response")),
+            transcript_path=body.get("transcript_path"),
+            **common,
+        )
+    elif phase == "distill":
+        lc.distill(
+            response=body.get("last_assistant_message", ""),
+            user_turn=body.get(USER_TURN_KEY),
+            **common,
+        )
+    elif phase == "learn":
+        lc.learn(
+            tool_name=body.get("tool_name", "unknown"),
+            error=as_text(body.get("error") or body.get("tool_response")),
+            **common,
+        )
+    else:
+        raise ValueError(f"not a hook write phase: {phase}")
