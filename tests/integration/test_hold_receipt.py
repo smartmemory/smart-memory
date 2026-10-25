@@ -1,5 +1,7 @@
 """Held receipts through real core storage and the consumer boundary."""
 
+import os
+import socket
 from uuid import uuid4
 
 import pytest
@@ -7,12 +9,51 @@ from redis import Redis
 from smartmemory.pipeline import PipelineConfig
 from smartmemory.tools.factory import create_server_memory
 from smartmemory.utils.cache import NoOpCache
+from tests._shared_db_guard import SHARED_PORTS
+
+
+pytestmark = pytest.mark.live_db
+
+
+def _backend():
+    """The throwaway FalkorDB this run is pointed at, or a skip. Never the shared 9010 (test-backends.md)."""
+    for hosts, ports in (
+        ("FALKORDB_HOST", "FALKORDB_PORT"),
+        ("GRAPH_DB_HOST", "GRAPH_DB_PORT"),
+    ):
+        if os.environ.get(ports, "").strip():
+            host, port = (
+                os.environ.get(hosts, "").strip() or "localhost",
+                int(os.environ[ports]),
+            )
+            break
+    else:
+        pytest.skip(
+            "no throwaway FalkorDB: set FALKORDB_PORT to a registered test port (port_check.py --reserve-test)"
+        )
+    if port in SHARED_PORTS:
+        pytest.fail(
+            f"{host}:{port} is a shared local database; use a throwaway container"
+        )
+    try:
+        socket.create_connection((host, port), timeout=2).close()
+    except OSError:
+        pytest.skip(f"no FalkorDB listening on {host}:{port}")
+    return host, port
 
 
 @pytest.fixture
 def core(monkeypatch):
     name = f"test_core_hold_receipt_{uuid4().hex}"
-    redis = Redis(host="localhost", port=9010)
+    host, port = _backend()
+    for var, value in (
+        ("FALKORDB_HOST", host),
+        ("GRAPH_DB_HOST", host),
+        ("FALKORDB_PORT", str(port)),
+        ("GRAPH_DB_PORT", str(port)),
+    ):
+        monkeypatch.setenv(var, value)
+    redis = Redis(host=host, port=port)
     before = set(redis.execute_command("GRAPH.LIST"))
     cfg = PipelineConfig.graph_only(llm_enabled=False)
     cfg.extraction.entity_ruler.enabled = False

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytest_plugins = ["tests._shared_db_guard"]
+
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
 # Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
