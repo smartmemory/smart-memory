@@ -219,6 +219,9 @@ def consume(
                         return finished
                     wait(list(inflight), timeout=poll, return_when=FIRST_COMPLETED)
                     continue
+                queue.adopt_spill(
+                    root
+                )  # HOOK-SPILL-INTERIM-1's spilled payloads join the queue
                 pending = queue.hook_jobs(root)
                 busy = {job["session_id"] for job in inflight.values()}
                 now = time.time()
@@ -309,6 +312,14 @@ class DaemonConsumer:
     def start(self) -> "DaemonConsumer":
         set_remote_drain(False, self.root)
         counts = queue.hook_counts(self.root)
+        try:
+            counts["spill"] = sum(
+                1
+                for n in os.listdir(queue.hook_spill_dir(self.root))
+                if n.endswith(".json") and not n.startswith(".")
+            )
+        except FileNotFoundError:
+            counts["spill"] = 0
         log.info("Hook queue consumer starting on %s: %s", self.root, counts)
         self.thread.start()
         return self

@@ -38,6 +38,47 @@ def _record(root: Path, name: str, phase: str, session: str, n: str) -> None:
     (root / "queue" / f"{name}.{phase}.json").write_text(json.dumps(record) + "\n")
 
 
+def _spill(
+    root: Path, second: int, phase: str, session: str, n: str, body=None
+) -> Path:
+    """A HOOK-SPILL-INTERIM-1 spill file as the pre-queue hook writes it (its report's contract)."""
+    spill = capture_queue.hook_spill_dir(root)
+    spill.mkdir(exist_ok=True)
+    name = f"20261025T1000{second:02d}000000Z-{100 + second}-{phase}.json"
+    if body is None:
+        payload = {
+            "session_id": session,
+            "cwd": "/w",
+            "tool_name": "Bash",
+            "tool_input": {"n": n},
+        }
+        body = json.dumps(
+            {
+                "v": 1,
+                "phase": phase,
+                "ts": "2026-10-25T10:00:00.000000Z",
+                "pid": 1,
+                "payload": payload,
+            }
+        )
+    (spill / name).write_text(body + "\n")
+    return spill / name
+
+
+class _Warnings(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.lines: list[str] = []
+        logging.getLogger("smartmemory_app.capture_queue").addHandler(self)
+
+    def emit(self, record) -> None:
+        self.lines.append(record.getMessage())
+
+    def close(self) -> None:
+        logging.getLogger("smartmemory_app.capture_queue").removeHandler(self)
+        super().close()
+
+
 def _hook(env: dict, phase: str, n: str, **extra: str) -> None:
     payload = {
         "session_id": "test_hc_hook",
@@ -153,6 +194,82 @@ def hook_sheds_past_the_cap(root, env, writer):
     }
 
 
+def spill_is_adopted_and_drained(root, env, writer):
+    # Spilled payloads join the queue on start; each spill file is gone once queued.
+    _spill(root, 1, "observe", "s", "spill-1")
+    _spill(root, 2, "learn", "s", "spill-2")
+    _run_daemon(root, writer, lambda: len(writer.calls) == 2).stop()
+    return {
+        "calls": writer.calls,
+        "spill_left": os.listdir(capture_queue.hook_spill_dir(root)),
+    }
+
+
+def spill_keeps_time_order_with_queued_jobs(root, env, writer):
+    # A session's spilled and queued jobs run in arrival order (spill name ts vs record mtime).
+    _spill(root, 1, "observe", "a", "a1")
+    _record(root, "5000-1", "observe", "a", "a2")
+    middle = capture_queue._spill_ns("20261025T100002000000Z")
+    os.utime(root / "queue" / "5000-1.observe.json", ns=(middle, middle))
+    _spill(root, 3, "observe", "a", "a3")
+    _run_daemon(root, writer, lambda: len(writer.calls) == 3).stop()
+    return {"calls": writer.calls}
+
+
+def malformed_spill_is_dead_lettered_with_a_warning(root, env, writer):
+    warnings = _Warnings()
+    _spill(root, 1, "observe", "s", "", body="{not json")
+    (capture_queue.hook_spill_dir(root) / "stray.json").write_text("{}")
+    _spill(root, 2, "observe", "s", "good")
+    _run_daemon(root, writer, lambda: writer.calls == ["good"]).stop()
+    warnings.close()
+    return {
+        "calls": writer.calls,
+        "dead": sorted(os.listdir(root / "dead")),
+        "warned": sum("is malformed" in line for line in warnings.lines),
+    }
+
+
+def spill_tmp_file_is_ignored(root, env, writer):
+    tmp = capture_queue.hook_spill_dir(root) / ".tmp-77-observe"
+    _spill(root, 1, "observe", "s", "done")
+    tmp.write_text('{"v":1')
+    _run_daemon(root, writer, lambda: writer.calls == ["done"]).stop()
+    return {
+        "calls": writer.calls,
+        "spill_left": os.listdir(capture_queue.hook_spill_dir(root)),
+    }
+
+
+def spill_crash_between_adopt_and_delete_writes_once(root, env, writer):
+    # A consumer killed after queueing a spill file but before deleting it: the next start
+    # finds the job named after the file, deletes the file, and writes it once.
+    path = _spill(root, 1, "observe", "s", "once")
+    body = path.read_text()
+    capture_queue.adopt_spill(root)
+    path.write_text(body)  # the delete never happened
+    consumer = _run_daemon(root, writer, lambda: writer.calls == ["once"])
+    time.sleep(0.3)  # room for a second write, if the file were queued again
+    consumer.stop()
+    consumer_left = os.listdir(capture_queue.hook_spill_dir(root))
+    return {"calls": writer.calls, "spill_left": consumer_left}
+
+
+def spill_stays_when_the_queue_write_fails(root, env, writer):
+    # The spill file is deleted only after its job is written: a failed write keeps it.
+    path = _spill(root, 1, "observe", "s", "kept")
+    (root / "payloads").chmod(0o500)
+    try:
+        adopted = capture_queue.adopt_spill(root)
+    finally:
+        (root / "payloads").chmod(0o700)
+    kept = path.exists()
+    _run_daemon(root, writer, lambda: writer.calls == ["kept"]).stop()
+    return {"adopted": adopted, "kept": kept, "calls": writer.calls}
+
+
+ZERO = {"queue": 0, "running": 0, "dead": 0}
+
 ROWS = [
     (
         backlog_drains_on_start,
@@ -165,6 +282,29 @@ ROWS = [
     (
         hook_sheds_past_the_cap,
         {"calls": ["kept-1", "kept-2"], "shed_warning": True, "payloads_left": 0},
+    ),
+    (spill_is_adopted_and_drained, {"calls": ["spill-1", "spill-2"], "spill_left": []}),
+    (spill_keeps_time_order_with_queued_jobs, {"calls": ["a1", "a2", "a3"]}),
+    (
+        malformed_spill_is_dead_lettered_with_a_warning,
+        {
+            "calls": ["good"],
+            "dead": [
+                "spill-20261025T100001000000Z-101-observe.json",
+                "spill-stray.json",
+            ],
+            "warned": 2,
+            "_left": {"queue": 0, "running": 0, "dead": 2},
+        },
+    ),
+    (spill_tmp_file_is_ignored, {"calls": ["done"], "spill_left": [".tmp-77-observe"]}),
+    (
+        spill_stays_when_the_queue_write_fails,
+        {"adopted": 0, "kept": True, "calls": ["kept"]},
+    ),
+    (
+        spill_crash_between_adopt_and_delete_writes_once,
+        {"calls": ["once"], "spill_left": []},
     ),
 ]
 
@@ -189,6 +329,8 @@ def test_daemon_is_the_one_consumer(tmp_path, monkeypatch, caplog):
         with caplog.at_level(logging.WARNING):
             got = scenario(root, env, Writer())
         left = capture_queue.hook_counts(root)
-        if got != expected or left != {"queue": 0, "running": 0, "dead": 0}:
+        expected = dict(expected)
+        expected_left = expected.pop("_left", ZERO)
+        if got != expected or left != expected_left:
             failures.append((scenario.__name__, got, left))
     assert failures == []
