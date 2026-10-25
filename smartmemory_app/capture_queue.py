@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from filelock import FileLock, Timeout
@@ -711,6 +714,162 @@ def hook_counts(root: str | Path | None = None) -> dict[str, int]:
         name: sum(1 for _ in (root / name).glob("*.json"))
         for name in ("queue", "running", "dead")
     }
+
+
+# HOOK-SPILL-INTERIM-1 left the pre-queue hooks spilling over-cap payloads to
+# ``<data dir>/hook-spill/<UTC ts>-<pid>-<phase>.json`` (envelope
+# ``{"v":1,"phase","ts","pid","payload"}``, published by rename, ``.tmp-*`` while being
+# written). The consumer adopts them into this queue before each scan, so they get the
+# same per-session order, retry and dead-letter policy as hook jobs.
+
+_SPILL_NAME = re.compile(r"^(\d{8}T\d{12}Z)-(\d+)-(observe|learn|distill)\.json$")
+
+
+def hook_spill_dir(root: Path) -> Path:
+    """The spill folder sits next to ``hook-queue`` in the data dir (the spill hooks' rule)."""
+    return Path(root).parent / "hook-spill"
+
+
+def _write_durable(path: Path, text: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _spill_ns(stamp: str) -> int:
+    moment = datetime.strptime(stamp, "%Y%m%dT%H%M%S%fZ")
+    return calendar.timegm(moment.timetuple()) * 10**9 + moment.microsecond * 1000
+
+
+def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
+    log.warning(
+        "Hook spill file %s is malformed, moving it to %s/dead/spill-%s; its write is lost until requeued by hand: %s",
+        path.name,
+        root,
+        path.name,
+        error,
+    )
+    try:
+        path.rename(root / "dead" / f"spill-{path.name}")
+    except OSError as exc:
+        log.warning(
+            "Hook spill file %s not moved to dead/ (%s): %s", path.name, exc, error
+        )
+
+
+def adopt_spill(root: Path, spill_dir: Path | None = None) -> int:
+    """Move spill files into the queue in name (arrival) order. Returns files adopted.
+
+    A spill file is deleted only after its payload and queue record are fsynced, and
+    the job is named after the spill file, so a crash between the two leaves a record
+    that the next pass recognises: the spill file is then deleted, never queued twice.
+    """
+    spill_dir = Path(spill_dir) if spill_dir else hook_spill_dir(root)
+    try:
+        names = sorted(
+            n
+            for n in os.listdir(spill_dir)
+            if n.endswith(".json") and not n.startswith(".")
+        )
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        log.warning(
+            "Hook spill folder %s unreadable, spilled payloads wait: %s", spill_dir, exc
+        )
+        return 0
+    adopted = 0
+    for name in names:
+        path = spill_dir / name
+        match = _SPILL_NAME.match(name)
+        if match is None:
+            _dead_letter_spill(
+                root, path, "spill file name does not match <ts>-<pid>-<phase>.json"
+            )
+            continue
+        stamp, pid, phase = match.groups()
+        job_name = f"spill-{stamp}-{pid}.{phase}.json"
+        if any(
+            (root / sub / job_name).exists() for sub in ("queue", "running", "dead")
+        ):
+            path.unlink(missing_ok=True)  # adopted before a crash; its job is queued
+            continue
+        try:
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            _dead_letter_spill(root, path, f"unreadable spill file: {exc}")
+            continue
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("v") != 1
+            or envelope.get("phase") != phase
+            or "payload" not in envelope
+        ):
+            _dead_letter_spill(
+                root, path, "spill envelope is not v1 with this phase and a payload"
+            )
+            continue
+        payload = envelope["payload"]
+        body = payload if isinstance(payload, dict) else {}
+        session = body.get("session_id")
+        cwd = body.get("cwd")
+        payload_path = root / "payloads" / job_name
+        record = {
+            "v": 1,
+            "phase": phase,
+            "session_id": session if isinstance(session, str) and session else None,
+            "cwd": cwd if isinstance(cwd, str) else None,
+            "workspace_id": None,
+            "payload_path": str(payload_path),
+            "state_snapshot": None,
+            "queued_ns": _spill_ns(stamp),
+            "spill": name,
+        }
+        try:
+            _write_durable(payload_path, json.dumps(payload))
+            _write_durable(root / "queue" / job_name, json.dumps(record) + "\n")
+        except OSError as exc:
+            log.warning(
+                "Hook spill file %s not adopted, it stays in %s for the next pass: %s",
+                name,
+                spill_dir,
+                exc,
+            )
+            return adopted
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning(
+                "Hook spill file %s is queued as %s but was not deleted; if its job finishes first, "
+                "the next pass queues it a second time: %s",
+                name,
+                job_name,
+                exc,
+            )
+        adopted += 1
+        if phase == "distill":
+            log.warning(
+                "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none); "
+                "its response is stored unpaired with its prompt",
+                name,
+            )
+    if adopted:
+        log.info(
+            "Adopted %d hook spill file(s) from %s into the hook queue",
+            adopted,
+            spill_dir,
+        )
+    return adopted
 
 
 if __name__ == "__main__":
