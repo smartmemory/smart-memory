@@ -448,6 +448,19 @@ _HOOK_CONSUMER_STOP_S = 1.5
 _shutdown_requested = threading.Event()
 _hook_lifecycle_lock = threading.Lock()
 
+# The serving uvicorn server. Its SIGTERM/SIGINT handler (and ours, outside serve) sets
+# ``should_exit``, so the warmup guards read that flag directly: shutdown is seen the
+# moment the signal is handled, not on the stop watcher's next 50 ms tick
+# (DAEMON-WARMUP-SIGNAL-RACE-FU-1). Signal handlers stay flag-only, no lock is taken.
+_lifecycle_server = None
+
+
+def _shutdown_begun() -> bool:
+    """True once a stop request, SIGTERM or SIGINT has been handled for this lifecycle."""
+    return _shutdown_requested.is_set() or bool(
+        getattr(_lifecycle_server, "should_exit", False)
+    )
+
 
 def _request_shutdown() -> None:
     """Block hook sync and consumer start; waits out one already in progress."""
@@ -458,7 +471,7 @@ def _request_shutdown() -> None:
 def _sync_hooks() -> None:
     """Refresh installed hooks, warning explicitly when that upgrade is lost."""
     with _hook_lifecycle_lock:
-        if _shutdown_requested.is_set():
+        if _shutdown_begun():
             log.warning(
                 "Hook sync skipped, the daemon is shutting down: updated hook scripts were not installed"
             )
@@ -488,9 +501,10 @@ def _start_hook_consumer() -> None:
     with _hook_lifecycle_lock:
         if _hook_consumer is not None:
             return
-        if _shutdown_requested.is_set():
+        if _shutdown_begun():
             log.warning(
-                "Hook queue consumer not started, the daemon is shutting down; hook writes wait on disk for the next start"
+                "Hook queue consumer not started, the daemon is shutting down. "
+                "Hook writes wait on disk for the next start"
             )
             return
         try:
@@ -500,7 +514,7 @@ def _start_hook_consumer() -> None:
         except Exception as exc:
             reason = _safe_degraded_reason(exc)
             log.warning(
-                "Hook queue consumer did not start; hook writes wait on disk: %s",
+                "Hook queue consumer did not start, hook writes wait on disk: %s",
                 reason,
             )
             _startup_line(f"Warning: hook queue consumer did not start ({reason})")
@@ -519,16 +533,18 @@ def _stop_hook_consumer() -> None:
 def _start_background_warmup() -> threading.Thread:
     """Start model/backend warmup and publish only states actually observed."""
     # A warmup begins a new daemon lifecycle; main() starts it before any stop path exists.
+    global _lifecycle_server
+    _lifecycle_server = None
     _shutdown_requested.clear()
     _set_startup_state("warming")
 
     def run() -> None:
         try:
             backend_ok = _warm_backend()
-            if _shutdown_requested.is_set():
+            if _shutdown_begun():
                 log.warning(
                     "Shutdown requested during warmup: hooks not synced and hook queue consumer "
-                    "not started; hook writes wait on disk for the next start"
+                    "not started. Hook writes wait on disk for the next start"
                 )
                 return
             if backend_ok:
@@ -554,7 +570,7 @@ def _start_background_warmup() -> threading.Thread:
             _start_hook_consumer()
         else:
             log.warning(
-                "Hook queue consumer not started (backend not warm); hook writes wait on disk until a healthy start"
+                "Hook queue consumer not started (backend not warm), hook writes wait on disk until a healthy start"
             )
             _set_startup_state(
                 "degraded",
@@ -739,7 +755,8 @@ def _install_sigterm_handler(server, received: list[int]):
 
     uvicorn swaps in its own handler while it serves and restores this one after, then
     raises the captured signal again. Returns the previous handler, or None off the main
-    thread. The handler only sets flags (no locks): the stop watcher relays it.
+    thread. The handler only sets flags (no locks): the warmup guards read
+    ``should_exit`` directly and the stop watcher relays it to ``_shutdown_requested``.
     """
     if threading.current_thread() is not threading.main_thread():
         return None
@@ -767,6 +784,8 @@ def _run_until_stopped(server, data_path: Path, pid: int, cleanup) -> None:
                 _shutdown_requested.set()
                 return
 
+    global _lifecycle_server
+    _lifecycle_server = server  # before any handler can set should_exit on it
     previous = _install_sigterm_handler(server, received)
     watcher = threading.Thread(
         target=observe_stop, name="smartmemory-stop", daemon=True
