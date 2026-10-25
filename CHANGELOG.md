@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### HOOK-CAPTURE-NO-LLM-LANDED-TEST-FU-1 (2026-10-26)
+
+- test(capture): `tests/integration/test_hook_capture_no_llm.py` passes 5/5 under the isolated no-credential, outbound-TCP-denied, ports-pinned-to-1 run (HOOK-CAPTURE-NO-LLM-LANDED-TEST-FU-1). The 2.0 fixture writes under the store's own minted Lite workspace instead of an unrelated synthetic one (writes no longer raise `EffectScopeMismatch`). Both lines pin every backend to loopback port 1 in the fixture, stop counting those refused connects as LLM calls (any other TCP connect still counts and fails the row), and drain through `worker_entry.run_configured_worker` so `stage:enrich` boxes finish. No production change.
+
 ### HOOK-CAPTURE-NO-LLM-1 (2026-10-25)
 
 - fix(capture): transcript capture makes no LLM call by default. The capture worker builds its memory with core's costless profile (`PipelineConfig.costless()`: spaCy rules extraction and local enrichers, no deferred LLM extraction, supersession judge, grounding or evolution), whatever provider keys the environment holds, and session lessons (three Groq calls per session) are skipped with a WARNING and the existing `degradation` receipt. `SMARTMEMORY_CAPTURE_LLM=1` restores the previous Groq-pinned pipeline and lessons (rollback). `SMARTMEMORY_CAPTURE_OFFLINE=1` still selects Tier 1 and wins over the opt-in.

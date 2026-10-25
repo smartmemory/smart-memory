@@ -25,6 +25,20 @@ ENTITY_TEXT = (
 )
 
 
+# Every database backend is pinned to this dead loopback port, so optional non-LLM plumbing (Redis progress
+# streams, the ruler hot-reload) is refused at once and never reaches a live service. Only these connects are
+# not counted: nothing can listen on port 1, and no model is reachable there. Any other TCP connect is an
+# outbound call and is counted as an LLM entry point.
+DEAD_BACKEND = ("127.0.0.1", 1)
+BACKEND_ENV = (
+    "GRAPH_DB",
+    "FALKORDB",
+    "REDIS",
+    "CACHE_REDIS",
+    "MONGODB",
+)
+
+
 class LLMTrap(RuntimeError):
     """Raised by every trapped LLM entry point; the call is also recorded."""
 
@@ -46,6 +60,9 @@ def lite_env(tmp_path, monkeypatch):
     # An LLM route exists: the condition the fix must hold under.
     monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", "gsk_fake_hook_capture_no_llm")
+    for prefix in BACKEND_ENV:
+        monkeypatch.setenv(f"{prefix}_HOST", DEAD_BACKEND[0])
+        monkeypatch.setenv(f"{prefix}_PORT", str(DEAD_BACKEND[1]))
     for name in (
         "SMARTMEMORY_CAPTURE_OFFLINE",
         "SMARTMEMORY_CAPTURE_LLM",
@@ -98,12 +115,26 @@ def llm_calls(monkeypatch):
 
     def connect(sock, address):
         if sock.family in (socket.AF_INET, socket.AF_INET6):
+            if tuple(address[:2]) == DEAD_BACKEND:
+                raise ConnectionRefusedError(f"pinned dead backend {address}")
             calls.append(f"connect:{address}")
             raise LLMTrap(f"egress {address}")
         return real_connect(sock, address)
 
     monkeypatch.setattr(socket.socket, "connect", connect)
     return calls
+
+
+@pytest.fixture
+def lite_ws(lite_env):
+    """The store's own generated Lite workspace: the one the admission path owns and the writes must carry."""
+    from smartmemory.identity_switches import lite_owner_identity
+    from smartmemory_app.storage import get_memory
+
+    get_memory()  # creates memory.db; the identity mints into it
+    identity = lite_owner_identity(lite_env)
+    assert identity is not None, "precondition: the Lite identity switch must be ON"
+    return identity.workspace_id
 
 
 def _lifecycle():
@@ -113,32 +144,32 @@ def _lifecycle():
     return MemoryLifecycle("hcnl-session", LifecycleConfig())
 
 
-def _observe(tmp_path):
+def _observe(tmp_path, ws):
     _lifecycle().observe(
         tool_name="Bash",
         tool_input={"command": "kubectl apply -f redis.yaml"},
         tool_result=ENTITY_TEXT,
-        workspace_id="ws-hcnl",
+        workspace_id=ws,
         strict=True,
     )
 
 
-def _learn(tmp_path):
+def _learn(tmp_path, ws):
     _lifecycle().learn(
-        tool_name="Bash", error=ENTITY_TEXT, workspace_id="ws-hcnl", strict=True
+        tool_name="Bash", error=ENTITY_TEXT, workspace_id=ws, strict=True
     )
 
 
-def _distill(tmp_path):
+def _distill(tmp_path, ws):
     _lifecycle().distill(
         "Alice Johnson confirmed it runs in Berlin for Acme Corporation.",
-        workspace_id="ws-hcnl",
+        workspace_id=ws,
         user_turn=f"Who deployed Redis? {ENTITY_TEXT}",
         strict=True,
     )
 
 
-def _capture(tmp_path):
+def _capture(tmp_path, ws):
     from smartmemory_app.capture_worker import import_capture
 
     turns = [
@@ -176,7 +207,7 @@ def _capture(tmp_path):
     result = import_capture(
         {
             "transcript_path": str(path),
-            "workspace_id": "ws-hcnl",
+            "workspace_id": ws,
             "session_id": "hcnl-capture",
             "cwd": str(tmp_path),
         }
@@ -186,7 +217,7 @@ def _capture(tmp_path):
     assert result["chunks_ingested"] >= 1
 
 
-def _user_add(tmp_path):
+def _user_add(tmp_path, ws):
     from smartmemory_app import storage
 
     storage.ingest(ENTITY_TEXT, memory_type="semantic", origin="cli:add")
@@ -229,7 +260,7 @@ def _entity_edges(db: Path, origin: str) -> int:
     ("label", "origin", "write", "costless"), ROWS, ids=[row[0] for row in ROWS]
 )
 def test_internal_notes_make_no_llm_call(
-    label, origin, write, costless, lite_env, tmp_path, request
+    label, origin, write, costless, lite_env, lite_ws, tmp_path, request
 ):
     from smartmemory_app.storage import apply_runtime_config
     from smartmemory.utils.llm import llm_route_available
@@ -241,16 +272,17 @@ def test_internal_notes_make_no_llm_call(
     db = lite_env / "memory.db"
 
     if not costless:
-        write(tmp_path)
+        write(tmp_path, lite_ws)
         kinds = {kind for kind, _ in _box_kinds(db)}
         assert "extract" in kinds, f"control lost its deferred LLM extraction: {kinds}"
         return
 
     calls = request.getfixturevalue("llm_calls")
-    write(tmp_path)
-    from smartmemory.pipeline.work_graph.worker import run_worker
+    write(tmp_path, lite_ws)
+    # The wrapper's own worker entry: it passes core's v2 config, so v2 boxes (stage:enrich) are drained too.
+    from smartmemory_app.worker_entry import run_configured_worker
 
-    assert run_worker(lite_env, idle_exit=0.5, lease=30) == 0
+    assert run_configured_worker(lite_env, idle_exit=0.5, lease=30) == 0
     assert calls == [], f"{label}: LLM entry points reached: {calls}"
     boxes = _box_kinds(db)
     assert boxes, f"{label}: no work-graph run was planned"
