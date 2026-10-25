@@ -7,6 +7,8 @@ import pytest
 
 from tests import _host_isolation as host_isolation
 
+pytest_plugins = ["tests._shared_db_guard"]
+
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
 # Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
