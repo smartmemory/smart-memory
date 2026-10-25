@@ -15,6 +15,7 @@ import atexit
 import logging
 import os
 import re
+import signal
 import threading
 import time
 import webbrowser
@@ -436,18 +437,42 @@ def _warm_backend() -> bool:
     return backend_ok
 
 
+# DAEMON-WARMUP-SHUTDOWN-1: launchd sends SIGKILL 5 s after SIGTERM, so the request
+# drain and the hook consumer drain are bounded to leave the store close room inside it.
+_GRACEFUL_SHUTDOWN_S = 1.5
+_HOOK_CONSUMER_STOP_S = 1.5
+
+# Set once SIGTERM or a stop request is seen. Warmup checks it, under the lock, before it
+# publishes hooks or starts the consumer, and shutdown sets it under the same lock, so
+# neither can happen after shutdown began.
+_shutdown_requested = threading.Event()
+_hook_lifecycle_lock = threading.Lock()
+
+
+def _request_shutdown() -> None:
+    """Block hook sync and consumer start; waits out one already in progress."""
+    with _hook_lifecycle_lock:
+        _shutdown_requested.set()
+
+
 def _sync_hooks() -> None:
     """Refresh installed hooks, warning explicitly when that upgrade is lost."""
-    try:
-        from smartmemory_app.setup import _copy_hooks
+    with _hook_lifecycle_lock:
+        if _shutdown_requested.is_set():
+            log.warning(
+                "Hook sync skipped, the daemon is shutting down: updated hook scripts were not installed"
+            )
+            return
+        try:
+            from smartmemory_app.setup import _copy_hooks
 
-        _copy_hooks()
-    except Exception as exc:
-        reason = _safe_degraded_reason(exc)
-        log.warning(
-            "Hook sync failed, updated hook scripts were not installed: %s", reason
-        )
-        _startup_line(f"Warning: hook sync failed ({reason})")
+            _copy_hooks()
+        except Exception as exc:
+            reason = _safe_degraded_reason(exc)
+            log.warning(
+                "Hook sync failed, updated hook scripts were not installed: %s", reason
+            )
+            _startup_line(f"Warning: hook sync failed ({reason})")
 
 
 _hook_consumer = None
@@ -460,32 +485,52 @@ def _start_hook_consumer() -> None:
     With the backend down the jobs wait on disk and drain on the next start.
     """
     global _hook_consumer
-    if _hook_consumer is not None:
-        return
-    try:
-        from smartmemory_app.hook_consumer import start_in_daemon
+    with _hook_lifecycle_lock:
+        if _hook_consumer is not None:
+            return
+        if _shutdown_requested.is_set():
+            log.warning(
+                "Hook queue consumer not started, the daemon is shutting down; hook writes wait on disk for the next start"
+            )
+            return
+        try:
+            from smartmemory_app.hook_consumer import start_in_daemon
 
-        _hook_consumer = start_in_daemon()
-    except Exception as exc:
-        reason = _safe_degraded_reason(exc)
-        log.warning(
-            "Hook queue consumer did not start; hook writes wait on disk: %s", reason
-        )
-        _startup_line(f"Warning: hook queue consumer did not start ({reason})")
+            _hook_consumer = start_in_daemon()
+        except Exception as exc:
+            reason = _safe_degraded_reason(exc)
+            log.warning(
+                "Hook queue consumer did not start; hook writes wait on disk: %s",
+                reason,
+            )
+            _startup_line(f"Warning: hook queue consumer did not start ({reason})")
 
 
 def _stop_hook_consumer() -> None:
-    if _hook_consumer is not None:
-        _hook_consumer.stop()
+    """Stop the consumer; jobs still running after the bound are retried on the next start."""
+    global _hook_consumer
+    _request_shutdown()
+    with _hook_lifecycle_lock:
+        consumer, _hook_consumer = _hook_consumer, None
+    if consumer is not None:
+        consumer.stop(timeout=_HOOK_CONSUMER_STOP_S)
 
 
 def _start_background_warmup() -> threading.Thread:
     """Start model/backend warmup and publish only states actually observed."""
+    # A warmup begins a new daemon lifecycle; main() starts it before any stop path exists.
+    _shutdown_requested.clear()
     _set_startup_state("warming")
 
     def run() -> None:
         try:
             backend_ok = _warm_backend()
+            if _shutdown_requested.is_set():
+                log.warning(
+                    "Shutdown requested during warmup: hooks not synced and hook queue consumer "
+                    "not started; hook writes wait on disk for the next start"
+                )
+                return
             if backend_ok:
                 from smartmemory_app.work_graph import show_reextract_offer
 
@@ -624,9 +669,9 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
             pid_file.unlink(missing_ok=True)
         cleaned = True
 
-    # atexit handles cleanup on normal exit AND uvicorn's graceful SIGTERM shutdown.
-    # Do NOT install a custom SIGTERM handler — uvicorn needs SIGTERM to trigger
-    # its graceful shutdown (drain active requests, then exit → atexit fires).
+    # _run_until_stopped runs _cleanup after SIGTERM and stop requests; atexit covers
+    # other normal exits. uvicorn re-raises SIGTERM once it has drained, which with the
+    # default handler killed the process before any cleanup (DAEMON-WARMUP-SHUTDOWN-1).
     atexit.register(_cleanup)
 
     # Start the sink drain loop as a background daemon thread. It binds no
@@ -655,23 +700,51 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
 
     server = uvicorn.Server(
         uvicorn.Config(
-            app, host="127.0.0.1", port=port, log_level="warning", log_config=None
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            log_config=None,
+            timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_S,
         )
     )
     _run_until_stopped(server, data_path, os.getpid(), _cleanup)
+
+
+def _install_sigterm_handler(server, received: list[int]):
+    """Catch the SIGTERM uvicorn re-raises after draining, so cleanup runs first.
+
+    uvicorn swaps in its own handler while it serves and restores this one after, then
+    raises the captured signal again. Returns the previous handler, or None off the main
+    thread. The handler only sets flags (no locks): the stop watcher relays it.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return None
+
+    def on_sigterm(signum, frame):
+        received.append(signum)
+        server.should_exit = True
+
+    return signal.signal(signal.SIGTERM, on_sigterm)
 
 
 def _run_until_stopped(server, data_path: Path, pid: int, cleanup) -> None:
     """Observe PID-specific local IPC and let uvicorn drain before closing stores."""
     request = data_path / f".daemon.stop-{pid}"
     finished = threading.Event()
+    received: list[int] = []
 
     def observe_stop():
         while not finished.wait(0.05):
             if request.exists():
                 server.should_exit = True
+            if getattr(server, "should_exit", False):
+                # SIGTERM (uvicorn's handler) or a stop request: warmup must not
+                # publish hooks or start the consumer from here on.
+                _shutdown_requested.set()
                 return
 
+    previous = _install_sigterm_handler(server, received)
     watcher = threading.Thread(
         target=observe_stop, name="smartmemory-stop", daemon=True
     )
@@ -681,8 +754,15 @@ def _run_until_stopped(server, data_path: Path, pid: int, cleanup) -> None:
     finally:
         finished.set()
         watcher.join(timeout=1)
-        cleanup()
-        request.unlink(missing_ok=True)
+        try:
+            cleanup()
+            request.unlink(missing_ok=True)
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+                if received:
+                    # Exit the way the caller asked, now that the stores are closed.
+                    signal.raise_signal(signal.SIGTERM)
 
 
 if __name__ == "__main__":
