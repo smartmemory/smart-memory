@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### HOOK-WRITE-QUEUE-SPILL-REQUEUE-FU-1 (2026-10-26)
+
+- fix(hooks): `sm lifecycle requeue-hooks` now requeues an adopted spill job that reached `dead/` (HOOK-WRITE-QUEUE-SPILL-REQUEUE-FU-1). It skipped every file named `spill-*`, but `_adopt_one` names each valid adopted job `spill-<stamp>-<pid>.<phase>.json`, so those jobs stayed dead after the store came back, through both `--name` and bulk requeue (the command reported "skipped" and exited 0). Requeue now reads the record: a `spill-*` file with a `spill` field and a `payload_path` is a job and requeues like any other (attempt count and error reset, `queued_ns` kept so its order holds); a raw envelope dead-lettered as malformed is still skipped. Table test `tests/unit/test_capture_queue.py::test_requeue_adopted_spill_jobs_table`.
+
 ### DAEMON-9014-CRASH-DIAG-1 + CLI-TEST-HOST-ISOLATION-1 port to 2.0 (2026-10-26, HOOK-WRITE-QUEUE-1 daemon-exit diagnosis)
 
 - `sm stop` (and anything else that stops the daemon or worker) no longer switches off a background job it did not install (DAEMON-9014-CRASH-DIAG-1). macOS keys background jobs by user, not by home folder, so a process running with a different HOME (a test suite, a second install) saw your real `ai.smartmemory.daemon` job and booted it out; that is how the local daemon died twice on 2026-10-22 during test runs. A job now counts as ours only when `launchctl print` shows it loaded from this HOME's `~/Library/LaunchAgents/<label>.plist` (symlinks resolved); any other job is left running with one WARNING naming both paths. Covers `stop_daemon`, the worker stop and the legacy-worker retirement. Table test `tests/unit/test_launchd_ownership.py`.
