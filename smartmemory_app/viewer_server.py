@@ -95,6 +95,32 @@ def _capabilities(mode: str) -> dict[str, bool]:
     }
 
 
+def _memory_count(backend) -> int:
+    """Count non-Version nodes for /health without loading the graph.
+
+    DAEMON-HEALTH-STARVE-1: this used to ``serialize()`` the whole store (every node
+    and edge, JSON-decoded) under the viewer's read/write lock on every probe, which
+    on a 1.7 GB store took longer than any health timeout. The Lite SQLite backend
+    answers with one COUNT under its own connection lock; other backends keep the
+    serialize path.
+    """
+    conn = getattr(backend, "_conn", None)
+    lock = getattr(backend, "_lock", None)
+    if conn is not None and lock is not None:
+        with lock:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM nodes WHERE memory_type IS NOT 'Version'"
+            ).fetchone()
+        return int(row[0])
+    from smartmemory_app.local_api import _rw_lock
+
+    with _rw_lock:
+        snapshot = backend.serialize()
+    return len(
+        [n for n in snapshot.get("nodes", []) if n.get("memory_type") != "Version"]
+    )
+
+
 def _build_app() -> FastAPI:
     app = FastAPI()
 
@@ -226,14 +252,7 @@ def _build_app() -> FastAPI:
 
             if not isinstance(mem, RemoteMemory):
                 try:
-                    from smartmemory_app.local_api import _rw_lock
-
-                    with _rw_lock:
-                        snapshot = mem._graph.backend.serialize()
-                    nodes = snapshot.get("nodes", [])
-                    node_count = len(
-                        [n for n in nodes if n.get("memory_type") != "Version"]
-                    )
+                    node_count = _memory_count(mem._graph.backend)
                 except Exception:
                     node_count = 0  # backend exists but empty/new — still healthy
         except Exception as exc:
