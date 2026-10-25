@@ -508,3 +508,31 @@ def test_legacy_launchd_without_pidfile(tmp_path, monkeypatch, caplog, bootout_o
             assert "1 processing rows remain unrecovered" in caplog.text
     finally:
         cleanup(process)
+
+
+# WRAPPER-WORKER-V2-FALLBACK-1: one row per core shape the worker entry can meet.
+def _run_v1(data_dir, *, idle_exit, lease):
+    return ("legacy", data_dir, idle_exit, lease)
+
+
+def _run_v2(data_dir, *, idle_exit, lease, v2=None):
+    return ("v2", data_dir, idle_exit, lease, v2)
+
+
+@pytest.mark.parametrize(
+    "run_worker, expected, warns",
+    [
+        (_run_v1, ("legacy", "d", 1.0, 2.0), True),  # older core: no v2 param, no lite_handlers
+        (_run_v2, ("v2", "d", 1.0, 2.0, None), False),  # current core, switch OFF: v2=None
+    ],
+    ids=["older-core-no-v2", "current-core-switch-off"],
+)
+def test_run_configured_worker_core_shapes(monkeypatch, caplog, run_worker, expected, warns):
+    from smartmemory_app import worker_entry
+
+    monkeypatch.setattr(worker_entry, "apply_runtime_config", lambda: None)
+    monkeypatch.setattr("smartmemory.pipeline.work_graph.worker.run_worker", run_worker)
+    monkeypatch.setattr(worker_entry, "_v2_config", lambda data_dir: None)
+    with caplog.at_level(logging.WARNING, logger="smartmemory_app.worker_entry"):
+        assert worker_entry.run_configured_worker("d", idle_exit=1.0, lease=2.0) == expected
+    assert any("legacy drain only" in r.message for r in caplog.records) is warns

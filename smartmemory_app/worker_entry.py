@@ -1,6 +1,7 @@
 """Wrapper-configured entry point for the persistent core worker."""
 
 import argparse
+import inspect
 import logging
 
 from smartmemory_app.storage import apply_runtime_config, _resolve_data_dir
@@ -19,8 +20,21 @@ def run_configured_worker(data_dir, *, idle_exit: float, lease: float) -> int:
     from smartmemory.pipeline.work_graph.worker import run_worker
 
     return run_worker(
-        str(data_dir), idle_exit=idle_exit, lease=lease, v2=_v2_config(data_dir)
+        str(data_dir), idle_exit=idle_exit, lease=lease, **_v2_kwargs(data_dir, run_worker)
     )
+
+
+def _v2_kwargs(data_dir, run_worker) -> dict:
+    """``{"v2": cfg}`` only for a core whose ``run_worker`` accepts ``v2``; ``{}`` runs the legacy drain.
+
+    An older core has neither ``lite_handlers`` nor a ``v2`` parameter, so passing ``v2=None`` to it raises TypeError.
+    """
+    if "v2" not in inspect.signature(run_worker).parameters:
+        logger.warning(
+            "core run_worker has no v2 parameter (older core); the worker runs the legacy drain only, no v2 records"
+        )
+        return {}
+    return {"v2": _v2_config(data_dir)}
 
 
 def _v2_config(data_dir):
