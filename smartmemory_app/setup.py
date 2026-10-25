@@ -999,6 +999,11 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
     # DIST-AGENT-HOOKS-1: Wire hooks for remote mode too.
     # Hooks call CLI which falls back to remote API via storage dispatch.
     _copy_hooks()
+    # HOOK-WRITE-QUEUE-1: no daemon in remote mode, so the write hooks start the
+    # remote drainer (`smartmemory lifecycle drain-hooks`) for their queued jobs.
+    from smartmemory_app.hook_consumer import set_remote_drain
+
+    set_remote_drain(True)
     _copy_skills()
     _register_hooks()
     click.echo("Lifecycle hooks installed. Auto-recall and observation active.")
@@ -1212,7 +1217,16 @@ def _copy_hooks() -> None:
     for src_name, dest_name in _HOOK_FILE_MAP.items():
         src = HOOKS_SRC / src_name
         if src.exists():
-            shutil.copy2(src, dest / dest_name)
+            # bash reads a script while it runs: publish by rename, so a hook running at the
+            # swap keeps reading the old file whole instead of a mix of old and new bytes.
+            target = dest / dest_name
+            temporary = target.with_name(f".{dest_name}.{os.getpid()}.tmp")
+            try:
+                shutil.copy2(src, temporary)
+                os.replace(temporary, target)
+            except BaseException:
+                temporary.unlink(missing_ok=True)
+                raise
 
 
 def _copy_skills() -> None:

@@ -2647,11 +2647,10 @@ def run_lifecycle_phase(
     workspace_id: str | None = None,
     user_turn: str | None = None,
 ) -> None:
-    """Run one hook write phase: warm daemon first (local mode), else in-process.
+    """Run one write phase for the ``smartmemory lifecycle <phase>`` CLI: warm daemon first (local mode), else in-process.
 
-    The CLI commands below and the hook queue drainer (HOOK-WRITE-QUEUE-1,
-    ``capture_worker.run_hook_job``) both come through here, so a queued write
-    runs exactly the code a direct ``smartmemory lifecycle <phase>`` runs.
+    The hooks no longer come through here: they append to the hook queue and the
+    daemon consumes it in-process (HOOK-WRITE-QUEUE-1, ``hook_consumer``).
     """
     from smartmemory_app.lifecycle import (
         STRICT_KEY,
@@ -2713,15 +2712,16 @@ def lifecycle_learn() -> None:
     help="Hook queue directory (default <data dir>/hook-queue).",
 )
 def lifecycle_drain_hooks(queue_dir: str | None) -> None:
-    """Write queued observe/learn/distill hook payloads, then exit when idle.
+    """Remote mode: write queued observe/learn/distill hook payloads, then exit when idle.
 
-    Started by the hooks themselves when no drainer is alive (HOOK-WRITE-QUEUE-1).
-    Prints the queue counts it leaves behind.
+    Started by the hooks when the queue holds the ``remote-drain`` marker and no
+    drainer is alive (HOOK-WRITE-QUEUE-1). In local mode the daemon is the one
+    consumer, so this logs a WARNING and writes nothing. Prints the queue counts.
     """
     from smartmemory_app.capture_queue import hook_counts
-    from smartmemory_app.capture_worker import run_hooks
+    from smartmemory_app.hook_consumer import run_remote_drainer
 
-    run_hooks(queue_dir)
+    run_remote_drainer(queue_dir)
     click.echo(json.dumps(hook_counts(queue_dir)))
 
 
@@ -2756,6 +2756,36 @@ def lifecycle_drain(timeout: float) -> None:
     result, code = drain(timeout)
     click.echo(json.dumps(result))
     raise SystemExit(code)
+
+
+@lifecycle_group.command("requeue-hooks")
+@click.option(
+    "--name",
+    "names",
+    multiple=True,
+    help="Only this dead/ file name (repeatable). An unknown name is reported, exit 1.",
+)
+@click.option("--dry-run", is_flag=True, help="List the records, move nothing.")
+@click.option(
+    "--dir",
+    "queue_dir",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Hook queue directory (default <data dir>/hook-queue).",
+)
+def lifecycle_requeue_hooks(
+    names: tuple[str, ...], dry_run: bool, queue_dir: str | None
+) -> None:
+    """Move dead-lettered observe/learn/distill hook jobs back to the hook queue once.
+
+    One line per record. The attempt count restarts, the job keeps its place in its
+    session's order. Malformed spill files and records whose payload is gone are skipped.
+    The daemon's consumer picks the jobs up; this starts nothing.
+    """
+    require_local("sm lifecycle requeue-hooks")
+    from smartmemory_app.capture_queue import run_requeue_dead_hooks
+
+    raise SystemExit(run_requeue_dead_hooks(list(names) or None, dry_run, queue_dir))
 
 
 @lifecycle_group.command("reclassify")

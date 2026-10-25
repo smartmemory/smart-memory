@@ -95,6 +95,32 @@ def _capabilities(mode: str) -> dict[str, bool]:
     }
 
 
+def _memory_count(backend) -> int:
+    """Count non-Version nodes for /health without loading the graph.
+
+    DAEMON-HEALTH-STARVE-1: this used to ``serialize()`` the whole store (every node
+    and edge, JSON-decoded) under the viewer's read/write lock on every probe, which
+    on a 1.7 GB store took longer than any health timeout. The Lite SQLite backend
+    answers with one COUNT under its own connection lock; other backends keep the
+    serialize path.
+    """
+    conn = getattr(backend, "_conn", None)
+    lock = getattr(backend, "_lock", None)
+    if conn is not None and lock is not None:
+        with lock:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM nodes WHERE memory_type IS NOT 'Version'"
+            ).fetchone()
+        return int(row[0])
+    from smartmemory_app.local_api import _rw_lock
+
+    with _rw_lock:
+        snapshot = backend.serialize()
+    return len(
+        [n for n in snapshot.get("nodes", []) if n.get("memory_type") != "Version"]
+    )
+
+
 def _build_app() -> FastAPI:
     app = FastAPI()
 
@@ -226,14 +252,7 @@ def _build_app() -> FastAPI:
 
             if not isinstance(mem, RemoteMemory):
                 try:
-                    from smartmemory_app.local_api import _rw_lock
-
-                    with _rw_lock:
-                        snapshot = mem._graph.backend.serialize()
-                    nodes = snapshot.get("nodes", [])
-                    node_count = len(
-                        [n for n in nodes if n.get("memory_type") != "Version"]
-                    )
+                    node_count = _memory_count(mem._graph.backend)
                 except Exception:
                     node_count = 0  # backend exists but empty/new — still healthy
         except Exception as exc:
@@ -431,6 +450,35 @@ def _sync_hooks() -> None:
         _startup_line(f"Warning: hook sync failed ({reason})")
 
 
+_hook_consumer = None
+
+
+def _start_hook_consumer() -> None:
+    """HOOK-WRITE-QUEUE-1: the daemon is the one consumer of the hook write queue.
+
+    Started once the backend is warm, on its own thread, never on the event loop.
+    With the backend down the jobs wait on disk and drain on the next start.
+    """
+    global _hook_consumer
+    if _hook_consumer is not None:
+        return
+    try:
+        from smartmemory_app.hook_consumer import start_in_daemon
+
+        _hook_consumer = start_in_daemon()
+    except Exception as exc:
+        reason = _safe_degraded_reason(exc)
+        log.warning(
+            "Hook queue consumer did not start; hook writes wait on disk: %s", reason
+        )
+        _startup_line(f"Warning: hook queue consumer did not start ({reason})")
+
+
+def _stop_hook_consumer() -> None:
+    if _hook_consumer is not None:
+        _hook_consumer.stop()
+
+
 def _start_background_warmup() -> threading.Thread:
     """Start model/backend warmup and publish only states actually observed."""
     _set_startup_state("warming")
@@ -458,7 +506,11 @@ def _start_background_warmup() -> threading.Thread:
 
         if backend_ok:
             _set_startup_state("ok")
+            _start_hook_consumer()
         else:
+            log.warning(
+                "Hook queue consumer not started (backend not warm); hook writes wait on disk until a healthy start"
+            )
             _set_startup_state(
                 "degraded",
                 _get_last_warmup_failure()
@@ -581,6 +633,7 @@ def main(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         nonlocal cleaned
         if cleaned:
             return
+        _stop_hook_consumer()  # finish in-flight hook writes before the store closes
         _shutdown()
         if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
             os.getpid()

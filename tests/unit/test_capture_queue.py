@@ -194,3 +194,90 @@ def test_missing_groq_key_fails_closed(monkeypatch):
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         worker._memory()
+
+
+def _dead_hook(root, name, *, payload=True, **extra):
+    body = root / "payloads" / f"{name}.json"
+    if payload:
+        body.write_text(json.dumps({"session_id": "s", "tool_input": {"n": name}}))
+    record = {
+        "v": 1,
+        "phase": "observe",
+        "session_id": "s",
+        "payload_path": str(body),
+        "state_snapshot": None,
+        "attempts": 5,
+        "last_error": "No space left on device",
+        "failed_at": 1.0,
+        "queued_ns": 111,
+        **extra,
+    }
+    (root / "dead" / f"{name}.json").write_text(json.dumps(record))
+
+
+def test_requeue_hooks_table(capsys):
+    root = queue.hook_queue_dir()
+    _dead_hook(root, "a.observe")
+    _dead_hook(root, "b.observe")
+    _dead_hook(root, "nopayload.observe", payload=False)
+    _dead_hook(root, "badphase.observe", phase="bogus")
+    (root / "dead" / "spill-20261025T100001000000Z-1-observe.json").write_text("{")
+    (root / "queue" / "dup.observe.json").write_text("{}")
+    _dead_hook(root, "dup.observe")
+    rows = [
+        # names, dry_run, expected (action, name) list, queue after, dead after, exit
+        (
+            ["a.observe"],
+            True,
+            [("requeued", "a.observe.json")],
+            ["dup.observe.json"],
+            6,
+            0,
+        ),
+        (
+            ["a.observe.json", "ghost"],
+            False,
+            [("requeued", "a.observe.json"), ("unknown", "ghost.json")],
+            ["a.observe.json", "dup.observe.json"],
+            5,
+            1,
+        ),
+        (
+            None,
+            False,
+            [
+                ("requeued", "b.observe.json"),
+                ("skipped", "badphase.observe.json"),
+                ("skipped", "dup.observe.json"),
+                ("skipped", "nopayload.observe.json"),
+                ("skipped", "spill-20261025T100001000000Z-1-observe.json"),
+            ],
+            ["a.observe.json", "b.observe.json", "dup.observe.json"],
+            4,
+            0,
+        ),
+    ]
+    got = []
+    for names, dry_run, expected, queued, dead, code in rows:
+        capsys.readouterr()
+        rc = queue.run_requeue_dead_hooks(names, dry_run)
+        out = capsys.readouterr().out
+        lines = [
+            ln.split(":")[0].replace("would ", "").split()
+            for ln in out.splitlines()[:-1]
+        ]
+        got.append(
+            (
+                [tuple(ln) for ln in lines] == expected,
+                sorted(p.name for p in (root / "queue").glob("*.json")) == queued,
+                len(list((root / "dead").glob("*.json"))) == dead,
+                rc == code,
+            )
+        )
+    assert got == [(True, True, True, True)] * len(rows)
+    record = json.loads((root / "queue" / "a.observe.json").read_text())
+    assert (record["queued_ns"], "attempts" in record, "last_error" in record) == (
+        111,
+        False,
+        False,
+    )

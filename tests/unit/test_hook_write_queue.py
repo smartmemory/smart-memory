@@ -1,4 +1,4 @@
-"""HOOK-WRITE-QUEUE-1: the observe, learn and distill hooks enqueue and return; the drainer writes.
+"""HOOK-WRITE-QUEUE-1: the observe, learn and distill hooks enqueue and return; the daemon consumes.
 
 Probes (units/HOOK-WRITE-QUEUE-1/filed.md): enqueue shape per phase, per-session order across
 interleaved sessions, retry then dead-letter, 20 concurrent hooks with nothing dropped, remote mode
@@ -22,7 +22,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from smartmemory_app import capture_queue, capture_worker, cli, storage
+from smartmemory_app import capture_queue, cli, hook_consumer, lifecycle_api, storage
+from smartmemory_app.lifecycle import STRICT_KEY, USER_TURN_KEY, WORKSPACE_KEY
 from smartmemory_app.lifecycle import MemoryLifecycle
 
 HOOKS = Path(__file__).resolve().parents[2] / "smartmemory_app" / "hooks"
@@ -80,7 +81,10 @@ def recorder(monkeypatch: pytest.MonkeyPatch):
     active: dict[str, int] = {}
     overlap: list[str] = []
 
-    def fake(phase, body, *, strict=False, workspace_id=None, user_turn=None):
+    def fake(lc, phase, body):
+        strict = body.get(STRICT_KEY) is True
+        workspace_id = body.get(WORKSPACE_KEY)
+        user_turn = body.get(USER_TURN_KEY)
         session = body.get("session_id")
         with lock:
             active[session] = active.get(session, 0) + 1
@@ -107,14 +111,20 @@ def recorder(monkeypatch: pytest.MonkeyPatch):
             with lock:
                 active[session] -= 1
 
-    monkeypatch.setattr(cli, "run_lifecycle_phase", fake)
+    # Patch both bindings: lifecycle_api imports run_phase by name, so a fake set only on
+    # lifecycle would freeze into lifecycle_api if it were first imported under the patch.
+    monkeypatch.setattr("smartmemory_app.lifecycle.run_phase", fake)
+    monkeypatch.setattr(lifecycle_api, "run_phase", fake)
+    monkeypatch.setattr(
+        "smartmemory_app.lifecycle_api._get_lifecycle", lambda body: None
+    )
     return SimpleNamespace(calls=calls, fail=fail, overlap=overlap)
 
 
 def drain(env: dict, **kwargs) -> int:
     kwargs.setdefault("idle_exit", 0.0)
     kwargs.setdefault("poll", 0.01)
-    return capture_worker.run_hooks(queue_root(env), **kwargs)
+    return hook_consumer.consume(queue_root(env), **kwargs)
 
 
 # ── Probe 1: enqueue shape per phase (persist row: capture_queue.enqueue) ─────────────
@@ -183,20 +193,18 @@ def test_enqueue_shape(phase, payload, expected, env, tmp_path, monkeypatch):
         }
     else:
         assert record["state_snapshot"] is None
-    # The hook started a drainer for its queue and wrote nothing to the store itself.
-    deadline = time.monotonic() + 5
-    while not (tmp_path / "stub-calls").exists():
-        assert time.monotonic() < deadline, "hook did not start a drainer"
-        time.sleep(0.01)
-    assert (
-        tmp_path / "stub-calls"
-    ).read_text() == f"lifecycle drain-hooks --dir {queue_root(env)}\n"
+    # Local mode: the daemon is the one consumer, so the hook started no process at all.
+    time.sleep(0.2)
+    assert not (tmp_path / "stub-calls").exists()
 
 
 def test_drained_job_runs_the_lifecycle_phase_strict(env, monkeypatch):
-    """The drainer calls the same MemoryLifecycle methods the CLI does, strict, with the job's pin."""
-    monkeypatch.setattr(cli, "_lifecycle_request", lambda *a: None)
-    monkeypatch.setattr(cli, "_load_lifecycle_toml", lambda: {})
+    """The consumer calls the MemoryLifecycle methods in-process, strict, with the job's pin: no HTTP hop."""
+    http_hop = Mock()
+    monkeypatch.setattr(cli, "_lifecycle_request", http_hop)
+    monkeypatch.setattr(
+        "smartmemory_app.lifecycle_api._load_lifecycle_config", lambda: {}
+    )
     methods = {phase: Mock() for phase in WRITE_PHASES}
     for phase, method in methods.items():
         monkeypatch.setattr(MemoryLifecycle, phase, method)
@@ -237,6 +245,7 @@ def test_drained_job_runs_the_lifecycle_phase_strict(env, monkeypatch):
         "dead": 0,
     }
     assert list((queue_root(env) / "payloads").iterdir()) == []
+    http_hop.assert_not_called()
 
 
 STRICT_ROWS = [
@@ -428,7 +437,10 @@ def test_remote_mode_goes_through_the_queue(env, monkeypatch):
         )
         daemon = Mock()
         monkeypatch.setattr(cli, "_lifecycle_via_daemon", daemon)
-        monkeypatch.setattr(cli, "_load_lifecycle_toml", lambda: {})
+        monkeypatch.setattr(
+            "smartmemory_app.lifecycle_api._load_lifecycle_config", lambda: {}
+        )
+        hook_consumer.set_remote_drain(True, queue_root(env))
         payload = {
             "session_id": "test_hwq_remote",
             "cwd": "/w",
@@ -442,7 +454,19 @@ def test_remote_mode_goes_through_the_queue(env, monkeypatch):
             == 0
         )
         assert _FakeService.ingests == []  # the hook itself wrote nothing
-        drain(env, max_attempts=3)
+        stub_calls = Path(env["HOME"]).parent / "stub-calls"
+        deadline = time.monotonic() + 5
+        while (
+            not stub_calls.exists()
+        ):  # remote mode: the hook starts the remote drainer
+            assert time.monotonic() < deadline, "hook did not start the remote drainer"
+            time.sleep(0.01)
+        assert (
+            stub_calls.read_text() == f"lifecycle drain-hooks --dir {queue_root(env)}\n"
+        )
+        hook_consumer.run_remote_drainer(
+            queue_root(env), max_attempts=3, idle_exit=0.0, poll=0.01
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -463,10 +487,7 @@ def test_remote_mode_goes_through_the_queue(env, monkeypatch):
 
 @pytest.mark.parametrize("phase", WRITE_PHASES)
 def test_hook_wall_time_under_50ms(phase, env):
-    root = capture_queue.hook_queue_dir(queue_root(env))
-    (root / "worker.pid").write_text(
-        f"{os.getpid()}\n"
-    )  # a live drainer: steady state, no spawn
+    capture_queue.hook_queue_dir(queue_root(env))  # steady state: the dirs exist
     payload = json.dumps(
         {
             "session_id": "test_hwq_time",
@@ -502,19 +523,24 @@ def test_no_drop_branch_and_one_shared_body():
     assert bodies["observe"] == bodies["learn"] == bodies["distill"]
 
 
-def test_drain_hooks_command_drains_and_prints_counts(env, recorder, monkeypatch):
+def test_drain_hooks_command_refuses_in_local_mode(env, recorder, monkeypatch, caplog):
+    """Local mode: the daemon is the one consumer, so drain-hooks writes nothing and says why."""
     from click.testing import CliRunner
 
-    monkeypatch.setenv("SMARTMEMORY_HOOK_WORKER_IDLE", "0")
+    monkeypatch.setattr(
+        "smartmemory_app.config.load_config", lambda: SimpleNamespace(mode="local")
+    )
     payload = {
         "session_id": "test_hwq_cli",
         "tool_name": "Bash",
         "tool_input": {"n": "cli"},
     }
     assert run_hook("learn", payload, env).returncode == 0
-    result = CliRunner().invoke(
-        cli.cli, ["lifecycle", "drain-hooks", "--dir", str(queue_root(env))]
-    )
+    with caplog.at_level(logging.WARNING):
+        result = CliRunner().invoke(
+            cli.cli, ["lifecycle", "drain-hooks", "--dir", str(queue_root(env))]
+        )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"queue": 0, "running": 0, "dead": 0}
-    assert [(c["phase"], c["n"]) for c in recorder.calls] == [("learn", "cli")]
+    assert json.loads(result.output) == {"queue": 1, "running": 0, "dead": 0}
+    assert recorder.calls == []
+    assert "remote mode only" in caplog.text
