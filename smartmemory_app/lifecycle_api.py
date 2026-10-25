@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
-from smartmemory_app.lifecycle import MemoryLifecycle, run_phase
+from smartmemory_app.lifecycle import STRICT_KEY, MemoryLifecycle, run_phase
 from smartmemory_app.lifecycle_config import LifecycleConfig
 
 log = logging.getLogger(__name__)
@@ -69,25 +70,59 @@ async def recall(request: Request):
     return {"context": result}
 
 
+# What a failed write phase loses, named in the route's WARNING.
+_WRITE_PHASE_LOSS = {
+    "observe": "tool observation",
+    "distill": "turn pair",
+    "learn": "error memory",
+}
+
+
+def _write_phase(phase: str, body: dict):
+    """Run one hook write phase; a write that did not land is an error response, never ``ok``.
+
+    The phase runs strict, so a failed store raises instead of being logged and
+    swallowed inside ``MemoryLifecycle`` (U20.S1-HOOK-STORE-WORKSPACE-REFUSAL-1:
+    the route answered ``{"status": "ok"}`` while every 2.0 store was refused).
+    The CLI caller treats a non-2xx as "daemon unavailable" and runs the phase
+    in-process once more (``cli.run_lifecycle_phase``).
+    """
+    try:
+        run_phase(_get_lifecycle(body), phase, {**body, STRICT_KEY: True})
+    except Exception as exc:
+        lost = _WRITE_PHASE_LOSS[phase]
+        log.warning(
+            "Lifecycle %s write failed; %s not stored: %s: %s",
+            phase,
+            lost,
+            type(exc).__name__,
+            exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "phase": phase,
+                "lost": lost,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+    return {"status": "ok"}
+
+
 @lifecycle_router.post("/observe")
 async def observe(request: Request):
-    body = await request.json()
-    run_phase(_get_lifecycle(body), "observe", body)
-    return {"status": "ok"}
+    return _write_phase("observe", await request.json())
 
 
 @lifecycle_router.post("/distill")
 async def distill(request: Request):
-    body = await request.json()
-    run_phase(_get_lifecycle(body), "distill", body)
-    return {"status": "ok"}
+    return _write_phase("distill", await request.json())
 
 
 @lifecycle_router.post("/learn")
 async def learn(request: Request):
-    body = await request.json()
-    run_phase(_get_lifecycle(body), "learn", body)
-    return {"status": "ok"}
+    return _write_phase("learn", await request.json())
 
 
 @lifecycle_router.post("/persist")

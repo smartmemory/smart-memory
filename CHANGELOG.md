@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### U20.S1-HOOK-STORE-WORKSPACE-REFUSAL-1 (2026-10-25)
+
+- fix(hooks): `POST /lifecycle/observe`, `/learn` and `/distill` no longer answer `{"status": "ok"}` when the write was lost. The route runs the phase strict; a failed store answers 500 with `{"status": "error", "phase", "lost", "error"}` and logs one WARNING `Lifecycle <phase> write failed; <what> not stored: <error>` (the CLI caller then runs the phase in-process, as for any daemon failure). Test: `tests/integration/test_hook_write_route_lite.py` (real Lite store; the three "a hook write lands a memory" golden rows are strict xfail on core 2.0 until the U20.S1 scope-bind producer fix).
+
 ### HOOK-WRITE-QUEUE-1 (2026-10-25)
 
 - fix(hooks): the observe, learn and distill hooks no longer write to the store or drop payloads under load. Each hook appends its payload to a durable queue under `<data dir>/hook-queue/` in pure bash (no Python start) and returns; HOOK-LOAD-CAP-1's "skipped under load" branches are deleted. A drainer, `smartmemory lifecycle drain-hooks`, started by the hook only when no drainer is alive, writes the jobs through the same `MemoryLifecycle` phases, oldest first and one at a time per session, at most `SMARTMEMORY_HOOK_DRAIN_MAX` (default 3) at once. A failed write is retried with backoff and moved to `hook-queue/dead/` after `SMARTMEMORY_HOOK_MAX_ATTEMPTS` (default 5), with a WARNING. Remote mode goes through the same queue. The one loss path left is a queue that cannot be written, logged as `payload lost` in `hooks.log`. Distill pairs the response with the prompt snapshotted when the Stop hook fired. Persist (SessionEnd) is unchanged.
