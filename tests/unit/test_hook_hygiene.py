@@ -262,6 +262,9 @@ def test_hook_script_logs_stderr_and_exits_zero(
     else:
         log_dir = tmp_path / "new-data"
         env["SMARTMEMORY_DATA_DIR"] = str(log_dir)
+    # The write hooks start a drainer (whose failure is logged here) only in remote mode.
+    (log_dir / "hook-queue").mkdir(parents=True)
+    (log_dir / "hook-queue/remote-drain").touch()
     script = (
         Path(__file__).resolve().parents[2]
         / "smartmemory_app"
