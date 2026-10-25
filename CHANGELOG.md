@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### WRAPPER-WORKER-V2-FALLBACK-1 (2026-10-25)
+
+- fix(worker): `worker_entry.run_configured_worker` passes `v2=` only when core's `run_worker` accepts it. An older core (no `lite_handlers`, no `v2` parameter) now logs the WARNING and runs the legacy drain instead of raising `TypeError`.
+
 ### U20.S1-HANDLERS (2026-10-24)
 
 - feat(worker): `worker_entry.run_configured_worker` passes core's switch-gated `v2=lite_v2_worker_config(data_dir)`; None (the legacy drain, unchanged) while `sm2_save_local_admission` is OFF, the default. An older core without `lite_handlers` logs one WARNING and runs the legacy drain.
