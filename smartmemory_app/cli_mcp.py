@@ -34,6 +34,9 @@ CLIENTS = ("claude-code", "cursor", "codex")
 
 _SERVER_KEY = "smartmemory"
 
+# smartmemory-mcp defaults to its REST backend (MCP-PERF-1); only this value opens the in-process store.
+MCP_MODE_ENV = "SMARTMEMORY_MCP_MODE"
+
 
 def _resolve_server_command() -> str:
     """Locate the ``smartmemory-mcp`` console script.
@@ -45,12 +48,26 @@ def _resolve_server_command() -> str:
     return found or "smartmemory-mcp"
 
 
+def _server_env() -> dict[str, str]:
+    """The env the MCP entry carries, from the saved CLI mode (MCP-INSTALL-LOCAL-MODE-1).
+
+    A local (Lite) install gets ``SMARTMEMORY_MCP_MODE=local`` so the MCP server keeps using the in-process
+    store; the server's default is REST, which would send a user with no API key to a backend they never set up.
+    Remote and unconfigured installs write nothing: remote is the server's default, and an unconfigured install
+    has no store to point at. The config file alone decides (``apply_env=False``): the client launches the
+    server without this shell's ``SMARTMEMORY_MODE``, so the shell's value says nothing about the install.
+    """
+    from smartmemory_app.config import load_config
+
+    return {MCP_MODE_ENV: "local"} if load_config(apply_env=False).mode == "local" else {}
+
+
 def _server_block() -> dict:
     """The portable MCP server descriptor (used by JSON-based clients)."""
     return {
         "command": _resolve_server_command(),
         "args": [],
-        "env": {},
+        "env": _server_env(),
     }
 
 
@@ -103,9 +120,10 @@ def _write_codex_toml(path: Path, *, dry_run: bool) -> str:
     Returns the full file contents that would be written.
     """
     cmd = _resolve_server_command()
-    new_block = tomli_w.dumps(
-        {"mcp_servers": {_SERVER_KEY: {"command": cmd, "args": []}}}
-    )
+    entry: dict = {"command": cmd, "args": []}
+    if env := _server_env():
+        entry["env"] = env
+    new_block = tomli_w.dumps({"mcp_servers": {_SERVER_KEY: entry}})
 
     if path.exists():
         original = path.read_text(encoding="utf-8")
