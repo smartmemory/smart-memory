@@ -199,7 +199,7 @@ class _BoundedProbe:
             if not fresh and time.monotonic() - self._warned > _HEALTH_STALE_LOG_S:
                 self._warned = time.monotonic()
                 log.warning(
-                    "Health field %s is still being read after %.2fs (store busy); "
+                    "Health field %s is still being read after %.2fs (store busy), "
                     "answering with %s",
                     self.name,
                     budget,

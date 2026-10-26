@@ -400,7 +400,7 @@ def daemon_port_rows(port: int):
             yield f"Daemon port: OK ({port}, free)"
     except psutil.AccessDenied as exc:
         log.warning(
-            "Daemon port %s: system-wide socket listing denied (%s, macOS needs root); "
+            "Daemon port %s: system-wide socket listing denied (%s, macOS needs root), "
             "identifying the holder by connect probe and /health instead",
             port,
             exc,
@@ -408,7 +408,7 @@ def daemon_port_rows(port: int):
         yield _port_probe_row(port)
     except (psutil.Error, OSError) as exc:
         log.warning(
-            "Daemon port %s: socket listing failed (%s); the port holder is not identified",
+            "Daemon port %s: socket listing failed (%s), so the port holder is not identified",
             port,
             type(exc).__name__,
         )

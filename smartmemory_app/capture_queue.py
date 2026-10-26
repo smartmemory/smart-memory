@@ -611,7 +611,7 @@ def _contain_payloads(root: Path, record: dict) -> None:
         if str(root) not in _foreign_payload_roots:
             _foreign_payload_roots.add(str(root))
             log.warning(
-                "Hook queue %s: a record names %s outside this queue; reading payloads from %s "
+                "Hook queue %s: a record names %s outside this queue, reading payloads from %s "
                 "instead (one warning per queue)",
                 root,
                 value,
@@ -875,7 +875,7 @@ def hook_io_failure(
     _io_failures.pop(key, None)
     if not dead_letter:
         log.warning(
-            "Hook %s job %s (session %s) was written but its record could not be removed after %d attempts; "
+            "Hook %s job %s (session %s) was written but its record could not be removed after %d attempts, so "
             "it stays in %s and the next daemon start writes it a second time: %s",
             job.get("phase"),
             path.name,
@@ -894,7 +894,7 @@ def hook_io_failure(
             max_attempts - 1
         )  # try the rename again after the next backoff
         log.warning(
-            "Hook %s job %s (session %s) not moved to dead/ either (%s); it stays in %s and is retried",
+            "Hook %s job %s (session %s) not moved to dead/ either (%s), so it stays in %s and is retried",
             job.get("phase"),
             path.name,
             job.get("session_id"),
@@ -954,7 +954,7 @@ def recover_running(root: Path, *, max_attempts: int) -> int:
             except OSError as again:
                 log.warning(
                     "Hook %s job %s (session %s) left in running/ by a dead worker could not be requeued "
-                    "(%s, then %s); it waits there until the next start",
+                    "(%s, then %s), so it waits there until the next start",
                     job.get("phase"),
                     source.name,
                     job.get("session_id"),
@@ -988,7 +988,7 @@ def mark_interrupted(root: Path, jobs: list[dict]) -> None:
         )
     except OSError as exc:
         log.warning(
-            "Hook queue %s: interrupted jobs not recorded (%s); recovery counts them as attempts",
+            "Hook queue %s: interrupted jobs not recorded (%s), so recovery counts them as attempts",
             root,
             exc,
         )
@@ -1161,7 +1161,7 @@ def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
     _spill_warn_once(
         path,
         "malformed",
-        "Hook spill file %s is malformed, moving it to %s/dead/spill-%s; its write is lost until requeued by hand: %s",
+        "Hook spill file %s is malformed, moving it to %s/dead/spill-%s, so its write is lost until requeued by hand: %s",
         path.name,
         root,
         path.name,
@@ -1320,7 +1320,7 @@ def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
         _spill_warn_once(
             path,
             "unlink",
-            "Hook spill file %s is queued as %s but was not deleted; if its job finishes first, "
+            "Hook spill file %s is queued as %s but was not deleted: if its job finishes first, "
             "the next pass queues it a second time: %s",
             name,
             job_name,
@@ -1328,7 +1328,7 @@ def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
         )
     if phase == "distill":
         log.warning(
-            "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none); "
+            "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none), so "
             "its response is stored unpaired with its prompt",
             name,
         )
