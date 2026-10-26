@@ -363,6 +363,7 @@ def _get_local_memory(
     with _init_lock:
         if _memory is not None:  # double-checked
             return _memory
+        _refuse_new_store_if_closing()
         cfg = apply_runtime_config()
 
         from smartmemory.ontology.pattern_manager import PatternManager
@@ -392,7 +393,7 @@ def _get_local_memory(
         }
         if on_progress is None:
             # Direct library callers keep the core factory's established one-shot path.
-            _memory = create_lite_memory(
+            memory = create_lite_memory(
                 **create_kwargs,
                 auto_download_models=False,
             )
@@ -410,7 +411,7 @@ def _get_local_memory(
                 lambda: _require_spacy_model(cfg.spacy_model),
                 lambda: _require_embedding_model(allow_download=False),
             )
-            _memory = _timed_startup_step(
+            memory = _timed_startup_step(
                 on_progress,
                 "Loading the spaCy language model and opening saved memories",
                 "Language model and saved memories ready",
@@ -418,6 +419,17 @@ def _get_local_memory(
                     **create_kwargs,
                     auto_download_models=False,
                 ),
+            )
+        # HOOK-CONSUMER-WARMUP-STORE-GATE-FU-1: a store finished after shutdown began is
+        # never published. No other thread holds it yet, so this one closes it.
+        with _store_gate:
+            closing = _store_closing
+            if not closing:
+                _memory = memory
+        if closing:
+            _close_memory(memory)
+            raise StoreClosingError(
+                "SmartMemory is shutting down, the store was closed before first use"
             )
         atexit.register(_shutdown_at_exit)
         # DIST-LITE-WARMSTART-1: warm the local embedder in the background so the
@@ -481,26 +493,31 @@ def _shutdown() -> None:
     if _memory is None:
         return
     try:
-        if hasattr(_memory, "_vector_backend") and _memory._vector_backend is not None:
-            vb = _memory._vector_backend
+        _close_memory(_memory)
+    finally:
+        _memory = None
+
+
+def _close_memory(memory) -> None:
+    """Flush and close one memory instance (see ``_shutdown``), logging a failure."""
+    try:
+        if hasattr(memory, "_vector_backend") and memory._vector_backend is not None:
+            vb = memory._vector_backend
             if hasattr(vb, "save_all"):
                 vb.save_all()
             elif hasattr(vb, "_save"):
                 vb._save()
         # Use SmartMemory.close() which shuts down evolution worker, ontology
         # store, and graph backend in the correct order.
-        if hasattr(_memory, "close"):
-            _memory.close()
-        elif hasattr(_memory, "_graph") and hasattr(_memory._graph, "backend"):
-            _memory._graph.backend.close()
+        if hasattr(memory, "close"):
+            memory.close()
+        elif hasattr(memory, "_graph") and hasattr(memory._graph, "backend"):
+            memory._graph.backend.close()
     except Exception as exc:
         log.warning(
             "SmartMemory shutdown error: session data may not be fully persisted: %s",
             exc,
         )
-    finally:
-        _memory = None
-
 
 
 # HOOK-CONSUMER-SHUTDOWN-RACE-1: closing the SQLite connection while another thread is
@@ -532,6 +549,15 @@ def store_in_use():
         with _store_gate:
             _store_users -= 1
             _store_gate.notify_all()
+
+
+def _refuse_new_store_if_closing() -> None:
+    """Once shutdown began, no store is opened (HOOK-CONSUMER-WARMUP-STORE-GATE-FU-1)."""
+    with _store_gate:
+        if _store_closing:
+            raise StoreClosingError(
+                "SmartMemory is shutting down, the store is not opened again"
+            )
 
 
 def open_store_gate() -> None:
@@ -566,8 +592,14 @@ def close_store_when_idle(timeout: float) -> bool:
 
 
 def _shutdown_at_exit() -> None:
-    """atexit: close the store unless work still runs on it (see ``close_store_when_idle``)."""
+    """atexit: close the store unless work still runs on it (see ``close_store_when_idle``).
+
+    The gate closes first, under the same lock as the count, so no store user can start
+    between the check and the close (HOOK-CONSUMER-WARMUP-STORE-GATE-FU-1).
+    """
+    global _store_closing
     with _store_gate:
+        _store_closing = True
         busy = _store_users
     if busy:
         log.warning(
