@@ -245,17 +245,21 @@ def _build_app() -> FastAPI:
         node_count = -1
         mem = None
         try:
-            from smartmemory_app.storage import get_memory
+            from smartmemory_app.storage import get_memory, store_in_use
 
-            mem = get_memory()
-            backend_ok = mem is not None
-            from smartmemory_app.remote_backend import RemoteMemory
+            # A sync route's thread can outlive uvicorn's drain; hold the store so the
+            # daemon's cleanup never closes it under this count (HOOK-CONSUMER-SHUTDOWN-RACE-1
+            # F-A). While the daemon stops this raises StoreClosingError: degraded.
+            with store_in_use():
+                mem = get_memory()
+                backend_ok = mem is not None
+                from smartmemory_app.remote_backend import RemoteMemory
 
-            if not isinstance(mem, RemoteMemory):
-                try:
-                    node_count = _memory_count(mem._graph.backend)
-                except Exception:
-                    node_count = 0  # backend exists but empty/new — still healthy
+                if not isinstance(mem, RemoteMemory):
+                    try:
+                        node_count = _memory_count(mem._graph.backend)
+                    except Exception:
+                        node_count = 0  # backend exists but empty/new — still healthy
         except Exception as exc:
             degraded_reason = _safe_degraded_reason(exc)
         if not backend_ok:
@@ -271,9 +275,11 @@ def _build_app() -> FastAPI:
         if backend_ok and cfg.mode != "remote":
             try:
                 from smartmemory.pipeline.work_graph.reextract import reextract_offer
+                from smartmemory_app.storage import store_in_use
                 from smartmemory_app.work_graph import get_work_graph
 
-                offer = reextract_offer(mem, get_work_graph())
+                with store_in_use():
+                    offer = reextract_offer(mem, get_work_graph())
             except Exception:
                 log.warning("Re-extraction notice unavailable", exc_info=True)
         work_info = None
