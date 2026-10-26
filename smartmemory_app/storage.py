@@ -711,7 +711,8 @@ def _ingest_raw(content, memory_type, sync, properties, origin):
 
 def _legacy_ingest_view(result, sync: bool):
     """The legacy local ``ingest`` return of one core result: the item_id string, the sync=False dict, or a hold."""
-    if not sync:  # receipt arm reads as the legacy dict; legacy returns pass through unchanged
+    # sync=False: a receipt reads as the legacy dict; legacy returns pass through unchanged
+    if not sync:
         from smartmemory_app.save_return import ingest_dict
 
         result = ingest_dict(result, op="ingest")
