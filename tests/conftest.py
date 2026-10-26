@@ -117,6 +117,22 @@ def restore_smartmemory_env():
     env_pin._applied, env_sources._pre_pin_names = state
 
 
+@pytest.fixture(autouse=True)
+def reopen_store_gate():
+    """Reopen the daemon's store gate after each test (HOOK-CONSUMER-SHUTDOWN-RACE-1).
+
+    A test that runs ``viewer_server.main()`` or its cleanup in-process (with warmup
+    stubbed, so no new lifecycle reopens it) leaves ``storage._store_closing`` set, and
+    every later gated call in that worker is refused: lifecycle phases never start
+    (``test_health_during_slow_write`` waited forever) and sync routes answer 503. A real
+    daemon exits after its cleanup, so only a test process outlives the closed gate.
+    """
+    yield
+    from smartmemory_app import storage
+
+    storage.open_store_gate()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def cli_test_port():
     """One port per pytest process, registered in ~/.ports as cliTest (CLI-TEST-HOST-ISOLATION-1).
