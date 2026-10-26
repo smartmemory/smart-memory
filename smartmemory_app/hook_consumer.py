@@ -304,13 +304,17 @@ def consume(
                                 return_when=FIRST_COMPLETED,
                             )
                         continue
-                    queue.adopt_spill(
-                        root
-                    )  # HOOK-SPILL-INTERIM-1's spilled payloads join the queue
-                    # With every slot busy there is nothing to claim, and a scan of a large
+                    # With every slot busy there is nothing to claim: no spill adoption and
+                    # no scan, the pass falls through to the wait below. A scan of a large
                     # backlog (9K records, ~0.6 s unloaded) would delay seeing a stop past
-                    # the daemon's shutdown bound (HOOK-CONSUMER-SHUTDOWN-RACE-1 trials).
-                    pending = queue.hook_jobs(root) if len(inflight) < parallel else []
+                    # the daemon's shutdown bound (HOOK-CONSUMER-SHUTDOWN-RACE-1 trials) and
+                    # took ~70% of a core (HOOK-CONSUMER-SCAN-1).
+                    pending = []
+                    if len(inflight) < parallel:
+                        queue.adopt_spill(
+                            root
+                        )  # HOOK-SPILL-INTERIM-1's spilled payloads join the queue
+                        pending = queue.hook_jobs(root)
                     busy = {job["session_id"] for job in inflight.values()}
                     now = time.time()
                     for job in pending:
