@@ -109,7 +109,24 @@ def execute_hook_job(job: dict) -> None:
                     exc,
                 )
         request[USER_TURN_KEY] = user_turn
-    run_phase(_get_lifecycle(request), job["phase"], request)
+    from smartmemory_app.storage import store_in_use
+
+    # The daemon closes the store only once no job holds it (HOOK-CONSUMER-SHUTDOWN-RACE-1).
+    with store_in_use():
+        run_phase(_get_lifecycle(request), job["phase"], request)
+
+
+def _free_retry(error: BaseException) -> bool:
+    """A daemon stop or a lost store write lock: nothing was written, the job did not fail."""
+    from smartmemory_app.storage import StoreBusyError, StoreClosingError
+
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, (StoreBusyError, StoreClosingError)):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def _write_pid(root: Path) -> None:
@@ -172,6 +189,7 @@ def _settle(root: Path, inflight: dict, max_attempts: int) -> tuple[int, bool]:
                     job,
                     f"{type(error).__name__}: {error}",
                     max_attempts=max_attempts,
+                    free=_free_retry(error),
                 )
         except Exception as exc:  # noqa: BLE001 - a settle failure must not kill the consumer
             troubled = True
@@ -258,6 +276,7 @@ def consume(
         _write_pid(root)
         inflight: dict = {}
         idle_since = None
+        marked = False  # the jobs a stop leaves running are recorded once
         backoff = 0.0
         with ThreadPoolExecutor(
             max_workers=parallel, thread_name_prefix="smartmemory-hook-job"
@@ -268,7 +287,14 @@ def consume(
                     finished += settled
                     if stop.is_set():
                         if not inflight:
+                            if marked:
+                                queue.clear_interrupted(root)
                             return finished
+                        if not marked:
+                            # Should the process exit before these finish, recovery
+                            # requeues them without using an attempt.
+                            queue.mark_interrupted(root, list(inflight.values()))
+                            marked = True
                         if troubled:  # a done job whose record cannot be written yet
                             time.sleep(poll)
                         else:
@@ -281,12 +307,15 @@ def consume(
                     queue.adopt_spill(
                         root
                     )  # HOOK-SPILL-INTERIM-1's spilled payloads join the queue
-                    pending = queue.hook_jobs(root)
+                    # With every slot busy there is nothing to claim, and a scan of a large
+                    # backlog (9K records, ~0.6 s unloaded) would delay seeing a stop past
+                    # the daemon's shutdown bound (HOOK-CONSUMER-SHUTDOWN-RACE-1 trials).
+                    pending = queue.hook_jobs(root) if len(inflight) < parallel else []
                     busy = {job["session_id"] for job in inflight.values()}
                     now = time.time()
                     for job in pending:
-                        if len(inflight) >= parallel:
-                            break
+                        if len(inflight) >= parallel or stop.is_set():
+                            break  # a stop seen mid-scan starts no new job
                         session = job["session_id"]
                         if session in busy:
                             continue
@@ -418,15 +447,34 @@ class DaemonConsumer:
         self.thread.start()
         return self
 
-    def stop(self, timeout: float = 30.0) -> None:
+    def _holds_queue(self) -> bool:
+        try:
+            return (self.root / "worker.pid").read_text(
+                encoding="utf-8"
+            ).strip() == str(os.getpid())
+        except OSError:
+            return False
+
+    def stop(self, timeout: float = 30.0) -> bool:
+        """Stop and wait up to ``timeout``; True once the thread, and so every job, has ended."""
         self._stop.set()
         if self.thread.is_alive():
             self.thread.join(timeout)
         if self.thread.is_alive():
+            # The consumer thread marks its in-flight jobs once it sees the stop, but it can
+            # be inside a backlog scan or starved of the GIL past the bound; the 2026-10-26
+            # trials found no marker and recovery counted the attempts. Mark what is in
+            # running/ here (this caller's thread, never a signal handler) once worker.pid
+            # names this process: it then holds worker.lock, so every record there is ours.
+            running = sorted((self.root / "running").glob("*.json"))
+            if running and self._holds_queue():
+                queue.mark_interrupted(self.root, [{"_path": str(p)} for p in running])
             log.warning(
-                "Hook queue consumer still running after %.0fs at shutdown; its jobs stay in running/ and are retried on the next start",
+                "Hook queue consumer still running after %.1fs at shutdown; its jobs stay in running/ and are retried on the next start without using an attempt",
                 timeout,
             )
+            return False
+        return True
 
 
 def start_in_daemon(**kwargs) -> DaemonConsumer:
