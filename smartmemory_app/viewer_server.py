@@ -245,17 +245,21 @@ def _build_app() -> FastAPI:
         node_count = -1
         mem = None
         try:
-            from smartmemory_app.storage import get_memory
+            from smartmemory_app.storage import get_memory, store_in_use
 
-            mem = get_memory()
-            backend_ok = mem is not None
-            from smartmemory_app.remote_backend import RemoteMemory
+            # A sync route's thread can outlive uvicorn's drain; hold the store so the
+            # daemon's cleanup never closes it under this count (HOOK-CONSUMER-SHUTDOWN-RACE-1
+            # F-A). While the daemon stops this raises StoreClosingError: degraded.
+            with store_in_use():
+                mem = get_memory()
+                backend_ok = mem is not None
+                from smartmemory_app.remote_backend import RemoteMemory
 
-            if not isinstance(mem, RemoteMemory):
-                try:
-                    node_count = _memory_count(mem._graph.backend)
-                except Exception:
-                    node_count = 0  # backend exists but empty/new — still healthy
+                if not isinstance(mem, RemoteMemory):
+                    try:
+                        node_count = _memory_count(mem._graph.backend)
+                    except Exception:
+                        node_count = 0  # backend exists but empty/new — still healthy
         except Exception as exc:
             degraded_reason = _safe_degraded_reason(exc)
         if not backend_ok:
@@ -271,9 +275,11 @@ def _build_app() -> FastAPI:
         if backend_ok and cfg.mode != "remote":
             try:
                 from smartmemory.pipeline.work_graph.reextract import reextract_offer
+                from smartmemory_app.storage import store_in_use
                 from smartmemory_app.work_graph import get_work_graph
 
-                offer = reextract_offer(mem, get_work_graph())
+                with store_in_use():
+                    offer = reextract_offer(mem, get_work_graph())
             except Exception:
                 log.warning("Re-extraction notice unavailable", exc_info=True)
         work_info = None
@@ -441,6 +447,10 @@ def _warm_backend() -> bool:
 # drain and the hook consumer drain are bounded to leave the store close room inside it.
 _GRACEFUL_SHUTDOWN_S = 1.5
 _HOOK_CONSUMER_STOP_S = 1.5
+# HOOK-CONSUMER-SHUTDOWN-RACE-1: once the consumer has stopped, other work on the store
+# (the /lifecycle phase pool) gets this long to finish before the daemon exits with the
+# store left open rather than close it underneath that work.
+_STORE_IDLE_WAIT_S = 0.25
 
 # Set once SIGTERM or a stop request is seen. Warmup checks it, under the lock, before it
 # publishes hooks or starts the consumer, and shutdown sets it under the same lock, so
@@ -520,14 +530,29 @@ def _start_hook_consumer() -> None:
             _startup_line(f"Warning: hook queue consumer did not start ({reason})")
 
 
-def _stop_hook_consumer() -> None:
-    """Stop the consumer; jobs still running after the bound are retried on the next start."""
+def _stop_hook_consumer() -> bool:
+    """Stop the consumer; False when jobs still run after the bound (retried on the next start)."""
     global _hook_consumer
     _request_shutdown()
     with _hook_lifecycle_lock:
         consumer, _hook_consumer = _hook_consumer, None
-    if consumer is not None:
-        consumer.stop(timeout=_HOOK_CONSUMER_STOP_S)
+    if consumer is None:
+        return True
+    return consumer.stop(timeout=_HOOK_CONSUMER_STOP_S)
+
+
+def _stop_hook_consumer_then_close_store() -> bool:
+    """Close the store only after every hook job and gated store user has ended.
+
+    A job still running at the bound keeps the store open: the process then exits without
+    closing it (closing under a running statement crashed the daemon, SIGSEGV), the job's
+    uncommitted write rolls back and it is retried from running/ on the next start.
+    Returns True when the store was closed.
+    """
+    from smartmemory_app.storage import close_store_when_idle
+
+    stopped = _stop_hook_consumer()
+    return close_store_when_idle(_STORE_IDLE_WAIT_S if stopped else 0.0)
 
 
 def _start_background_warmup() -> threading.Thread:
@@ -536,6 +561,9 @@ def _start_background_warmup() -> threading.Thread:
     global _lifecycle_server
     _lifecycle_server = None
     _shutdown_requested.clear()
+    from smartmemory_app.storage import open_store_gate
+
+    open_store_gate()
     _set_startup_state("warming")
 
     def run() -> None:
@@ -642,7 +670,7 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
         from smartmemory_app.config import load_config
 
         port = load_config().daemon_port
-    from smartmemory_app.storage import _shutdown, _resolve_data_dir
+    from smartmemory_app.storage import _resolve_data_dir
 
     from smartmemory_app.runtime_diagnostics import install_daemon_diagnostics
 
@@ -677,8 +705,8 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
         nonlocal cleaned
         if cleaned:
             return
-        _stop_hook_consumer()  # finish in-flight hook writes before the store closes
-        _shutdown()
+        # Finish in-flight hook writes, then close the store only if nothing still runs on it.
+        _stop_hook_consumer_then_close_store()
         if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(
             os.getpid()
         ):

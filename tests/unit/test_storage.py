@@ -45,7 +45,7 @@ def test_get_memory_singleton(tmp_path):
 
 
 def test_get_memory_registers_atexit(tmp_path):
-    """get_memory() registers _shutdown with atexit on first init."""
+    """get_memory() registers the gated store close with atexit on first init (HOOK-CONSUMER-SHUTDOWN-RACE-1)."""
     import smartmemory_app.storage as storage
 
     mock_mem = MagicMock()
@@ -64,7 +64,7 @@ def test_get_memory_registers_atexit(tmp_path):
         patch("atexit.register") as mock_register,
     ):
         storage.get_memory()
-        mock_register.assert_called_once_with(storage._shutdown)
+        mock_register.assert_called_once_with(storage._shutdown_at_exit)
 
 
 @pytest.mark.parametrize("keyed", [False, True])
