@@ -152,7 +152,7 @@ def import_capture(
                 # Session lessons are an LLM call: skipped on the costless path. Not a degradation, so the
                 # whole-file retry never re-runs it.
                 log.warning(
-                    "capture %s: session lessons skipped (costless capture; AI opt-in is off)",
+                    "capture %s: session lessons skipped (costless capture because AI opt-in is off)",
                     job.get("capture_id") or job.get("session_id"),
                 )
                 return {"lesson_ids": [], "lessons_skipped": True}

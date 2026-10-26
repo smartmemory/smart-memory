@@ -50,7 +50,7 @@ def _not_loaded(what: str, cause: BaseException | None, repair_hint: str | None)
     if cause is not None:
         message += f": {cause}"
     elif repair_hint is None:
-        message += " (the loader reported no cause; see the log for warnings)"
+        message += " (the loader reported no cause, see the log for warnings)"
     return f"{message}. {repair_hint}" if repair_hint else message
 
 

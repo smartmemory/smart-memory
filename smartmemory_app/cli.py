@@ -718,7 +718,7 @@ def folder_group() -> None:
     help="Repeat every N seconds.",
 )
 def folder_sync_cmd(root: str, preset: str, watch_seconds: int | None) -> None:
-    """Sync ROOT into memory once (or every N seconds with --watch). Local mode only; runs on this machine."""
+    """Sync ROOT into memory once (or every N seconds with --watch). Local mode only, on this machine."""
     import time
 
     from smartmemory_app.folder_sync import FolderSyncError, sync_folder
@@ -2874,7 +2874,7 @@ def lifecycle_requeue_hooks(
 
     One line per record. The attempt count restarts, the job keeps its place in its
     session's order. Malformed spill files and records whose payload is gone are skipped.
-    The daemon's consumer picks the jobs up; this starts nothing.
+    The daemon's consumer picks the jobs up. This starts nothing.
     """
     require_local("sm lifecycle requeue-hooks")
     from smartmemory_app.capture_queue import run_requeue_dead_hooks
