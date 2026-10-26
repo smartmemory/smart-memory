@@ -16,10 +16,12 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import threading
 import time
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI
@@ -96,15 +98,39 @@ def _capabilities(mode: str) -> dict[str, bool]:
     }
 
 
+def _count_readonly(path: str) -> int:
+    """COUNT non-Version nodes on a read-only connection of its own.
+
+    HOOK-CONSUMER-SCAN-1: WAL readers never wait on the writer, and this connection shares
+    neither ``backend._lock`` nor the backend's connection, so a long store query on the
+    backend cannot hold it up. The busy timeout is short: a locked file is reported, not waited on.
+    """
+    conn = sqlite3.connect(
+        f"file:{quote(path)}?mode=ro", uri=True, timeout=0.05, check_same_thread=False
+    )
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM nodes WHERE memory_type IS NOT 'Version'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(row[0])
+
+
 def _memory_count(backend) -> int:
     """Count non-Version nodes for /health without loading the graph.
 
     DAEMON-HEALTH-STARVE-1: this used to ``serialize()`` the whole store (every node
     and edge, JSON-decoded) under the viewer's read/write lock on every probe, which
-    on a 1.7 GB store took longer than any health timeout. The Lite SQLite backend
-    answers with one COUNT under its own connection lock; other backends keep the
-    serialize path.
+    on a 1.7 GB store took longer than any health timeout. HOOK-CONSUMER-SCAN-1: a Lite
+    SQLite file is now counted on a read-only connection that takes neither
+    ``backend._lock`` nor the viewer's ``_rw_lock``. Only a backend with no file to open
+    (an in-memory database, a non-SQLite store) still takes its lock, and /health runs
+    this inside ``_BoundedProbe``, so even that never makes the probe wait.
     """
+    namespace = getattr(backend, "cache_namespace", None)
+    if isinstance(namespace, str) and namespace.startswith("sqlite:"):
+        return _count_readonly(namespace.removeprefix("sqlite:"))
     conn = getattr(backend, "_conn", None)
     lock = getattr(backend, "_lock", None)
     if conn is not None and lock is not None:
@@ -120,6 +146,66 @@ def _memory_count(backend) -> int:
     return len(
         [n for n in snapshot.get("nodes", []) if n.get("memory_type") != "Version"]
     )
+
+
+# HOOK-CONSUMER-SCAN-1: /health never waits on the store. Every store-touching field runs in a
+# helper thread and the probe waits at most this long for it; past that it answers with the
+# last value (or none) and names the field in ``stale``.
+_HEALTH_PROBE_BUDGET_S = 0.1
+_HEALTH_STALE_LOG_S = 60.0
+
+
+class _BoundedProbe:
+    """One health field computed off the request thread, single-flight, with a wait budget."""
+
+    def __init__(self, name: str, default, ttl: float = 0.0):
+        self.name = name
+        self.default = default
+        self.ttl = ttl
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._has = False
+        self._value = default
+        self._at = 0.0
+        self._warned = 0.0
+
+    def _run(self, fn) -> None:
+        try:
+            value = fn()
+        except Exception:
+            log.warning("Health field %s unavailable", self.name, exc_info=True)
+            return
+        with self._lock:
+            self._value, self._has, self._at = value, True, time.monotonic()
+
+    def get(self, fn, budget: float = _HEALTH_PROBE_BUDGET_S):
+        """``(value, fresh)``; not fresh when ``fn`` is still running after ``budget`` s."""
+        with self._lock:
+            thread = self._thread
+            if thread is None or not thread.is_alive():
+                if self._has and time.monotonic() - self._at < self.ttl:
+                    return self._value, True
+                thread = self._thread = threading.Thread(
+                    target=self._run,
+                    args=(fn,),
+                    name=f"smartmemory-health-{self.name}",
+                    daemon=True,
+                )
+                thread.start()
+        thread.join(budget)
+        with self._lock:
+            fresh = not thread.is_alive() and self._has
+            value = self._value
+            if not fresh and time.monotonic() - self._warned > _HEALTH_STALE_LOG_S:
+                self._warned = time.monotonic()
+                log.warning(
+                    "Health field %s is still being read after %.2fs (store busy); "
+                    "answering with %s",
+                    self.name,
+                    budget,
+                    "the last value" if self._has else "no value",
+                )
+        return value, fresh
 
 
 def _build_app() -> FastAPI:
@@ -172,6 +258,12 @@ def _build_app() -> FastAPI:
             except Exception:
                 pass
         return await call_next(request)
+
+    # One probe per store-touching /health field (HOOK-CONSUMER-SCAN-1). Single-flight: a
+    # slow offer scan (every node, under the backend lock) is joined, never stacked.
+    count_probe = _BoundedProbe("memories", -1)
+    offer_probe = _BoundedProbe("reextract_offer", None)
+    work_probe = _BoundedProbe("work_graph", None)
 
     @app.get("/health")
     def health():
@@ -244,6 +336,7 @@ def _build_app() -> FastAPI:
         degraded_reason = None
         node_count = -1
         mem = None
+        stale: list[str] = []
         try:
             from smartmemory_app.storage import get_memory, store_in_use
 
@@ -256,10 +349,20 @@ def _build_app() -> FastAPI:
                 from smartmemory_app.remote_backend import RemoteMemory
 
                 if not isinstance(mem, RemoteMemory):
-                    try:
-                        node_count = _memory_count(mem._graph.backend)
-                    except Exception:
-                        node_count = 0  # backend exists but empty/new — still healthy
+
+                    def count():
+                        try:
+                            with store_in_use():
+                                return _memory_count(mem._graph.backend)
+                        except Exception:
+                            log.warning(
+                                "Memory count unavailable, reporting 0", exc_info=True
+                            )
+                            return 0  # backend exists but empty/new — still healthy
+
+                    node_count, fresh = count_probe.get(count)
+                    if not fresh:
+                        stale.append("memories")
         except Exception as exc:
             degraded_reason = _safe_degraded_reason(exc)
         if not backend_ok:
@@ -278,8 +381,17 @@ def _build_app() -> FastAPI:
                 from smartmemory_app.storage import store_in_use
                 from smartmemory_app.work_graph import get_work_graph
 
-                with store_in_use():
-                    offer = reextract_offer(mem, get_work_graph())
+                def read_offer():
+                    try:
+                        with store_in_use():
+                            return reextract_offer(mem, get_work_graph())
+                    except Exception:
+                        log.warning("Re-extraction notice unavailable", exc_info=True)
+                        return None
+
+                offer, fresh = offer_probe.get(read_offer)
+                if not fresh:
+                    stale.append("reextract_offer")
             except Exception:
                 log.warning("Re-extraction notice unavailable", exc_info=True)
         work_info = None
@@ -287,7 +399,16 @@ def _build_app() -> FastAPI:
             try:
                 from smartmemory_app.work_graph import get_work_status
 
-                work_info = get_work_status()
+                def read_work():
+                    try:
+                        return get_work_status()
+                    except Exception:
+                        log.warning("Work graph counts unavailable", exc_info=True)
+                        return None
+
+                work_info, fresh = work_probe.get(read_work)
+                if not fresh:
+                    stale.append("work_graph")
             except Exception:
                 log.warning("Work graph counts unavailable", exc_info=True)
 
@@ -323,6 +444,9 @@ def _build_app() -> FastAPI:
         }
         if degraded_reason:
             response["degraded_reason"] = degraded_reason
+        if stale:
+            # The store was busy: these fields hold their last value (or -1 / null if none).
+            response["stale"] = stale
         return response
 
     # DIST-AGENT-HOOKS-1: Mount lifecycle API at /lifecycle on root app
