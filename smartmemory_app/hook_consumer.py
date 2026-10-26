@@ -109,7 +109,24 @@ def execute_hook_job(job: dict) -> None:
                     exc,
                 )
         request[USER_TURN_KEY] = user_turn
-    run_phase(_get_lifecycle(request), job["phase"], request)
+    from smartmemory_app.storage import store_in_use
+
+    # The daemon closes the store only once no job holds it (HOOK-CONSUMER-SHUTDOWN-RACE-1).
+    with store_in_use():
+        run_phase(_get_lifecycle(request), job["phase"], request)
+
+
+def _free_retry(error: BaseException) -> bool:
+    """A daemon stop or a lost store write lock: nothing was written, the job did not fail."""
+    from smartmemory_app.storage import StoreBusyError, StoreClosingError
+
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, (StoreBusyError, StoreClosingError)):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def _write_pid(root: Path) -> None:
@@ -172,6 +189,7 @@ def _settle(root: Path, inflight: dict, max_attempts: int) -> tuple[int, bool]:
                     job,
                     f"{type(error).__name__}: {error}",
                     max_attempts=max_attempts,
+                    free=_free_retry(error),
                 )
         except Exception as exc:  # noqa: BLE001 - a settle failure must not kill the consumer
             troubled = True
@@ -258,6 +276,7 @@ def consume(
         _write_pid(root)
         inflight: dict = {}
         idle_since = None
+        marked = False  # the jobs a stop leaves running are recorded once
         backoff = 0.0
         with ThreadPoolExecutor(
             max_workers=parallel, thread_name_prefix="smartmemory-hook-job"
@@ -268,7 +287,14 @@ def consume(
                     finished += settled
                     if stop.is_set():
                         if not inflight:
+                            if marked:
+                                queue.clear_interrupted(root)
                             return finished
+                        if not marked:
+                            # Should the process exit before these finish, recovery
+                            # requeues them without using an attempt.
+                            queue.mark_interrupted(root, list(inflight.values()))
+                            marked = True
                         if troubled:  # a done job whose record cannot be written yet
                             time.sleep(poll)
                         else:
@@ -418,15 +444,18 @@ class DaemonConsumer:
         self.thread.start()
         return self
 
-    def stop(self, timeout: float = 30.0) -> None:
+    def stop(self, timeout: float = 30.0) -> bool:
+        """Stop and wait up to ``timeout``; True once the thread, and so every job, has ended."""
         self._stop.set()
         if self.thread.is_alive():
             self.thread.join(timeout)
         if self.thread.is_alive():
             log.warning(
-                "Hook queue consumer still running after %.0fs at shutdown; its jobs stay in running/ and are retried on the next start",
+                "Hook queue consumer still running after %.1fs at shutdown; its jobs stay in running/ and are retried on the next start without using an attempt",
                 timeout,
             )
+            return False
+        return True
 
 
 def start_in_daemon(**kwargs) -> DaemonConsumer:

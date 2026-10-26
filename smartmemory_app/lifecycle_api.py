@@ -36,9 +36,22 @@ _phase_pool = ThreadPoolExecutor(
 
 
 async def _off_loop(fn, /, *args, **kwargs):
-    """Run blocking lifecycle work on the phase pool, keeping the request's contextvars."""
-    call = functools.partial(contextvars.copy_context().run, fn, *args, **kwargs)
+    """Run blocking lifecycle work on the phase pool, keeping the request's contextvars.
+
+    The work holds the store (``store_in_use``): uvicorn's shutdown abandons this thread
+    at its drain bound, and the daemon must not close the store under it.
+    """
+    call = functools.partial(
+        contextvars.copy_context().run, _holding_store, fn, *args, **kwargs
+    )
     return await asyncio.get_running_loop().run_in_executor(_phase_pool, call)
+
+
+def _holding_store(fn, /, *args, **kwargs):
+    from smartmemory_app.storage import store_in_use
+
+    with store_in_use():
+        return fn(*args, **kwargs)
 
 
 def _get_lifecycle(body: dict) -> MemoryLifecycle:
