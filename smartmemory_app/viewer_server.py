@@ -476,7 +476,7 @@ def _warm_backend() -> bool:
     _embedding_check = None
     from smartmemory.errors import MissingModelError
     from smartmemory_app.hf_progress import discrete_huggingface_progress
-    from smartmemory_app.storage import get_memory
+    from smartmemory_app.storage import StoreClosingError, get_memory, store_in_use
 
     _startup_line("Loading SmartMemory...")
     started = time.perf_counter()
@@ -485,7 +485,13 @@ def _warm_backend() -> bool:
     _set_last_warmup_failure(None)
     with discrete_huggingface_progress(_startup_line):
         try:
-            get_memory(on_progress=_startup_line)
+            # Hold the store while it opens (HOOK-CONSUMER-WARMUP-STORE-GATE-FU-1): a
+            # shutdown that begins meanwhile leaves it open, and get_memory then refuses
+            # to publish it. A shutdown that began first refuses this with StoreClosingError.
+            with store_in_use():
+                get_memory(on_progress=_startup_line)
+        except StoreClosingError:
+            raise
         except Exception as exc:
             from smartmemory_app.crash_reporter import report_in_background
 
@@ -691,6 +697,8 @@ def _start_background_warmup() -> threading.Thread:
     _set_startup_state("warming")
 
     def run() -> None:
+        from smartmemory_app.storage import StoreClosingError, store_in_use
+
         try:
             backend_ok = _warm_backend()
             if _shutdown_begun():
@@ -702,8 +710,17 @@ def _start_background_warmup() -> threading.Thread:
             if backend_ok:
                 from smartmemory_app.work_graph import show_reextract_offer
 
-                show_reextract_offer(log.info)
+                # The notice walks the whole store: hold it, so cleanup never closes the
+                # connection under this scan (HOOK-CONSUMER-WARMUP-STORE-GATE-FU-1).
+                with store_in_use():
+                    show_reextract_offer(log.info)
             _sync_hooks()
+        except StoreClosingError:
+            log.warning(
+                "Shutdown began before startup finished with saved memories: hooks not synced "
+                "and hook queue consumer not started. Hook writes wait on disk for the next start"
+            )
+            return
         except BaseException as exc:
             from smartmemory_app.crash_reporter import report_in_background
 
