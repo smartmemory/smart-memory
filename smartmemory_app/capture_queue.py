@@ -317,17 +317,59 @@ def _dead_letter_path(root: Path, path: Path, error: str) -> None:
         )
 
 
+# HOOK-CONSUMER-SHUTDOWN-RACE-1: a job cut short by a daemon stop, or one that lost the
+# store write lock (StoreBusyError, nothing written), did not fail, so it is requeued
+# without using its failure budget. These free retries have their own bound so a job
+# that always loses the lock still ends: past it, each retry counts as a failed attempt.
+# 40 is about 55 minutes of continuous lock loss (each loss waits out the 30 s write
+# lock, then backs off up to 60 s), or 40 daemon stops in the middle of the job.
+DEFAULT_HOOK_MAX_FREE_RETRIES = 40
+INTERRUPTED_MARKER = "interrupted.json"
+
+
+def max_free_retries() -> int:
+    raw = os.environ.get("SMARTMEMORY_HOOK_MAX_FREE_RETRIES", "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_HOOK_MAX_FREE_RETRIES
+    except ValueError:
+        value = DEFAULT_HOOK_MAX_FREE_RETRIES
+    return value if value >= 0 else DEFAULT_HOOK_MAX_FREE_RETRIES
+
+
 def fail_hook_job(
-    root: Path, job: dict, error: str, *, max_attempts: int, permanent: bool = False
+    root: Path,
+    job: dict,
+    error: str,
+    *,
+    max_attempts: int,
+    permanent: bool = False,
+    free: bool = False,
 ) -> str:
-    """Requeue with a backoff, or dead-letter after ``max_attempts``. Returns ``requeued`` or ``dead``."""
+    """Requeue with a backoff, or dead-letter after ``max_attempts``. Returns ``requeued`` or ``dead``.
+
+    ``free`` (shutdown, lost write lock) requeues without counting an attempt while the
+    job's free retries last (``max_free_retries``), then counts like any failure.
+    """
+    record = {**_strip(job), "last_error": error, "failed_at": time.time()}
+    free_retries = int(job.get("free_retries", 0))
+    if free and not permanent and free_retries < max_free_retries():
+        free_retries += 1
+        record["free_retries"] = free_retries
+        record["not_before"] = time.time() + min(60.0, 2.0 ** (free_retries - 1))
+        source = Path(job["_path"])
+        _write_json_atomic(root / "queue" / source.name, record)
+        source.unlink(missing_ok=True)
+        log.warning(
+            "Hook %s job %s requeued without using an attempt (free retry %d of %d): %s",
+            job["phase"],
+            source.name,
+            free_retries,
+            max_free_retries(),
+            error,
+        )
+        return "requeued"
     attempts = int(job.get("attempts", 0)) + 1
-    record = {
-        **_strip(job),
-        "attempts": attempts,
-        "last_error": error,
-        "failed_at": time.time(),
-    }
+    record["attempts"] = attempts
     source = Path(job["_path"])
     if permanent or attempts >= max_attempts:
         _write_json_atomic(root / "dead" / source.name, record)
@@ -447,14 +489,26 @@ def recover_running(root: Path, *, max_attempts: int) -> int:
     A record whose requeue cannot be written (full disk) is renamed back to queue/ as it is
     (attempt not counted); one that cannot even be renamed stays in running/ with a WARNING.
     """
+    marker = root / INTERRUPTED_MARKER
+    try:
+        interrupted = set(json.loads(marker.read_text(encoding="utf-8")).get("jobs", []))
+    except FileNotFoundError:
+        interrupted = set()
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        log.warning("Hook queue %s unreadable, its jobs count an attempt: %s", marker, exc)
+        interrupted = set()
     recovered = 0
     for job in hook_jobs(root, "running"):
+        stopped = Path(job["_path"]).name in interrupted
         try:
             fail_hook_job(
                 root,
                 job,
-                "worker exited while the job was running",
+                "the daemon stopped while the job was running"
+                if stopped
+                else "worker exited while the job was running",
                 max_attempts=max_attempts,
+                free=stopped,
             )
         except OSError as exc:
             source = Path(job["_path"])
@@ -479,7 +533,32 @@ def recover_running(root: Path, *, max_attempts: int) -> int:
                 exc,
             )
         recovered += 1
+    _discard(marker)
     return recovered
+
+
+def mark_interrupted(root: Path, jobs: list[dict]) -> None:
+    """Record the jobs a stopping consumer leaves running, so recovery does not count them.
+
+    Written by the consumer thread once it sees the stop, never by a signal handler. A
+    job that finishes after all is settled as usual and its name here is ignored.
+    """
+    names = sorted(Path(job["_path"]).name for job in jobs)
+    try:
+        _write_json_atomic(
+            root / INTERRUPTED_MARKER,
+            {"pid": os.getpid(), "at": time.time(), "jobs": names},
+        )
+    except OSError as exc:
+        log.warning(
+            "Hook queue %s: interrupted jobs not recorded (%s); recovery counts them as attempts",
+            root,
+            exc,
+        )
+
+
+def clear_interrupted(root: Path) -> None:
+    _discard(root / INTERRUPTED_MARKER)
 
 
 def requeue_dead_hooks(

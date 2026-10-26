@@ -17,6 +17,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -367,7 +368,7 @@ def _get_local_memory(
                     auto_download_models=False,
                 ),
             )
-        atexit.register(_shutdown)
+        atexit.register(_shutdown_at_exit)
         # DIST-LITE-WARMSTART-1: warm the local embedder in the background so the
         # user's first add() overlaps the ~12s model load instead of paying it inline.
         # Daemon thread, idempotent, opt out with SMARTMEMORY_NO_WARM=1.
@@ -448,6 +449,82 @@ def _shutdown() -> None:
         )
     finally:
         _memory = None
+
+
+
+# HOOK-CONSUMER-SHUTDOWN-RACE-1: closing the SQLite connection while another thread is
+# inside a statement crashes the process (SIGSEGV in sqlite.py execute). Work that can
+# outlive uvicorn's drain (hook consumer jobs, the /lifecycle phase pool) holds the store
+# through ``store_in_use``; the daemon closes it only once no such work is running.
+class StoreClosingError(RuntimeError):
+    """The daemon is shutting down: the store takes no new work. Nothing was written."""
+
+
+_store_gate = threading.Condition()
+_store_users = 0
+_store_closing = False
+
+
+@contextmanager
+def store_in_use():
+    """Hold the store open for one unit of work; shutdown never closes it underneath."""
+    global _store_users
+    with _store_gate:
+        if _store_closing:
+            raise StoreClosingError(
+                "SmartMemory is shutting down, the store takes no new work"
+            )
+        _store_users += 1
+    try:
+        yield
+    finally:
+        with _store_gate:
+            _store_users -= 1
+            _store_gate.notify_all()
+
+
+def open_store_gate() -> None:
+    """A new daemon lifecycle: the store takes work again."""
+    global _store_closing
+    with _store_gate:
+        _store_closing = False
+
+
+def close_store_when_idle(timeout: float) -> bool:
+    """Refuse new store work, wait up to ``timeout`` s for running work, then close the store.
+
+    Returns False, with the store left open, when work is still running at the deadline:
+    the caller exits without closing. Its uncommitted transaction rolls back when SQLite
+    next opens the file, and a hook job stays in running/ for the next start.
+    """
+    global _store_closing
+    with _store_gate:
+        _store_closing = True
+        idle = _store_gate.wait_for(lambda: _store_users == 0, max(0.0, timeout))
+        busy = _store_users
+    if not idle:
+        log.warning(
+            "SmartMemory store left open at shutdown: %d unit(s) of work still running on it, "
+            "and closing it under them can crash the process. Their uncommitted writes roll back "
+            "and hook jobs are retried on the next start",
+            busy,
+        )
+        return False
+    _shutdown()
+    return True
+
+
+def _shutdown_at_exit() -> None:
+    """atexit: close the store unless work still runs on it (see ``close_store_when_idle``)."""
+    with _store_gate:
+        busy = _store_users
+    if busy:
+        log.warning(
+            "SmartMemory store left open at exit: %d unit(s) of work still running on it",
+            busy,
+        )
+        return
+    _shutdown()
 
 
 # --- Helpers -------------------------------------------------------------------
