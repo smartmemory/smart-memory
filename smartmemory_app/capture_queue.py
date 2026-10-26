@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime
@@ -233,21 +234,62 @@ def _contain_payloads(root: Path, record: dict) -> None:
         record[key] = str(local)
 
 
+# HOOK-CONSUMER-SCAN-1: parsed queue records keyed by path, valid while (mtime_ns, size) are
+# unchanged. A scan of 9K queued records parsed every file on every pass (0.74-0.91 s CPU);
+# now it stats each file and parses only new or changed ones. Entries for files that are
+# gone (claimed, finished, dead-lettered) are evicted by the scan of their directory.
+_hook_record_cache: dict[str, tuple[int, int, dict]] = {}
+_hook_record_cache_lock = threading.Lock()
+
+
+def _parse_hook_record(root: Path, path: Path, mtime_ns: int) -> tuple[dict | None, bool]:
+    """Read one queued record: ``(record or None if dead-lettered/gone, cacheable)``."""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, False  # claimed or finished between glob and read
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "Hook queue record %s unreadable, moving it to dead/: %s",
+            path.name,
+            exc,
+        )
+        _dead_letter_path(root, path, f"unreadable record: {exc}")
+        return None, False
+    if not isinstance(record, dict) or record.get("phase") not in HOOK_PHASES:
+        log.warning(
+            "Hook queue record %s has no known phase, moving it to dead/", path.name
+        )
+        _dead_letter_path(root, path, "record has no known phase")
+        return None, False
+    _contain_payloads(root, record)
+    record.setdefault("queued_ns", mtime_ns)
+    cacheable = True
+    if not record.get("session_id"):
+        derived = _payload_session(record.get("payload_path"))
+        record["session_id"] = derived or "unknown"
+        cacheable = derived is not None  # a payload that is not there yet may appear later
+    return record, cacheable
+
+
 def hook_jobs(root: Path, subdir: str = "queue") -> list[dict]:
     """Records in ``subdir`` oldest first. Each carries ``_path`` and an order key ``queued_ns``.
 
     The bash hook has no clock (bash 3.2), so the first scan stamps ``queued_ns``
     from the record's mtime, and a requeue keeps it: a retried job keeps its place.
     A record without a session id takes the payload's, else ``unknown``.
+    Parsed records are cached by ``(path, mtime_ns, size)`` (HOOK-CONSUMER-SCAN-1): a
+    rescan parses only new or changed files.
     """
     records = []
+    seen = set()
     for path in (root / subdir).glob("*.json"):
+        key = str(path)
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            mtime_ns = path.stat().st_mtime_ns
+            stat = path.stat()
         except FileNotFoundError:
-            continue  # claimed or finished between glob and read
-        except (OSError, ValueError) as exc:
+            continue  # claimed or finished between glob and stat
+        except OSError as exc:
             log.warning(
                 "Hook queue record %s unreadable, moving it to dead/: %s",
                 path.name,
@@ -255,20 +297,29 @@ def hook_jobs(root: Path, subdir: str = "queue") -> list[dict]:
             )
             _dead_letter_path(root, path, f"unreadable record: {exc}")
             continue
-        if not isinstance(record, dict) or record.get("phase") not in HOOK_PHASES:
-            log.warning(
-                "Hook queue record %s has no known phase, moving it to dead/", path.name
-            )
-            _dead_letter_path(root, path, "record has no known phase")
-            continue
-        _contain_payloads(root, record)
-        record.setdefault("queued_ns", mtime_ns)
-        if not record.get("session_id"):
-            record["session_id"] = (
-                _payload_session(record.get("payload_path")) or "unknown"
-            )
-        record["_path"] = str(path)
+        stamp = (stat.st_mtime_ns, stat.st_size)
+        with _hook_record_cache_lock:
+            hit = _hook_record_cache.get(key)
+        if hit is not None and hit[:2] == stamp:
+            record = dict(hit[2])
+        else:
+            record, cacheable = _parse_hook_record(root, path, stat.st_mtime_ns)
+            if record is None:
+                continue
+            with _hook_record_cache_lock:
+                if cacheable:
+                    _hook_record_cache[key] = (*stamp, dict(record))
+                else:
+                    _hook_record_cache.pop(key, None)
+        seen.add(key)
+        record["_path"] = key
         records.append(record)
+    prefix = str(root / subdir) + os.sep
+    with _hook_record_cache_lock:
+        for key in [
+            k for k in _hook_record_cache if k.startswith(prefix) and k not in seen
+        ]:
+            del _hook_record_cache[key]
     records.sort(key=lambda r: (r["queued_ns"], Path(r["_path"]).name))
     return records
 
