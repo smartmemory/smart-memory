@@ -645,6 +645,39 @@ def ingest(
       usearch and entity_patterns.jsonl require cross-process coordination.
       On Timeout: raises filelock.Timeout — caller surfaces as error string.
     """
+    result, remote = _ingest_raw(content, memory_type, sync, properties, origin)
+    return result if remote else _legacy_ingest_view(result, sync)
+
+
+def ingest_with_receipt(
+    content: str,
+    memory_type: str = "episodic",
+    sync: bool = True,
+    properties: dict[str, str] | None = None,
+    origin: str | None = None,
+):
+    """The receipt doorway of ``ingest``: the same save, returned as a ``save_return.SaveReturn``.
+
+    ``ingest`` keeps its legacy return (an item_id string, or the sync=False dict) for its existing callers, so a
+    core save receipt reads there as its subject id (U4.32). This doorway is for callers that render the receipt
+    (MCP ``memory_save``, G52/G137): on the receipt arm ``value`` is the subject id and ``receipt``/``summary`` are
+    the wire receipt and its one line; on the legacy arm ``value`` is exactly what ``ingest`` returns and
+    ``receipt`` is None (no receipt is made up). Hosted mode is ``ingest``'s hosted return on the legacy arm.
+    Refusals (``SaveRejected``, ``SaveReturnRefused``) are the ones ``ingest`` raises. Arguments are ``ingest``'s.
+    """
+    from smartmemory_app.save_return import SaveReturn, resolve_save_return
+
+    result, remote = _ingest_raw(content, memory_type, sync, properties, origin)
+    if remote:  # hosted receipts belong to the hosted-adapters step (see ``save``): ``ingest``'s hosted return, as is
+        return SaveReturn(result)
+    resolved = resolve_save_return(result, op="ingest")
+    if resolved.receipt is not None:
+        return resolved
+    return SaveReturn(_legacy_ingest_view(result, sync))
+
+
+def _ingest_raw(content, memory_type, sync, properties, origin):
+    """Run one ``ingest`` save and return ``(what core or the hosted client returned, unread; whether hosted)``."""
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
 
@@ -668,27 +701,32 @@ def ingest(
             if k not in RESERVED_INGEST_PROPERTIES:
                 ctx[k] = v
     if isinstance(mem, RemoteMemory):
-        return mem.ingest(content, memory_type, context=ctx)
+        return mem.ingest(content, memory_type, context=ctx), True
     # Local path — acquire write lock for cross-process coordination
     data_path = _data_path if _data_path is not None else _resolve_data_dir()
     lock = _get_lock_file(data_path)
     with lock:
-        result = mem.ingest(content, context=ctx, sync=sync)
-        if not sync:  # receipt arm reads as the legacy dict; legacy returns pass through unchanged
-            from smartmemory_app.save_return import ingest_dict
+        return mem.ingest(content, context=ctx, sync=sync), False
 
-            result = ingest_dict(result, op="ingest")
-        if isinstance(result, dict) and result.get("status") == "held":
-            return result
-        if not sync and isinstance(result, dict):
-            # Initialization has applied the effective provider/model settings.
-            # Use core's placement resolver, not the foreground extraction status:
-            # even a configured LLM is deferred and reports ruler_only at save time.
-            warning = llm_extraction_warning()
-            if warning:
-                log.warning("%s", warning)
-                return {**result, "warning": warning}
-            return result
+
+def _legacy_ingest_view(result, sync: bool):
+    """The legacy local ``ingest`` return of one core result: the item_id string, the sync=False dict, or a hold."""
+    # sync=False: a receipt reads as the legacy dict; legacy returns pass through unchanged
+    if not sync:
+        from smartmemory_app.save_return import ingest_dict
+
+        result = ingest_dict(result, op="ingest")
+    if isinstance(result, dict) and result.get("status") == "held":
+        return result
+    if not sync and isinstance(result, dict):
+        # Initialization has applied the effective provider/model settings.
+        # Use core's placement resolver, not the foreground extraction status:
+        # even a configured LLM is deferred and reports ruler_only at save time.
+        warning = llm_extraction_warning()
+        if warning:
+            log.warning("%s", warning)
+            return {**result, "warning": warning}
+        return result
     return _normalize_ingest_result(result)
 
 
