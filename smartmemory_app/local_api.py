@@ -18,6 +18,8 @@ DELETE /graph/nodes/{id} → /memory/graph/nodes/{id} (405 — entity-node ops s
 All endpoints acquire _rw_lock for thread safety under uvicorn's thread pool.
 """
 
+import functools
+import inspect
 import ipaddress
 import logging
 import re
@@ -26,14 +28,15 @@ from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from smartmemory.errors import MissingModelError
 from smartmemory_app.config import UnconfiguredError, llm_key_present
-from smartmemory_app.storage import get_memory
+from smartmemory_app.storage import StoreClosingError, get_memory, store_in_use
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +45,46 @@ log = logging.getLogger(__name__)
 # ingest+read could race on the SmartMemory singleton's non-thread-safe state.
 _rw_lock = threading.RLock()
 
+
+def _holding_store(endpoint):
+    """Run a sync endpoint inside ``store_in_use()``, on the worker thread that runs it."""
+
+    @functools.wraps(endpoint)
+    def run(*args, **kwargs):
+        with store_in_use():
+            return endpoint(*args, **kwargs)
+
+    run._holds_store = True
+    return run
+
+
+class _StoreGatedRoute(APIRoute):
+    """Sync routes hold the store while they run (HOOK-CONSUMER-SHUTDOWN-RACE-1 F-A).
+
+    uvicorn runs a sync route on a worker thread and, at its graceful-shutdown bound,
+    cancels the request and returns from ``server.run()`` while that thread still runs,
+    so the daemon's ``_cleanup`` could close the store under a slow ingest or delete
+    (the SIGSEGV of F1). The gate is taken inside the thread, not around the awaited
+    handler: a cancelled request would release it while the thread kept going. Async
+    routes run on the event loop, which has stopped before the store closes.
+    """
+
+    def __init__(self, path, endpoint, **kwargs):
+        if not inspect.iscoroutinefunction(endpoint) and not getattr(
+            endpoint, "_holds_store", False
+        ):
+            endpoint = _holding_store(endpoint)
+        super().__init__(path, endpoint, **kwargs)
+
+
 api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
+api.router.route_class = _StoreGatedRoute
+
+
+@api.exception_handler(StoreClosingError)
+async def _store_closing(request: Request, exc: StoreClosingError):
+    # The daemon is stopping: nothing was written, the caller may retry after a restart.
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 # TOUR-ASK-502-1: this app is MOUNTED under /memory. An unhandled route error
@@ -204,7 +246,7 @@ def get_edges_bulk(body: EdgesBulkRequest) -> dict:
 
 # Option B delete endpoint — /graph/nodes/{node_id} via router mounted at /graph.
 # Both delete endpoints must exist: fetchAdapter.js:48-49 calls two separate paths.
-_graph_router = APIRouter()
+_graph_router = APIRouter(route_class=_StoreGatedRoute)
 
 
 @_graph_router.delete("/nodes/{node_id}")
