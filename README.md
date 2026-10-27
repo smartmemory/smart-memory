@@ -40,7 +40,7 @@ Text with a dollar sign needs single quotes, because the shell expands `$48` ins
 ### What you get from here
 
 - **Your AI remembers across sessions.** Setup installs hooks that capture context while you work and recall the relevant parts when the next session starts.
-- **Ask questions in plain language.** `sm search` is semantic search. "Which database did we pick" finds the Postgres memory even though the words don't match.
+- **Ask questions in plain language.** `sm search` is semantic search. "Which database did we pick" finds the Postgres memory even though the words don't match. `sm search` shows each memory once, with the facts that matched it indented underneath as `[fact]` lines, and `sm ask` uses up to 8 memories as evidence (`--limit`).
 - **A knowledge graph you can see.** Everything you add gets linked into a graph you can explore in your browser. The tour below shows you around.
 
 ## A quick tour
@@ -231,7 +231,7 @@ smartmemory search "query" --full      # Whole bodies instead of 200-character p
 smartmemory get abcdef                 # Local read-only lookup by unique ID prefix (6+ hex chars)
 smartmemory help search                # Show command help
 smartmemory search "*"                 # List all memories
-smartmemory search --top-k 20 "query"  # Control result count (default: 5)
+smartmemory search --top-k 20 "query"  # Control result count in memories (default: 5, one row per memory)
 smartmemory search --project atlas "q" # Filter by property
 smartmemory ask "what did we decide?"  # Answer, or labelled excerpts locally without an LLM key
 
