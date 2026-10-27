@@ -1,6 +1,7 @@
 """Caller disclosure follows core's effective route, not an API-key list."""
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -180,8 +181,13 @@ def test_effective_config_disclosure_through_storage_api_and_cli(
     item_id = "ba931e6b-83ac-4b4b-97e4-8bcdd03cfb30"
     work_graph = Mock()
     work_graph.add_run.return_value = "run-id"
+    # CORE-INGEST-SPLIT-1: core reads runner.stages (pre_store_stage) to split prepare from
+    # apply, so the fake carries the real stage order's tail; run_to is the prepare half and
+    # run_from the apply half, both stubbed to return the saved state.
     runner = Mock()
+    runner.stages = [SimpleNamespace(name=n) for n in ("classify", "store")]
     runner.run_to.return_value = PipelineState(item_id=item_id)
+    runner.run_from.return_value = PipelineState(item_id=item_id)
 
     def core_ingest(content, *, context, sync):
         # Exercise core's actual route resolution and deferred-work planning.
@@ -214,7 +220,18 @@ def test_effective_config_disclosure_through_storage_api_and_cli(
         return response.json()
 
     monkeypatch.setattr("smartmemory_app.cli._daemon_request", request)
-    with patch.dict("os.environ", {"BROWSER": "true", **credentials}, clear=True):
+    with patch.dict(
+        "os.environ",
+        {
+            "BROWSER": "true",
+            # clear=True drops tests/conftest.py's switches: crash reports off (a CLI
+            # crash would POST to PostHog) and the inherited-env check off.
+            "SMARTMEMORY_CRASH_REPORTS": "0",
+            "SMARTMEMORY_ENV_CHECK": "0",
+            **credentials,
+        },
+        clear=True,
+    ):
         storage.apply_runtime_config()
         monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
         result = CliRunner().invoke(cli, ["add", "Alice leads Atlas"])

@@ -1,5 +1,6 @@
 """CLI-SETUP-UX-1: numbered setup steps, measured estimates, default local model none."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import click
@@ -591,8 +592,15 @@ def test_no_local_model_queues_no_llm_extraction(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     class ForegroundRunner:
+        # CORE-INGEST-SPLIT-1: core reads runner.stages (pre_store_stage) to split prepare
+        # from apply; run_to is the prepare half, run_from the apply half.
+        stages = [SimpleNamespace(name=n) for n in ("classify", "store")]
+
         def run_to(self, **kwargs):
             return PipelineState(item_id="test_setupux_none", text="t", entity_ids={})
+
+        def run_from(self, state, *args, **kwargs):
+            return state
 
     with patch.dict(os.environ):
         for name in CLEAN_ENV_KEYS + ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_MODEL"):
