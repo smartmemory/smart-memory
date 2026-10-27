@@ -31,7 +31,7 @@ def test_persist_cmd_fallback(runner):
     assert result.exit_code == 0
     assert "item-abc" in result.output
     mock_ingest.assert_called_once_with(
-        "test memory text", "episodic", properties={}, origin="cli:add"
+        "test memory text", "episodic", properties=None, origin="cli:add"
     )
 
 
