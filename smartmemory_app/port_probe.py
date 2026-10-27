@@ -108,10 +108,12 @@ def _psutil_holder(port: int) -> tuple[int | None, str | None]:
     except (psutil.Error, OSError):
         return None, None
     for process in psutil.process_iter(["pid", "name"]):
+        # psutil < 6 (core allows >=5.9) names this ``connections``.
+        read = getattr(process, "net_connections", None) or process.connections
         try:
-            if listening(process.net_connections(kind="tcp")):
+            if listening(read(kind="tcp")):
                 return process.info["pid"], process.info["name"]
-        except (psutil.Error, OSError):
+        except (psutil.Error, OSError, AttributeError):
             continue
     return None, None
 

@@ -293,3 +293,84 @@ def test_health_identity_never_exposes_the_install_id(tmp_path, monkeypatch):
     fields = port_probe.identity_fields()
     assert fields["install_id_present"] is True and fields["version"]
     assert "12345678" not in json.dumps(fields)
+
+
+class _OldPsutilProcess:
+    """A psutil 5.x process: ``connections`` only, no ``net_connections``."""
+
+    def __init__(self, info, connections):
+        self.info = info
+        self._connections = connections
+
+    def connections(self, kind="tcp"):
+        if isinstance(self._connections, Exception):
+            raise self._connections
+        return self._connections
+
+
+class _NewPsutilProcess(_OldPsutilProcess):
+    """A psutil 6+ process whose ``net_connections`` raises AttributeError."""
+
+    def net_connections(self, kind="tcp"):
+        raise AttributeError("no net_connections")
+
+
+class StubRow(NamedTuple):
+    name: str
+    process: type
+    connections: object
+    holder: tuple
+
+
+PSUTIL_STUB_ROWS = [
+    StubRow(
+        "psutil 5.x: only connections, finds the holder",
+        _OldPsutilProcess,
+        [Conn(Addr("127.0.0.1", 0), psutil.CONN_LISTEN, 77)],
+        (77, "holder"),
+    ),
+    StubRow(
+        "psutil 5.x: connections finds no listener",
+        _OldPsutilProcess,
+        [],
+        (None, None),
+    ),
+    StubRow(
+        "psutil 5.x: connections denied",
+        _OldPsutilProcess,
+        psutil.AccessDenied(),
+        (None, None),
+    ),
+    StubRow(
+        "AttributeError from the process is caught",
+        _NewPsutilProcess,
+        [],
+        (None, None),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "row", PSUTIL_STUB_ROWS, ids=[row.name for row in PSUTIL_STUB_ROWS]
+)
+def test_psutil_holder_without_net_connections(monkeypatch, row):
+    """CLI-PORT-PROBE-PSUTIL-FLOOR-1: an old psutil gives the holder or unknown, never a traceback."""
+    port = 54321
+    connections = row.connections
+    if isinstance(connections, list):
+        connections = [
+            Conn(Addr("127.0.0.1", port), c.status, c.pid) for c in connections
+        ]
+
+    def denied(kind="tcp"):
+        raise psutil.AccessDenied()
+
+    monkeypatch.setattr(psutil, "net_connections", denied)
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda attrs=None: [
+            row.process({"pid": 77, "name": "holder"}, connections),
+        ],
+    )
+    assert port_probe._psutil_holder(port) == row.holder
