@@ -564,8 +564,7 @@ def get_api_key() -> str:
             expects_key = True
         if expects_key:
             warnings.warn(
-                "No API key found. Set SMARTMEMORY_API_KEY env var "
-                "or run: smartmemory setup --mode remote --api-key sk_...",
+                "No API key found. Set SMARTMEMORY_API_KEY env var or run: sm login",
                 stacklevel=2,
             )
     return key

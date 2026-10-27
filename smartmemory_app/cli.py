@@ -700,6 +700,17 @@ cli.add_command(_setup_cmd, name="setup")
 cli.add_command(_setup_cmd, name="init")
 cli.add_command(_uninstall_cmd, name="uninstall")
 
+
+@cli.command("login")
+@click.option("--api-key", help="SmartMemory API key (stored in the OS keychain).")
+@click.option("--api-url", help="Service base URL (overrides SMARTMEMORY_API_URL).")
+def login_cmd(api_key: str | None, api_url: str | None) -> None:
+    """Log in to your SmartMemory account, so memory is shared across agents and machines."""
+    from smartmemory_app.setup import _setup_click
+
+    _setup_click("remote", api_key, api_url)
+
+
 # `sm code …` and `sm mcp …` subgroups
 from smartmemory_app.cli_code import code_group as _code_group  # noqa: E402
 from smartmemory_app.cli_mcp import mcp_group as _mcp_group  # noqa: E402
@@ -1950,7 +1961,7 @@ def search_cmd(
         if load_config().mode == "remote":
             raise click.ClickException(
                 "--origin is not supported in remote mode: the hosted search API "
-                "does not accept origin filters. Use local mode or remove --origin."
+                "does not accept origin filters. Remove --origin."
             )
     if offset is not None:
         from smartmemory_app.config import load_config

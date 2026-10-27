@@ -321,7 +321,7 @@ def dependency_rows(data_dir: Path):
         if backend.priority > 0 or os.name == "nt"
         else "warning: no usable backend"
     )
-    hint = ". Fix: smartmemory setup --mode remote" if status != "OK" else ""
+    hint = ". Fix: sm login" if status != "OK" else ""
     yield f"Keyring: {status} ({name}{fallback}){hint}"
     if os.name == "nt":
         from smartmemory_app.setup import _resolve_hook_shell

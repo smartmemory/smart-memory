@@ -209,6 +209,17 @@ def _suppressed(command: str | None, argv: list[str]) -> bool:
         return True
 
 
+def _funnel_notices() -> list[str]:
+    """CLI-HINTS-FUNNEL-1 line, isolated so its failure never drops the update lines."""
+    try:
+        from smartmemory_app.hints import funnel_notices
+
+        return funnel_notices()
+    except Exception as exc:
+        log.debug("update-check: funnel hint skipped: %s", exc)
+        return []
+
+
 def trailing_notices(
     command: str | None = None, *, argv: list[str] | None = None
 ) -> list[str]:
@@ -225,6 +236,7 @@ def trailing_notices(
         hint = update_hint(__version__)
         if hint:
             lines.append(hint)
+        lines.extend(_funnel_notices())
         return lines
     except Exception as exc:
         log.debug("update-check: trailing notices skipped: %s", exc)

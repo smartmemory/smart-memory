@@ -282,7 +282,7 @@ def verify_auth(choices: dict) -> Check:
         return Check(
             False,
             "the config file is not in remote mode",
-            "Run: sm setup --mode remote --api-key KEY",
+            "Run: sm login",
         )
     return _row_check(doctor.check_credentials(_doctor_context()))
 

@@ -879,7 +879,7 @@ def search(
     if search_kwargs.get("origin") is not None and load_config().mode == "remote":
         raise NotImplementedError(
             "--origin is not supported in remote mode: the hosted search API "
-            "does not accept origin filters. Use local mode or remove --origin."
+            "does not accept origin filters. Remove --origin."
         )
     mem = get_memory()
     # Forward documented core options. Unknown extension keys still drop, while
@@ -912,7 +912,7 @@ def search(
     if isinstance(mem, RemoteMemory):
         if filters:
             raise NotImplementedError(
-                "Property filters are not supported in remote mode. Use local mode or remove --<property> flags."
+                "Property filters are not supported in remote mode. Remove --<property> flags."
             )
         return mem.search(query, top_k, **core_kwargs)
     # Wildcard: return ALL memory nodes (not entity/relation/pattern nodes).

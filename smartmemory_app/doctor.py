@@ -914,14 +914,14 @@ def check_credentials(ctx: Context) -> Row:
             "API key",
             WARN,
             f"not checked: {exc} could not be read",
-            "Set SMARTMEMORY_API_KEY for this shell, or run: sm setup --mode remote --api-key KEY",
+            "Set SMARTMEMORY_API_KEY for this shell, or run: sm login",
         )
     if source is None:
         return Row(
             "API key",
             FAIL,
             "none found (checked env SMARTMEMORY_API_KEY and the OS keychain)",
-            "Run: sm setup --mode remote --api-key KEY",
+            "Run: sm login",
         )
     return Row("API key", PASS, f"present (from {source})")
 
@@ -999,7 +999,7 @@ def check_tenant(ctx: Context) -> Row:
             WARN,
             f"not checked: no API key{' (' + unread + ' unreadable)' if unread else ''}, "
             f"so the account behind the CLI is unknown. Workspace: {ws_text}.",
-            "Run: sm setup --mode remote --api-key KEY",
+            "Run: sm login",
         )
     url = f"{_api_url(ctx)}/auth/me"
     url_label = _shown(
@@ -1027,7 +1027,7 @@ def check_tenant(ctx: Context) -> Row:
             "Tenant and workspace",
             FAIL,
             "the service rejected the API key (HTTP 401)",
-            "Create a new key in the console, then run: sm setup --mode remote --api-key KEY",
+            "Create a new key in the console, then run: sm login",
         )
     if status != 200 or not isinstance(body, dict):
         return Row(

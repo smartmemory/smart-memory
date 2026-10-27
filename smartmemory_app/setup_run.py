@@ -54,7 +54,7 @@ RUN_FIX = {
     "seed": "Check that the data folder is writable, then run: sm setup",
     "restart": "Run: sm stop, then run: sm setup",
     "daemon": "Run: sm doctor, then run: sm start --wait",
-    "auth": "Run: sm setup --mode remote --api-key KEY",
+    "auth": "Run: sm login",
     "mode": "Run: sm doctor",
     "roundtrip": "Run: sm doctor",
 }

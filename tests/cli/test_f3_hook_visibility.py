@@ -152,7 +152,7 @@ def test_cold_remote_origin_refuses_before_connecting(tmp_path, monkeypatch, que
         assert response.status_code == 501, response.text
         assert response.json()["detail"] == (
             "--origin is not supported in remote mode: the hosted search API "
-            "does not accept origin filters. Use local mode or remove --origin."
+            "does not accept origin filters. Remove --origin."
         )
         assert storage._remote_memory is None
     finally:
