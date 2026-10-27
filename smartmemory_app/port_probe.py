@@ -20,12 +20,15 @@ DEFAULT_PORT = 9014
 #: Fallback range setup may pick from when the default port is taken.
 FALLBACK_PORTS = tuple(range(DEFAULT_PORT, DEFAULT_PORT + 6))
 
-FREE, LIVE, STALE, FOREIGN = "free", "live", "stale", "foreign"
+#: How long the ``/health`` handshake waits before the listener counts as not answering.
+HANDSHAKE_TIMEOUT = 2.0
+
+FREE, LIVE, STALE, FOREIGN, UNKNOWN = "free", "live", "stale", "foreign", "unknown"
 
 
 class PortState(NamedTuple):
     port: int
-    state: str  # free | live | stale | foreign
+    state: str  # free | live | stale | foreign | unknown
     pid: int | None = None
     program: str | None = None
     version: str | None = None
@@ -64,8 +67,7 @@ def _listening(port: int, timeout: float = 0.5) -> bool:
         probe.close()
 
 
-def port_holder(port: int) -> tuple[int | None, str | None]:
-    """Best effort pid and program name of the listener (own processes only on macOS)."""
+def _lsof_holder(port: int) -> tuple[int | None, str | None]:
     try:
         out = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fpc"],
@@ -80,12 +82,56 @@ def port_holder(port: int) -> tuple[int | None, str | None]:
     return (int(pid[1]) if pid else None), (name[1] if name else None)
 
 
+def _psutil_holder(port: int) -> tuple[int | None, str | None]:
+    """Cross-platform holder lookup for machines without ``lsof`` (every Windows install).
+
+    The system-wide socket list needs root on macOS, so on AccessDenied it falls back
+    to the caller's own processes, which is where a hung SmartMemory daemon lives.
+    """
+    import psutil
+
+    def listening(connections) -> bool:
+        return any(
+            c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN
+            for c in connections
+        )
+
+    try:
+        for c in psutil.net_connections(kind="tcp"):
+            if c.laddr and c.laddr.port == port and c.status == psutil.CONN_LISTEN:
+                if c.pid is None:
+                    return None, None
+                return c.pid, psutil.Process(c.pid).name()
+        return None, None
+    except psutil.AccessDenied:
+        pass
+    except (psutil.Error, OSError):
+        return None, None
+    for process in psutil.process_iter(["pid", "name"]):
+        try:
+            if listening(process.net_connections(kind="tcp")):
+                return process.info["pid"], process.info["name"]
+        except (psutil.Error, OSError):
+            continue
+    return None, None
+
+
+def port_holder(port: int) -> tuple[int | None, str | None]:
+    """Best effort pid and program name of the listener: ``lsof``, then psutil."""
+    pid, name = _lsof_holder(port)
+    if pid is None:
+        pid, name = _psutil_holder(port)
+    return pid, name
+
+
 def _handshake(port: int) -> dict | None:
     import httpx
 
     try:
         with httpx.Client(trust_env=False) as client:
-            reply = client.get(f"http://127.0.0.1:{port}/health", timeout=2)
+            reply = client.get(
+                f"http://127.0.0.1:{port}/health", timeout=HANDSHAKE_TIMEOUT
+            )
         data = reply.json()
     except Exception:
         return None
@@ -98,7 +144,9 @@ def probe_port(port: int) -> PortState:
     live: answers ``/health`` as SmartMemory with the identity fields.
     stale: answers as SmartMemory without them (an older daemon), or does not
     answer but its command line is SmartMemory's (hung).
-    foreign: anything else that accepts connections.
+    foreign: answers as something else, or does not answer and its process is not ours.
+    unknown: does not answer and no tool could name the holder, so SmartMemory is not
+    ruled out. Callers must not move the port or call it "another program".
     """
     if not _listening(port):
         return PortState(port, FREE)
@@ -117,7 +165,11 @@ def probe_port(port: int) -> PortState:
     pid, program = port_holder(port)
     if data and data.get("service") == "smartmemory":
         return PortState(port, STALE, pid, program)
-    if pid and _is_smartmemory_process(pid):
+    if data is not None:
+        return PortState(port, FOREIGN, pid, program)
+    if pid is None:
+        return PortState(port, UNKNOWN)
+    if _is_smartmemory_process(pid):
         return PortState(port, STALE, pid, program)
     return PortState(port, FOREIGN, pid, program)
 
@@ -135,6 +187,19 @@ def _is_smartmemory_process(pid: int) -> bool:
 def conflict_message(state: PortState, config_path) -> str:
     """The one holder line: who has the port and what to do about it."""
     port = state.port
+    if state.state == LIVE:
+        return (
+            f"Port {port} is held by a SmartMemory daemon"
+            f"{f' ({state.holder})' if state.pid else ''} that is running. "
+            f"Run: sm status. To restart it: sm stop, then sm start."
+        )
+    if state.state == UNKNOWN:
+        return (
+            f"Port {port} is held by a process that is not answering and could not be "
+            f"identified, so it may be a hung SmartMemory daemon. Run: sm stop, then "
+            f"sm start. If the port is still held, set daemon_port in {config_path} "
+            f"(or SMARTMEMORY_DAEMON_PORT) to a free port."
+        )
     if state.state == STALE:
         stop = f"kill {state.pid}" if state.pid else "stop that process"
         return (
@@ -212,6 +277,8 @@ def port_report_rows(configured: int) -> list[str]:
             holder = f"SmartMemory daemon {state.version} ({state.holder})"
         elif state.state == STALE:
             holder = f"SmartMemory daemon not answering normally ({state.holder})"
+        elif state.state == UNKNOWN:
+            holder = "not answering, holder not identified (may be a hung SmartMemory daemon)"
         else:
             holder = f"NOT SmartMemory: {state.holder}"
         rows.append(f"Port {port} [{role}]: {holder}")

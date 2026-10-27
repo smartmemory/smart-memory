@@ -367,9 +367,28 @@ def _port_probe_row(port: int) -> str:
         health = {}
     if health.get("service") == "smartmemory":
         return f"Daemon port: OK ({port}, SmartMemory listener)"
+    from smartmemory_app.port_probe import STALE, UNKNOWN, probe_port
+
+    held = probe_port(port)
+    if held.state in (STALE, UNKNOWN):
+        return _restart_row(port, held)
     return (
         f"Daemon port: warning: {port} is in use by a process that does not answer as SmartMemory. "
         f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
+    )
+
+
+def _restart_row(port: int, held) -> str:
+    """A holder that is, or may be, our own daemon: restart it, never "change ports"."""
+    who = f" ({held.holder})" if held.pid else ""
+    what = (
+        "an older or hung SmartMemory daemon"
+        if held.state == "stale"
+        else "a process that is not answering and could not be identified (it may be a hung SmartMemory daemon)"
+    )
+    return (
+        f"Daemon port: warning: {port} is held by {what}{who}. "
+        f"Fix: smartmemory stop, then smartmemory start"
     )
 
 
@@ -384,11 +403,13 @@ def daemon_port_rows(port: int):
         ]
         for connection in listeners:
             # Identity by handshake (CLI-PORT-CONFLICT-1), not a command-line guess.
-            from smartmemory_app.port_probe import LIVE, probe_port
+            from smartmemory_app.port_probe import LIVE, STALE, UNKNOWN, probe_port
 
             held = probe_port(port)
             if held.state == LIVE:
                 yield f"Daemon port: OK ({port}, SmartMemory listener)"
+            elif held.state in (STALE, UNKNOWN):
+                yield _restart_row(port, held)
             else:
                 who = f" ({held.holder})" if held.pid else ""
                 yield (

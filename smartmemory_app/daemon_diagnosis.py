@@ -12,7 +12,6 @@ import os
 import plistlib
 import re
 import socket
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,18 +155,10 @@ def diagnose(f: DaemonFacts) -> Diagnosis:
 
 
 def _port_holder_pid(port: int) -> int | None:
-    """Best effort: name the listener so the owner knows what to stop."""
-    try:
-        out = subprocess.run(
-            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    match = re.search(r"^p(\d+)$", out, re.MULTILINE)
-    return int(match[1]) if match else None
+    """Best effort: name the listener so the owner knows what to stop (lsof, then psutil)."""
+    from smartmemory_app.port_probe import port_holder
+
+    return port_holder(port)[0]
 
 
 def _last_log_error(log_path: Path) -> str | None:

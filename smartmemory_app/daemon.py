@@ -313,10 +313,16 @@ def _warn_foreign_listener() -> None:
 def _refuse_held_port() -> None:
     """Before spawning: a port held by something else is named, not discovered after a crash."""
     from smartmemory_app.config import config_path
-    from smartmemory_app.port_probe import FOREIGN, STALE, conflict_message, probe_port
+    from smartmemory_app.port_probe import (
+        FOREIGN,
+        STALE,
+        UNKNOWN,
+        conflict_message,
+        probe_port,
+    )
 
     held = probe_port(_port())
-    if held.state in (FOREIGN, STALE):
+    if held.state in (FOREIGN, STALE, UNKNOWN):
         raise RuntimeError(conflict_message(held, config_path()))
 
 
