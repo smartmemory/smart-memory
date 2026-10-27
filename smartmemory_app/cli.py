@@ -341,6 +341,15 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             )
 
 
+def _child_texts(item: dict) -> list[str]:
+    """Text of the matching facts search nested under a memory (`children`, CLI-SEARCH-FACT-COLLAPSE-1)."""
+    return [
+        str(child["content"])
+        for child in item.get("children") or []
+        if isinstance(child, dict) and child.get("content")
+    ]
+
+
 def _memory_request(method: str, path: str, **kwargs):
     """Route explicit memory operations by configured mode before touching a daemon."""
     from smartmemory_app.config import load_config
@@ -1939,16 +1948,25 @@ def search_cmd(
         # cost is ~0.25s (measured 2026-08-31). The daemon path above stays
         # async — a long-lived process warms at boot (CORE-SEARCH-WARMSTART-1).
         os.environ.setdefault("SMARTMEMORY_RERANK_BLOCK", "1")
+        from smartmemory_app.search_collapse import (
+            collapse_to_parents,
+            pool_size,
+            scoped_get,
+        )
+
+        collapse = query.strip() != "*"
         try:
             results = search(
                 query,
-                top_k,
+                pool_size(top_k) if collapse else top_k,
                 filters=props,
                 include_reference=include_reference,
                 **({"origin": origin} if origin is not None else {}),
                 **window,
                 **hop_options,
             )
+            if collapse and isinstance(results, list):
+                results = collapse_to_parents(results, top_k, scoped_get, **window)
         except NotImplementedError as e:
             raise click.ClickException(str(e))
         except RemoteBackendError as e:
@@ -2021,6 +2039,9 @@ def search_cmd(
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id}  {content}")
+        for child in r.get("children") or []:
+            if isinstance(child, dict) and child.get("content"):
+                click.echo(f"    [fact] {child['content']}")
     if page is not None and results and page["offset"] + len(results) < page["total"]:
         import shlex
 
@@ -2193,7 +2214,13 @@ def _render_ask_relations(result: dict) -> None:
 
 @cli.command("ask")
 @click.argument("question")
-@click.option("--limit", default=5, show_default=True, type=click.IntRange(min=1))
+@click.option(
+    "--limit",
+    default=8,
+    show_default=True,
+    help="Memories used as evidence, one per source memory.",
+    type=click.IntRange(min=1),
+)
 @click.option(
     "--reasoning",
     is_flag=True,
@@ -2242,6 +2269,7 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
                 click.echo(
                     f"{number}. [{item.get('memory_type', 'unknown')}] {item.get('item_id', '?')} "
                     f"({item.get('created_at') or 'date unknown'})\n   {item.get('content', '')}"
+                    + "".join(f"\n   [fact] {fact}" for fact in _child_texts(item))
                 )
         else:
             click.echo("Nothing relevant found.")
@@ -2269,7 +2297,10 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
                 continue
             click.echo(
                 click.style(
-                    f"    - {item.get('item_id', '?')}: {item.get('content', '')}",
+                    f"    - {item.get('item_id', '?')}: {item.get('content', '')}"
+                    + "".join(
+                        f"\n        [fact] {fact}" for fact in _child_texts(item)
+                    ),
                     dim=True,
                 )
             )
