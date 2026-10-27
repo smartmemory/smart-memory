@@ -340,18 +340,14 @@ def host_isolation_guard(
 @pytest.fixture(scope="session", autouse=True)
 def real_home_report_leak_gate():
     """Fail if a CLI or shell test adds reporting content to the real profile."""
+    from tests import _report_leak
+
     root = Path.home() / ".smartmemory"
-
-    def snapshot():
-        paths = [root / "hook-failures.tsv"]
-        paths.extend((root / "report-outbox").rglob("*"))
-        return {
-            str(p): p.read_bytes() for p in paths if p.is_file() and p.stat().st_size
-        }
-
-    before = snapshot()
+    before = _report_leak.snapshot(root)
     yield
-    gained = [p for p, content in snapshot().items() if before.get(p) != content]
+    # Live hooks drain this outbox during the run: young claims and put-back claims
+    # are not test content (OPS-REPORT-OUTBOX-SENDING-LEAK-1).
+    gained = _report_leak.leaks(before, _report_leak.snapshot(root))
     assert not gained, (
         "Tests leaked reporting content into the real home: " + ", ".join(gained)
     )
