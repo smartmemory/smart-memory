@@ -1751,6 +1751,12 @@ def recall_cmd(
         )
     if context:
         click.echo(context)
+    else:
+        # stdout feeds a model prompt when this runs as a hook, so the empty
+        # state goes to stderr and stdout stays empty (CLI-RECALL-EMPTY-STATE-1).
+        click.echo(
+            'No results. Try different words, or `sm search "<query>"`.', err=True
+        )
 
 
 @cli.command("retag")
