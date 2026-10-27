@@ -232,7 +232,7 @@ def test_local_ask_unchanged(hosted, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Reasoning:" in result.output
     assert calls == [
-        ("POST", "/memory/ask", {"json": {"question": "What?", "limit": 5}})
+        ("POST", "/memory/ask", {"json": {"question": "What?", "limit": 8}})
     ]
     assert hosted[0] == []
 

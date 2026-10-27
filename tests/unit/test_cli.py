@@ -118,8 +118,9 @@ def test_search_cmd_fallback(runner):
 
     assert result.exit_code == 0
     assert "abc12345" in result.output
+    # CLI-2.0-SEARCH-FACT-COLLAPSE-1: the fallback fetches the collapse pool (pool_size(5) = 30), then pages 5
     mock_search.assert_called_once_with(
-        "test query", 5, filters={}, include_reference=False
+        "test query", 30, filters={}, include_reference=False
     )
 
 
@@ -285,8 +286,9 @@ def test_search_cmd_with_filters(runner):
 
     assert result.exit_code == 0
     assert "abc12345" in result.output
+    # CLI-2.0-SEARCH-FACT-COLLAPSE-1: the fallback fetches the collapse pool (pool_size(5) = 30), then pages 5
     mock_search.assert_called_once_with(
-        "test", 5, filters={"project": "atlas"}, include_reference=False
+        "test", 30, filters={"project": "atlas"}, include_reference=False
     )
 
 

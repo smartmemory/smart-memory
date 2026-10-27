@@ -36,6 +36,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from smartmemory.errors import MissingModelError
 from smartmemory_app.config import UnconfiguredError, llm_key_present
+from smartmemory_app.search_collapse import collapse_to_parents, pool_size, scoped_get
 from smartmemory_app.storage import StoreClosingError, get_memory, store_in_use
 
 log = logging.getLogger(__name__)
@@ -875,6 +876,9 @@ class SearchRequest(BaseModel):
     memory_type: Optional[str] = (
         None  # DIST-OBSIDIAN-LITE-1: SDK contract; folded into filters
     )
+    # CLI-SEARCH-FACT-COLLAPSE-1: "parent" returns one row per source memory with its matching
+    # facts nested under `children` (plus a `collapse` block); "none" returns core's rows unchanged (facts as separate results).
+    collapse: Literal["parent", "none"] = "parent"
 
 
 def _search_items(body: SearchRequest) -> list[dict]:
@@ -887,6 +891,8 @@ def _search_items(body: SearchRequest) -> list[dict]:
     if body.memory_type:
         filters.setdefault("memory_type", body.memory_type)
 
+    # The wildcard lists everything: there are no fact rows to fold into their memories.
+    collapse = body.collapse == "parent" and body.query.strip() != "*"
     with _rw_lock:
         from smartmemory_app.storage import search
         from smartmemory_app.remote_backend import RemoteBackendError
@@ -894,7 +900,7 @@ def _search_items(body: SearchRequest) -> list[dict]:
         try:
             results = search(
                 body.query,
-                body.top_k,
+                pool_size(body.top_k) if collapse else body.top_k,
                 filters=filters or None,
                 **{
                     k: v
@@ -916,6 +922,10 @@ def _search_items(body: SearchRequest) -> list[dict]:
         except RemoteBackendError as e:
             raise HTTPException(
                 status_code=502, detail=f"Hosted SmartMemory API error: {e}"
+            )
+        if collapse and isinstance(results, list):
+            results = collapse_to_parents(
+                results, body.top_k, scoped_get, since=body.since, until=body.until
             )
     return results
 
@@ -943,9 +953,14 @@ def search_endpoint(body: SearchRequest) -> dict:
     return result
 
 
+# CLI-SEARCH-FACT-COLLAPSE-1: evidence is counted in source memories, and a memory's matching
+# facts ride along nested under it, so the budget is 8 parents rather than 5 rows.
+ASK_DEFAULT_LIMIT = 8
+
+
 class AskRequest(BaseModel):
     question: str
-    limit: int = 5
+    limit: int = ASK_DEFAULT_LIMIT
     reasoning: bool = True
 
 
@@ -1066,10 +1081,32 @@ def _ask_relations(hits: list[dict]) -> list[dict[str, str]]:
     return relations
 
 
+def _hit_id(hit: dict) -> str:
+    return str(hit.get("item_id") or hit.get("id") or "")
+
+
+def _fact_texts(hit: dict) -> list[str]:
+    """The text of the matching facts search nested under a source memory."""
+    return [
+        str(child["content"])
+        for child in hit.get("children") or []
+        if isinstance(child, dict) and child.get("content")
+    ]
+
+
+def _collapse_fields(hit: dict) -> dict:
+    """The ``children`` and ``collapse`` blocks a collapsed search row carries, else nothing."""
+    return {k: hit[k] for k in ("children", "collapse") if hit.get(k)}
+
+
 def _ask_prompt(question: str, evidence: list[dict], relations: list[dict]) -> str:
     """Format retrieved memories and graph edges as the model's grounded evidence."""
     memories = (
-        "\n".join(f"- [{item['item_id']}] {item['content']}" for item in evidence)
+        "\n".join(
+            f"- [{item['item_id']}] {item['content']}"
+            + "".join(f"\n  - fact: {fact}" for fact in _fact_texts(item))
+            for item in evidence
+        )
         or "- (no matching memories)"
     )
     edges = (
@@ -1124,25 +1161,38 @@ def ask_endpoint(body: AskRequest) -> dict:
         log.warning(
             "No LLM configured. Returning extractive memories without a written answer."
         )
+        collapsed: dict[str, dict] = {}
+
+        def search_fn(question: str, limit: int) -> list[dict]:
+            rows = _search_items(SearchRequest(query=question, top_k=limit))
+            for row in rows:
+                if fields := _collapse_fields(row):
+                    collapsed[_hit_id(row)] = fields
+            return rows
+
         with _rw_lock:
             try:
-                return _get_mem().ask(
+                result = _get_mem().ask(
                     body.question,
                     body.limit,
                     reasoning=body.reasoning,
                     mode="extractive",
-                    search_fn=lambda question, limit: _search_items(
-                        SearchRequest(query=question, top_k=limit)
-                    ),
+                    search_fn=search_fn,
                 )
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if isinstance(result, dict):
+            for item in result.get("evidence") or []:
+                if isinstance(item, dict) and collapsed.get(item.get("item_id")):
+                    item.update(collapsed[item["item_id"]])
+        return result
 
     hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
     evidence = [
         {
-            "item_id": str(hit.get("item_id") or hit.get("id") or ""),
+            "item_id": _hit_id(hit),
             "content": str(hit.get("content") or ""),
+            **_collapse_fields(hit),
         }
         for hit in hits
         if isinstance(hit, dict) and (hit.get("item_id") or hit.get("id"))
