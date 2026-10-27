@@ -4,7 +4,8 @@ Core search returns a memory and each of its extracted ``[fact]`` rows as separa
 so one memory's facts can fill most of a Lite top-5 and push a second memory out. This groups
 the rows under the memory that produced them (``metadata.source_item``): a group ranks by its
 best row, the page holds ``k`` parents, each parent is returned once with its matching facts
-nested under ``facts`` (best first, capped).
+nested under ``children`` (best first, capped) and a ``collapse`` block saying how the row got
+there. ``children`` and ``collapse`` are the public JSON names (CORE-DOC-SUMMARY-POINTER-1 F3).
 
 Contract and the six things it must not lose:
 ``units/CLI-ASK-EVIDENCE-FACT-COLLAPSE-1/report.md`` ``## Ranking contract``.
@@ -48,12 +49,38 @@ def _in_window(row: dict, since, until) -> bool:
     return until is None or created <= parse_time_boundary(until)
 
 
-def _nested(fact: dict) -> dict:
-    meta = fact.get("metadata") or {}
+def _score_of(row: dict):
+    meta = row.get("metadata") or {}
+    for value in (row.get("score"), meta.get("fact_score"), meta.get("score")):
+        if value is not None:
+            return value
+    return None
+
+
+def _child(rank: int, fact: dict) -> dict:
     return {
         "item_id": fact.get("item_id"),
+        "memory_type": fact.get("memory_type", "fact"),
         "content": fact.get("content", ""),
-        "relation": meta.get("relation"),
+        "score": _score_of(fact),
+        "rank": rank,
+        "kind": "fact",
+    }
+
+
+def _collapsed(row: dict, children: list, **flags) -> dict:
+    """``row`` with the capped best-first ``children`` and the ``collapse`` provenance block."""
+    return {
+        **row,
+        "children": [_child(rank, fact) for rank, fact in children[:FACTS_PER_PARENT]],
+        "collapse": {
+            "parent_matched": False,
+            "promoted": False,
+            "parent_unresolved": False,
+            **flags,
+            "children_total": len(children),
+            "kind": "fact",
+        },
     }
 
 
@@ -65,7 +92,7 @@ def collapse_to_parents(
     since=None,
     until=None,
 ) -> list[dict]:
-    """Return at most ``k`` rows, one per source memory, facts nested under ``facts``.
+    """Return at most ``k`` rows, one per source memory, facts nested under ``children``.
 
     ``rows`` is score-ordered, so a group's rank is where its first row appeared.
     ``fetch_parent`` is a scoped read (``storage.get``): it returns ``{}`` for a memory the
@@ -75,7 +102,7 @@ def collapse_to_parents(
     """
     groups: dict[str, dict] = {}
     no_source = 0
-    for row in rows:
+    for rank, row in enumerate(rows, 1):  # rank = position in the pre-collapse pool
         if not isinstance(row, dict) or not _in_window(row, since, until):
             continue
         item_id = row.get("item_id") or row.get("id")
@@ -86,11 +113,11 @@ def collapse_to_parents(
                 no_source += 1
                 groups.setdefault(
                     f"standalone:{item_id}",
-                    {"memory": row, "facts": [], "standalone": True},
+                    {"memory": row, "facts": [], "legacy": True},
                 )
                 continue
             groups.setdefault(source, {"memory": None, "facts": []})["facts"].append(
-                row
+                (rank, row)
             )
         else:
             groups.setdefault(item_id, {"memory": None, "facts": []})["memory"] = row
@@ -107,23 +134,24 @@ def collapse_to_parents(
         if len(page) >= k:
             break
         memory, facts = group["memory"], group["facts"]
+        promoted = False
         if memory is None:
             fetched = fetch_parent(parent_id)
             if fetched and _in_window(fetched, since, until):
-                memory = fetched
+                memory, promoted = fetched, True
             elif fetched:
                 continue
             else:
-                # Unreadable or gone: show the best matching fact rather than drop it.
+                # Unreadable or gone: the best matching fact stands for the group.
                 unreadable += 1
-                page.append(facts[0])
+                page.append(_collapsed(facts[0][1], facts, parent_unresolved=True))
                 continue
-        if group.get("standalone"):
+        if group.get("legacy"):
             page.append(memory)
             continue
-        # `facts` is additive: a memory with no matching fact keeps its row shape unchanged.
+        # `children` is additive: a memory with no matching fact keeps its row shape unchanged.
         page.append(
-            {**memory, "facts": [_nested(f) for f in facts[:FACTS_PER_PARENT]]}
+            _collapsed(memory, facts, parent_matched=not promoted, promoted=promoted)
             if facts
             else memory
         )

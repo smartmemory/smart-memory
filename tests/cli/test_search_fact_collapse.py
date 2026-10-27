@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from smartmemory_app import cli as cli_module
 from smartmemory_app import local_api, storage
 from smartmemory_app.config import LLM_KEY_ENV_VARS
+from smartmemory_app.search_collapse import collapse_to_parents
 
 # id -> (content, created_at or None for "now"). Memory text never matches the queries below:
 # only the facts do, so a fact that matches has to promote its parent.
@@ -44,7 +45,7 @@ def _ids(items):
 
 
 def _fact_texts(item):
-    return [f["content"] for f in item.get("facts", [])]
+    return [c["content"] for c in item.get("children", [])]
 
 
 APPROVAL = "credit score cutoff 680 approved by Dana Ortiz"
@@ -56,6 +57,8 @@ def _crowded_today(items, log):
     # collapse none = core's rows: the memory plus its facts take the slots, the approval is out
     assert "m-appr" not in _ids(items)
     assert sum(i["memory_type"] == "fact" for i in items) >= 3
+    # and not one new key: collapse none is byte-for-byte core's rows
+    assert not [i for i in items if {"children", "collapse", "facts"} & set(i)]
 
 
 def _one_row_per_memory(items, log):
@@ -63,7 +66,8 @@ def _one_row_per_memory(items, log):
     assert len(ids) == len(set(ids)) and not any(i.startswith("fact::") for i in ids)
     assert {"m-680", "m-appr"} <= set(ids)  # the approval is promoted by its fact
     parent = next(i for i in items if i["item_id"] == "m-680")
-    assert 1 <= len(parent["facts"]) <= 3  # nested, capped
+    assert 1 <= len(parent["children"]) <= 3  # nested, capped
+    assert "facts" not in parent and parent["collapse"]["kind"] == "fact"
     assert all("cutoff" in t for t in _fact_texts(parent))
     assert _fact_texts(next(i for i in items if i["item_id"] == "m-appr")) == [APPROVAL]
     assert (
@@ -102,7 +106,9 @@ def _cli_layout(output, log):
 def _ask_extractive(evidence, log):
     ids = [e["item_id"] for e in evidence]
     assert len(ids) == len(set(ids)) and {"m-680", "m-appr"} <= set(ids)
-    assert APPROVAL in next(e for e in evidence if e["item_id"] == "m-appr")["facts"]
+    appr = next(e for e in evidence if e["item_id"] == "m-appr")
+    assert APPROVAL in _fact_texts(appr) and "facts" not in appr
+    assert appr["collapse"]["promoted"] is True
 
 
 def _ask_llm_prompt(prompt, log):
@@ -295,3 +301,99 @@ def test_search_and_ask_rank_source_memories_not_rows(lite_store, monkeypatch, c
                 failures.append((label, str(exc)[:300]))
     assert not failures, failures
     assert local_api.AskRequest(question="q").limit == 8
+
+
+def _pool_row(item_id, source=None, score=0.5):
+    meta = {"source_item": source} if source else {}
+    kind = "fact" if source else "episodic"
+    return {
+        "item_id": item_id,
+        "memory_type": kind,
+        "content": f"text {item_id}",
+        "score": score,
+        "metadata": meta,
+    }
+
+
+# Pre-collapse pool, rank = 1-based position. m-a is in the pool with 4 facts (cap 3, total 4),
+# m-b is promoted by one fact, m-c is unreadable, m-d matches with no facts.
+SHAPE_POOL = [
+    _pool_row("fact::a1", "m-a", 0.9),
+    _pool_row("fact::a2", "m-a", 0.8),
+    _pool_row("m-a", None, 0.7),
+    _pool_row("fact::b1", "m-b", 0.6),
+    _pool_row("fact::a3", "m-a", 0.5),
+    _pool_row("fact::c1", "m-c", 0.4),
+    _pool_row("fact::a4", "m-a", 0.3),
+    _pool_row("m-d", None, 0.2),
+]
+NO_FLAGS = {"parent_matched": False, "promoted": False, "parent_unresolved": False}
+
+
+def test_collapsed_rows_carry_children_and_collapse_blocks():
+    """F3 of CORE-DOC-SUMMARY-POINTER-1: `children` and `collapse` are the public JSON names."""
+
+    def fetch(item_id):
+        return (
+            {}
+            if item_id == "m-c"
+            else _pool_row(item_id) | {"content": f"read {item_id}"}
+        )
+
+    plain = collapse_to_parents(SHAPE_POOL, 10, fetch)
+    collapsed = {r["item_id"]: r for r in plain}
+    rows = [
+        (
+            "children shape, best first, rank is the pre-collapse pool position",
+            [
+                (c["item_id"], c["memory_type"], c["score"], c["rank"], c["kind"])
+                for c in collapsed["m-a"]["children"]
+            ],
+            [
+                ("fact::a1", "fact", 0.9, 1, "fact"),
+                ("fact::a2", "fact", 0.8, 2, "fact"),
+                ("fact::a3", "fact", 0.5, 5, "fact"),
+            ],
+        ),
+        (
+            "child content is the fact text",
+            collapsed["m-a"]["children"][0]["content"],
+            "text fact::a1",
+        ),
+        (
+            "cap of 3 with children_total 4, parent was in the pool",
+            collapsed["m-a"]["collapse"],
+            {**NO_FLAGS, "parent_matched": True, "children_total": 4, "kind": "fact"},
+        ),
+        (
+            "promoted: the parent was added only because a fact matched",
+            collapsed["m-b"]["collapse"],
+            {**NO_FLAGS, "promoted": True, "children_total": 1, "kind": "fact"},
+        ),
+        (
+            "parent_unresolved: the best child stands for the group",
+            (collapsed["fact::c1"]["item_id"], collapsed["fact::c1"]["collapse"]),
+            (
+                "fact::c1",
+                {
+                    **NO_FLAGS,
+                    "parent_unresolved": True,
+                    "children_total": 1,
+                    "kind": "fact",
+                },
+            ),
+        ),
+        (
+            "a memory with no matching fact keeps its row unchanged",
+            collapsed["m-d"],
+            SHAPE_POOL[-1],
+        ),
+        (
+            "no `facts` or `standalone` key in any collapsed row",
+            [k for r in plain for k in r if k in ("facts", "standalone")]
+            + [k for r in plain for k in r.get("collapse", {}) if k == "standalone"],
+            [],
+        ),
+    ]
+    failures = [(label, got, want) for label, got, want in rows if got != want]
+    assert not failures, failures

@@ -1018,7 +1018,7 @@ class SearchRequest(BaseModel):
         None  # DIST-OBSIDIAN-LITE-1: SDK contract; folded into filters
     )
     # CLI-SEARCH-FACT-COLLAPSE-1: "parent" returns one row per source memory with its matching
-    # facts nested under `facts`; "none" returns core's rows unchanged (facts as separate results).
+    # facts nested under `children` (plus a `collapse` block); "none" returns core's rows unchanged (facts as separate results).
     collapse: Literal["parent", "none"] = "parent"
 
 
@@ -1227,12 +1227,17 @@ def _hit_id(hit: dict) -> str:
 
 
 def _fact_texts(hit: dict) -> list[str]:
-    """The matching facts search nested under a source memory, as plain strings."""
+    """The text of the matching facts search nested under a source memory."""
     return [
-        str(fact["content"])
-        for fact in hit.get("facts") or []
-        if isinstance(fact, dict) and fact.get("content")
+        str(child["content"])
+        for child in hit.get("children") or []
+        if isinstance(child, dict) and child.get("content")
     ]
+
+
+def _collapse_fields(hit: dict) -> dict:
+    """The ``children`` and ``collapse`` blocks a collapsed search row carries, else nothing."""
+    return {k: hit[k] for k in ("children", "collapse") if hit.get(k)}
 
 
 def _ask_prompt(question: str, evidence: list[dict], relations: list[dict]) -> str:
@@ -1240,7 +1245,7 @@ def _ask_prompt(question: str, evidence: list[dict], relations: list[dict]) -> s
     memories = (
         "\n".join(
             f"- [{item['item_id']}] {item['content']}"
-            + "".join(f"\n  - fact: {fact}" for fact in item.get("facts", []))
+            + "".join(f"\n  - fact: {fact}" for fact in _fact_texts(item))
             for item in evidence
         )
         or "- (no matching memories)"
@@ -1309,13 +1314,13 @@ def ask_endpoint(body: AskRequest) -> dict:
             "No usable LLM (%s). Returning extractive memories without a written answer.",
             failure.code if failure else "no provider key",
         )
-        nested_facts: dict[str, list[str]] = {}
+        collapsed: dict[str, dict] = {}
 
         def search_fn(question: str, limit: int) -> list[dict]:
             rows = _search_items(SearchRequest(query=question, top_k=limit))
             for row in rows:
-                if facts := _fact_texts(row):
-                    nested_facts[_hit_id(row)] = facts
+                if fields := _collapse_fields(row):
+                    collapsed[_hit_id(row)] = fields
             return rows
 
         with _rw_lock:
@@ -1331,8 +1336,8 @@ def ask_endpoint(body: AskRequest) -> dict:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
         if isinstance(result, dict):
             for item in result.get("evidence") or []:
-                if isinstance(item, dict) and nested_facts.get(item.get("item_id")):
-                    item["facts"] = nested_facts[item["item_id"]]
+                if isinstance(item, dict) and collapsed.get(item.get("item_id")):
+                    item.update(collapsed[item["item_id"]])
         if failure is not None and isinstance(result, dict):
             result = {**result, "code": failure.code, "notice": failure.message()}
         return result
@@ -1342,7 +1347,7 @@ def ask_endpoint(body: AskRequest) -> dict:
         {
             "item_id": _hit_id(hit),
             "content": str(hit.get("content") or ""),
-            **({"facts": facts} if (facts := _fact_texts(hit)) else {}),
+            **_collapse_fields(hit),
         }
         for hit in hits
         if isinstance(hit, dict) and (hit.get("item_id") or hit.get("id"))

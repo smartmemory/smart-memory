@@ -351,6 +351,15 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
             )
 
 
+def _child_texts(item: dict) -> list[str]:
+    """Text of the matching facts search nested under a memory (`children`, CLI-SEARCH-FACT-COLLAPSE-1)."""
+    return [
+        str(child["content"])
+        for child in item.get("children") or []
+        if isinstance(child, dict) and child.get("content")
+    ]
+
+
 def _memory_request(method: str, path: str, **kwargs):
     """Route explicit memory operations by configured mode before touching a daemon."""
     from smartmemory_app.config import load_config
@@ -2088,9 +2097,9 @@ def search_cmd(
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id}  {content}")
-        for fact in r.get("facts") or []:
-            if isinstance(fact, dict) and fact.get("content"):
-                click.echo(f"    [fact] {fact['content']}")
+        for child in r.get("children") or []:
+            if isinstance(child, dict) and child.get("content"):
+                click.echo(f"    [fact] {child['content']}")
     if page is not None and results and page["offset"] + len(results) < page["total"]:
         import shlex
 
@@ -2322,7 +2331,7 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
                 click.echo(
                     f"{number}. [{item.get('memory_type', 'unknown')}] {item.get('item_id', '?')} "
                     f"({item.get('created_at') or 'date unknown'})\n   {item.get('content', '')}"
-                    + "".join(f"\n   [fact] {fact}" for fact in item.get("facts") or [])
+                    + "".join(f"\n   [fact] {fact}" for fact in _child_texts(item))
                 )
         else:
             click.echo("Nothing relevant found.")
@@ -2352,7 +2361,7 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
                 click.style(
                     f"    - {item.get('item_id', '?')}: {item.get('content', '')}"
                     + "".join(
-                        f"\n        [fact] {fact}" for fact in item.get("facts") or []
+                        f"\n        [fact] {fact}" for fact in _child_texts(item)
                     ),
                     dim=True,
                 )
