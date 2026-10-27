@@ -1,5 +1,6 @@
 """Durable privacy-filtered reports at the fixed hook-marker rendezvous."""
 
+import atexit
 import json
 import logging
 import math
@@ -20,6 +21,12 @@ MANUAL_DAILY_CAP = 5
 DAILY_CAP = 20
 # At least twice the report transport's 5-second timeout, with contention headroom.
 CLAIM_LEASE_SECONDS = 60
+# Lock wait when an interrupted or exiting sender puts its claim back in the queue.
+RELEASE_LOCK_SECONDS = 0.5
+# Claims this process holds, claim -> queued path. Interpreter exit kills the daemon
+# sender thread (crash_reporter.flush_in_background) mid-send without running its
+# finally, so _release_held puts them back at exit (OPS-REPORT-OUTBOX-SENDING-LEAK-1).
+_held: dict[Path, Path] = {}
 
 
 class ManualCapReached(Exception):
@@ -269,6 +276,24 @@ def enqueue(
         return payload, True
 
 
+def _release(claim: Path, path: Path) -> None:
+    """Put a claim this process still holds back in the queue for the next sender."""
+    try:
+        with FileLock(str(claim.parent / ".queue.lock"), timeout=RELEASE_LOCK_SECONDS):
+            if claim.exists():
+                claim.rename(path)
+    except OSError as exc:
+        # The claim keeps this pid: the next sender reclaims it once the pid is dead.
+        log.warning("Queued report claim not released (%s)", type(exc).__name__)
+
+
+@atexit.register
+def _release_held() -> None:
+    for claim, path in list(_held.items()):
+        _held.pop(claim, None)
+        _release(claim, path)
+
+
 def flush(post, allowed, root: Path | None = None) -> set[str]:
     """One mutation lock, immutable claims, no network work under the lock."""
     root = root or directory()
@@ -303,6 +328,7 @@ def flush(post, allowed, root: Path | None = None) -> set[str]:
                 lease = f"{int(time.time() * 1_000_000)}-{uuid.uuid4().hex}"
                 claim = root / f"{path.stem}.{os.getpid()}.{started}.{lease}.sending"
                 path.rename(claim)
+                _held[claim] = path
             try:
                 success = post(envelope["payload"])
             except Exception as exc:
@@ -332,6 +358,11 @@ def flush(post, allowed, root: Path | None = None) -> set[str]:
                     claim.rename(path)
         except OSError as exc:
             log.warning("Queued report unavailable (%s)", type(exc).__name__)
+        finally:
+            # Any exit that skipped the result step (lock timeout, BaseException)
+            # puts the report back instead of leaving a .sending behind.
+            if claim is not None and _held.pop(claim, None) is not None:
+                _release(claim, path)
     return delivered
 
 
