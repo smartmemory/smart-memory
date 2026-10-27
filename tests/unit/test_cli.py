@@ -10,6 +10,8 @@ import pytest
 from click.testing import CliRunner
 from unittest.mock import patch
 
+from smartmemory_app.search_collapse import pool_size
+
 
 @pytest.fixture
 def runner():
@@ -118,8 +120,9 @@ def test_search_cmd_fallback(runner):
 
     assert result.exit_code == 0
     assert "abc12345" in result.output
+    # CLI-SEARCH-FACT-COLLAPSE-1: the fallback fetches the collapse pool (pool_size(5) = 30), then pages 5
     mock_search.assert_called_once_with(
-        "test query", 5, filters={}, include_reference=False
+        "test query", pool_size(5), filters={}, include_reference=False
     )
 
 
@@ -285,8 +288,9 @@ def test_search_cmd_with_filters(runner):
 
     assert result.exit_code == 0
     assert "abc12345" in result.output
+    # CLI-SEARCH-FACT-COLLAPSE-1: the fallback fetches the collapse pool (pool_size(5) = 30), then pages 5
     mock_search.assert_called_once_with(
-        "test", 5, filters={"project": "atlas"}, include_reference=False
+        "test", pool_size(5), filters={"project": "atlas"}, include_reference=False
     )
 
 
