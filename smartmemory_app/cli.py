@@ -151,6 +151,27 @@ def _parse_props(explicit: tuple[str, ...] = ()) -> dict[str, str]:
     return props
 
 
+_TIME_HELP = (
+    "ISO-8601 with Z or an offset (2026-10-27T01:25:30Z or 2026-10-26T21:25-04:00), "
+    "or a relative duration (7d, 24h, 30m). A time without an offset is read as UTC."
+)
+
+
+def _search_window(resolve, since: str | None, until: str | None) -> dict:
+    """Resolve --since/--until; a bad value is a usage error (exit 2) naming its option."""
+    for flag, value in (("--since", since), ("--until", until)):
+        try:
+            resolve(**{flag[2:]: value}, relative=True)
+        except ValueError as exc:
+            raise click.UsageError(
+                f"Invalid value for {flag}: {value!r}. Use {_TIME_HELP}"
+            ) from exc
+    try:
+        return resolve(since, until, relative=True)
+    except ValueError as exc:
+        raise click.UsageError(f"--since must not be after --until: {exc}") from exc
+
+
 def _daemon_url() -> str:
     from smartmemory_app.config import load_config
 
@@ -1870,8 +1891,8 @@ def retag_cmd(
     default=False,
     help="Include reference data in results",
 )
-@click.option("--since", help="Inclusive creation time: ISO-8601 or 7d, 24h, 30m")
-@click.option("--until", help="Exclusive creation time: ISO-8601 or relative duration")
+@click.option("--since", help=f"Inclusive creation time. {_TIME_HELP}")
+@click.option("--until", help=f"Exclusive creation time. {_TIME_HELP}")
 @click.option(
     "--multi-hop", is_flag=True, help="Follow related entities across search hops"
 )
@@ -1949,10 +1970,7 @@ def search_cmd(
     hop_options = {"multi_hop": True, "max_hops": max_hops} if multi_hop else {}
     if hop_strategy is not None:
         hop_options["hop_strategy"] = hop_strategy
-    try:
-        window = resolve_search_window(since, until, relative=True)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+    window = _search_window(resolve_search_window, since, until)
     props = _parse_props(explicit_props)
     body: dict = {"query": query, "top_k": top_k, **window, **hop_options}
     if origin is not None:

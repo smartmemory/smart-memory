@@ -1,6 +1,11 @@
 """Normalize arbitrary property flags before Click chooses the positional argument."""
 
+import re
+
 import click
+
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_CLOCK = re.compile(r"\d{2}:\d{2}(:\d{2}(\.\d+)?)?([zZ]|[+-]\d{2}:?\d{2})?")
 
 
 class PropertyCommand(click.Command):
@@ -61,3 +66,40 @@ class AddCommand(PropertyCommand):
 
 class SearchCommand(PropertyCommand):
     positional_error = "Multiple QUERY words. Quote the query."
+    time_options = ("--since", "--until")
+
+    def parse_args(self, ctx, args):
+        return super().parse_args(ctx, self._join_date_time(list(args)))
+
+    def _join_date_time(self, args):
+        """Fold an unquoted ``DATE TIME`` value into one token.
+
+        ``--until 2026-10-26 21:11:00 query`` reaches us as two words after the
+        shell splits it; without this the clock part is read as a second query word.
+        """
+        joined = []
+        index = 0
+        while index < len(args):
+            if args[index] == "--":
+                joined.extend(args[index:])
+                break
+            option, equal, value = args[index].partition("=")
+            if option not in self.time_options:
+                joined.append(args[index])
+            else:
+                if not equal:
+                    joined.append(option)
+                    if index + 1 >= len(args):
+                        break
+                    index += 1
+                    value = args[index]
+                if (
+                    _DATE.fullmatch(value)
+                    and index + 1 < len(args)
+                    and _CLOCK.fullmatch(args[index + 1])
+                ):
+                    index += 1
+                    value = f"{value} {args[index]}"
+                joined.append(f"{option}={value}" if equal else value)
+            index += 1
+        return joined
