@@ -70,10 +70,25 @@ def _queued_claim(pid: int, started: float) -> Path:
 
 def _exit_mid_send(tmp_path):
     data_dir = tmp_path / "data"
-    env = {**os.environ, "HOME": str(tmp_path / "home"), "SMARTMEMORY_DATA_DIR": str(data_dir)}
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "SMARTMEMORY_DATA_DIR": str(data_dir),
+    }
     run = subprocess.run(
-        [sys.executable, "-I", "-c", EXIT_MID_SEND, str(ROOT), str(data_dir), REPORT_ID],
-        env=env, capture_output=True, text=True, timeout=60,
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            EXIT_MID_SEND,
+            str(ROOT),
+            str(data_dir),
+            REPORT_ID,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert run.returncode == 0, run.stderr[-2000:]
     assert run.stdout.strip() == "1", "precondition: the flush thread claimed mid-send"
@@ -117,7 +132,10 @@ def _gate(pid, started, age):
         pid, started, now - age
     )
     found = _report_leak.leaks({}, {str(claim): b"{}"}, now=now)
-    return [line.replace(str(claim), "<claim>").replace(f" {pid} ", " <pid> ") for line in found]
+    return [
+        line.replace(str(claim), "<claim>").replace(f" {pid} ", " <pid> ")
+        for line in found
+    ]
 
 
 def _gate_put_back(tmp_path):
@@ -151,6 +169,8 @@ ROWS = [
 ]
 
 
-@pytest.mark.parametrize("scenario,expected", [r[1:] for r in ROWS], ids=[r[0] for r in ROWS])
+@pytest.mark.parametrize(
+    "scenario,expected", [r[1:] for r in ROWS], ids=[r[0] for r in ROWS]
+)
 def test_sending_claim_never_outlives_its_sender(tmp_path, scenario, expected):
     assert scenario(tmp_path) == expected
