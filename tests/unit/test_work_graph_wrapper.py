@@ -29,8 +29,13 @@ def lite(tmp_path, monkeypatch):
     )
     # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so the offer test needs a provider;
     # the route mock above still decides whether one is reachable.
+    # A bare config defaults to 9014, the owner's real daemon: use the test port the
+    # conftest reserved (CLI-TESTS-LIVE-HOST-CONNECTS-1).
     cfg = config.SmartMemoryConfig(
-        mode="local", data_dir=str(tmp_path), llm_provider="groq"
+        mode="local",
+        data_dir=str(tmp_path),
+        llm_provider="groq",
+        daemon_port=int(os.environ["SMARTMEMORY_DAEMON_PORT"]),
     )
     monkeypatch.setattr(config, "load_config", lambda: cfg)
     monkeypatch.setattr(storage, "load_config", lambda: cfg)

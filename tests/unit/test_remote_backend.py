@@ -307,30 +307,38 @@ def test_get_neighbors_returns_error_shape_on_failure(remote):
 # ── recall ────────────────────────────────────────────────────────────────
 
 
-def test_recall_deduplicates_on_item_id_field(remote):
+@pytest.fixture()
+def recall_remote(remote, monkeypatch):
+    """``remote`` with the snapshot and decisions requests that recall() makes answered
+    empty, so no recall test reaches (or resolves) api.example.com."""
+    monkeypatch.setattr(remote, "_request", lambda *args, **kwargs: [])
+    return remote
+
+
+def test_recall_deduplicates_on_item_id_field(recall_remote):
     """recall() must deduplicate items that appear in both recent and semantic results."""
     item = {"item_id": "dup-1", "content": "duplicate", "memory_type": "semantic"}
-    with patch.object(remote, "search", return_value=[item]):
-        result = remote.recall(cwd="/project", top_k=10)
+    with patch.object(recall_remote, "search", return_value=[item]):
+        result = recall_remote.recall(cwd="/project", top_k=10)
     # item appears in both calls but must appear only once in output
     assert result.count("duplicate") == 1
 
 
-def test_recall_deduplicates_on_id_field(remote):
+def test_recall_deduplicates_on_id_field(recall_remote):
     """recall() must also handle responses where ID field is 'id' (not 'item_id')."""
     item = {"id": "dup-2", "content": "alt id field", "memory_type": "episodic"}
-    with patch.object(remote, "search", return_value=[item]):
-        result = remote.recall(cwd="/project", top_k=10)
+    with patch.object(recall_remote, "search", return_value=[item]):
+        result = recall_remote.recall(cwd="/project", top_k=10)
     assert result.count("alt id field") == 1
 
 
-def test_recall_returns_empty_string_when_no_results(remote):
-    with patch.object(remote, "search", return_value=[]):
-        result = remote.recall(cwd="/project")
+def test_recall_returns_empty_string_when_no_results(recall_remote):
+    with patch.object(recall_remote, "search", return_value=[]):
+        result = recall_remote.recall(cwd="/project")
     assert result == ""
 
 
-def test_recall_filters_zero_confidence(remote, monkeypatch):
+def test_recall_filters_zero_confidence(recall_remote, monkeypatch):
     """Regression: confidence=0.0 must NOT be coerced to 1.0 and must be filtered."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.3")
     items = [
@@ -347,15 +355,15 @@ def test_recall_filters_zero_confidence(remote, monkeypatch):
             "confidence": 0.9,
         },
     ]
-    with patch.object(remote, "search", return_value=items):
-        result = remote.recall(cwd="/project", top_k=10)
+    with patch.object(recall_remote, "search", return_value=items):
+        result = recall_remote.recall(cwd="/project", top_k=10)
     assert "zero confidence item" not in result, (
         "confidence=0.0 must be filtered by recall floor"
     )
     assert "high confidence item" in result
 
 
-def test_recall_tilde_marker_on_low_confidence(remote, monkeypatch):
+def test_recall_tilde_marker_on_low_confidence(recall_remote, monkeypatch):
     """Items with confidence < 0.5 get a ~ prefix in remote recall output."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.1")
     items = [
@@ -366,13 +374,13 @@ def test_recall_tilde_marker_on_low_confidence(remote, monkeypatch):
             "confidence": 0.4,
         },
     ]
-    with patch.object(remote, "search", return_value=items):
-        result = remote.recall(cwd="/project", top_k=10)
+    with patch.object(recall_remote, "search", return_value=items):
+        result = recall_remote.recall(cwd="/project", top_k=10)
     assert "~[" in result, "Low-confidence items should have ~ prefix"
     assert "low confidence memory" in result
 
 
-def test_recall_stale_marker(remote, monkeypatch):
+def test_recall_stale_marker(recall_remote, monkeypatch):
     """Stale items get ⚠ prefix in remote recall output."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.1")
     items = [
@@ -384,13 +392,13 @@ def test_recall_stale_marker(remote, monkeypatch):
             "stale": True,
         },
     ]
-    with patch.object(remote, "search", return_value=items):
-        result = remote.recall(cwd="/project", top_k=10)
+    with patch.object(recall_remote, "search", return_value=items):
+        result = recall_remote.recall(cwd="/project", top_k=10)
     assert "⚠" in result, "Stale items should have ⚠ prefix"
     assert "stale remote memory" in result
 
 
-def test_recall_no_stale_marker_when_fresh(remote, monkeypatch):
+def test_recall_no_stale_marker_when_fresh(recall_remote, monkeypatch):
     """Non-stale items have no ⚠ prefix in remote recall output."""
     monkeypatch.setenv("SMARTMEMORY_RECALL_FLOOR", "0.1")
     items = [
@@ -402,7 +410,7 @@ def test_recall_no_stale_marker_when_fresh(remote, monkeypatch):
             "stale": False,
         },
     ]
-    with patch.object(remote, "search", return_value=items):
-        result = remote.recall(cwd="/project", top_k=10)
+    with patch.object(recall_remote, "search", return_value=items):
+        result = recall_remote.recall(cwd="/project", top_k=10)
     assert "⚠" not in result
     assert "fresh remote memory" in result

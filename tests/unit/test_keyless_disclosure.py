@@ -2,9 +2,11 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock
 
 import pytest
+
+from tests._host_isolation import cleared_env
 
 
 def _write_config(tmp_path, monkeypatch, provider):
@@ -220,18 +222,8 @@ def test_effective_config_disclosure_through_storage_api_and_cli(
         return response.json()
 
     monkeypatch.setattr("smartmemory_app.cli._daemon_request", request)
-    with patch.dict(
-        "os.environ",
-        {
-            "BROWSER": "true",
-            # clear=True drops tests/conftest.py's switches: crash reports off (a CLI
-            # crash would POST to PostHog) and the inherited-env check off.
-            "SMARTMEMORY_CRASH_REPORTS": "0",
-            "SMARTMEMORY_ENV_CHECK": "0",
-            **credentials,
-        },
-        clear=True,
-    ):
+    # cleared_env keeps tests/conftest.py's switches (crash reports off, env check off).
+    with cleared_env({"BROWSER": "true", **credentials}):
         storage.apply_runtime_config()
         monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
         result = CliRunner().invoke(cli, ["add", "Alice leads Atlas"])

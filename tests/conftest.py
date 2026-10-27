@@ -256,6 +256,9 @@ def host_isolation_guard(
 ):
     """No test reaches the owner's real daemon port, HOME or launchd job.
 
+    Network: a connect to any non-loopback address, or to 9014/9015, fails the test
+    (CLI-TESTS-LIVE-HOST-CONNECTS-1); proxy discovery is off so a loopback proxy cannot
+    hide one. Mock the transport (httpx.MockTransport), or listen on a loopback port.
     Port: SMARTMEMORY_DAEMON_PORT is the reserved test port (config, the daemon and
     the viewer all honour it), and a bind to 9014/9015 fails the test.
     launchd: the daemon module's job labels are scratch names, and a launchctl shim is
@@ -287,6 +290,12 @@ def host_isolation_guard(
         f"{host_isolation.TEST_LABEL_PREFIX}{token}.worker",
     )
     monkeypatch.setenv("SMARTMEMORY_DAEMON_PORT", str(cli_test_port))
+    # Core's SmartMemory() starts an update check against api.smartmemory.ai unless this
+    # is set (update_check._opted_out). Silent by contract; update-check tests set their own.
+    monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
+    # launch_metrics.emit POSTs to load_config().daemon_port, which is 9014 whenever a
+    # test replaces load_config with a bare SmartMemoryConfig. Tests of emit set it to 0.
+    monkeypatch.setenv("SMARTMEMORY_DISABLE_LAUNCH_METRICS", "1")
     monkeypatch.setattr(setup_mod, "DATA_DIR", home / ".smartmemory")
     monkeypatch.setattr(setup_mod, "CLAUDE_DIR", home / ".claude")
     monkeypatch.setattr(
@@ -304,18 +313,23 @@ def host_isolation_guard(
     monkeypatch.setenv("PATH", f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}")
 
     binds: list[str] = []
+    connects: list[str] = []
     spawned: list = []
     monkeypatch.setattr(socket.socket, "bind", host_isolation.bind_guard(binds))
+    host_isolation.install_connect_guard(monkeypatch, connects)
     monkeypatch.setattr(
         subprocess.Popen, "__init__", host_isolation.tracking_popen_init(spawned, shim)
     )
     try:
-        yield host_isolation.HostGuard(cli_test_port, launchctl_log, binds, shim)
+        yield host_isolation.HostGuard(
+            cli_test_port, launchctl_log, binds, shim, connects
+        )
     finally:
         host_isolation.stop_spawned(spawned)
     calls = host_isolation.real_launchctl_calls(launchctl_log)
     assert not calls, "test called launchctl (real launchd job): " + "; ".join(calls)
     assert not binds, "test bound the owner's real daemon port: " + "; ".join(binds)
+    assert not connects, "test connected to a live host: " + "; ".join(connects)
 
 
 @pytest.fixture(scope="session", autouse=True)

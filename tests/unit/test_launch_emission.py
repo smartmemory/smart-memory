@@ -42,6 +42,8 @@ class TestCliEmit:
 
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
         monkeypatch.delenv("SMARTMEMORY_MODE", raising=False)
+        # tests/conftest.py disables emission; these tests drive emit with a fake client.
+        monkeypatch.delenv("SMARTMEMORY_DISABLE_LAUNCH_METRICS", raising=False)
         save_config(SmartMemoryConfig(mode="local"))
 
     def test_emit_posts_event_to_daemon(self, monkeypatch):
