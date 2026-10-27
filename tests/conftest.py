@@ -11,6 +11,11 @@ pytest_plugins = ["tests._shared_db_guard"]
 
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
+# CLI-CRASH-REPORTER-TEST-GUARD-1: the senders are a no-op under any pytest run. This
+# suite lifts that so its stubbed-transport tests can drive them; test_report_test_guard.py
+# clears these to prove the guard itself.
+os.environ["SMARTMEMORY_CRASH_REPORTS_IN_TESTS"] = "1"
+os.environ["SMARTMEMORY_LAUNCH_METRICS_IN_TESTS"] = "1"
 # Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
 # (CLI-ENV-DETECT-1). test_env_pin.py removes this to test the check itself.
 os.environ["SMARTMEMORY_ENV_CHECK"] = "0"

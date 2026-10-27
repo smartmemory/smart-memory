@@ -73,8 +73,18 @@ def flush_in_background(
     return ReportResult("queued", report_id)
 
 
+def under_test() -> bool:
+    """True inside a pytest run unless a test opts in (decided at send time)."""
+    if os.environ.get("SMARTMEMORY_CRASH_REPORTS_IN_TESTS") == "1":
+        return False
+    return "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+
+
 def enabled() -> bool:
     if os.environ.get("SMARTMEMORY_CRASH_REPORTS") == "0":
+        return False
+    if under_test():
+        log.debug("Crash reporting is a no-op under pytest")
         return False
     try:
         from smartmemory_app.config import load_config
@@ -171,6 +181,9 @@ def _common(source: str, data_dir: Path, args: list[str] | None = None) -> dict:
 
 def _post(payload: dict) -> bool:
     """Transport runs outside the queue lock while its immutable claim is held."""
+    if under_test():
+        log.debug("Crash/support report send skipped under pytest")
+        return False
     try:
         host = os.environ.get("SMARTMEMORY_CRASH_REPORT_HOST", DEFAULT_HOST).rstrip("/")
         with httpx.Client(timeout=5, trust_env=True) as client:
