@@ -318,6 +318,7 @@ def test_start_daemon_port_conflict_message_includes_log_tail(tmp_path):
     """start_daemon raises RuntimeError with the port-conflict hint when port is open
     but health check fails (another process is using the port)."""
     from smartmemory_app.daemon import start_daemon
+    from smartmemory_app.port_probe import FOREIGN, PortState
 
     log_path = tmp_path / "daemon.log"
     log_path.write_text("Loading backend...\nfatal startup detail\n")
@@ -343,6 +344,13 @@ def test_start_daemon_port_conflict_message_includes_log_tail(tmp_path):
         patch("smartmemory_app.daemon._data_dir", return_value=tmp_path),
         patch("smartmemory_app.daemon._launchd_manages_daemon", return_value=False),
         patch("smartmemory_app.daemon.is_running", return_value=False),
+        # CLI-PORT-CONFLICT-1: the pre-spawn refusal is covered in test_port_conflict.py,
+        # this test keeps the post-spawn path (the holder appeared after the probe).
+        patch("smartmemory_app.daemon._refuse_held_port"),
+        patch(
+            "smartmemory_app.port_probe.probe_port",
+            return_value=PortState(9014, FOREIGN, 4242, "python3"),
+        ),
         patch("subprocess.Popen", side_effect=fake_popen),
         patch("socket.socket", return_value=fake_socket),
     ):
@@ -350,6 +358,7 @@ def test_start_daemon_port_conflict_message_includes_log_tail(tmp_path):
             start_daemon()
 
     msg = str(exc_info.value)
+    assert "process 4242 (python3)" in msg
     assert "in use" in msg.lower() or "sm status" in msg, (
         f"Expected port-conflict hint in RuntimeError, got: {msg!r}"
     )
@@ -789,3 +798,17 @@ def test_custom_model_warmup_dimension(
     else:
         assert viewer_server._embedding_check is None
         assert "empty or incorrectly sized vector" in caplog.text
+
+
+@pytest.fixture(autouse=True)
+def _no_real_port_probe():
+    """These tests fake the daemon, sockets and subprocess calls, so a real port probe
+    (CLI-PORT-CONFLICT-1) would read the fake world as a foreign holder. The probe and
+    the refusal are covered in test_port_conflict.py."""
+    from unittest.mock import patch
+
+    with (
+        patch("smartmemory_app.daemon._refuse_held_port"),
+        patch("smartmemory_app.port_probe.ensure_daemon_port_free"),
+    ):
+        yield

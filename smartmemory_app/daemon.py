@@ -296,6 +296,30 @@ def _health_response(limit: float):
     return response
 
 
+_WARNED_FOREIGN: set[int] = set()
+
+
+def _warn_foreign_listener() -> None:
+    port = _port()
+    if port not in _WARNED_FOREIGN:
+        _WARNED_FOREIGN.add(port)
+        log.warning(
+            "Port %s answers /health but not as SmartMemory, so the daemon is treated as not running. "
+            "Run: sm doctor --ports",
+            port,
+        )
+
+
+def _refuse_held_port() -> None:
+    """Before spawning: a port held by something else is named, not discovered after a crash."""
+    from smartmemory_app.config import config_path
+    from smartmemory_app.port_probe import FOREIGN, STALE, conflict_message, probe_port
+
+    held = probe_port(_port())
+    if held.state in (FOREIGN, STALE):
+        raise RuntimeError(conflict_message(held, config_path()))
+
+
 def is_running(require_healthy: bool = True) -> bool:
     """Check daemon is running AND is SmartMemory (not a random process on the port).
 
@@ -310,6 +334,7 @@ def is_running(require_healthy: bool = True) -> bool:
         _remaining(2)
         data = r.json()
         if data.get("service") != "smartmemory":
+            _warn_foreign_listener()
             return False
         if require_healthy and data.get("status") != "ok":
             return False
@@ -461,6 +486,8 @@ def start_daemon(
         not wait_until_ready or existing.get("status") != "warming"
     ):
         return existing
+    if existing is None:
+        _refuse_held_port()
 
     data = _data_dir()
     data.mkdir(parents=True, exist_ok=True)
@@ -612,10 +639,15 @@ def start_daemon(
     status = get_status()
     if status is None:
         proc.terminate()
+        from smartmemory_app.config import config_path
+        from smartmemory_app.port_probe import conflict_message, probe_port
+
+        held = probe_port(port)
         raise RuntimeError(
             _startup_failure_message(
-                f"SmartMemory could not start because port {port} is in use. "
-                "Stop the other process, then run `sm status`.",
+                conflict_message(held, config_path())
+                if held.state != "free"
+                else f"SmartMemory could not start: port {port} did not answer as SmartMemory.",
                 log_path,
             )
         )

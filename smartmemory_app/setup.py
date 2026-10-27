@@ -626,6 +626,9 @@ def _start_daemon_local(
     from smartmemory_app.daemon import _retire_legacy_workers, _upgrade_worker_agent
 
     try:
+        from smartmemory_app.port_probe import ensure_daemon_port_free
+
+        ensure_daemon_port_free(on_log or click.echo)
         _upgrade_worker_agent()
         _retire_legacy_workers()
         launchd_ok = _install_launchd_plist()

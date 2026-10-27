@@ -3247,8 +3247,15 @@ def _venv_repair_commands() -> str:
     help="Local output path for --bundle.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Print the checks as JSON.")
+@click.option(
+    "--ports", is_flag=True, help="List every port SmartMemory uses and who holds it."
+)
 def doctor_cmd(
-    bundle: bool, url: str | None, out: Path | None, as_json: bool = False
+    bundle: bool,
+    url: str | None,
+    out: Path | None,
+    as_json: bool = False,
+    ports: bool = False,
 ) -> None:
     """Diagnose a broken install (DIST-INSTALL-RESOLVE-1).
 
@@ -3263,6 +3270,13 @@ def doctor_cmd(
         if not url or out is None:
             raise click.UsageError("--bundle requires both --url and --out.")
         _download_diagnostics_bundle(url, out)
+        return
+    if ports:
+        from smartmemory_app.config import load_config
+        from smartmemory_app.port_probe import port_report_rows
+
+        for row in port_report_rows(load_config().daemon_port):
+            click.echo(row)
         return
 
     # SETUP-DOCTOR-1: what the CLI will actually use, and which source won.

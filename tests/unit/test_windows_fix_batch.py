@@ -536,3 +536,17 @@ def test_windows_doctor_repair_uses_native_python(monkeypatch):
     text = _venv_repair_commands()
     assert ".venv\\Scripts\\python.exe -m pip" in text
     assert "source" not in text and "&&" not in text
+
+
+@pytest.fixture(autouse=True)
+def _no_real_port_probe():
+    """These tests fake the daemon, sockets and subprocess calls, so a real port probe
+    (CLI-PORT-CONFLICT-1) would read the fake world as a foreign holder. The probe and
+    the refusal are covered in test_port_conflict.py."""
+    from unittest.mock import patch
+
+    with (
+        patch("smartmemory_app.daemon._refuse_held_port"),
+        patch("smartmemory_app.port_probe.ensure_daemon_port_free"),
+    ):
+        yield

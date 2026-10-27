@@ -270,6 +270,7 @@ def _build_app() -> FastAPI:
         """Daemon health check. Used by daemon.is_running() to verify ownership."""
 
         from smartmemory_app.config import load_config
+        from smartmemory_app.port_probe import identity_fields
 
         cfg = load_config()
         startup_status, startup_reason = _get_startup_state()
@@ -279,6 +280,7 @@ def _build_app() -> FastAPI:
             status = startup_status or "ok"
             response = {
                 "service": "smartmemory",
+                **identity_fields(),
                 "status": status,
                 "pid": os.getpid(),
                 "mode": "remote",
@@ -314,6 +316,7 @@ def _build_app() -> FastAPI:
             mode = "remote" if cfg.mode == "remote" else "lite"
             response = {
                 "service": "smartmemory",
+                **identity_fields(),
                 "status": startup_status,
                 "memories": -1,
                 "reextract_offer": None,
@@ -426,6 +429,7 @@ def _build_app() -> FastAPI:
 
         response = {
             "service": "smartmemory",
+            **identity_fields(),
             "status": "ok" if backend_ok else "degraded",
             "memories": node_count,
             "llm_provider": cfg.llm_provider,

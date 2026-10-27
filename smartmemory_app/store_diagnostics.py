@@ -383,17 +383,16 @@ def daemon_port_rows(port: int):
             if c.laddr.port == port and c.status == psutil.CONN_LISTEN
         ]
         for connection in listeners:
-            process = psutil.Process(connection.pid) if connection.pid else None
-            command = " ".join(process.cmdline()) if process else ""
-            if (
-                "smartmemory_app.viewer_server" in command
-                or "smartmemory" in command
-                and " start" in command
-            ):
+            # Identity by handshake (CLI-PORT-CONFLICT-1), not a command-line guess.
+            from smartmemory_app.port_probe import LIVE, probe_port
+
+            held = probe_port(port)
+            if held.state == LIVE:
                 yield f"Daemon port: OK ({port}, SmartMemory listener)"
             else:
+                who = f" ({held.holder})" if held.pid else ""
                 yield (
-                    f"Daemon port: warning: {port} held by a non-SmartMemory or unverified process. "
+                    f"Daemon port: warning: {port} held by a non-SmartMemory or unverified process{who}. "
                     f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
                 )
         if not listeners:
