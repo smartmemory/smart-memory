@@ -611,7 +611,11 @@ def cli() -> None:
     from smartmemory_app.hook_failures import consume_in_background, marker_directory
 
     try:
-        from smartmemory_app.install_check import first_run_check
+        from smartmemory_app.install_check import (
+            first_run_check,
+            last_store_version,
+            store_version_warning,
+        )
 
         command = click.get_current_context().invoked_subcommand
         if command not in {"lifecycle", "doctor"}:
@@ -620,7 +624,13 @@ def cli() -> None:
             flush_in_background()
             consume_in_background(marker_directory())
             if command not in {"doctor", "report"}:
-                first_run_check(debug_log_path().parent)
+                data_dir = debug_log_path().parent
+                # CLI-HOME-SHARED-ACROSS-ENVS-1: read the last version before the check rewrites it.
+                previous = last_store_version(data_dir)
+                first_run_check(data_dir)
+                warning = store_version_warning(previous, data_dir)
+                if warning:
+                    click.echo(warning, err=True)
     except Exception as exc:
         log.warning(
             "Startup installation diagnostics unavailable (%s)", type(exc).__name__
