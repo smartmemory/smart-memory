@@ -80,13 +80,17 @@ ENV_ROWS = [
 @pytest.mark.parametrize("entry,runner", ENTRIES, ids=[e[0] for e in ENTRIES])
 def test_entry_binds_local(monkeypatch, entry, runner):
     monkeypatch.delenv(BILLING_MODE_ENV, raising=False)
-    assert resolve_billing_mode() is BillingMode.ENFORCE, "precondition: unset resolves enforce"
+    assert resolve_billing_mode() is BillingMode.ENFORCE, (
+        "precondition: unset resolves enforce"
+    )
     with pytest.raises(_Stop):
         runner(monkeypatch)
     assert resolve_billing_mode() is BillingMode.LOCAL, entry
 
 
-@pytest.mark.parametrize("label,before,expected", ENV_ROWS, ids=[r[0] for r in ENV_ROWS])
+@pytest.mark.parametrize(
+    "label,before,expected", ENV_ROWS, ids=[r[0] for r in ENV_ROWS]
+)
 def test_operator_choice_wins_at_every_entry(monkeypatch, label, before, expected):
     for entry, runner in ENTRIES:
         with monkeypatch.context() as mp:
@@ -102,14 +106,24 @@ def test_operator_choice_wins_at_every_entry(monkeypatch, label, before, expecte
 def test_spawned_child_interpreter_binds(tmp_path):
     """A fresh interpreter started the way the daemon and capture queue start one binds on its own."""
     env = {k: v for k, v in os.environ.items() if k != BILLING_MODE_ENV}
-    env.update(HOME=str(tmp_path), SMARTMEMORY_DATA_DIR=str(tmp_path / "data"), SMARTMEMORY_CRASH_REPORTS="0")
+    env.update(
+        HOME=str(tmp_path),
+        SMARTMEMORY_DATA_DIR=str(tmp_path / "data"),
+        SMARTMEMORY_CRASH_REPORTS="0",
+    )
     code = (
         "import smartmemory_app.capture_worker as c\n"
         "from smartmemory.billing.mode import resolve_billing_mode\n"
         "c.run = lambda: print('MODE=' + resolve_billing_mode().value)\n"
         "c.main()\n"
     )
-    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     assert "MODE=local" in out.stdout, out.stdout + out.stderr
 
 
@@ -131,12 +145,16 @@ def test_entry_inventory_is_complete():
         text = path.read_text(encoding="utf-8")
         if re.search(r'^if __name__ == "__main__":', text, re.M):
             found.add(path.stem)
-        for match in re.finditer(r'"-m",\s*"smartmemory_app\.(\w+)"|-m smartmemory_app\.(\w+)', text):
+        for match in re.finditer(
+            r'"-m",\s*"smartmemory_app\.(\w+)"|-m smartmemory_app\.(\w+)', text
+        ):
             found.add(match.group(1) or match.group(2))
         for match in re.finditer(r"from smartmemory_app\.(\w+) import main", text):
             found.add(match.group(1))
     found.discard("__main__")
-    scripts = tomllib.loads((ROOT.parent / "pyproject.toml").read_text())["project"]["scripts"]
+    scripts = tomllib.loads((ROOT.parent / "pyproject.toml").read_text())["project"][
+        "scripts"
+    ]
     assert set(scripts.values()) == {"smartmemory_app.cli:main"}
     unknown = found - BOUND - set(NOT_BOUND)
     assert not unknown, f"entries with no bind decision: {sorted(unknown)}"
