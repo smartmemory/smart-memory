@@ -4065,6 +4065,9 @@ def server_cmd() -> None:
 
 def main() -> None:
     """Run the CLI with literal arguments on Windows."""
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     cli(windows_expand_args=False)
 
 

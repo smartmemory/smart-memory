@@ -164,6 +164,13 @@ def run() -> None:
                 queue.transition(job, "done", **receipt)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     logging.basicConfig(level=logging.WARNING)
     run()
+
+
+if __name__ == "__main__":
+    main()

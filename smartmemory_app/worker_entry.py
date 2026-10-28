@@ -50,6 +50,9 @@ def _v2_config(data_dir):
 
 
 def main():
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir")
     args = parser.parse_args()

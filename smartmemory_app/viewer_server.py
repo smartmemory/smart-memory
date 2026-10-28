@@ -807,6 +807,9 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
     No ``port`` means the configured one (``SMARTMEMORY_DAEMON_PORT``, then the
     config file, then ``DEFAULT_PORT``), never a hard-coded 9014 (CLI-TEST-HOST-ISOLATION-1).
     """
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     if port is None:
         from smartmemory_app.config import load_config
 
