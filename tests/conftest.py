@@ -26,6 +26,18 @@ def pytest_collection_modifyitems(items):
 
 
 @pytest.fixture(autouse=True)
+def restore_billing_mode_env():
+    """A test that runs an entry's ``main`` binds ``local`` into the process env: undo it afterwards."""
+    key = "SMARTMEMORY_BILLING_MODE"
+    before = os.environ.get(key)
+    yield
+    if before is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = before
+
+
+@pytest.fixture(autouse=True)
 def isolated_support_diagnostics(monkeypatch, tmp_path):
     """Never write user logs or make doctor probes against a live network."""
     if not os.environ.get("HF_HOME"):
