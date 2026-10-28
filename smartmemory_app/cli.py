@@ -48,7 +48,10 @@ def _configure_cli_logging() -> None:
         level = logging.WARNING
     # The root logger must admit DEBUG records for the background file handler.
     # Console handlers retain the user-selected level, so this does not make the
-    # command itself noisier.
+    # command itself noisier. Libraries that read their own logger level to decide
+    # on output do see DEBUG: sentence-transformers then draws tqdm bars by default,
+    # which core suppresses with an explicit show_progress_bar=False at every
+    # encode/predict (F3-HOOK-VISIBILITY-TQDM-STDOUT-1).
     logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
