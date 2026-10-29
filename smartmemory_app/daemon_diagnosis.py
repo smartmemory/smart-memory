@@ -13,6 +13,7 @@ import plistlib
 import re
 import socket
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -25,6 +26,11 @@ WARMING_NOTE = (
     "You can keep using sm add and sm search: requests wait for the load, "
     "so the first ones can be slow."
 )
+
+
+#: Seconds a daemon may spend starting before "still starting" becomes "not ready".
+#: A first start on a loaded machine took 68 s or more (spaCy load alone 54 s).
+STARTUP_GRACE_S = 120
 
 
 class Diagnosis(NamedTuple):
@@ -42,6 +48,8 @@ class DaemonFacts:
     health: dict | None = None  # parsed /health of a SmartMemory daemon, else None
     port_taken: bool = False  # another program accepts connections on the port
     port_holder_pid: int | None = None
+    port_holder_is_ours: bool = False  # the holder is our own SmartMemory daemon
+    daemon_age_s: float | None = None  # seconds since daemon.pid was written
     marker_pid: int | None = None  # daemon.pid content
     marker_garbled: bool = False  # daemon.pid exists but holds no valid pid
     marker_alive: bool = False
@@ -103,6 +111,21 @@ def diagnose(f: DaemonFacts) -> Diagnosis:
             False,
             f"daemon at {addr} is up but degraded: {_short(reason) or 'no reason given'}",
             f"Run: sm restart. {log}",
+        )
+    if f.port_taken and f.port_holder_is_ours:
+        age = f" ({int(f.daemon_age_s)}s)" if f.daemon_age_s is not None else ""
+        if f.daemon_age_s is None or f.daemon_age_s < STARTUP_GRACE_S:
+            return Diagnosis(
+                "starting",
+                False,
+                f"the SmartMemory daemon is still starting{age}, waiting for it",
+                f"{WARMING_NOTE} Check again in a minute: sm status",
+            )
+        return Diagnosis(
+            "unresponsive",
+            False,
+            f"the daemon started{age} but is not ready yet on port {f.port}",
+            f"Run: sm status. If it stays unready, run: sm restart. {log}",
         )
     if f.port_taken:
         holder = f" (process {f.port_holder_pid})" if f.port_holder_pid else ""
@@ -191,6 +214,7 @@ def collect_facts(status: dict | None = None) -> DaemonFacts:
     """Observe the daemon. ``status`` is a health reply the caller already has."""
     from smartmemory_app import daemon
     from smartmemory_app.config import config_path
+    from smartmemory_app.port_probe import _is_smartmemory_process
     from smartmemory.utils.process import process_cmdline
 
     port = daemon._port()
@@ -225,6 +249,20 @@ def collect_facts(status: dict | None = None) -> DaemonFacts:
                     is_daemon = any(
                         "smartmemory_app.viewer_server" in a for a in arguments
                     )
+    holder_pid = _port_holder_pid(port) if port_taken else None
+    # Our own daemon, still loading models: the pidfile pid holds the port, or the
+    # holder's command line is the daemon's. An unnamed holder with a live daemon
+    # pidfile counts as ours too (lsof can fail for an ordinary user).
+    ours = port_taken and (
+        (marker_pid is not None and alive and is_daemon is not False
+         and holder_pid in (None, marker_pid))
+        or (holder_pid is not None and holder_pid != marker_pid
+            and _is_smartmemory_process(holder_pid))
+    )
+    try:
+        age = time.time() - marker.stat().st_mtime if marker_pid is not None else None
+    except OSError:
+        age = None
     plist_python = _plist_python()
     return DaemonFacts(
         port=port,
@@ -232,7 +270,9 @@ def collect_facts(status: dict | None = None) -> DaemonFacts:
         config_path=config_path(),
         health=health,
         port_taken=port_taken,
-        port_holder_pid=_port_holder_pid(port) if port_taken else None,
+        port_holder_pid=holder_pid,
+        port_holder_is_ours=bool(ours),
+        daemon_age_s=max(age, 0.0) if age is not None else None,
         marker_pid=marker_pid,
         marker_garbled=garbled,
         marker_alive=alive,

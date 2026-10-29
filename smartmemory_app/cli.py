@@ -346,6 +346,14 @@ def _daemon_request(method: str, path: str, timeout: int = 120, **kwargs):
                 url,
                 timeout,
             )
+            if method.upper() != "GET":
+                # A write queues behind the model load, so the daemon may still store
+                # it after this client gave up: never report that as a plain failure.
+                raise click.ClickException(
+                    "SmartMemory did not answer in time (timeout). The request may "
+                    "still have been saved: run sm status, then sm search to check "
+                    f"before adding it again.  (check {_DAEMON_LOG_HINT})"
+                )
             raise click.ClickException(
                 f"SmartMemory daemon is not responding (timeout).  (check {_DAEMON_LOG_HINT})"
             )
