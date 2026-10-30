@@ -72,6 +72,10 @@ ROWS = [
      NEW, False, NEW, True, ""),
     ("no record, dest already bundled -> recorded, not rewritten", "daemon", _plain, NEW, None, None, False,
      NEW, False, NEW, True, ""),
+    ("record exists, dest is a released version -> untouched", "daemon", _plain, OLD, MINE, OLD, False,
+     OLD, True, MINE, True, "locally modified, not replaced"),
+    ("first run, no record file, nothing copied -> empty record written", "setup", _plain, MINE, None, None, False,
+     MINE, True, None, True, "locally modified, not replaced"),
     ("opt-out -> untouched", "daemon", _plain, OLD, OLD, None, True,
      OLD, False, OLD, False, "missing or out of date"),
     ("symlinked file, locally modified -> link and file untouched", "daemon", _file_link, MINE, None, None, False,
@@ -172,6 +176,8 @@ def test_hook_sync_never_replaces_a_hook_it_did_not_install(
         )
 
     record_file = data_dir / "installed-hooks.json"
+    # Every guarded run leaves a record file, so the released-version table is used once.
+    assert record_file.exists() or opt_out
     saved = json.loads(record_file.read_text())["hooks"] if record_file.exists() else {}
     assert saved.get(str(path)) == (_sha(record_after) if record_after else None)
 

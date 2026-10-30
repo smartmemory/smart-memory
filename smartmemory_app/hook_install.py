@@ -124,13 +124,17 @@ def record_path() -> Path:
     return _resolve_data_dir() / RECORD_NAME
 
 
-def load_record() -> dict[str, str]:
-    """Destination path -> sha256 last installed there. Unreadable counts as empty."""
+def load_record() -> dict[str, str] | None:
+    """Destination path -> sha256 last installed there.
+
+    ``None`` means no record file exists yet (the first guarded run on this data dir).
+    An unreadable or malformed file counts as an empty record, with a WARNING.
+    """
     path = record_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return None
     except (OSError, ValueError) as exc:
         logger.warning(
             "Hook install record %s could not be read (%s): a hook that differs from "
@@ -141,6 +145,11 @@ def load_record() -> dict[str, str]:
         return {}
     hooks = data.get("hooks") if isinstance(data, dict) else None
     if not isinstance(hooks, dict):
+        logger.warning(
+            "Hook install record %s has no hooks table: a hook that differs from this "
+            "package counts as locally modified",
+            path,
+        )
         return {}
     return {k: v for k, v in hooks.items() if isinstance(k, str) and isinstance(v, str)}
 
@@ -161,9 +170,13 @@ def _save_record(hooks: dict[str, str]) -> None:
 
 
 def hook_state(
-    target: Path, src_name: str, bundled: bytes, record: dict[str, str]
+    target: Path, src_name: str, bundled: bytes, record: dict[str, str] | None
 ) -> str:
-    """Classify ``target`` against the bundled bytes. A symlink is judged by the file it names."""
+    """Classify ``target`` against the bundled bytes. A symlink is judged by the file it names.
+
+    The released-version table applies only while ``record`` is ``None`` (the first
+    guarded run). With a record, only the sha recorded for this destination is ours.
+    """
     if not os.path.lexists(target):
         return MISSING
     try:
@@ -174,7 +187,10 @@ def hook_state(
     if current == bundled:
         return CURRENT
     digest = _sha256(current)
-    if record.get(str(target)) == digest or digest in _RELEASED_SHAS.get(src_name, ()):
+    if record is None:
+        if digest in _RELEASED_SHAS.get(src_name, ()):
+            return OURS
+    elif record.get(str(target)) == digest:
         return OURS
     return MODIFIED
 
@@ -197,7 +213,7 @@ def install_hooks(src_dir: Path, dest_dir: Path, file_map: dict[str, str]) -> li
     """Install or upgrade the hooks the package owns. Returns the names left in place."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     record = load_record()
-    updated = dict(record)
+    updated = dict(record or {})
     kept: list[str] = []
     for src_name, dest_name in file_map.items():
         src = src_dir / src_name
@@ -218,6 +234,7 @@ def install_hooks(src_dir: Path, dest_dir: Path, file_map: dict[str, str]) -> li
         if state != CURRENT:
             _publish(src, target)
         updated[str(target)] = _sha256(bundled)
-    if updated != record:
+    # First guarded run: save even an empty record, so the released-version table is used once.
+    if record is None or updated != record:
         _save_record(updated)
     return kept
