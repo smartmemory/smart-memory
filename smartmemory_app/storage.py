@@ -1138,6 +1138,8 @@ def recall(
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
 
+    # CORE-RECALL-NO-MANUAL-SCAN-1: hook recall takes graph search's empty answer as
+    # final. Needs core >= 1.5.33 (older SmartMemory.search has no `manual_scan`).
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
     recent_k, semantic_k = _split_recall_counts(requested)
@@ -1146,12 +1148,14 @@ def recall(
     emitted = 0
     while requested:
         if query:
-            raw = list(mem.search(query, top_k=fetch_k))
+            raw = list(mem.search(query, top_k=fetch_k, manual_scan=False))
             results = eligible(raw)
             exhausted = len(raw) < fetch_k
         elif cwd:
-            recent = list(mem.search("", top_k=fetch_k, sort_by="recency"))
-            semantic = list(mem.search(cwd, top_k=fetch_k))
+            recent = list(
+                mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
+            )
+            semantic = list(mem.search(cwd, top_k=fetch_k, manual_scan=False))
             recent_rows, semantic_rows = eligible(recent), eligible(semantic)
             # Preserve ceil(k/2) recency first, then floor(k/2) semantic.
             # Overflow from either channel can replace missing/duplicate slots.
@@ -1163,7 +1167,9 @@ def recall(
             )
             exhausted = len(recent) < fetch_k and len(semantic) < fetch_k
         else:
-            raw = list(mem.search("", top_k=fetch_k, sort_by="recency"))
+            raw = list(
+                mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
+            )
             results = eligible(raw)
             exhausted = len(raw) < fetch_k
 
