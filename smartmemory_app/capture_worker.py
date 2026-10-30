@@ -46,7 +46,10 @@ def _memory():
     # pipeline, pinned to Groq, never subscription billing.
     from smartmemory_app.worker_entry import install_worker_spawner
 
+    from smartmemory_app.storage import _guard_llm_route
+
     _hold_llm_if_provider_none()
+    _guard_llm_route()  # no send to a provider the user did not pick (ROUTE-PORT-1)
     install_worker_spawner()  # saves here spawn the held wrapper worker, not core's
     offline = os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") == "1"
     if offline:

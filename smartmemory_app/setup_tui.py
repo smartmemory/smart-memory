@@ -57,12 +57,9 @@ EMBEDDING_PROVIDERS = [
     ("ollama", "Local Ollama embeddings"),
 ]
 
-_KEY_VARS = {
-    "groq": "GROQ_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-}
+from smartmemory_app.config import LLM_PROVIDER_KEY_ENV  # noqa: E402
+
+_KEY_VARS = LLM_PROVIDER_KEY_ENV
 
 LOCAL_MODEL_PROVIDERS = {"ollama", "lmstudio"}
 NO_MODEL_ID = "__none__"

@@ -3538,18 +3538,10 @@ def config_cmd(key: str | None, value: str | None) -> None:
         click.echo(f"  team_id           = {cfg.team_id or '(none)'}")
         return
 
+    from smartmemory_app.config import LLM_PROVIDER_TABLE
+
     settable = {
-        "llm_provider": {
-            "values": [
-                "groq",
-                "claude-agent",
-                "anthropic",
-                "openai",
-                "ollama",
-                "lmstudio",
-                "none",
-            ]
-        },
+        "llm_provider": {"values": list(LLM_PROVIDER_TABLE)},
         "llm_model": {"values": None},
         "embedding_provider": {"values": ["local", "openai", "ollama"]},
         "daemon_port": {"values": None},

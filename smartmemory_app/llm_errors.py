@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
+from urllib.parse import urlparse
 
 LLM_KEY_MISSING = "llm_key_missing"
 LLM_KEY_REJECTED = "llm_key_rejected"
@@ -43,6 +44,53 @@ DOTENV_NOTE = (
 GROQ_URL = "https://api.groq.com/openai/v1"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 OPENAI_URL = "https://api.openai.com/v1"
+ANTHROPIC_URL = "https://api.anthropic.com/v1/"  # core ANTHROPIC_OPENAI_BASE_URL (main)
+
+# WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the provider that owns the endpoint each
+# configured llm_provider may send to. claude-agent is Anthropic's (the Agent SDK, or
+# the Anthropic API without it). Local servers, none and unknown names own none.
+_ENDPOINT_OWNER = {
+    "groq": "groq",
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "gemini": "gemini",
+    "claude-agent": "anthropic",
+}
+
+
+def endpoint_owner(endpoint: Optional[str]) -> Optional[str]:
+    """The provider owning ``endpoint``'s host, or None for any other host (local server, proxy)."""
+    try:
+        from smartmemory.utils.llm_client.provider_secrets import endpoint_provider
+    except ImportError:  # an older core: the same four hosts
+
+        def endpoint_provider(endpoint: Optional[str]) -> Optional[str]:
+            host = (urlparse(endpoint or "").hostname or "").lower()
+            if host == "api.groq.com" or host.endswith(".groq.com"):
+                return "groq"
+            return {
+                "generativelanguage.googleapis.com": "gemini",
+                "api.anthropic.com": "anthropic",
+                "api.openai.com": "openai",
+            }.get(host)
+
+    return endpoint_provider(endpoint)
+
+
+def refused_endpoint_owner(
+    provider: Optional[str], endpoint: Optional[str]
+) -> Optional[str]:
+    """The provider owning ``endpoint`` when the picked ``provider`` may not send there, else None.
+
+    A known provider's host is allowed only for that provider. A host no provider owns
+    (localhost, the user's own OpenAI-compatible endpoint) is always allowed. A local
+    or unknown llm_provider owns no host, so every known provider's host is refused.
+    """
+    owner = endpoint_owner(endpoint)
+    if owner is None:
+        return None
+    picked = (provider or "").strip().lower()
+    return None if owner == _ENDPOINT_OWNER.get(picked) else owner
 
 
 class LlmProviderNone(RuntimeError):
@@ -50,6 +98,18 @@ class LlmProviderNone(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("llm_provider is none: no LLM is configured, nothing was sent")
+
+
+class LlmRouteRefused(RuntimeError):
+    """Raised instead of sending when the call would reach a provider the user did not pick."""
+
+    def __init__(self, provider: str, target: str) -> None:
+        self.provider = provider
+        self.target = target
+        super().__init__(
+            f"llm_provider is {provider}, but this call would go to {target}, so it was refused "
+            "and nothing was sent"
+        )
 
 
 @dataclass(frozen=True)
@@ -99,12 +159,21 @@ def route_for(
         return LlmRoute(label, model, GROQ_URL, "GROQ_API_KEY")
     if name.startswith("gemini"):
         return LlmRoute(label, model, GEMINI_URL, "GEMINI_API_KEY")
-    if name.startswith(("claude", "anthropic/")) or name in ("sonnet", "opus", "haiku"):
-        return LlmRoute(
-            label, model, "Claude", None
-        )  # SDK sign-in or ANTHROPIC_API_KEY
-    if name.startswith("deepseek"):
-        return LlmRoute(label, model, "DeepSeek", "DEEPSEEK_API_KEY")
+    if name in ("sonnet", "opus", "haiku"):
+        try:
+            from smartmemory.utils.llm import _claude_agent_sdk_available
+
+            sdk = _claude_agent_sdk_available()
+        except Exception:
+            sdk = False
+        if sdk:
+            return LlmRoute(
+                label, model, "Claude Agent SDK", None
+            )  # the SDK's own sign-in
+        # No SDK: core expands the alias to a claude-* id and calls the Anthropic API (never OpenAI).
+        return LlmRoute(label, model, ANTHROPIC_URL, "ANTHROPIC_API_KEY")
+    if name.startswith(("claude", "anthropic/")):
+        return LlmRoute(label, model, ANTHROPIC_URL, "ANTHROPIC_API_KEY")
     return LlmRoute(label, model or "gpt-4o-mini", OPENAI_URL, "OPENAI_API_KEY")
 
 
@@ -198,6 +267,8 @@ def classify(exc: BaseException, provider: Optional[str], environ=None) -> LlmFa
     route = route_for(provider, environ)
     if isinstance(exc, LlmProviderNone):
         return LlmFailure(LLM_PROVIDER_NONE, route)
+    if isinstance(exc, LlmRouteRefused):
+        return LlmFailure(LLM_ROUTE_UNRESOLVED, route)
     status = _status_code(exc)
     text = str(exc)
     if status in (401, 403) or type(exc).__name__ in (

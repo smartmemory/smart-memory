@@ -611,6 +611,11 @@ CASES = [
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 def test_doctor_row(case, monkeypatch, tmp_path):
+    import smartmemory.utils.llm as core_llm
+
+    # Whether the Agent SDK imports is a property of the machine, not of the row
+    # (CLI-PROVIDER-ROUTE-1 made a claude-agent row depend on it): pin it present.
+    monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: True)
     _id, kwargs, key, status, text = case
     result = row(build(monkeypatch, tmp_path, **kwargs), key)
     assert result.status == status, result
@@ -1442,3 +1447,124 @@ def test_llm_route_crash_is_plain_and_reported(monkeypatch, tmp_path):
     assert "secret detail" not in text
     assert len(seen) == 1 and isinstance(seen[0][0], RuntimeError)
     assert seen[0][1] == {"source": "doctor", "handled": True}
+
+
+# CLI-PROVIDER-ROUTE-1 (ported by WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1): the Anthropic
+# family names its own endpoint, with or without a key. "main core" rows simulate a core
+# with main's Anthropic route (core 7d792b92: the capability attribute, and the dry run
+# reporting api.anthropic.com); "core 2.0" rows run the installed core, which sends a
+# claude-* model to the OpenAI client, so the wrapper's route guard refuses it and doctor
+# says so. (id, llm_provider, environ, simulate main core, status, must, must not)
+ANTHROPIC_ROUTE_ROWS = [
+    (
+        "anthropic-no-key",
+        "anthropic",
+        {"OPENAI_API_KEY": "sk-decoy"},
+        True,
+        FAIL,
+        "endpoint https://api.anthropic.com/v1/",
+        "api.openai.com",
+    ),
+    (
+        "anthropic-key",
+        "anthropic",
+        {"ANTHROPIC_API_KEY": "sk-ant-synthetic"},
+        True,
+        PASS,
+        "endpoint https://api.anthropic.com/v1/",
+        "api.openai.com",
+    ),
+    (
+        "claude-agent-no-sdk-no-key",
+        "claude-agent",
+        {"OPENAI_API_KEY": "sk-decoy"},
+        True,
+        FAIL,
+        "pip install 'smartmemory-core[claude]'",
+        "api.openai.com",
+    ),
+    (
+        "claude-agent-no-sdk-key",
+        "claude-agent",
+        {"ANTHROPIC_API_KEY": "sk-ant-synthetic"},
+        True,
+        PASS,
+        "endpoint https://api.anthropic.com/v1/",
+        "not supported",
+    ),
+    (
+        "core-2.0-anthropic-no-key",
+        "anthropic",
+        {"OPENAI_API_KEY": "sk-decoy"},
+        False,
+        FAIL,
+        "ANTHROPIC_API_KEY is missing",
+        "",
+    ),
+    (
+        "core-2.0-anthropic-key-refused",
+        "anthropic",
+        {"ANTHROPIC_API_KEY": "sk-ant-synthetic", "OPENAI_API_KEY": "sk-decoy"},
+        False,
+        FAIL,
+        "SmartMemory refuses the call and nothing is sent",
+        "",
+    ),
+    (
+        "core-2.0-claude-agent-no-sdk-key-refused",
+        "claude-agent",
+        {"ANTHROPIC_API_KEY": "sk-ant-synthetic"},
+        False,
+        FAIL,
+        "Upgrade smartmemory-core",
+        "",
+    ),
+]
+
+
+def _simulate_main_core(monkeypatch):
+    import smartmemory.utils.llm as core_llm
+
+    from smartmemory_app.llm_errors import ANTHROPIC_URL
+
+    monkeypatch.setattr(
+        core_llm, "ANTHROPIC_OPENAI_BASE_URL", ANTHROPIC_URL, raising=False
+    )
+    real = doctor._core_dry_run
+
+    def dry_run():
+        call = real()
+        if call.route == "openai" and (call.model or "").startswith("claude"):
+            call.api_base = ANTHROPIC_URL  # what main's call_llm passes
+        return call
+
+    monkeypatch.setattr(doctor, "_core_dry_run", dry_run)
+
+
+@pytest.mark.parametrize(
+    "provider, environ, main_core, status, must, must_not",
+    [r[1:] for r in ANTHROPIC_ROUTE_ROWS],
+    ids=[r[0] for r in ANTHROPIC_ROUTE_ROWS],
+)
+def test_anthropic_family_doctor_row_names_the_anthropic_endpoint(
+    monkeypatch, tmp_path, provider, environ, main_core, status, must, must_not
+):
+    import smartmemory.utils.llm as core_llm
+
+    if not main_core and hasattr(core_llm, "ANTHROPIC_OPENAI_BASE_URL"):
+        pytest.skip("the installed core already routes claude-* to Anthropic")
+    monkeypatch.setattr(core_llm, "_claude_agent_sdk_available", lambda: False)
+    if main_core:
+        _simulate_main_core(monkeypatch)
+    ctx = build(
+        monkeypatch,
+        tmp_path,
+        environ=environ,
+        config=LOCAL_CFG + f'[local]\nllm_provider = "{provider}"\n',
+    )
+    got = doctor.check_llm(ctx)
+    text = f"{got.detail} {got.fix}"
+    assert got.status == status, got
+    assert must in text, got
+    if must_not:
+        assert must_not not in text, got

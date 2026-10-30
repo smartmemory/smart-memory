@@ -798,19 +798,17 @@ def _setup_local(tracker=None) -> bool:
     click.echo("  ollama       free, local (llama3.1, mistral)")
     click.echo("  lmstudio     local, OpenAI-compatible endpoint")
     click.echo("  none         EntityRuler only (very limited)")
+    from smartmemory_app.config import LLM_PROVIDER_TABLE
+
     llm = click.prompt(
         "LLM provider",
         default="groq",
-    )
+        type=click.Choice(list(LLM_PROVIDER_TABLE), case_sensitive=False),
+    ).lower()
 
     # Prompt for API key if the provider needs one
-    _LLM_KEY_ENVVAR = {
-        "groq": "GROQ_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-    }
+    from smartmemory_app.config import LLM_PROVIDER_KEY_ENV as _LLM_KEY_ENVVAR
+
     llm_model = ""
     if llm in LOCAL_MODEL_PROVIDERS:
         llm_model = _prompt_local_model(llm)

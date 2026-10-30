@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from smartmemory_app.remote_backend import RemoteMemory
 
 from smartmemory_app.config import (
+    LLM_PROVIDER_TABLE,
     NO_LLM_PROVIDER_OFF_LINE,
     NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
@@ -203,6 +204,7 @@ def apply_runtime_config() -> SmartMemoryConfig:
         _hold_llm_route_off()
     if llm_provider_none(cfg):
         _block_llm_transport()
+    _guard_llm_route()
     return cfg
 
 
@@ -259,13 +261,17 @@ def _provider_default_model(provider: str | None, environ=None) -> str | None:
     """
     env = os.environ if environ is None else environ
     provider = (provider or "").lower()
-    if provider == "gemini":
-        return "gemini/gemini-2.0-flash"
-    if provider == "groq":
-        return "openai/gpt-oss-120b"  # core's Groq default (is_groq_model routes it)
     if provider == "openai":
         return env.get("OPENAI_MODEL") or "gpt-4o-mini"  # core's fallback
-    return None
+    if provider and provider not in LLM_PROVIDER_TABLE:
+        log.warning(
+            "llm_provider %r is not supported (supported: %s), so no model is pinned and core "
+            "falls back to its own default model and endpoint. Run: sm setup",
+            provider,
+            ", ".join(LLM_PROVIDER_TABLE),
+        )
+        return None
+    return LLM_PROVIDER_TABLE.get(provider, (None, None))[1]
 
 
 def _hold_llm_route_off() -> None:
@@ -324,7 +330,7 @@ def _block_llm_transport() -> None:
                 "No-LLM guard: core has no %s, that send path is not blocked", name
             )
             continue
-        if getattr(real, "_no_llm_provider_block", False):
+        if _wraps(real, "_no_llm_provider_block"):
             continue
 
         def blocked(*args, _real=real, _name=name, **kwargs):
@@ -343,6 +349,97 @@ def _block_llm_transport() -> None:
         blocked.__wrapped__ = real
         setattr(core_llm, name, blocked)
     log.info("LLM send paths blocked: llm_provider is none")
+
+
+def _wraps(fn, marker: str) -> bool:
+    """Whether ``fn`` or anything it wraps carries ``marker`` (the guards stack in either order)."""
+    while fn is not None:
+        if getattr(fn, marker, False):
+            return True
+        fn = getattr(fn, "__wrapped__", None)
+    return False
+
+
+def _guard_llm_route() -> None:
+    """Refuse any LLM send that would go to a provider the user did not pick.
+
+    WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the provider table pins a model per
+    provider, but core still decides the endpoint from the model name and the ambient
+    env, and on 2.0 it sends a ``claude-*`` model with no Agent SDK to api.openai.com
+    under whatever OPENAI_API_KEY is set (main's core half, 7d792b92, is not on 2.0).
+    Core's extractor also sends a ``llama*`` model to Groq whenever GROQ_API_KEY is set,
+    even with a local provider picked. So the two functions that send to a provider are
+    wrapped in core's module (call_llm reads them at call time): ``call_openai_chat``
+    may only reach the picked provider's host or a host that is no known provider (a
+    local server or the user's own endpoint), and the Claude Agent SDK only serves the
+    Anthropic family. Bedrock needs an explicit ``LLM_PROVIDER=bedrock`` pin and is left
+    as is. Each call re-reads the config, as the provider-none block does; provider
+    none is that block's job. A refusal sends nothing and logs a WARNING.
+    """
+    from smartmemory.utils import llm as core_llm
+
+    from smartmemory_app.llm_errors import (
+        LlmRouteRefused,
+        OPENAI_URL,
+        refused_endpoint_owner,
+    )
+
+    def picked() -> str:
+        try:
+            return (load_config().llm_provider or "none").strip().lower()
+        except Exception:
+            return ""  # unreadable config: no provider owns any endpoint, fail closed
+
+    def openai_chat(*args, _real, **kwargs):
+        provider = picked()
+        if provider != "none":
+            target = (
+                kwargs.get("api_base")
+                or os.environ.get("OPENAI_BASE_URL")
+                or OPENAI_URL
+            )
+            owner = refused_endpoint_owner(provider, target)
+            if owner:
+                log.warning(
+                    "LLM call refused before sending: llm_provider is %r but the call would go to %s",
+                    provider,
+                    owner,
+                )
+                raise LlmRouteRefused(provider, owner)
+        return _real(*args, **kwargs)
+
+    def claude_agent(*args, _real, **kwargs):
+        provider = picked()
+        if provider != "none":
+            owner = refused_endpoint_owner(provider, "https://api.anthropic.com")
+            if owner:
+                log.warning(
+                    "LLM call refused before sending: llm_provider is %r but the call would go to the Claude Agent SDK",
+                    provider,
+                )
+                raise LlmRouteRefused(provider, "the Claude Agent SDK")
+        return _real(*args, **kwargs)
+
+    for name, check in (
+        ("call_openai_chat", openai_chat),
+        ("_call_claude_agent", claude_agent),
+    ):
+        real = getattr(core_llm, name, None)
+        if real is None:
+            log.warning(
+                "Provider route guard: core has no %s, that send path is not guarded",
+                name,
+            )
+            continue
+        if _wraps(real, "_provider_route_guard"):
+            continue
+
+        def guarded(*args, _real=real, _check=check, **kwargs):
+            return _check(*args, _real=_real, **kwargs)
+
+        guarded._provider_route_guard = True
+        guarded.__wrapped__ = real
+        setattr(core_llm, name, guarded)
 
 
 def _get_local_memory(

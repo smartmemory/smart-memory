@@ -38,6 +38,36 @@ LLM_KEY_ENV_VARS = (
     "GEMINI_API_KEY",
 )
 
+# CLI-PROVIDER-ROUTE-1: the one provider table. provider -> (key env var or None, default model or None).
+# Every site that maps a configured llm_provider to a key or a model reads this, so a provider cannot be
+# offered by setup and then mapped to another provider's model or endpoint. A model of None means "the
+# user's chosen model" (local servers) or "no LLM" (none). Providers absent here are not supported.
+LLM_PROVIDER_TABLE: dict[str, tuple[str | None, str | None]] = {
+    "groq": (
+        "GROQ_API_KEY",
+        "openai/gpt-oss-120b",
+    ),  # core's Groq default (is_groq_model routes it)
+    "openai": (
+        "OPENAI_API_KEY",
+        None,
+    ),  # None: $OPENAI_MODEL or core's gpt-4o-mini (provider_default_model)
+    "anthropic": (
+        "ANTHROPIC_API_KEY",
+        "claude-haiku-4-5-20251001",
+    ),  # = core _CLAUDE_ALIAS_TO_MODEL["haiku"]
+    "gemini": ("GEMINI_API_KEY", "gemini/gemini-2.0-flash"),
+    "claude-agent": (
+        None,
+        "sonnet",
+    ),  # the Agent SDK alias; without the SDK core expands it to the Anthropic API
+    "ollama": (None, None),
+    "lmstudio": (None, None),
+    "none": (None, None),
+}
+LLM_PROVIDER_KEY_ENV: dict[str, str] = {
+    p: k for p, (k, _m) in LLM_PROVIDER_TABLE.items() if k
+}
+
 # Local OpenAI-compatible LLM servers → default base URL. These speak the OpenAI
 # Chat Completions API, so extraction needs NO provider-specific code: the core
 # extraction path already routes through the OpenAI client, which honors
