@@ -602,6 +602,7 @@ def start_daemon(
         proc = spawn_detached(
             [
                 sys.executable,
+                "-P",  # SM-DAEMON-CWD-1: cwd never shadows site-packages (python >= 3.11)
                 "-c",
                 f"from smartmemory_app.viewer_server import main; main(port={port}, open_browser=False)",
             ],
@@ -609,6 +610,7 @@ def start_daemon(
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=env,
+            cwd=str(data),  # SM-DAEMON-CWD-1: never inherit a launch dir that can be deleted
         )
 
     # Phase 1: Wait for port to open (fast socket check, no httpx timeout)
@@ -871,6 +873,7 @@ def _start_workers(num_workers: int = 1) -> None:
         spawn_detached(
             [
                 sys.executable,
+                "-P",  # SM-DAEMON-CWD-1
                 "-m",
                 "smartmemory_app.worker_entry",
                 "--data-dir",
@@ -880,6 +883,7 @@ def _start_workers(num_workers: int = 1) -> None:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=os.environ.copy(),
+            cwd=str(data),  # SM-DAEMON-CWD-1
         )
 
 
