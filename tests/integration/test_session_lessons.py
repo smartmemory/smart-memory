@@ -8,6 +8,7 @@ import pytest
 from smartmemory_app import capture_queue as queue, capture_worker, storage
 from smartmemory_app.lifecycle import MemoryLifecycle
 from smartmemory_app.session_lessons import ORIGIN
+from tests._capture_llm import opt_in_capture_llm
 
 pytestmark = pytest.mark.integration
 PROMPT = "Add support for refunds, full and partial, triggered by Stripe's `charge.refunded` webhook, per docs/refunds-contract.md. Post them to the ledger and submit them for clearing."
@@ -36,7 +37,7 @@ def test_real_store_lesson_import_and_fresh_hooks(tmp_path, monkeypatch):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
 
     def make_memory():
         return create_lite_memory(
@@ -155,7 +156,7 @@ def test_three_session_lifecycle_and_fresh_injection(tmp_path, monkeypatch):
         monkeypatch.setenv(key, value)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
     contents = [
         "Deployment rule X requires approval from team A.",
         "Deployment rule X requires approval from team B.",

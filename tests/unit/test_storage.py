@@ -73,7 +73,13 @@ def test_local_memory_disables_entity_grounding_by_default(tmp_path, keyed):
     from smartmemory_app import storage
     from smartmemory_app.config import SmartMemoryConfig
 
-    config = SmartMemoryConfig(mode="local", coreference=True)
+    config = SmartMemoryConfig(
+        # llm_provider none (the default) holds the LLM off whatever the key
+        # (WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1), so the row picks a provider.
+        mode="local",
+        coreference=True,
+        llm_provider="groq",
+    )
     mock_mem = MagicMock()
     mock_pm = MagicMock()
     mock_store = MagicMock()

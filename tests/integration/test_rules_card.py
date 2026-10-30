@@ -8,6 +8,7 @@ import pytest
 from smartmemory_app import storage
 from smartmemory_app.rules_card import build_rules_card
 from smartmemory_app.session_lessons import capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "rules_card"
 
@@ -35,10 +36,10 @@ def test_capture_card_and_lifecycle_on_reopened_lite_store(
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "SMARTMEMORY_NO_WARM": "1",
-        "SMARTMEMORY_CAPTURE_LLM": "1",
         "GROQ_API_KEY": "fixture-only",
     }.items():
         monkeypatch.setenv(key, value)
+    opt_in_capture_llm(monkeypatch)
     for key in (
         "LLM_PROVIDER",
         "LLM_API_KEY",
@@ -118,7 +119,7 @@ def test_reclassify_persists_in_reopened_store(tmp_path, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
     response = (FIXTURES.parent / "lesson_classifier/internal.txt").read_text()
     monkeypatch.setattr(
         "smartmemory_app.lesson_classifier.call_llm", lambda **kwargs: (None, response)

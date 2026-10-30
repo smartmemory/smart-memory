@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from smartmemory_app import capture_queue as queue, capture_worker as worker
 from smartmemory_app.lifecycle import MemoryLifecycle
+from tests._capture_llm import opt_in_capture_llm
 
 
 @pytest.fixture(autouse=True)
@@ -168,7 +169,7 @@ def test_partial_chunk_failure_is_error(tmp_path, monkeypatch, caplog):
 def test_groq_pin_never_uses_openai_key(monkeypatch):
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
     monkeypatch.setenv("GROQ_API_KEY", "test-groq")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai")
     monkeypatch.setenv("LLM_API_KEY", "wrong-key")
@@ -190,7 +191,7 @@ def test_groq_pin_never_uses_openai_key(monkeypatch):
 def test_missing_groq_key_fails_closed(monkeypatch):
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         worker._memory()

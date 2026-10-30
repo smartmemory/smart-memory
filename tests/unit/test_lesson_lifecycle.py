@@ -9,6 +9,7 @@ from smartmemory.utils.llm_client.openai_chat import set_last_usage
 
 from smartmemory_app import lesson_lifecycle as lifecycle
 from smartmemory_app.session_lessons import capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 
 class Memory:
@@ -98,7 +99,7 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "fake")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
     mem = Memory()
     old = mem.add_decision(content=OLD, context_snapshot={"workspace_id": "ws"})
     job = dict(session_id="new", workspace_id="ws", transcript_path="/tmp/session")

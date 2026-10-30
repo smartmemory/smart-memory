@@ -6,6 +6,7 @@ from pathlib import Path
 from smartmemory_app import storage
 from smartmemory_app.lifecycle import MemoryLifecycle
 from smartmemory_app.session_lessons import capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_lifecycle_live"
 
@@ -25,11 +26,11 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
         "SMARTMEMORY_NO_WARM": "1",
-        "SMARTMEMORY_CAPTURE_LLM": "1",
         "GROQ_API_KEY": "fake-only",
         "SMARTMEMORY_HOOK_TRACE": str(tmp_path / "trace.jsonl"),
     }.items():
         monkeypatch.setenv(key, value)
+    opt_in_capture_llm(monkeypatch)
     for key in (
         "LLM_PROVIDER",
         "LLM_API_KEY",

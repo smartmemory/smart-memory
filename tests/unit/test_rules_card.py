@@ -14,6 +14,7 @@ from smartmemory_app.lifecycle_config import LifecycleConfig
 from smartmemory_app.recall_format import payload_ids
 from smartmemory_app.rules_card import build_rules_card
 from smartmemory_app.session_lessons import ORIGIN, capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "rules_card"
 
@@ -64,7 +65,7 @@ def test_capture_replays_raw_fixture_and_persists_kind(
     monkeypatch.setenv("GROQ_API_KEY", "fixture-only")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
-    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
+    opt_in_capture_llm(monkeypatch)
     for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     calls = []
