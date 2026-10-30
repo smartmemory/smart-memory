@@ -288,11 +288,13 @@ def test_daemon_starts_one_core_worker(tmp_path, monkeypatch):
     command = popen.call_args.args[0]
     assert command == [
         sys.executable,
+        "-P",
         "-m",
         "smartmemory_app.worker_entry",
         "--data-dir",
         str(tmp_path),
     ]
+    assert popen.call_args.kwargs["cwd"] == str(tmp_path)
     assert not list(tmp_path.glob("worker.*.pid"))
 
 
