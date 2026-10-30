@@ -304,7 +304,8 @@ def test_save_on_demand_child_inherits_config(tmp_path, monkeypatch):
     # Exercise real storage save -> core callback -> on-demand spawner. Replace
     # only the final worker command with a child that records its inherited env.
     def capture(command, **kwargs):
-        assert command[2] == "smartmemory.cli"
+        # WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: the held wrapper entry, never core's CLI worker.
+        assert command[1:3] == ["-m", "smartmemory_app.worker_entry"], command
         destination = tmp_path / "child-env.json"
         script = (
             "import os,json,pathlib; pathlib.Path("

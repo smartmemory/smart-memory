@@ -1296,9 +1296,9 @@ def worker_cmd(ctx: click.Context, loop: bool) -> None:
 @worker_cmd.command("requeue-dead")
 def requeue_dead_cmd() -> None:
     """Reset dead and skipped boxes for another worker attempt."""
-    from smartmemory.pipeline.work_graph.spawn import spawn_worker_if_idle
     from smartmemory_app.storage import _resolve_data_dir
     from smartmemory_app.work_graph import get_work_graph
+    from smartmemory_app.worker_entry import spawn_worker_if_idle
 
     count = get_work_graph().requeue_dead()
     if count:

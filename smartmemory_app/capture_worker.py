@@ -44,7 +44,10 @@ def _memory():
     # runs core's costless profile (no LLM extraction, deferred or inline, whatever
     # keys the environment holds). SMARTMEMORY_CAPTURE_LLM=1 opts in to the previous
     # pipeline, pinned to Groq, never subscription billing.
+    from smartmemory_app.worker_entry import install_worker_spawner
+
     _hold_llm_if_provider_none()
+    install_worker_spawner()  # saves here spawn the held wrapper worker, not core's
     offline = os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") == "1"
     if offline:
         profile = PipelineConfig.tier1()

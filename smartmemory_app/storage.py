@@ -192,6 +192,9 @@ def _run_startup_warmups(
 
 def apply_runtime_config() -> SmartMemoryConfig:
     """Apply persisted provider settings before memory construction or worker spawn."""
+    from smartmemory_app.worker_entry import install_worker_spawner
+
+    install_worker_spawner()  # before load_config: no store is built if it raises
     cfg = load_config()
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
