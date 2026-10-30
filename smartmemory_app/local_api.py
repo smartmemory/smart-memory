@@ -1157,9 +1157,21 @@ def ask_endpoint(body: AskRequest) -> dict:
         except RemoteBackendError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
-    if not llm_key_present():
+    from smartmemory_app import llm_errors
+    from smartmemory_app.config import llm_provider_none
+
+    # CLI-TOUR-LLM-ROUTE-1: provider none is no LLM whatever keys the daemon
+    # inherited, and a configured provider whose own key is absent answers
+    # extractively with a coded notice instead of a 502 from core.
+    failure = (
+        llm_errors.provider_none()
+        if llm_provider_none(cfg)
+        else llm_errors.missing_key(cfg.llm_provider)
+    )
+    if failure is not None or not llm_key_present():
         log.warning(
-            "No LLM configured. Returning extractive memories without a written answer."
+            "No usable LLM (%s). Returning extractive memories without a written answer.",
+            failure.code if failure else "no provider key",
         )
         collapsed: dict[str, dict] = {}
 
@@ -1185,6 +1197,8 @@ def ask_endpoint(body: AskRequest) -> dict:
             for item in result.get("evidence") or []:
                 if isinstance(item, dict) and collapsed.get(item.get("item_id")):
                     item.update(collapsed[item["item_id"]])
+        if failure is not None and isinstance(result, dict):
+            result = {**result, "code": failure.code, "notice": failure.message()}
         return result
 
     hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
@@ -1212,19 +1226,27 @@ def ask_endpoint(body: AskRequest) -> dict:
             temperature=0,
         )
     except Exception as exc:
-        log.exception("sm ask LLM request failed")
-        detail = (
-            f"Unable to answer with the configured LLM: {type(exc).__name__}: {exc}"
-        )
-        if isinstance(exc, ImportError) and (
-            exc.name == "openai" or str(exc) == "openai package is required"
+        log.exception("sm ask LLM request failed")  # raw detail: daemon.log only
+        if not (
+            isinstance(exc, ImportError)
+            and (exc.name == "openai" or str(exc) == "openai package is required")
         ):
-            detail = (
-                "Python dependency 'openai' is missing; its SDK provides transport for "
-                "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
-                "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
-                "(core-library users: pip install 'smartmemory-core[llm]')."
-            )
+            # CLI-TOUR-LLM-ROUTE-1: one plain message with a stable code; the
+            # exception goes to the crash report, never to the terminal.
+            failure = llm_errors.classify(exc, cfg.llm_provider)
+            try:
+                from smartmemory_app.crash_reporter import report_in_background
+
+                report_in_background(exc, source="daemon", handled=True)
+            except Exception:
+                log.warning("sm ask: crash report for the LLM failure was not sent")
+            return JSONResponse(status_code=502, content=failure.payload())
+        detail = (
+            "Python dependency 'openai' is missing; its SDK provides transport for "
+            "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
+            "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
+            "(core-library users: pip install 'smartmemory-core[llm]')."
+        )
         raise HTTPException(status_code=502, detail=detail)
     if not isinstance(answer, str) or not answer.strip():
         raise HTTPException(

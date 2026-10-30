@@ -27,8 +27,32 @@ CAPTURE_LLM_ENV = "SMARTMEMORY_CAPTURE_LLM"
 
 
 def capture_llm_opted_in() -> bool:
-    """Whether transcript capture may call an LLM (extraction and session lessons). Default no."""
-    return os.environ.get(CAPTURE_LLM_ENV, "").strip() == "1"
+    """Whether transcript capture may call an LLM (extraction and session lessons). Default no.
+
+    WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: llm_provider none means no LLM, so the
+    opt-in is ignored then (it would pin Groq behind the user's choice). An
+    unreadable config keeps capture costless too.
+    """
+    if os.environ.get(CAPTURE_LLM_ENV, "").strip() != "1":
+        return False
+    try:
+        from smartmemory_app.config import llm_provider_none, load_config
+
+        off = llm_provider_none(load_config())
+    except Exception as exc:
+        log.warning(
+            "%s=1 ignored: the config could not be read (%s), so capture makes no LLM call",
+            CAPTURE_LLM_ENV,
+            type(exc).__name__,
+        )
+        return False
+    if off:
+        log.warning(
+            "%s=1 ignored: llm_provider is none, so capture makes no LLM call",
+            CAPTURE_LLM_ENV,
+        )
+        return False
+    return True
 
 
 def capture_dir() -> Path:

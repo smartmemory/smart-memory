@@ -14,6 +14,27 @@ from smartmemory_app import capture_queue as queue
 log = logging.getLogger(__name__)
 
 
+def _hold_llm_if_provider_none() -> None:
+    """Install the daemon's no-LLM hold in this process when llm_provider is none.
+
+    WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: the capture worker builds its own memory
+    (create_lite_memory) and never runs storage.apply_runtime_config, so without
+    this the route hold and the send block were missing here.
+    """
+    from smartmemory_app.config import llm_provider_none, load_config
+
+    try:
+        cfg = load_config()
+    except Exception as exc:  # capture_llm_opted_in already keeps capture costless
+        log.warning("Capture: config unreadable (%s), no-LLM hold not installed", exc)
+        return
+    if llm_provider_none(cfg):
+        from smartmemory_app.storage import _block_llm_transport, _hold_llm_route_off
+
+        _hold_llm_route_off()
+        _block_llm_transport()
+
+
 def _memory():
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
@@ -23,6 +44,7 @@ def _memory():
     # runs core's costless profile (no LLM extraction, deferred or inline, whatever
     # keys the environment holds). SMARTMEMORY_CAPTURE_LLM=1 opts in to the previous
     # pipeline, pinned to Groq, never subscription billing.
+    _hold_llm_if_provider_none()
     offline = os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") == "1"
     if offline:
         profile = PipelineConfig.tier1()

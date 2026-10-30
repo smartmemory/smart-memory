@@ -85,7 +85,8 @@ def no_llm_key_error(provider: str = "none") -> click.ClickException:
         f"  export {example}=<your key>\n"
         "  sm restart\n"
         "Or run `sm setup` to choose a provider.\n"
-        "To list the matching memories without a written answer, run `sm ask --extractive`."
+        "To list the matching memories without a written answer, run `sm ask --extractive`.\n"
+        "Details: sm doctor, or send them to us with: sm report --send"
     )
 
 
@@ -94,7 +95,15 @@ def require_llm_key(cfg: Any, *, extractive: bool = False) -> None:
 
     Remote mode answers with the hosted LLM, so a local key is not required there.
     """
-    if extractive or cfg.mode == "remote" or llm_key_available():
+    if extractive or cfg.mode == "remote":
+        return
+    from smartmemory_app.config import llm_provider_none
+
+    if llm_provider_none(cfg):  # CLI-TOUR-LLM-ROUTE-1: none means no LLM, keys or not
+        from smartmemory_app.llm_errors import provider_none
+
+        raise click.ClickException(provider_none().message())
+    if llm_key_available():
         return
     raise no_llm_key_error(cfg.llm_provider)
 
