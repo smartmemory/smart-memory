@@ -278,14 +278,15 @@ ROWS = [
     "provider,keys,path", [r[1:] for r in ROWS], ids=[r[0] for r in ROWS]
 )
 def test_llm_calls_reach_only_the_picked_provider(
-    sent, monkeypatch, tmp_path, provider, keys, path
+    sent, caplog, monkeypatch, tmp_path, provider, keys, path
 ):
     configured, model, sdk, allowed, served = PROVIDERS[provider]
     if path in GROQ_ONLY:
         monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     _pick(monkeypatch, tmp_path, configured, keys, sdk, model)
 
-    PATHS[path]()
+    with caplog.at_level("WARNING", logger="smartmemory_app.storage"):
+        PATHS[path]()
 
     hosts = list(sent)
     assert set(hosts) <= ({allowed} - {None}), (
@@ -300,6 +301,23 @@ def test_llm_calls_reach_only_the_picked_provider(
     if served:
         assert hosts, (
             f"{configured!r} is servable but {path} sent nothing (over-blocked)"
+        )
+    if (
+        configured in ("anthropic", "claude-agent")
+        and not sdk
+        and path in SENDS_TO_PICKED
+        and not _core_serves_anthropic()
+    ):
+        # The pinned Claude model is what core tried to send (to its OpenAI client, which
+        # the guard refused), never a model chosen by whichever other key is ambient.
+        refused = [
+            r.args[1]
+            for r in caplog.records
+            if r.getMessage().startswith("LLM call refused before sending")
+            and len(r.args) > 1
+        ]
+        assert refused and set(refused) == {"openai"}, (
+            f"{configured!r} picked: refused calls were headed for {refused}"
         )
 
 
