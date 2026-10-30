@@ -51,13 +51,42 @@ def ask(*args):
     return CliRunner().invoke(cli_module.cli, ["ask", "What did we choose?", *args])
 
 
-def test_no_key_names_the_key_and_the_fix_before_any_request(local):
+def test_provider_none_says_no_llm_and_names_the_fix_before_any_request(local):
+    """CLI-TOUR-LLM-ROUTE-1: none means no LLM; the message says so and how to turn one on."""
     sent, _ = local
     result = ask()
     assert result.exit_code == 1, result.output
     for needle in (
+        "No LLM is configured (llm_provider is none)",
+        "Nothing was sent to any LLM provider",
+        "sm setup",
+        "sm config llm_provider groq",
+        "export GROQ_API_KEY",
+        "sm restart",
+        "sm report --send",
+    ):
+        assert needle in result.output
+    assert CANARY not in result.output
+    assert sent == []
+
+
+def test_provider_none_ignores_a_key_the_shell_holds(local, monkeypatch):
+    sent, _ = local
+    monkeypatch.setenv("GROQ_API_KEY", CANARY + "_llm")
+    result = ask()
+    assert result.exit_code == 1, result.output
+    assert "No LLM is configured" in result.output
+    assert CANARY not in result.output
+    assert sent == []
+
+
+def test_no_key_names_the_key_and_the_fix_before_any_request(local, monkeypatch):
+    sent, _ = local
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
+    result = ask()
+    assert result.exit_code == 1, result.output
+    for needle in (
         "GROQ_API_KEY",
-        "ANTHROPIC_API_KEY",
         "export GROQ_API_KEY",
         "sm restart",
         "sm setup",
@@ -80,6 +109,7 @@ def test_configured_provider_names_only_its_own_key(local, monkeypatch):
 
 def test_key_in_env_reaches_the_request(local, monkeypatch):
     sent, _ = local
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     monkeypatch.setenv("GROQ_API_KEY", CANARY + "_llm")
     result = ask()
     assert result.exit_code == 0, result.output
@@ -90,6 +120,7 @@ def test_key_in_env_reaches_the_request(local, monkeypatch):
 
 def test_key_in_keychain_or_profile_reaches_the_request(local, monkeypatch):
     sent, _ = local
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     monkeypatch.setattr(preflight, "_stored_llm_key_present", lambda: True)
     assert ask().exit_code == 0
     assert sent == ["/memory/ask"]

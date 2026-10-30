@@ -45,6 +45,8 @@ def test_semantic_keyless_notice_logged_and_visible(monkeypatch, caplog, keyed):
     from smartmemory_app.config import LLM_KEY_ENV_VARS
 
     monkeypatch.setenv("SMARTMEMORY_MODE", "local")
+    # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so "keyed" needs a provider.
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
     for name in LLM_KEY_ENV_VARS:
         monkeypatch.setenv(name, "")
     monkeypatch.setenv("OPENAI_API_KEY", "test_F1b_unused_key" if keyed else "")
