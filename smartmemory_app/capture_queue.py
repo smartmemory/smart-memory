@@ -20,6 +20,7 @@ from filelock import FileLock, Timeout
 from smartmemory.utils.process import spawn_detached
 
 from smartmemory_app import capture_hold as hold
+from smartmemory_app import observe_classify
 
 log = logging.getLogger(__name__)
 
@@ -1006,7 +1007,8 @@ def requeue_dead_hooks(
     """Move hook ``dead/`` records back to ``queue/`` with a fresh attempt count.
 
     Returns (action, file name, detail). ``requeued`` keeps ``queued_ns`` so the job takes its
-    old place in its session's order. ``skipped`` covers a raw ``spill-*`` file (a malformed spill
+    old place in its session's order. ``quarantined`` is an adopted observe spill job that the
+    remote-skip classifier rejects (``_quarantine_dead_spill``). ``skipped`` covers a raw ``spill-*`` file (a malformed spill
     envelope, not a job; an adopted spill job requeues like any other), a record with no known
     phase, a payload that is gone, and a name that is already in queue/ or running/. ``unknown`` is a requested name not in dead/. ``names``
     limits the move (file names, ``.json`` optional).
@@ -1060,6 +1062,27 @@ def requeue_dead_hooks(
         if any((root / sub / name).exists() for sub in ("queue", "running")):
             out.append(("skipped", name, "already in queue/ or running/"))
             continue
+        # SM-SPILL-ADOPT-CLASSIFY-1: an adopted observe spill may predate the remote-skip check.
+        why = (
+            _classify_job_payload(record)
+            if is_spill and record["phase"] == "observe"
+            else None
+        )
+        if why is not None:
+            if not dry_run:
+                try:
+                    _quarantine_dead_spill(root, path, record, why)
+                except (OSError, ValueError) as exc:  # stays in dead/, never queued
+                    out.append(
+                        (
+                            "skipped",
+                            name,
+                            f"rejected ({why}), left in dead/: {type(exc).__name__}",
+                        )
+                    )
+                    continue
+            out.append(("quarantined", name, why))
+            continue
         if not dry_run:
             for key in ("attempts", "last_error", "failed_at"):
                 record.pop(key, None)
@@ -1078,11 +1101,12 @@ def run_requeue_dead_hooks(
     for action, name, detail in done:
         print(f"{'would ' if dry_run else ''}{action} {name}: {detail}")
     tally = {
-        a: sum(d[0] == a for d in done) for a in ("requeued", "skipped", "unknown")
+        a: sum(d[0] == a for d in done)
+        for a in ("requeued", "quarantined", "skipped", "unknown")
     }
     print(
-        f"{len(done)} record(s): {tally['requeued']} requeued, {tally['skipped']} "
-        f"skipped, {tally['unknown']} unknown."
+        f"{len(done)} record(s): {tally['requeued']} requeued, {tally['quarantined']} "
+        f"quarantined, {tally['skipped']} skipped, {tally['unknown']} unknown."
     )
     return 1 if tally["unknown"] else 0
 
@@ -1180,6 +1204,70 @@ def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
             exc,
             error,
         )
+
+
+# SM-SPILL-ADOPT-CLASSIFY-1: an observe spill that the remote-skip classifier rejects (``observe_classify``,
+# the ops hook's OBSERVE-SPILL-SKIP-REMOTE-1 check) is never queued. It moves to ``hook-spill/quarantine/``,
+# the folder ops ``observe_drain.py`` moves its own rejects to; ``adopt_spill`` lists only top-level files,
+# so a quarantined file is never adopted again. Logs name the file and the reject class, never the payload.
+SPILL_QUARANTINE = "quarantine"
+
+
+def _spill_quarantine_dir(spill_dir: Path) -> Path:
+    quarantine = spill_dir / SPILL_QUARANTINE
+    quarantine.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return quarantine
+
+
+def _quarantine_spill(spill_dir: Path, path: Path, why: str) -> None:
+    """Move one rejected spill file aside. ``OSError`` keeps it in place for a later pass (never queued)."""
+    quarantine = _spill_quarantine_dir(spill_dir)
+    try:
+        path.rename(quarantine / path.name)
+    except FileNotFoundError:
+        return
+    log.warning(
+        "Hook spill file %s not adopted: remote or infra payload, not provably local (%s), "
+        "moved to %s (SM-SPILL-ADOPT-CLASSIFY-1)",
+        path.name,
+        why,
+        quarantine,
+    )
+
+
+def _classify_job_payload(record: dict) -> str | None:
+    """Reject class for a queued observe job's payload file, or None. Unreadable = reject (fail closed)."""
+    try:
+        payload = json.loads(Path(record["payload_path"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return observe_classify.CLASSIFIER_FAILED
+    return observe_classify.classify(payload)
+
+
+def _quarantine_dead_spill(root: Path, path: Path, record: dict, why: str) -> None:
+    """Turn a rejected adopted spill job in ``dead/`` back into a spill envelope in the quarantine folder.
+
+    The envelope is written durably before the job's payload and record are deleted, so a crash
+    between them leaves a copy in both places; the next requeue rewrites the same quarantine file.
+    """
+    spill_name = record.get("spill")
+    if not (isinstance(spill_name, str) and _SPILL_NAME.match(spill_name)):
+        spill_name = path.name
+    payload_path = Path(record["payload_path"])
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    quarantine = _spill_quarantine_dir(hook_spill_dir(root))
+    envelope = {"v": 1, "phase": record["phase"], "payload": payload}
+    _write_durable(quarantine / spill_name, json.dumps(envelope) + "\n")
+    payload_path.unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+    log.warning(
+        "Hook job %s not requeued: remote or infra payload, not provably local (%s), "
+        "moved to %s/%s (SM-SPILL-ADOPT-CLASSIFY-1)",
+        path.name,
+        why,
+        quarantine,
+        spill_name,
+    )
 
 
 def adopt_spill(root: Path, spill_dir: Path | None = None) -> int:
@@ -1292,6 +1380,11 @@ def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
         )
         return False
     payload = envelope["payload"]
+    if phase == "observe":
+        why = observe_classify.classify(payload)  # never raises: an error is a reject
+        if why is not None:
+            _quarantine_spill(spill_dir, path, why)
+            return False
     body = payload if isinstance(payload, dict) else {}
     session = body.get("session_id")
     cwd = body.get("cwd")

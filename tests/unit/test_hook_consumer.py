@@ -52,7 +52,8 @@ def _spill(
             "session_id": session,
             "cwd": "/w",
             "tool_name": "Bash",
-            "tool_input": {"n": n},
+            # a provably local command: an observe spill passes the remote-skip classifier (SM-SPILL-ADOPT-CLASSIFY-1)
+            "tool_input": {"command": "ls", "n": n},
         }
         body = json.dumps(
             {
