@@ -227,11 +227,12 @@ def spawn_successor() -> None:
     root = capture_dir()
     with (root.parent / "hooks.log").open("a") as handle:
         spawn_detached(
-            [sys.executable, "-m", "smartmemory_app.capture_worker"],
+            [sys.executable, "-P", "-m", "smartmemory_app.capture_worker"],  # SM-DAEMON-CWD-1
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
             close_fds=True,
+            cwd=str(root.parent),  # SM-DAEMON-CWD-1: never inherit a launch dir that can be deleted
         )
 
 
