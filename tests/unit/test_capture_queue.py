@@ -322,7 +322,9 @@ def test_requeue_adopted_spill_jobs_table(capsys):
     spill.mkdir(parents=True, exist_ok=True)
     stamps = ["20261025T100001000000Z", "20261025T100002000000Z"]
     for stamp in stamps:
-        envelope = {"v": 1, "phase": "observe", "payload": {"session_id": "s1"}}
+        # a Read payload passes the remote-skip classifier (SM-SPILL-ADOPT-CLASSIFY-1)
+        payload = {"session_id": "s1", "tool_name": "Read"}
+        envelope = {"v": 1, "phase": "observe", "payload": payload}
         (spill / f"{stamp}-7-observe.json").write_text(json.dumps(envelope))
     assert queue.adopt_spill(root) == 2
     for job in queue.hook_jobs(root):  # a real claim, then attempts exhausted
