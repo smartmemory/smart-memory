@@ -1335,22 +1335,14 @@ def _ensure_spacy(
         ) from exc
 
 
-def _copy_hooks() -> None:
-    dest = CLAUDE_DIR / "hooks"
-    dest.mkdir(parents=True, exist_ok=True)
-    for src_name, dest_name in _HOOK_FILE_MAP.items():
-        src = HOOKS_SRC / src_name
-        if src.exists():
-            # bash reads a script while it runs: publish by rename, so a hook running at the
-            # swap keeps reading the old file whole instead of a mix of old and new bytes.
-            target = dest / dest_name
-            temporary = target.with_name(f".{dest_name}.{os.getpid()}.tmp")
-            try:
-                shutil.copy2(src, temporary)
-                os.replace(temporary, target)
-            except BaseException:
-                temporary.unlink(missing_ok=True)
-                raise
+def _copy_hooks() -> list[str]:
+    """Install the bundled hooks, never over a locally modified one (SM-HOOK-SYNC-CLOBBER-1).
+
+    Returns the hook names left in place; each gets a WARNING from hook_install.
+    """
+    from smartmemory_app.hook_install import install_hooks
+
+    return install_hooks(HOOKS_SRC, CLAUDE_DIR / "hooks", _HOOK_FILE_MAP)
 
 
 def _copy_skills() -> None:

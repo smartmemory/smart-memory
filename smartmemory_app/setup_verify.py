@@ -179,19 +179,31 @@ def verify_extra_models(choices: dict) -> Check:
 
 def verify_hooks(choices: dict) -> Check:
     from smartmemory_app import setup
+    from smartmemory_app.hook_install import CURRENT, MODIFIED, hook_state, load_record
 
     dest = setup.CLAUDE_DIR / "hooks"
+    record = load_record()
+    kept = []
     for src_name, dest_name in setup._HOOK_FILE_MAP.items():
         src = setup.HOOKS_SRC / src_name
         if not src.exists():
             continue
         target = dest / dest_name
-        if not target.exists() or target.read_bytes() != src.read_bytes():
+        state = hook_state(target, src_name, src.read_bytes(), record)
+        if state == MODIFIED:
+            # Someone else maintains it; sm setup would leave it as it is (SM-HOOK-SYNC-CLOBBER-1).
+            kept.append(dest_name)
+        elif state != CURRENT:
             return Check(
                 False,
                 f"hook {target} is missing or out of date",
                 "Run: sm setup",
             )
+    if kept:
+        return Check(
+            True,
+            f"hooks installed in {dest} (locally modified, not replaced: {', '.join(kept)})",
+        )
     return Check(True, f"hooks installed in {dest}")
 
 
