@@ -10,6 +10,7 @@ env var bypasses the keychain entirely — the correct path for CI/Docker.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tomllib
@@ -20,6 +21,8 @@ from typing import Optional
 
 import tomli_w
 
+
+log = logging.getLogger(__name__)
 
 _VALID_MODES = frozenset({"local", "remote"})
 
@@ -67,6 +70,109 @@ LLM_PROVIDER_TABLE: dict[str, tuple[str | None, str | None]] = {
 LLM_PROVIDER_KEY_ENV: dict[str, str] = {
     p: k for p, (k, _m) in LLM_PROVIDER_TABLE.items() if k
 }
+
+# CLI-DAEMON-KEY-PRECEDENCE-1: llm_provider -> the one env var that provider reads, for
+# loading, health (``llm_key_present``) and the missing-key messages (preflight). Main
+# keeps a second copy with deepseek; 2.0 keeps one table (deepseek is not supported
+# since CLI-PROVIDER-ROUTE-1, so it is an unknown provider here).
+PROVIDER_KEY_ENV = LLM_PROVIDER_KEY_ENV
+
+# Providers that reach their model without a cloud API key (the Claude Agent SDK, or no
+# LLM at all) load no stored credential. The local OpenAI-compatible servers join them in
+# ``selected_key_names`` (``_LOCAL_OPENAI_PROVIDERS`` is defined just below).
+_KEYLESS_PROVIDERS = frozenset({"none", "claude-agent"})
+
+
+def selected_key_names(cfg) -> tuple[str, ...]:
+    """The key env names the configured provider may read: its own, or none.
+
+    Precedence is explicit provider > exported env > keychain > shell profile, and a
+    credential is never used for a provider that is not selected (the daemon once loaded
+    a stale OPENAI_API_KEY from the keychain while ``llm_provider`` was groq). A provider
+    this table does not know keeps every name, as before: guessing "none" there would
+    switch off a route that worked.
+    """
+    provider = (getattr(cfg, "llm_provider", "") or "none").strip().lower()
+    if provider in PROVIDER_KEY_ENV:
+        return (PROVIDER_KEY_ENV[provider],)
+    if provider in _KEYLESS_PROVIDERS or provider in _LOCAL_OPENAI_PROVIDERS:
+        return ()
+    return LLM_KEY_ENV_VARS
+
+
+def present_key_names(cfg) -> tuple[str, ...]:
+    """The env names that count as "this provider has a key" for health and the ``sm ask`` gate.
+
+    A cloud provider counts only its own key, so a stale key for another provider never
+    reports a key present. Every other provider (a local server's placeholder
+    ``OPENAI_API_KEY``, claude-agent, an unknown name) keeps the any-key answer.
+    """
+    provider = (getattr(cfg, "llm_provider", "") or "none").strip().lower()
+    if provider in PROVIDER_KEY_ENV:
+        return (PROVIDER_KEY_ENV[provider],)
+    return LLM_KEY_ENV_VARS
+
+
+def load_llm_keys_from_stores(cfg=None) -> list[str]:
+    """Fill the selected provider's missing key env var from the OS keychain, then the shell profile.
+
+    ``sm setup`` stores keys in both, so the daemon gets them without sourcing a shell
+    profile and without a copy in its plist (``viewer_server.main`` calls this at boot;
+    the workers it starts inherit its env). Only the provider chosen in the config (or
+    ``SMARTMEMORY_LLM_PROVIDER``) is loaded: ``selected_key_names``. A key already
+    exported into this process wins and is never replaced. A selected key found nowhere
+    logs a WARNING that names it, because a launchd daemon cannot see a key exported
+    only in the shell that ran ``sm restart``. Prints names only, never values. Returns
+    the names it loaded.
+    """
+    if cfg is None:
+        try:
+            cfg = load_config()
+        except Exception as exc:
+            log.warning(
+                "LLM keys not loaded: the config could not be read (%s: %s)",
+                type(exc).__name__,
+                exc,
+            )
+            return []
+    loaded = []
+    names = selected_key_names(cfg)
+    for key_name in names:
+        if os.environ.get(key_name):
+            continue
+        try:
+            import keyring
+
+            stored = keyring.get_password("smartmemory", key_name)
+            if stored:
+                os.environ[key_name] = stored
+                print(f"  Loaded {key_name} from keychain", flush=True)
+                loaded.append(key_name)
+                continue
+        except Exception:
+            pass
+        try:
+            from smartmemory_app.setup import _read_env_from_profile
+
+            stored = _read_env_from_profile(key_name)
+            if stored:
+                os.environ[key_name] = stored
+                print(f"  Loaded {key_name} from shell profile", flush=True)
+                loaded.append(key_name)
+                continue
+        except Exception:
+            pass
+        if len(names) == 1:  # one named provider, so the miss is that provider's
+            log.warning(
+                "LLM provider %s is selected but %s is not set in this process, the OS "
+                "keychain or the shell profile, so LLM extraction is off. A key exported "
+                "only in your shell does not reach a background service: run sm setup "
+                "(it stores the key), then sm restart.",
+                (cfg.llm_provider or "").lower(),
+                key_name,
+            )
+    return loaded
+
 
 # Local OpenAI-compatible LLM servers → default base URL. These speak the OpenAI
 # Chat Completions API, so extraction needs NO provider-specific code: the core
@@ -393,15 +499,18 @@ def llm_key_present() -> bool:
     Used by health (and so `sm status`), the search disclosure and `ask`. It is not
     the queue gate: Lite saves and the core worker ask core's
     ``llm_route_available()``, which ``storage.apply_runtime_config`` holds off when
-    a local provider has no model or llm_provider is none (``llm_off``). Checks all of LLM_KEY_ENV_VARS, so a
-    user configured with Anthropic or DeepSeek is recognised — not just GROQ/OpenAI.
+    a local provider has no model or llm_provider is none (``llm_off``). A cloud provider counts only its own
+    key (``present_key_names``, CLI-DAEMON-KEY-PRECEDENCE-1); any other provider checks all of LLM_KEY_ENV_VARS.
     """
+    names = LLM_KEY_ENV_VARS
     try:
-        if llm_off(load_config()):
+        cfg = load_config()
+        if llm_off(cfg):
             return False
+        names = present_key_names(cfg)
     except Exception:
         pass  # an unreadable config falls through to the key check, as before
-    return any(os.environ.get(k) for k in LLM_KEY_ENV_VARS)
+    return any(os.environ.get(k) for k in names)
 
 
 def get_api_key() -> str:

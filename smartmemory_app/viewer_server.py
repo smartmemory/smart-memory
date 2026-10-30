@@ -828,35 +828,13 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
     data_path.mkdir(parents=True, exist_ok=True)
     pid_file = data_path / "daemon.pid"
 
-    # Load LLM API keys: env → keychain → shell profile.
-    # setup stores keys in all three locations. Keychain and profile
-    # are available immediately without sourcing .zshrc in a new shell.
-    from smartmemory_app.config import LLM_KEY_ENV_VARS
+    # Load the selected provider's LLM key: env, then keychain, then shell profile
+    # (CLI-DAEMON-KEY-PRECEDENCE-1). setup stores keys in the keychain and the profile,
+    # available without sourcing .zshrc in a new shell. Another provider's stored key
+    # is never loaded, so it can never be sent.
+    from smartmemory_app.config import load_llm_keys_from_stores
 
-    for key_name in LLM_KEY_ENV_VARS:
-        if os.environ.get(key_name):
-            continue
-        # Try keychain
-        try:
-            import keyring
-
-            stored = keyring.get_password("smartmemory", key_name)
-            if stored:
-                os.environ[key_name] = stored
-                print(f"  Loaded {key_name} from keychain", flush=True)
-                continue
-        except Exception:
-            pass
-        # Try shell profile
-        try:
-            from smartmemory_app.setup import _read_env_from_profile
-
-            stored = _read_env_from_profile(key_name)
-            if stored:
-                os.environ[key_name] = stored
-                print(f"  Loaded {key_name} from shell profile", flush=True)
-        except Exception:
-            pass
+    load_llm_keys_from_stores()
 
     # no-silent-degradation: the boot banner and per-add disclosure use the same
     # core route decision, including configured local and subscription providers.
