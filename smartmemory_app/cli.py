@@ -405,6 +405,10 @@ def _lifecycle_request(path: str, body: dict):
 
 
 _DAEMON_CONNECT_TIMEOUT = 1.5
+# Same name as lifecycle_api.CLIENT_DEADLINE_KEY (not imported: that pulls FastAPI
+# into the hook's cold start).
+_DAEMON_DEADLINE_KEY = "client_deadline"
+_DAEMON_READ_PATHS = frozenset({"/lifecycle/orient", "/lifecycle/recall"})
 
 
 def _daemon_marker_live() -> bool:
@@ -462,12 +466,20 @@ def _lifecycle_via_daemon(path: str, body: dict, timeout: float = 5.0):
     HOOK-DEADLINE: no connect at all without a live daemon.pid marker, and a
     1.5 s connect timeout when there is one. The read budget stays ``timeout``
     because a warm daemon's recall legitimately takes longer than a connect.
+
+    SM-LIFECYCLE-POOL-SPLIT-1: reads carry the moment this call stops waiting
+    (``client_deadline``, epoch seconds), so the daemon drops them instead of
+    running them for nobody once they have queued past it.
     """
     try:
         if not _daemon_marker_live():
             return None
         import httpx
 
+        if path in _DAEMON_READ_PATHS:
+            import time
+
+            body = {**body, _DAEMON_DEADLINE_KEY: time.time() + timeout}
         with httpx.Client(trust_env=False) as client:
             r = client.post(
                 f"{_daemon_url()}{path}",
