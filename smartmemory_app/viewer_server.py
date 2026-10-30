@@ -617,8 +617,15 @@ def _sync_hooks() -> None:
             )
             return
         try:
+            from smartmemory_app.config import load_config
             from smartmemory_app.setup import _copy_hooks
 
+            if not load_config().hook_sync:
+                log.info(
+                    "Hook sync off (hook_sync = false in config or SMARTMEMORY_HOOK_SYNC=0): "
+                    "installed hooks left as they are"
+                )
+                return
             _copy_hooks()
         except Exception as exc:
             reason = _safe_degraded_reason(exc)

@@ -269,6 +269,7 @@ class SmartMemoryConfig:
     daemon_port: int = 9014
     data_dir: str = "~/.smartmemory"
     crash_reports: bool = True
+    hook_sync: bool = True  # daemon start refreshes hooks (SM-HOOK-SYNC-CLOBBER-1)
 
 
 def config_path() -> Path:
@@ -318,6 +319,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
                 )
                 file_mode = None
             cfg.crash_reports = sm.get("crash_reports", True)
+            cfg.hook_sync = sm.get("hook_sync", True) is not False
             cfg.mode = file_mode
             cfg.api_url = remote.get("api_url", cfg.api_url)
             cfg.api_key_set = remote.get("api_key_set", False)
@@ -373,6 +375,8 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
 
     if os.environ.get("SMARTMEMORY_CRASH_REPORTS") == "0":
         cfg.crash_reports = False
+    if os.environ.get("SMARTMEMORY_HOOK_SYNC") == "0":
+        cfg.hook_sync = False
 
     # Translate a local OpenAI-compatible provider into the env vars the core
     # extraction path already consumes. Done after file+env resolution so config
@@ -480,9 +484,11 @@ def save_config(cfg: SmartMemoryConfig) -> None:
             "team_id": cfg.team_id,
         },
     }
+    if not cfg.hook_sync:
+        data["smartmemory"]["hook_sync"] = False
     if cfg.mode is not None:
         data["smartmemory"]["mode"] = cfg.mode
-    elif cfg.crash_reports:
+    elif cfg.crash_reports and cfg.hook_sync:
         del data["smartmemory"]
     # CLI-ENV-DETECT-1: keep tables other writers own (per-project env decisions).
     from smartmemory_app.env_pin import carry_over_tables

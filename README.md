@@ -746,6 +746,7 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
 | `SMARTMEMORY_LOG_LEVEL` | Logging threshold (default: `WARNING`). Set to `DEBUG` for startup context, daemon/fallback routing, and bounded request/response wire detail on stderr; `Authorization` and other credential-shaped fields are always redacted |
 | `SMARTMEMORY_NO_UPDATE_CHECK` | Set to `1` to turn off the daily update-available hint |
+| `SMARTMEMORY_HOOK_SYNC` | Set to `0` (or `hook_sync = false` under `[smartmemory]` in the config file) to stop the daemon refreshing `~/.claude/hooks/smartmemory-*.sh` at start. Without it, a hook you edited is never replaced: install and upgrade skip it with a WARNING naming it |
 | `CAPTURE_MAX_MB` | Largest transcript slice a session-end capture reads at once (default `50`). A larger transcript, or a larger new tail, is captured one slice per queue pass from where the last capture stopped, so nothing is skipped and other sessions are not held up |
 | `CAPTURE_MAX_RSS_MB` | Memory ceiling for the capture worker (default `3072`). Past it, between items, the worker hands the queue to a fresh worker and exits. The waiting item stays queued |
 | `SMARTMEMORY_CAPTURE_MAX` | Most capture workers a session end starts machine-wide (default `2`, `0` = no cap). A capped start loses nothing, the queued capture waits for a running worker |

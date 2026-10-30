@@ -181,6 +181,14 @@ def test_copy_hooks_updates_on_upgrade(tmp_path):
     # Existing SmartMemory hook from v1
     old = hooks_dest / "smartmemory-orient.sh"
     old.write_text("#!/bin/bash\n# v1 — old logic")
+    # ...that this install wrote: the record holds its bytes (SM-HOOK-SYNC-CLOBBER-1).
+    import hashlib
+    from smartmemory_app.hook_install import record_path
+
+    record_path().parent.mkdir(parents=True, exist_ok=True)
+    record_path().write_text(
+        json.dumps({"hooks": {str(old): hashlib.sha256(old.read_bytes()).hexdigest()}})
+    )
 
     # New version in source
     (hooks_src / "orient.sh").write_text("#!/bin/bash\n# v2 — new logic")
