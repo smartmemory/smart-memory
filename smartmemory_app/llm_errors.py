@@ -13,8 +13,9 @@ The daemon's 502 body is ``{"detail": <message>, "code": <code>, "llm": {...}}``
 
 from __future__ import annotations
 
+import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
 
@@ -46,51 +47,89 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 OPENAI_URL = "https://api.openai.com/v1"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/"  # core ANTHROPIC_OPENAI_BASE_URL (main)
 
-# WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the provider that owns the endpoint each
-# configured llm_provider may send to. claude-agent is Anthropic's (the Agent SDK, or
-# the Anthropic API without it). Local servers, none and unknown names own none.
-_ENDPOINT_OWNER = {
-    "groq": "groq",
-    "openai": "openai",
-    "anthropic": "anthropic",
-    "gemini": "gemini",
-    "claude-agent": "anthropic",
-}
+# WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the send guard is an ALLOWLIST of normalized hosts
+# (F1: the r1 denylist let any host that no vendor owns, and OpenAI's own trailing-dot and
+# regional hosts, through for every provider). Hosts compare by exact string equality after
+# ``normalized_host``; there is no prefix, suffix or substring match anywhere.
+ANTHROPIC_FAMILY = frozenset({"anthropic", "claude-agent"})
 
 
-def endpoint_owner(endpoint: Optional[str]) -> Optional[str]:
-    """The provider owning ``endpoint``'s host, or None for any other host (local server, proxy)."""
-    try:
-        from smartmemory.utils.llm_client.provider_secrets import endpoint_provider
-    except ImportError:  # an older core: the same four hosts
+def normalized_host(endpoint: Optional[str]) -> str:
+    """``endpoint``'s host, lowercased, userinfo and port dropped, one trailing dot stripped.
 
-        def endpoint_provider(endpoint: Optional[str]) -> Optional[str]:
-            host = (urlparse(endpoint or "").hostname or "").lower()
-            if host == "api.groq.com" or host.endswith(".groq.com"):
-                return "groq"
-            return {
-                "generativelanguage.googleapis.com": "gemini",
-                "api.anthropic.com": "anthropic",
-                "api.openai.com": "openai",
-            }.get(host)
-
-    return endpoint_provider(endpoint)
-
-
-def refused_endpoint_owner(
-    provider: Optional[str], endpoint: Optional[str]
-) -> Optional[str]:
-    """The provider owning ``endpoint`` when the picked ``provider`` may not send there, else None.
-
-    A known provider's host is allowed only for that provider. A host no provider owns
-    (localhost, the user's own OpenAI-compatible endpoint) is always allowed. A local
-    or unknown llm_provider owns no host, so every known provider's host is refused.
+    "" when the endpoint has no host (no scheme, unparsable): nothing is allowed to "".
     """
-    owner = endpoint_owner(endpoint)
-    if owner is None:
-        return None
+    try:
+        host = urlparse(endpoint or "").hostname or ""
+    except ValueError:
+        return ""
+    host = host.lower()
+    return host[:-1] if host.endswith(".") else host
+
+
+def is_loopback(host: str) -> bool:
+    """``localhost`` or a loopback IP literal (127.0.0.0/8, ::1). ``host`` is normalized."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def core_serves_anthropic() -> bool:
+    """Whether the installed core routes ``claude-*`` ids to api.anthropic.com (main core 7d792b92)."""
+    try:
+        from smartmemory.utils import llm as core_llm
+    except ImportError:
+        return False
+    return hasattr(core_llm, "ANTHROPIC_OPENAI_BASE_URL")
+
+
+def allowed_hosts(provider: Optional[str], llm_base_url: str = "") -> frozenset[str]:
+    """The exact normalized hosts ``provider`` may send to, besides loopback for local and unknown ones.
+
+    - A cloud provider: its hosts in ``config.LLM_PROVIDER_TABLE``. The Anthropic family
+      gets api.anthropic.com only when core has the Anthropic route; on core 2.0 without it
+      a call for them goes to core's OpenAI client, which is refused.
+    - A local OpenAI-compatible server (ollama, lmstudio, localai): the host of
+      ``llm_base_url``, else of its localhost default.
+    - Anything else (an unknown or unsupported name, an unreadable config): nothing.
+    """
+    from smartmemory_app.config import LLM_PROVIDER_TABLE, _LOCAL_OPENAI_PROVIDERS
+
     picked = (provider or "").strip().lower()
-    return None if owner == _ENDPOINT_OWNER.get(picked) else owner
+    if picked in _LOCAL_OPENAI_PROVIDERS:
+        host = normalized_host(llm_base_url or _LOCAL_OPENAI_PROVIDERS[picked])
+        return frozenset({host} - {""})
+    if picked in ANTHROPIC_FAMILY and not core_serves_anthropic():
+        return frozenset()
+    return frozenset(LLM_PROVIDER_TABLE.get(picked, (None, None, ()))[2])
+
+
+def refused_host(
+    provider: Optional[str], endpoint: Optional[str], llm_base_url: str = ""
+) -> Optional[str]:
+    """The normalized host ``endpoint`` would reach when the picked ``provider`` may not send there, else None.
+
+    Allowed: the provider's own hosts (``allowed_hosts``), and loopback for a local or
+    unknown provider. A cloud provider never gets loopback: its key must not go to a
+    local listener it did not ask for. Provider none is never refused here: the none
+    block owns it (storage._block_llm_transport). An endpoint with no host is refused as
+    ``"(no host)"``.
+    """
+    from smartmemory_app.config import LLM_PROVIDER_KEY_ENV
+
+    picked = (provider or "").strip().lower()
+    if picked == "none":
+        return None
+    host = normalized_host(endpoint)
+    if host and host in allowed_hosts(picked, llm_base_url):
+        return None
+    cloud = picked in LLM_PROVIDER_KEY_ENV or picked in ANTHROPIC_FAMILY
+    if host and not cloud and is_loopback(host):
+        return None
+    return host or "(no host)"
 
 
 class LlmProviderNone(RuntimeError):
@@ -100,15 +139,40 @@ class LlmProviderNone(RuntimeError):
         super().__init__("llm_provider is none: no LLM is configured, nothing was sent")
 
 
-class LlmRouteRefused(RuntimeError):
-    """Raised instead of sending when the call would reach a provider the user did not pick."""
+# Where a refused call's endpoint came from (LlmRouteRefused.source).
+SOURCE_BASE_URL = "OPENAI_BASE_URL"
 
-    def __init__(self, provider: str, target: str) -> None:
+
+def refusal_remedy(provider: str, source: Optional[str]) -> str:
+    """What to do about a refused call (names only, never values)."""
+    parts = []
+    if source == SOURCE_BASE_URL:
+        parts.append(
+            "OPENAI_BASE_URL in the environment points there: unset it, or pick lmstudio or ollama "
+            "with llm_base_url set to that server (sm setup), then sm restart."
+        )
+    if (provider or "").lower() in ANTHROPIC_FAMILY and not core_serves_anthropic():
+        parts.append(
+            f"llm_provider {provider} cannot be served by this install (core has no Anthropic route): "
+            "install the Claude Agent SDK (claude-agent) or pick another provider with sm setup."
+        )
+    return " ".join(parts) or (
+        "Pick the provider that endpoint belongs to with sm setup, then sm restart."
+    )
+
+
+class LlmRouteRefused(RuntimeError):
+    """Raised instead of sending when the call would reach a host the picked provider may not use."""
+
+    def __init__(
+        self, provider: str, target: str, source: Optional[str] = None
+    ) -> None:
         self.provider = provider
-        self.target = target
+        self.target = target  # the normalized host, or "the Claude Agent SDK"
+        self.source = source  # SOURCE_BASE_URL when the endpoint came from that env var
         super().__init__(
             f"llm_provider is {provider}, but this call would go to {target}, so it was refused "
-            "and nothing was sent"
+            f"and nothing was sent. {refusal_remedy(provider, source)}"
         )
 
 
@@ -192,9 +256,14 @@ class LlmFailure:
     code: str
     route: LlmRoute
     status: Optional[int] = None
+    # A send-guard refusal (LlmRouteRefused): where the call was headed and why.
+    refused_target: Optional[str] = None
+    refused_source: Optional[str] = None
 
     def message(self) -> str:
         r = self.route
+        if self.code == LLM_ROUTE_UNRESOLVED and self.refused_target:
+            return self._refused_message()
         attempted = (
             f"SmartMemory tried to answer with provider {r.provider}, "
             f"model {r.model or '(none)'}, endpoint {r.endpoint or '(none)'}."
@@ -247,6 +316,28 @@ class LlmFailure:
             f"{WHERE_TO_LOOK}"
         )
 
+    def _refused_message(self) -> str:
+        r = self.route
+        if r.provider in ANTHROPIC_FAMILY and not core_serves_anthropic():
+            # M1: say what fixes it, and never name api.anthropic.com: core 2.0 sent this call
+            # to its OpenAI client, not to Anthropic.
+            return (
+                f"SmartMemory tried to answer with provider {r.provider}, model {r.model or '(none)'}. "
+                "Nothing was sent.\n"
+                f"{refusal_remedy(r.provider, self.refused_source)}\n"
+                "  pip install 'smartmemory-core[claude]'   (then: sm config llm_provider claude-agent)\n"
+                "  sm setup\n"
+                "  sm restart\n"
+                f"{WHERE_TO_LOOK}"
+            )
+        return (
+            f"SmartMemory tried to answer with provider {r.provider}, model {r.model or '(none)'}, "
+            f"but the call was headed for {self.refused_target}, which llm_provider {r.provider} may not "
+            "use, so it was refused and nothing was sent.\n"
+            f"{refusal_remedy(r.provider, self.refused_source)}\n"
+            f"{WHERE_TO_LOOK}"
+        )
+
     def payload(self) -> dict[str, Any]:
         r = self.route
         return {
@@ -267,8 +358,14 @@ def classify(exc: BaseException, provider: Optional[str], environ=None) -> LlmFa
     route = route_for(provider, environ)
     if isinstance(exc, LlmProviderNone):
         return LlmFailure(LLM_PROVIDER_NONE, route)
-    if isinstance(exc, LlmRouteRefused):
-        return LlmFailure(LLM_ROUTE_UNRESOLVED, route)
+    if refused := _route_refusal(exc):
+        # The endpoint is where the refused call was headed, never the route's guess.
+        return LlmFailure(
+            LLM_ROUTE_UNRESOLVED,
+            replace(route, endpoint=refused.target),
+            refused_target=refused.target,
+            refused_source=refused.source,
+        )
     status = _status_code(exc)
     text = str(exc)
     if status in (401, 403) or type(exc).__name__ in (
@@ -283,6 +380,17 @@ def classify(exc: BaseException, provider: Optional[str], environ=None) -> LlmFa
     ):
         return LlmFailure(LLM_ROUTE_UNRESOLVED, route)
     return LlmFailure(LLM_REQUEST_FAILED, route, status)
+
+
+def _route_refusal(exc: BaseException) -> Optional[LlmRouteRefused]:
+    """The LlmRouteRefused that ``exc`` is or was raised from (core may wrap it), else None."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, LlmRouteRefused):
+            return exc
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return None
 
 
 def missing_key(provider: Optional[str], environ=None) -> Optional[LlmFailure]:

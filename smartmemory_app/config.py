@@ -41,34 +41,46 @@ LLM_KEY_ENV_VARS = (
     "GEMINI_API_KEY",
 )
 
-# CLI-PROVIDER-ROUTE-1: the one provider table. provider -> (key env var or None, default model or None).
-# Every site that maps a configured llm_provider to a key or a model reads this, so a provider cannot be
-# offered by setup and then mapped to another provider's model or endpoint. A model of None means "the
-# user's chosen model" (local servers) or "no LLM" (none). Providers absent here are not supported.
-LLM_PROVIDER_TABLE: dict[str, tuple[str | None, str | None]] = {
+# CLI-PROVIDER-ROUTE-1: the one provider table. provider -> (key env var or None, default model or None,
+# the hosts a call for that provider may reach). Every site that maps a configured llm_provider to a key, a
+# model or an endpoint reads this, so a provider cannot be offered by setup and then mapped to another
+# provider's model or endpoint. A model of None means "the user's chosen model" (local servers) or "no LLM"
+# (none). Hosts are exact, normalized host names (llm_errors.normalized_host): the send guard allows a cloud
+# provider only these (WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 F1); local servers and none list none here (local
+# servers get loopback plus their llm_base_url host, llm_errors.allowed_hosts). Providers absent here are not
+# supported.
+LLM_PROVIDER_TABLE: dict[str, tuple[str | None, str | None, tuple[str, ...]]] = {
     "groq": (
         "GROQ_API_KEY",
         "openai/gpt-oss-120b",
+        ("api.groq.com",),
     ),  # core's Groq default (is_groq_model routes it)
     "openai": (
         "OPENAI_API_KEY",
         None,
-    ),  # None: $OPENAI_MODEL or core's gpt-4o-mini (provider_default_model)
+        ("api.openai.com", "us.api.openai.com", "eu.api.openai.com"),
+    ),  # None: $OPENAI_MODEL or core's gpt-4o-mini (provider_default_model). Hosts: + OpenAI's data-residency hosts
     "anthropic": (
         "ANTHROPIC_API_KEY",
         "claude-haiku-4-5-20251001",
+        ("api.anthropic.com",),
     ),  # = core _CLAUDE_ALIAS_TO_MODEL["haiku"]
-    "gemini": ("GEMINI_API_KEY", "gemini/gemini-2.0-flash"),
+    "gemini": (
+        "GEMINI_API_KEY",
+        "gemini/gemini-2.0-flash",
+        ("generativelanguage.googleapis.com",),
+    ),
     "claude-agent": (
         None,
         "sonnet",
+        ("api.anthropic.com",),
     ),  # the Agent SDK alias; without the SDK core expands it to the Anthropic API
-    "ollama": (None, None),
-    "lmstudio": (None, None),
-    "none": (None, None),
+    "ollama": (None, None, ()),
+    "lmstudio": (None, None, ()),
+    "none": (None, None, ()),
 }
 LLM_PROVIDER_KEY_ENV: dict[str, str] = {
-    p: k for p, (k, _m) in LLM_PROVIDER_TABLE.items() if k
+    p: k for p, (k, _m, _h) in LLM_PROVIDER_TABLE.items() if k
 }
 
 # CLI-DAEMON-KEY-PRECEDENCE-1: llm_provider -> the one env var that provider reads, for
@@ -186,6 +198,11 @@ _LOCAL_OPENAI_PROVIDERS = {
 }
 
 
+# The key a local server's call carries. Local servers ignore auth, but the OpenAI SDK needs a
+# non-empty key; the send guard puts it on every local-provider call so an inherited cloud
+# OPENAI_API_KEY never reaches a local or LAN server (WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 F1).
+LOCAL_PLACEHOLDER_KEY = "local-llm-no-key"
+
 # Providers where setup asks which local model to use. "none" saves an empty model.
 LOCAL_MODEL_PROVIDERS = ("ollama", "lmstudio")
 
@@ -218,20 +235,27 @@ NO_LLM_PROVIDER_OFF_LINE = (
 
 
 def llm_provider_none(cfg) -> bool:
-    """True when llm_provider is none and no model or endpoint is set: no LLM at all.
+    """True when llm_provider is none and nothing turns the LLM back on: no LLM at all.
 
     CLI-TOUR-LLM-ROUTE-1 (owner: "none means no LLM"). Core has no "none" value:
     with no model, ``get_default_model()`` picks one by which key is in the
     environment and falls through to ``gpt-4o-mini`` with an inherited
     OPENAI_API_KEY, so a provider-none user reached api.openai.com. Every gate that
-    honours ``local_llm_without_model`` honours this too (``llm_off``). An explicit
-    ``llm_model`` or ``llm_base_url`` still turns the LLM on, as before.
+    honours ``local_llm_without_model`` honours this too (``llm_off``).
+
+    WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 F1: an EXPLICIT ``llm_provider none`` (the
+    key is in the config file, which ``sm setup`` and ``sm config`` always write, or
+    ``SMARTMEMORY_LLM_PROVIDER`` is set; ``cfg.llm_provider_explicit``) is no LLM even
+    with a leftover ``llm_model`` or ``llm_base_url``: zero requests. Only the unset
+    default (no ``llm_provider`` anywhere, the dataclass's "none") still lets an
+    explicit ``llm_model`` or ``llm_base_url`` turn the LLM on, as before. main keeps
+    the old rule for both.
     """
-    return (
-        (cfg.llm_provider or "none").lower() == "none"
-        and not cfg.llm_model
-        and not getattr(cfg, "llm_base_url", "")
-    )
+    if (cfg.llm_provider or "none").lower() != "none":
+        return False
+    if getattr(cfg, "llm_provider_explicit", False):
+        return True
+    return not cfg.llm_model and not getattr(cfg, "llm_base_url", "")
 
 
 def llm_off(cfg) -> bool:
@@ -255,6 +279,9 @@ class SmartMemoryConfig:
     team_id: str = ""
     coreference: bool = False
     llm_provider: str = "none"
+    # True when llm_provider came from the config file or SMARTMEMORY_LLM_PROVIDER, not the
+    # default above (load_config). Never saved: save_config always writes llm_provider.
+    llm_provider_explicit: bool = False
     llm_model: str = ""
     llm_base_url: str = ""  # override for OpenAI-compatible endpoints (ollama/lmstudio/localai); "" = provider default
     embedding_provider: str = "local"  # "local" | "openai" | "ollama"
@@ -319,6 +346,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
             cfg.team_id = remote.get("team_id", "")
             cfg.coreference = local.get("coreference", False)
             cfg.llm_provider = local.get("llm_provider", "none")
+            cfg.llm_provider_explicit = "llm_provider" in local
             cfg.llm_model = local.get("llm_model", "")
             cfg.llm_base_url = local.get("llm_base_url", "")
             cfg.embedding_provider = local.get("embedding_provider", "local")
@@ -352,6 +380,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
         cfg.data_dir = d
     if p := os.environ.get("SMARTMEMORY_LLM_PROVIDER"):
         cfg.llm_provider = p
+        cfg.llm_provider_explicit = True
     if m := os.environ.get("SMARTMEMORY_LLM_MODEL"):
         cfg.llm_model = m
     if b := os.environ.get("SMARTMEMORY_LLM_BASE_URL"):
@@ -410,7 +439,7 @@ def _apply_local_llm_env(cfg: SmartMemoryConfig, environ=None) -> dict[str, str]
             env, "OPENAI_BASE_URL", default_base, "provider default", derived
         )
     set_derived_env(
-        env, "OPENAI_API_KEY", "local-llm-no-key", "local placeholder", derived
+        env, "OPENAI_API_KEY", LOCAL_PLACEHOLDER_KEY, "local placeholder", derived
     )
     if cfg.llm_model:
         set_derived_env(

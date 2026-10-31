@@ -3579,6 +3579,11 @@ def config_cmd(key: str | None, value: str | None) -> None:
 
     cfg = load_config(apply_env=False)  # never persist inherited env values
     setattr(cfg, key, coerced)
+    if key == "llm_provider" and value == "none":
+        # WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 F1: none means no LLM, so a leftover model or
+        # endpoint is cleared rather than left to look like a live route.
+        cfg.llm_model = ""
+        cfg.llm_base_url = ""
     save_config(cfg)
     click.echo(f"{key} = {value}")
 

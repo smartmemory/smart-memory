@@ -1534,21 +1534,22 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
             "Set GROQ_API_KEY (or another provider key), run sm config llm_provider groq, then sm restart",
         )
     if route.pin != "bedrock" and route.probe_url:
-        from smartmemory_app.llm_errors import refused_endpoint_owner
+        from smartmemory_app.llm_errors import refused_host
 
-        # WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the daemon's route guard refuses a call
-        # that would reach another provider's endpoint, so doctor never calls it PASS.
-        owner = refused_endpoint_owner(app_provider, route.probe_url)
-        if owner:
+        # WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the daemon's route guard refuses a call to
+        # any host off the picked provider's allowlist, so doctor never calls it PASS.
+        host = refused_host(app_provider, route.probe_url, cfg.llm_base_url)
+        if host:
             fix = (
                 "Upgrade smartmemory-core (an older core sends Claude models to the OpenAI client), "
                 "or pick another provider with sm setup, then sm restart"
                 if app_provider in ("anthropic", "claude-agent")
-                else "Pick a provider whose endpoint this is (sm setup), or unset OPENAI_BASE_URL, then sm restart"
+                else "Pick the provider that endpoint belongs to (sm setup), or unset OPENAI_BASE_URL, "
+                "then sm restart"
             )
             return row(
                 FAIL,
-                f"{route_text}. That endpoint belongs to {owner}, not llm_provider {app_provider}, so "
+                f"{route_text}. llm_provider {app_provider} may not send to {host}, so "
                 f"SmartMemory refuses the call and nothing is sent: {ask_off} and LLM extraction fail.",
                 fix,
             )

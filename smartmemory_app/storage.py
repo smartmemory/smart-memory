@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from smartmemory_app.config import (
     LLM_PROVIDER_TABLE,
+    LOCAL_PLACEHOLDER_KEY,
     NO_LLM_PROVIDER_OFF_LINE,
     NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
@@ -271,7 +272,7 @@ def _provider_default_model(provider: str | None, environ=None) -> str | None:
             ", ".join(LLM_PROVIDER_TABLE),
         )
         return None
-    return LLM_PROVIDER_TABLE.get(provider, (None, None))[1]
+    return LLM_PROVIDER_TABLE.get(provider, (None, None, ()))[1]
 
 
 def _hold_llm_route_off() -> None:
@@ -360,64 +361,99 @@ def _wraps(fn, marker: str) -> bool:
     return False
 
 
+def _bearer_for(provider: str, api_key: str | None) -> str | None:
+    """The key a guarded call may carry: never another provider's ambient key.
+
+    A local server or an unknown provider (loopback only) gets the local placeholder:
+    such servers ignore auth, and an inherited cloud key must not reach them. A cloud
+    provider keeps the key core resolved unless it is another provider's ambient key
+    (core matches a key to an endpoint by exact host, so ``api.groq.com.`` fell back to
+    OPENAI_API_KEY); then it carries its own key, or the placeholder when that is unset.
+    ``api_key`` None means the OpenAI SDK would read OPENAI_API_KEY.
+    """
+    from smartmemory_app.config import LLM_KEY_ENV_VARS, LLM_PROVIDER_KEY_ENV
+    from smartmemory_app.llm_errors import ANTHROPIC_FAMILY
+
+    own_name = LLM_PROVIDER_KEY_ENV.get(provider) or (
+        "ANTHROPIC_API_KEY" if provider in ANTHROPIC_FAMILY else None
+    )
+    if own_name is None:
+        return LOCAL_PLACEHOLDER_KEY
+    own = os.environ.get(own_name) or None
+    effective = api_key or os.environ.get("OPENAI_API_KEY")
+    foreign = {os.environ.get(n) for n in LLM_KEY_ENV_VARS if n != own_name}
+    if effective and effective != own and effective in foreign:
+        return own or LOCAL_PLACEHOLDER_KEY
+    return api_key
+
+
 def _guard_llm_route() -> None:
-    """Refuse any LLM send that would go to a provider the user did not pick.
+    """Refuse any LLM send to a host the picked provider may not use.
 
     WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the provider table pins a model per
     provider, but core still decides the endpoint from the model name and the ambient
     env, and on 2.0 it sends a ``claude-*`` model with no Agent SDK to api.openai.com
     under whatever OPENAI_API_KEY is set (main's core half, 7d792b92, is not on 2.0).
     Core's extractor also sends a ``llama*`` model to Groq whenever GROQ_API_KEY is set,
-    even with a local provider picked. So the two functions that send to a provider are
-    wrapped in core's module (call_llm reads them at call time): ``call_openai_chat``
-    may only reach the picked provider's host or a host that is no known provider (a
-    local server or the user's own endpoint), and the Claude Agent SDK only serves the
-    Anthropic family. Bedrock needs an explicit ``LLM_PROVIDER=bedrock`` pin and is left
-    as is. Each call re-reads the config, as the provider-none block does; provider
-    none is that block's job. A refusal sends nothing and logs a WARNING.
+    even with a local provider picked, and an inherited ``OPENAI_BASE_URL`` sends every
+    call, with the OpenAI key, to whatever host it names. So the two functions that
+    send to a provider are wrapped in core's module (call_llm reads them at call time):
+    ``call_openai_chat`` may only reach a host on the picked provider's allowlist
+    (``llm_errors.refused_host``: a cloud provider's own hosts, a local server's
+    loopback or ``llm_base_url`` host, an unknown provider's loopback), and the Claude
+    Agent SDK only serves the Anthropic family. A local provider's call carries the
+    local placeholder key, and no call carries another provider's ambient key
+    (``_bearer_for``). Bedrock needs an explicit
+    ``LLM_PROVIDER=bedrock`` pin and is left as is. Each call re-reads the config, as
+    the provider-none block does; provider none is that block's job. A refusal sends
+    nothing, logs a WARNING and raises ``LlmRouteRefused``.
     """
     from smartmemory.utils import llm as core_llm
 
     from smartmemory_app.llm_errors import (
+        ANTHROPIC_FAMILY,
         LlmRouteRefused,
         OPENAI_URL,
-        refused_endpoint_owner,
+        SOURCE_BASE_URL,
+        refusal_remedy,
+        refused_host,
     )
 
-    def picked() -> str:
+    def picked() -> tuple[str, str]:
         try:
-            return (load_config().llm_provider or "none").strip().lower()
+            cfg = load_config()
         except Exception:
-            return ""  # unreadable config: no provider owns any endpoint, fail closed
+            return "", ""  # unreadable config: an unknown provider, loopback only
+        return (cfg.llm_provider or "none").strip().lower(), cfg.llm_base_url or ""
+
+    def refuse(provider: str, target: str, source: str | None, path: str):
+        log.warning(
+            "LLM call refused before sending: llm_provider is %r but the call would go to %s (%s). %s",
+            provider,
+            target,
+            path,
+            refusal_remedy(provider, source),
+        )
+        raise LlmRouteRefused(provider, target, source)
 
     def openai_chat(*args, _real, **kwargs):
-        provider = picked()
+        provider, base_url = picked()
         if provider != "none":
-            target = (
-                kwargs.get("api_base")
-                or os.environ.get("OPENAI_BASE_URL")
-                or OPENAI_URL
-            )
-            owner = refused_endpoint_owner(provider, target)
-            if owner:
-                log.warning(
-                    "LLM call refused before sending: llm_provider is %r but the call would go to %s",
-                    provider,
-                    owner,
-                )
-                raise LlmRouteRefused(provider, owner)
+            source = None
+            target = kwargs.get("api_base")
+            if not target and (target := os.environ.get("OPENAI_BASE_URL")):
+                source = SOURCE_BASE_URL
+            target = target or OPENAI_URL
+            host = refused_host(provider, target, base_url)
+            if host:
+                refuse(provider, host, source, "OpenAI-compatible client")
+            kwargs["api_key"] = _bearer_for(provider, kwargs.get("api_key"))
         return _real(*args, **kwargs)
 
     def claude_agent(*args, _real, **kwargs):
-        provider = picked()
-        if provider != "none":
-            owner = refused_endpoint_owner(provider, "https://api.anthropic.com")
-            if owner:
-                log.warning(
-                    "LLM call refused before sending: llm_provider is %r but the call would go to the Claude Agent SDK",
-                    provider,
-                )
-                raise LlmRouteRefused(provider, "the Claude Agent SDK")
+        provider, _base_url = picked()
+        if provider != "none" and provider not in ANTHROPIC_FAMILY:
+            refuse(provider, "the Claude Agent SDK", None, "Claude Agent SDK")
         return _real(*args, **kwargs)
 
     for name, check in (
