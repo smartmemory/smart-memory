@@ -66,8 +66,11 @@ def test_capture_replays_raw_fixture_and_persists_kind(
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
     opt_in_capture_llm(monkeypatch)
+    # capture writes these into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
     for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     calls = []
 
     def replay(**kwargs):

@@ -31,13 +31,16 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
     opt_in_capture_llm(monkeypatch)
+    # capture writes LLM_* into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
     for key in (
         "LLM_PROVIDER",
         "LLM_API_KEY",
         "OPENAI_BASE_URL",
         "SMARTMEMORY_CAPTURE_OFFLINE",
     ):
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
 
     sessions = json.loads((FIXTURES / "sessions.json").read_text())
     recorded_ids = [

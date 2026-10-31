@@ -239,6 +239,8 @@ def test_legacy_entry_refuses_to_consume(tmp_path):
 
 
 def configure(tmp_path, monkeypatch):
+    # The worker writes LLM_* into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
     for key in (
         "OPENAI_BASE_URL",
         "SMARTMEMORY_LLM_MODEL",
@@ -247,7 +249,8 @@ def configure(tmp_path, monkeypatch):
         "SMARTMEMORY_LLM_BASE_URL",
         "LLM_PROVIDER",
     ):
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     config = tmp_path / "config" / "smartmemory" / "config.toml"
     config.parent.mkdir(parents=True)
     config.write_text(
