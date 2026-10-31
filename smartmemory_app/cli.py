@@ -3963,45 +3963,90 @@ def install_pack_cmd(
 # ── Data management ─────────────────────────────────────────────────────────
 
 
+def _stop_for_clear() -> bool:
+    """Stop the daemon and workers that own the store. True when the daemon must come back.
+
+    The daemon cannot clear its own store: its ``daemon.pid`` and its core worker
+    are the live owners the reset refuses, so ``/memory/clear`` always answered
+    409 while a daemon ran (CLI-CLEAR-DAEMON-1). The CLI stops them, clears in
+    process, and restarts what it stopped.
+    """
+    from smartmemory_app.daemon import _launchd_manages_daemon, is_running, stop_daemon
+    from smartmemory_app.progress import startup_progress
+
+    restart = is_running(require_healthy=False) or _launchd_manages_daemon()
+    if restart:
+        click.echo("SmartMemory is running. Stopping it to clear the store...")
+    try:
+        with startup_progress("Stopping SmartMemory", emit=click.echo):
+            stop_daemon()
+    except Exception as exc:
+        raise _daemon_failure("stop", exc) from None
+    return restart
+
+
+def _restart_after_clear() -> None:
+    """Bring back the daemon `_stop_for_clear` stopped. A failure warns, the clear already happened."""
+    try:
+        _start_with_progress(
+            num_workers=1, message="Restarting SmartMemory", wait_until_ready=False
+        )
+    except Exception as exc:
+        log.warning(
+            "Daemon did not restart after sm clear: %s: %s", type(exc).__name__, exc
+        )
+        click.echo(
+            f"Warning: the store was cleared but SmartMemory did not restart "
+            f"({type(exc).__name__}). Run: sm start",
+            err=True,
+        )
+        return
+    click.echo("SmartMemory restarted.")
+
+
 @cli.command("clear")
 @click.option("--yes", is_flag=True, help="Confirm deletion of all local memories.")
 def clear_cmd(yes: bool = False) -> None:
-    """Delete all local memories and reset the vector index."""
+    """Delete all local memories and reset the vector index.
+
+    Stops a running daemon and its worker first, then restarts them.
+    """
     require_local("sm clear")
     if not yes:
         click.confirm("This will delete all local memories. Are you sure?", abort=True)
-    result = _daemon_request("POST", "/memory/clear")
-    if result is not None:
-        click.echo(f"Cleared {result.get('cleared', '?')} files via daemon.")
-        return
+    # The scope line used to come from the daemon call this command no longer makes.
+    _scope_header.print_scope_header(path="/memory/clear")
 
-    # Daemon not running — clear files directly
-    from smartmemory_app.storage import _resolve_data_dir, _shutdown
-
-    log.debug("daemon unreachable; using in-process fallback: %s", "clear")
-    _shutdown()
-
-    data_path = _resolve_data_dir()
-    if not data_path.exists():
-        click.echo("No data directory found. Nothing to clear.")
-        return
-
-    from smartmemory_app.store_reset import remove_store_files
-
+    restart = _stop_for_clear()
     try:
-        removed = remove_store_files(data_path)
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
+        from smartmemory_app.storage import _resolve_data_dir, _shutdown
 
-    click.echo(f"Cleared {removed} files from {data_path}")
+        _shutdown()
 
-    from smartmemory_app.setup import _seed_data_dir
+        data_path = _resolve_data_dir()
+        if not data_path.exists():
+            click.echo("No data directory found. Nothing to clear.")
+            return
 
-    _seed_data_dir()
-    from smartmemory_app.store_generation import bump_store_generation
+        from smartmemory_app.store_reset import remove_store_files
 
-    bump_store_generation()
-    click.echo("Re-seeded entity patterns.")
+        try:
+            removed = remove_store_files(data_path)
+        except RuntimeError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+        click.echo(f"Cleared {removed} files from {data_path}")
+
+        from smartmemory_app.setup import _seed_data_dir
+
+        _seed_data_dir()
+        from smartmemory_app.store_generation import bump_store_generation
+
+        bump_store_generation()
+        click.echo("Re-seeded entity patterns.")
+    finally:
+        if restart:
+            _restart_after_clear()
 
 
 # ── Admin: reindex ─────────────────────────────────────────────────────────
