@@ -171,9 +171,16 @@ def sent(monkeypatch, tmp_path):
         seen.append(SDK)
         raise RuntimeError("test Claude Agent SDK: recorded, nothing sent")
 
+    class SdkOptions:
+        """Core sets ClaudeAgentOptions to None when the SDK is not installed: fake it so the row never needs the SDK."""
+
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", http)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", ahttp)
     monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(llm_client, "ClaudeAgentOptions", SdkOptions)
     monkeypatch.setattr(llm_client, "_claude_agent_query", sdk_query)
     monkeypatch.setattr(llm_client, "CLAUDE_AGENT_SDK_AVAILABLE", False)
     yield seen
