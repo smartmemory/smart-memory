@@ -1,10 +1,31 @@
 """Credential-safe diagnostic text shared by health and lifecycle reporting."""
 
+import json
 import re
+from collections.abc import Iterable
+from urllib.parse import quote
 
 
-def redact_credentials(message: str) -> str:
-    """Preserve useful error text and file paths while hiding credential values."""
+def _mask_secrets(message: str, secrets: Iterable[str]) -> str:
+    """Replace every printed form of each exact secret value, whatever its length."""
+    forms = set()
+    for secret in secrets:
+        if secret and secret.strip():
+            for value in {secret, secret.strip()}:
+                forms |= {value, json.dumps(value)[1:-1], quote(value, safe="")}
+    for form in sorted(forms, key=len, reverse=True):
+        message = message.replace(form, "<redacted>")
+    return message
+
+
+def redact_credentials(message: str, secrets: Iterable[str] = ()) -> str:
+    """Preserve useful error text and file paths while hiding credential values.
+
+    ``secrets`` are exact values the caller holds (a key it is about to store). They
+    are masked by value in every printed form, because the patterns below only know
+    the shape of common keys and miss any other accepted key.
+    """
+    message = _mask_secrets(message, secrets)
     message = re.sub(
         r"(?i)(--[\w-]*(?:key|token|password|secret|authorization))(?:=|\s+)(?:\"[^\"]*\"|'[^']*'|\S+)",
         r"\1=<redacted>",
