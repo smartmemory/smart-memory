@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `sm setup` no longer prints your provider key (WRAPPER-2.0-SETUP-KEY-MASK-PORT-1, port of main d12e6cec and 86701dbb). When it cannot write your shell profile it now says `export GROQ_API_KEY="<your key>"` instead of the real key, error text masks the exact key in plain, JSON-escaped and URL-quoted forms, the saved-key prompt shows only the last four characters, and both key prompts hide what you type.
 - test, WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 fix r1: the same set-then-delete fix for `LLM_PROVIDER` and friends in `tests/unit/test_rules_card.py`, `tests/unit/test_lesson_lifecycle_live.py` and `tests/unit/test_worker_upgrade.py`, so no test file leaves an LLM env var behind for the files after it.
 - test, WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 fix r2: the Claude Agent SDK rows in `tests/unit/test_llm_provider_route_guard.py` fake `ClaudeAgentOptions`, so they pass with and without `claude_agent_sdk` installed.
 - test, WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 fix r1: `tests/unit/test_session_lessons.py` `lesson_env` sets then deletes `LLM_PROVIDER`, `LLM_API_KEY` and `OPENAI_BASE_URL`, so the values `session_lessons` writes into `os.environ` are removed at teardown (an absent name deleted with `raising=False` was never restored, and `LLM_PROVIDER=groq` leaked into the doctor rows that run after it).

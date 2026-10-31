@@ -689,6 +689,11 @@ def _read_env_from_profile(name: str) -> str:
     return _profile_lookup(name).value
 
 
+def _key_hint(key: str) -> str:
+    """What a prompt may show of a stored key: its last four characters, never a prefix."""
+    return "..." + key[-4:] if len(key) > 12 else "***"
+
+
 def _persist_env_var(name: str, value: str) -> None:
     """Persist through Windows credentials or a UTF-8 shell profile.
 
@@ -704,7 +709,7 @@ def _persist_env_var(name: str, value: str) -> None:
         except Exception as exc:
             logger.warning(
                 "Credential persistence failed; key is only available in this setup process: %s",
-                redact_credentials(str(exc)),
+                redact_credentials(str(exc), (value,)),
             )
             click.echo(
                 "  Warning: credential storage failed. The key is only set for this setup session."
@@ -744,8 +749,12 @@ def _persist_env_var(name: str, value: str) -> None:
 
         click.echo(f"  Written to {profile}")
     except Exception as e:
-        click.echo(f"  Warning: could not write to {profile}: {e}")
-        click.echo(f"  Add this manually: {export_line}")
+        click.echo(
+            f"  Warning: could not write to {profile}: "
+            f"{redact_credentials(str(e), (value,))}"
+        )
+        # Never print the key: it lands in terminal scrollback and CI logs.
+        click.echo(f'  Add this line to {profile} yourself: export {name}="<your key>"')
 
     # Set in current process so daemon picks it up
     os.environ[name] = value
@@ -833,16 +842,16 @@ def _setup_local(tracker=None) -> bool:
             if existing:
                 os.environ[key_envvar] = existing
         if existing:
-            masked = (
-                existing[:8] + "..." + existing[-4:] if len(existing) > 12 else "***"
-            )
+            masked = _key_hint(existing)
             api_key = click.prompt(
                 f"\n{key_envvar} ({masked}). Press Enter to keep, or paste new key",
+                hide_input=True,
                 default="",
             )
         else:
             api_key = click.prompt(
                 f"\n{key_envvar} not set. Enter your API key (Enter to skip)",
+                hide_input=True,
                 default="",
             )
         if api_key.strip():
