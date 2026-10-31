@@ -23,8 +23,11 @@ LESSON = (
 def lesson_env(monkeypatch, tmp_path):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "fake-groq")
+    # session_lessons writes these into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
     for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
     opt_in_capture_llm(monkeypatch)
