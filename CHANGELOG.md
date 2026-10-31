@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `sm clear` now works while the daemon is running (WRAPPER-2.0-CLEAR-UNDER-DAEMON-PORT-1, port of main CLI-CLEAR-DAEMON-1): it stops the daemon and its worker, clears the store in process, and restarts what it stopped. Before, it always answered "Store reset refused: live owners: .worker.pid, daemon.pid" because the daemon's own `/memory/clear` refused its own pid files. The refusal text no longer says to stop first when `sm clear` has already done that. The `sm doctor` AccessDenied port-row hunk was not taken.
+- ci, CI-2.0-MANUAL-ONLY-SWEEP-1 (2.0 port of main GH-ACTIONS-MANUAL-1, owner policy 2026-10-29): the Actions workflow triggers on this line are `workflow_dispatch` only (no push or pull_request triggers). Workflow trigger blocks only, no job body change.
+
 - test, WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 fix r1: the same set-then-delete fix for `LLM_PROVIDER` and friends in `tests/unit/test_rules_card.py`, `tests/unit/test_lesson_lifecycle_live.py` and `tests/unit/test_worker_upgrade.py`, so no test file leaves an LLM env var behind for the files after it.
 - test, WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 fix r2: the Claude Agent SDK rows in `tests/unit/test_llm_provider_route_guard.py` fake `ClaudeAgentOptions`, so they pass with and without `claude_agent_sdk` installed.
 - test, WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 fix r1: `tests/unit/test_session_lessons.py` `lesson_env` sets then deletes `LLM_PROVIDER`, `LLM_API_KEY` and `OPENAI_BASE_URL`, so the values `session_lessons` writes into `os.environ` are removed at teardown (an absent name deleted with `raising=False` was never restored, and `LLM_PROVIDER=groq` leaked into the doctor rows that run after it).
