@@ -866,7 +866,7 @@ def _setup_local(tracker=None) -> bool:
                 except Exception as exc:
                     logger.warning(
                         "OS credential store unavailable, using shell profile: %s",
-                        redact_credentials(str(exc)),
+                        redact_credentials(str(exc), (api_key.strip(),)),
                     )
 
     embedding = click.prompt(
@@ -994,7 +994,7 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         click.echo(f"Authenticated as {user.get('email')}. Team: {team_id}")
     except Exception as e:
         raise click.ClickException(
-            redact_credentials(f"Remote authentication failed: {e}")
+            redact_credentials(f"Remote authentication failed: {e}", (api_key,))
         ) from e
 
     set_api_key(api_key)  # persist to OS keychain (warns if unavailable, never raises)
@@ -1469,7 +1469,7 @@ def _install_launchd_plist() -> bool:
         else:
             click.echo(
                 f"Warning: launchctl load failed for {display_name}: "
-                f"{redact_credentials(result.stderr.strip())}"
+                f"{redact_credentials(result.stderr.strip(), (groq_key,))}"
             )
             click.echo(f"Load manually: launchctl load {plist_dest}")
             all_ok = False
