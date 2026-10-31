@@ -1,15 +1,14 @@
 """U5.22 wrapper search/get/wildcard/recall carry the merged-read extraction status. # trace G:G43,G46,G114,G136,G142
 
-Real SQLite lite memory with an in-memory pending store. Gate ON: a receipt-only
+Real SQLite lite memory with an in-memory pending store. The read gate is always on: a receipt-only
 item must be listed with `read_status`, graph-only items carry the neutral
-"unavailable" status. Gate OFF: output equals the legacy shape (no carrier anywhere).
+"unavailable" status.
 """
 
 import logging
 
 import pytest
 
-from smartmemory.configuration.switch_testing import switch_override
 from smartmemory.models.read_status import READ_STATUS_KEY
 from smartmemory.save.read_port import (
     AdmissionRow,
@@ -18,7 +17,6 @@ from smartmemory.save.read_port import (
     ScopeKeys,
     source_sha256,
 )
-from smartmemory.search.visibility_gate import SWITCH
 from smartmemory.tools.factory import create_lite_memory
 
 from smartmemory_app import storage
@@ -71,8 +69,7 @@ def lane(tmp_path, monkeypatch):
             },
             memory_type="semantic",
         )
-        with switch_override(SWITCH, True):
-            mem.bind_pending_reads(store, workspace_hidden=False)
+        mem.bind_pending_reads(store, workspace_hidden=False)
         monkeypatch.setattr(storage, "get_memory", lambda *a, **k: mem)
         yield mem, store
     finally:
@@ -84,25 +81,16 @@ def _by_id(rows):
 
 
 def test_wildcard_gate_on_lists_pending_and_stamps_graph_rows(lane):
-    with switch_override(SWITCH, True):
-        got = _by_id(storage.search("*"))
+    got = _by_id(storage.search("*"))
     assert (
         got["test_pending"]["read_status"]["extraction_state"] == "extraction_pending"
     )
     assert got["test_legacy"]["read_status"]["extraction_state"] == "unavailable"
 
 
-def test_wildcard_gate_off_is_the_legacy_snapshot(lane):
-    with switch_override(SWITCH, False):
-        got = _by_id(storage.search("*"))
-    assert set(got) == {"test_legacy"}
-    assert "read_status" not in got["test_legacy"]
-
-
 def test_wildcard_gate_on_applies_filters_and_type_to_pending(lane):
-    with switch_override(SWITCH, True):
-        assert "test_pending" in _by_id(storage.search("*", memory_type="semantic"))
-        assert "test_pending" not in _by_id(storage.search("*", memory_type="decision"))
+    assert "test_pending" in _by_id(storage.search("*", memory_type="semantic"))
+    assert "test_pending" not in _by_id(storage.search("*", memory_type="decision"))
 
 
 def _add_graph(mem, item_id, content, *, origin="user:test", revision=None):
@@ -167,9 +155,8 @@ def test_wildcard_gate_on_is_core_merged_identity(
     mem, store = lane
     setup(mem, store)
     monkeypatch.setattr(storage, "_WILDCARD_PENDING_WINDOW", window)
-    with switch_override(SWITCH, True):
-        authoritative = {i.item_id: i.to_dict() for i in mem.search("*", top_k=50)}
-        got = _by_id(storage.search("*"))
+    authoritative = {i.item_id: i.to_dict() for i in mem.search("*", top_k=50)}
+    got = _by_id(storage.search("*"))
     assert absent.isdisjoint(got)
     assert present <= set(got)
     assert set(got) == set(authoritative)
@@ -207,9 +194,8 @@ def test_wildcard_gate_on_full_window_at_cap_is_a_typed_refusal(
     monkeypatch.setattr(storage, "_WILDCARD_PENDING_WINDOW", 1)
     monkeypatch.setattr(storage, "_WILDCARD_CORE_CAP", 1)
     caplog.set_level(logging.WARNING)
-    with switch_override(SWITCH, True):
-        with pytest.raises(storage.WildcardEnumerationOverflowError):
-            storage.search("*")
+    with pytest.raises(storage.WildcardEnumerationOverflowError):
+        storage.search("*")
     assert [
         (r.levelname, r.getMessage())
         for r in caplog.records
@@ -230,12 +216,11 @@ def test_wildcard_over_return_is_a_typed_refusal(lane, caplog, monkeypatch):
     calls = _bounded_search(monkeypatch, mem, extra=1)
     monkeypatch.setattr(storage, "_WILDCARD_PENDING_WINDOW", 1)
     caplog.set_level(logging.WARNING)
-    with switch_override(SWITCH, True):
-        with pytest.raises(
-            storage.WildcardEnumerationOverflowError,
-            match="^wildcard enumeration returned 2 hits for a window of 1$",
-        ):
-            storage.search("*")
+    with pytest.raises(
+        storage.WildcardEnumerationOverflowError,
+        match="^wildcard enumeration returned 2 hits for a window of 1$",
+    ):
+        storage.search("*")
     assert calls == [1]
     assert [
         (r.levelname, r.getMessage())
@@ -249,36 +234,16 @@ def test_wildcard_over_return_is_a_typed_refusal(lane, caplog, monkeypatch):
     ]
 
 
-def test_wildcard_gate_off_never_asks_core(lane, monkeypatch):
-    mem, _store = lane
-    monkeypatch.setattr(
-        mem,
-        "search",
-        lambda *a, **k: pytest.fail("gate OFF wildcard must read the snapshot only"),
+def test_query_search_and_get_carry_the_gate_status(lane):
+    hits = _by_id(
+        storage.search("atlas budget", top_k=10, reranker="none", enable_hybrid=False)
     )
-    with switch_override(SWITCH, False):
-        assert set(_by_id(storage.search("*"))) == {"test_legacy"}
-
-
-@pytest.mark.parametrize("on", [False, True])
-def test_query_search_and_get_follow_the_gate(lane, on):
-    with switch_override(SWITCH, on):
-        hits = _by_id(
-            storage.search(
-                "atlas budget", top_k=10, reranker="none", enable_hybrid=False
-            )
-        )
-        got = storage.get("test_pending") if on else storage.get("test_legacy")
-    assert ("test_pending" in hits) is on
-    if on:
-        assert (
-            hits["test_pending"]["read_status"]["extraction_state"]
-            == "extraction_pending"
-        )
-        assert got["read_status"]["extraction_state"] == "extraction_pending"
-    else:
-        assert all("read_status" not in h for h in hits.values())
-        assert "read_status" not in got
+    got = storage.get("test_pending")
+    assert "test_pending" in hits
+    assert (
+        hits["test_pending"]["read_status"]["extraction_state"] == "extraction_pending"
+    )
+    assert got["read_status"]["extraction_state"] == "extraction_pending"
 
 
 def test_recall_dict_and_line_carry_status_only_when_present():
@@ -299,20 +264,17 @@ def test_recall_dict_and_line_carry_status_only_when_present():
     assert "extraction_pending" not in bare_line
 
 
-@pytest.mark.parametrize("on", [False, True])
-def test_storage_recall_line_follows_the_gate(lane, on):
-    with switch_override(SWITCH, on):
-        text = storage.recall(None, 5, query="atlas budget", include_snapshot=False)
-    assert ("[extraction_pending]" in text) is on
-    assert ("[unavailable]" in text) is on
+def test_storage_recall_line_carries_the_gate_status(lane):
+    text = storage.recall(None, 5, query="atlas budget", include_snapshot=False)
+    assert "[extraction_pending]" in text
+    assert "[unavailable]" in text
     assert "test_legacy" in text
 
 
 def test_storage_search_filter_path_carries_status(lane):
-    with switch_override(SWITCH, True):
-        rows = _by_id(
-            storage.search("atlas budget", top_k=10, filters={"origin": "user:test"})
-        )
+    rows = _by_id(
+        storage.search("atlas budget", top_k=10, filters={"origin": "user:test"})
+    )
     assert rows["test_legacy"]["read_status"]["extraction_state"] == "unavailable"
 
 
@@ -457,9 +419,8 @@ def test_result_sites_refuse_an_unreadable_carrier(
 ):
     mem, _store = lane
     caplog.set_level(logging.WARNING)
-    with switch_override(SWITCH, True):
-        with pytest.raises(MalformedReadStatusError) as raised:
-            site(mem, carrier, monkeypatch)
+    with pytest.raises(MalformedReadStatusError) as raised:
+        site(mem, carrier, monkeypatch)
     assert str(raised.value) == f"read_status on test_legacy is {reason}"
     assert [
         (r.levelname, r.getMessage())

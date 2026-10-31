@@ -378,7 +378,7 @@ def test_search_forwards_lifecycle_and_asof_params():
 def test_wildcard_search_hides_superseded_and_retracted_by_default():
     """CORE-RETRACTED-RECALL-1: the "*" branch never reaches core, so it must filter itself.
 
-    `search("*")` short-circuits to _list_all_memories() and returns without calling
+    `search("*")` short-circuits to _core_wildcard_rows() and returns without calling
     mem.search(), so core's lifecycle filters cannot run. Without an equivalent filter
     here, wildcard was the one local-mode surface still handing back withdrawn and
     replaced beliefs by default.
@@ -394,7 +394,7 @@ def test_wildcard_search_hides_superseded_and_retracted_by_default():
 
     with (
         patch("smartmemory_app.storage.get_memory", return_value=MagicMock()),
-        patch("smartmemory_app.storage._list_all_memories", return_value=list(rows)),
+        patch("smartmemory_app.storage._core_wildcard_rows", return_value=list(rows)),
     ):
         default = storage.search("*")
         with_retracted = storage.search("*", include_retracted=True)

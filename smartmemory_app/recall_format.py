@@ -492,23 +492,16 @@ def record_hook_error(message: str, error: Exception | str) -> None:
 
 
 def _core_already_logged(error: Exception | str) -> bool:
-    """Gate ON and ``error`` carries core's logged mark. Never true OFF: the legacy arm logs every loss itself."""
-    if not isinstance(error, BaseException):
-        return False
-    from smartmemory.configuration import switches
-    from smartmemory.search.visibility_gate import SWITCH
-
-    # ``switches.is_on``, not ``search_visibility_gate_on``: the latter writes the OFF WARNING, and this probe must
-    # leave the legacy log exactly as it was.
-    return switches.is_on(SWITCH) and refusal_logged(error)
+    """``error`` carries core's logged mark (the read gate is always on)."""
+    return isinstance(error, BaseException) and refusal_logged(error)
 
 
 def record_hook_degradation(message: str, error: Exception | str) -> None:
     """Log a non-fatal loss separately from a failed injection.
 
-    U5.21 (C1): with ``sm2_search_visibility_gate`` ON, a core refusal the site that raised it already logged (the mark
-    ``smartmemory.refusal_logging`` puts on the exception, the only carrier) is recorded in the trace without a second
-    WARNING. OFF, and for any unmarked error or a plain string, the WARNING is written exactly as before.
+    U5.21 (C1): a core refusal the site that raised it already logged (the mark ``smartmemory.refusal_logging`` puts on
+    the exception, the only carrier) is recorded in the trace without a second WARNING. For any unmarked error or a plain
+    string, the WARNING is written exactly as before.
     """
     detail = f"{message}: {refusal_text(error) if isinstance(error, BaseException) else error}"
     if not _core_already_logged(error):

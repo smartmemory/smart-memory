@@ -996,26 +996,20 @@ def persist_provenance(edits) -> dict:
 
 _WILDCARD_PENDING_WINDOW = 200
 _WILDCARD_CORE_CAP = 102_400
-#: Reasons the wrapper adds to a gated (switch ON) recall answer, beside core's coverage names, when optional context it
+#: Reasons the wrapper adds to a gated recall answer, beside core's coverage names, when optional context it
 #: would have included could not be read: the answer is then partial, never read as "there was none" (U5.21, C8).
 _SNAPSHOT_LOST_REASON = "snapshot_lookup_failed"
 _DECISIONS_LOST_REASON = "decision_lookup_failed"
 
 
-def _gated_fetch_cap() -> int | None:
-    """The widest fetch one gated search may ask for, or ``None`` with ``sm2_search_visibility_gate`` OFF (legacy, unbounded).
+def _gated_fetch_cap() -> int:
+    """The widest fetch one gated search may ask for (the read gate is always on).
 
     Two core bounds, the smaller wins: the budget of core's read gate (``search.lane_gate.DEFAULT_MAX_SCAN``), because a
     wider fetch cannot reach candidates the gate does not examine, and the intake read port's page limit
     (``save.read_port.MAX_PAGE_LIMIT``), because a gated search with a bound port asks the port for ``top_k`` rows and
-    core refuses a wider ask (``PendingFacadeUnavailable``). Probed with ``switches.is_on`` so the legacy arm gains no
-    OFF WARNING.
+    core refuses a wider ask (``PendingFacadeUnavailable``).
     """
-    from smartmemory.configuration import switches
-    from smartmemory.search.visibility_gate import SWITCH
-
-    if not switches.is_on(SWITCH):
-        return None
     from smartmemory.save.read_port import MAX_PAGE_LIMIT
     from smartmemory.search.lane_gate import DEFAULT_MAX_SCAN
 
@@ -1051,7 +1045,7 @@ def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
     admission revision of a graph row, an admission tombstone or core's origin/lifecycle exclusions, so it is not
     merged with core's answer: core's answer is used whole. Exhaustion is decided from core's own page: a window that
     comes back full is doubled until it comes back short, so no returned row is left without its carrier. A full
-    window at the cap is refused (one WARNING, typed error), never truncated. Gate OFF never calls this.
+    window at the cap is refused (one WARNING, typed error), never truncated.
     """
     from smartmemory.search.visibility_gate import gated_partial_coverage
 
@@ -1095,59 +1089,6 @@ def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
         payload = _result_dict(hit)
         rows.append({"confidence": 1.0, "stale": False, "reference": False, **payload})
     return rows
-
-
-def _list_all_memories(mem) -> list[dict]:
-    """Return all memory nodes (excluding entity/relation/Version nodes).
-
-    Used by wildcard search (`*`). Filters to user memory items only —
-    enrichment creates entity/relation nodes that should not appear in
-    user-facing search results.
-    """
-    backend = mem._graph.backend
-    snapshot = backend.serialize()
-    _EXCLUDED_TYPES = {"Version", "entity", "relation", "pattern"}
-    items = []
-    for raw in snapshot.get("nodes", []):
-        mt = raw.get("memory_type", "")
-        if mt in _EXCLUDED_TYPES:
-            continue
-        props = raw.get("properties", {})
-        nc = props.get("node_category", "")
-        if nc in ("entity", "relation"):
-            continue
-        # Include user metadata so property filters work on wildcard results
-        metadata = {
-            k: v
-            for k, v in props.items()
-            if k
-            not in {
-                "content",
-                "label",
-                "memory_type",
-                "node_category",
-                "entity_type",
-                "embedding",
-                "category",
-                "confidence",
-                "stale",
-                "reference",
-            }
-        }
-        item = {
-            "item_id": raw.get("item_id", ""),
-            "content": props.get("content", props.get("label", "")),
-            "memory_type": mt or props.get("memory_type", ""),
-            "created_at": raw.get("created_at", props.get("created_at", "")),
-            # CORE-PROPS-1: Include confidence, stale, reference as top-level keys
-            "confidence": props.get("confidence", 1.0),
-            "stale": props.get("stale", False),
-            "reference": props.get("reference", False),
-        }
-        if metadata:
-            item["metadata"] = metadata
-        items.append(item)
-    return items
 
 
 # All explicit caller-settable SmartMemory.search parameters, plus documented kwargs.
@@ -1257,13 +1198,8 @@ def search(
         "include_superseded",
         "include_retracted",
     }:
-        from smartmemory.search.visibility_gate import search_visibility_gate_on
-
-        if search_visibility_gate_on():
-            all_items = _core_wildcard_rows(mem, **core_kwargs)
-        else:
-            all_items = _list_all_memories(mem)
-        # F3: the wildcard shortcut bypasses core search visibility on the snapshot arm. Hide raw hooks on both arms.
+        all_items = _core_wildcard_rows(mem, **core_kwargs)
+        # F3: hide raw hook rows from the wildcard listing.
         all_items = [
             r
             for r in all_items
@@ -1353,12 +1289,11 @@ def search(
     settled = False
     for multiplier in (5, 20, 50):
         fetch_k = top_k * multiplier
-        if cap is not None:
-            # U5.21 (C4): gate ON, no fetch is wider than the bound core's read gate can examine.
-            fetch_k = min(fetch_k, cap)
-            if fetch_k <= asked:
-                break  # the last round already asked for the bound: a wider window cannot be asked for
-            asked = fetch_k
+        # U5.21 (C4): no fetch is wider than the bound core's read gate can examine.
+        fetch_k = min(fetch_k, cap)
+        if fetch_k <= asked:
+            break  # the last round already asked for the bound: a wider window cannot be asked for
+        asked = fetch_k
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
         partial = gated_partial_coverage(results, where="local filtered search")
         # U5.21 (C4): a row past the fetch was never asked for, so it is neither matched nor used (gate ON).
@@ -1375,7 +1310,7 @@ def search(
         if len(matched) >= top_k or (len(results) < fetch_k and not partial):
             settled = True
             break  # enough matches found, or exhausted all results (core's partial answer is not exhaustion)
-    if cap is not None and not settled:
+    if not settled:
         # C3: the widest window this call may ask for is spent and the answer is not proved complete. Said, never
         # presented as an exhausted search.
         log.warning(
@@ -1459,9 +1394,8 @@ def recall(
     # 1. Optional snapshot frame (graph-mirrored markdown from CORE-SUMMARY-1)
     excluded = set()
     frame = ""
-    # U5.21 (C3/C8): why the optional context that rides on the answer is incomplete. Gate ON only; OFF stays ().
+    # U5.21 (C3/C8): why the optional context that rides on the answer is incomplete.
     context_partial: tuple[str, ...] = ()
-    gated = _gated_fetch_cap() is not None
     if include_snapshot:
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
@@ -1476,9 +1410,8 @@ def recall(
             # raising site already logged is not logged twice. Any other failure logs as before.
             record_hook_degradation("Orient lost snapshot context", exc)
             snaps = []
-            if gated:
-                # C8: a lookup that failed is not "no snapshot". The answer says the frame was lost.
-                context_partial = (_SNAPSHOT_LOST_REASON,)
+            # C8: a lookup that failed is not "no snapshot". The answer says the frame was lost.
+            context_partial = (_SNAPSHOT_LOST_REASON,)
         snaps = filter_hook_items(snaps, excluded)
         if snaps:
             snap = snaps[0]
@@ -1543,17 +1476,15 @@ def recall(
     except Exception as exc:
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
-        if gated:
-            # C8: a lookup that failed is not "no decisions". The answer says the decisions were lost.
-            context_partial = (*context_partial, _DECISIONS_LOST_REASON)
+        # C8: a lookup that failed is not "no decisions". The answer says the decisions were lost.
+        context_partial = (*context_partial, _DECISIONS_LOST_REASON)
 
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
-    # U5.21 (C4): gate ON, every fetch (the first included) is clamped to what core's read gate can examine, and rows a
-    # callee returns beyond the fetch are not used. OFF keeps the legacy unbounded doubling.
+    # U5.21 (C4): every fetch (the first included) is clamped to what core's read gate can examine, and rows a
+    # callee returns beyond the fetch are not used.
     cap = _gated_fetch_cap()
-    if cap is not None:
-        fetch_k = min(fetch_k, cap)
+    fetch_k = min(fetch_k, cap)
 
     def examined(found, bound: int, where: str) -> list:
         return list(gated_fetch_bound(found, bound, where=where))
@@ -1615,7 +1546,7 @@ def recall(
         emitted = body.count("\n- ") if body else 0
         if emitted >= requested or exhausted:
             break
-        if cap is not None and fetch_k >= cap:
+        if fetch_k >= cap:
             # The bound is spent and the answer is not proved complete: a partial answer (core's gate examined only
             # part of what it could) or a full page at the bound. Either way deeper candidates were not examined.
             stopped = (
@@ -1626,7 +1557,7 @@ def recall(
             # C3/C8: candidates past the bound were not examined, so the answer is partial whatever made the stop.
             partial_names = (*partial_names, FETCH_BOUND_REASON)
             break
-        fetch_k = fetch_k * 2 if cap is None else min(fetch_k * 2, cap)
+        fetch_k = min(fetch_k * 2, cap)
 
     if emitted < requested:
         if stopped:
