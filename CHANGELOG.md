@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.34 (2026-11-01)
+
+core 1.5.34: Lite work_runs insert fix (LITE-WORK-RUNS-NAMED-INSERT-1). No wrapper code changes.
+
 ## 1.5.33 (2026-10-30)
 
 CLI 1.x cut from v1.5.32 plus four wrapper fixes (SM-SPILL-ADOPT-CLASSIFY-1, SM-DAEMON-CWD-1, SM-LIFECYCLE-POOL-SPLIT-1, hook recall manual_scan=False). Needs `smartmemory-core` 1.5.33 (pinned exactly).
