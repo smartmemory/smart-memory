@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.35 (2026-11-02)
+
+core 1.5.35: coreference `auto` no longer picks Apple MPS, which grew the Lite daemon's memory without bound (SM-VIEWER-RSS-1, D-0031). No wrapper code changes.
+
 ## 1.5.34 (2026-11-01)
 
 core 1.5.34: Lite work_runs insert fix (LITE-WORK-RUNS-NAMED-INSERT-1). No wrapper code changes.
