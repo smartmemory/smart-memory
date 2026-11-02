@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- docs (DOCS-COREF-EXTRA-1): README documents the optional coreference install, `pip install "smartmemory-core[coreference]"` (the wrapper defines no extra of its own): resolves he/she/it on save, downloads a model on first use, not part of the default Lite install (OWNER D-0035). No code or packaging change.
+
 - `sm clear` now works while the daemon is running (WRAPPER-2.0-CLEAR-UNDER-DAEMON-PORT-1, port of main CLI-CLEAR-DAEMON-1): it stops the daemon and its worker, clears the store in process, and restarts what it stopped. Before, it always answered "Store reset refused: live owners: .worker.pid, daemon.pid" because the daemon's own `/memory/clear` refused its own pid files. The refusal text no longer says to stop first when `sm clear` has already done that. The `sm doctor` AccessDenied port-row hunk was not taken.
 - ci, CI-2.0-MANUAL-ONLY-SWEEP-1 (2.0 port of main GH-ACTIONS-MANUAL-1, owner policy 2026-10-29): the Actions workflow triggers on this line are `workflow_dispatch` only (no push or pull_request triggers). Workflow trigger blocks only, no job body change.
 
