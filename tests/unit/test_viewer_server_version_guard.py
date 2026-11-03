@@ -21,7 +21,7 @@ def test_version_guard_exits_on_first_request_after_version_change():
         installed_versions["smartmemory-core"] = "1.4.105"
 
         with patch("smartmemory_app.viewer_server.os._exit") as exit_process:
-            response = TestClient(app).get("/")
+            response = TestClient(app, base_url="http://localhost").get("/")
 
     assert response.status_code == 200
     exit_process.assert_called_once_with(0)
@@ -43,7 +43,7 @@ def test_version_guard_checks_first_request_without_exiting_when_versions_match(
         package_version.reset_mock()
 
         with patch("smartmemory_app.viewer_server.os._exit") as exit_process:
-            response = TestClient(app).get("/")
+            response = TestClient(app, base_url="http://localhost").get("/")
 
     assert response.status_code == 200
     assert package_version.call_args_list == [

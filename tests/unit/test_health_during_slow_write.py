@@ -63,7 +63,7 @@ def _health_patches():
 async def _probe(app, route, body, started):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
-        transport=transport, base_url="http://daemon"
+        transport=transport, base_url="http://localhost"
     ) as client:
         write = asyncio.create_task(client.post(route, json=body))
         while not started.is_set():  # the slow body is now running

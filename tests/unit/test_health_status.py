@@ -21,7 +21,7 @@ def _health_client(tmp_path, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     from smartmemory_app.viewer_server import _build_app
 
-    return TestClient(_build_app())
+    return TestClient(_build_app(), base_url="http://localhost")
 
 
 def test_health_returns_safe_degraded_reason_and_logs_warning(

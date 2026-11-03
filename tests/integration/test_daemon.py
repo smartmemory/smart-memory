@@ -170,7 +170,7 @@ class TestHealthEndpointShape:
 
         backend = SQLiteBackend(db_path=":memory:")
         with patch.object(_api_mod, "_get_backend", return_value=backend):
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             r = client.get("/health")
 
         assert r.status_code == 200
@@ -191,7 +191,7 @@ class TestHealthEndpointShape:
         from fastapi.testclient import TestClient
 
         with patch("smartmemory_app.viewer_server._local_api"):
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             # Patch get_memory to raise — health should return "degraded"
             with patch("smartmemory_app.storage.get_memory", side_effect=RuntimeError("no backend")):
                 r = client.get("/health")

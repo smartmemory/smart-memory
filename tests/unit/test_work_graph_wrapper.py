@@ -161,7 +161,7 @@ def test_status_offer_and_requeue(lite, monkeypatch):
     )
     from smartmemory_app.viewer_server import _build_app
 
-    health_client = TestClient(_build_app())
+    health_client = TestClient(_build_app(), base_url="http://localhost")
     monkeypatch.setattr(
         "smartmemory_app.daemon.get_status",
         lambda: health_client.get("/health").json(),
@@ -305,7 +305,11 @@ def test_setup_and_startup_offer(lite, monkeypatch, capsys, caplog):
     monkeypatch.setattr(
         "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
     )
-    status = TestClient(viewer_server._build_app()).get("/health").json()
+    status = (
+        TestClient(viewer_server._build_app(), base_url="http://localhost")
+        .get("/health")
+        .json()
+    )
     monkeypatch.setattr(setup, "_install_launchd_plist", lambda: False)
     monkeypatch.setattr(
         "smartmemory_app.daemon.start_daemon",

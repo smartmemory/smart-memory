@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.5.37 (2026-11-03)
+
+Security patch for the local daemon. Needs `smartmemory-core` 1.5.37 (pinned exactly, no core code changes).
+
+- LITE-LOOPBACK-HOST-GATE-1 (security, user-visible, 2026-11-03): fix(daemon): a web page can no longer read, change or delete your local memories through the daemon on port 9014. The daemon listens on 127.0.0.1 only and has no login, but before this fix any site you visited could reach it two ways. With DNS rebinding, a site re-points its own name at 127.0.0.1 and then reads `/memory/graph/full` and deletes or edits every memory. Without rebinding, a site can still send a simple cross-site POST such as `POST /memory/reindex` or `POST /memory/reextract`, which start a full re-embed or a re-extraction that may spend your LLM key. A new root middleware (`smartmemory_app/loopback_gate.py`), registered so it runs before every route, the `/memory` and `/lifecycle` APIs and the viewer page, now answers 403 to any request whose Host is not `localhost`, `127.0.0.1` or `[::1]` (with no port or the daemon's own port), and to any POST, PUT, PATCH or DELETE (and any WebSocket handshake) that carries an `Origin` other than the daemon's own page (`Origin: null` included). Requests with no `Origin` header still pass, which is what the CLI, the hooks, the TUI and the Obsidian plugin send. Each refusal logs one WARNING with the method, path and refused value (cut to 100 characters), at most one line every 10 seconds with a count of the rest. Tests: `tests/unit/test_loopback_gate.py` drives the production app with attacker Hosts, hostile and `null` Origins and loopback controls, and checks the handler and the store are never reached. Existing tests that addressed the daemon as `testserver` now use `localhost`.
+
 ## 1.5.36 (2026-11-03)
 
 core 1.5.36: the Lite entity-graph lane no longer reads every node per search, which held the live Lite viewer daemon at 9-11 GB (SM-VIEWER-LEAK-1). No wrapper code changes.
