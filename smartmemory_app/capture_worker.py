@@ -75,9 +75,45 @@ def _memory():
         os.environ["OPENAI_BASE_URL"] = "https://api.groq.com/openai/v1"
         os.environ["SMARTMEMORY_LLM_MODEL"] = "openai/gpt-oss-120b"
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = "local"
+    _core_summary_follows(ai)
     return create_lite_memory(
         data_dir=str(queue.capture_dir().parent),
         pipeline_profile=PipelineConfig.lite() if ai else PipelineConfig.costless(),
+    )
+
+
+def _core_summary_follows(ai: bool) -> None:
+    """Make core's chunk-summary admission take capture's AI decision (FWD-MERGE-4 review HIGH).
+
+    Core's ``admit`` reads ``SMARTMEMORY_INGEST_AI_SUMMARY`` itself and calls its LLM for the
+    transcript chunk summary, outside the capture pipeline. When capture makes no LLM call
+    (the 2.0 gate refused: provider none or not groq, or capture is offline), the transcript
+    kind is taken out of this process's switch and the summary stays extractive.
+    """
+    from smartmemory.ingest.admission import (
+        AI_SUMMARY_ENV,
+        CLAUDE_CODE_TRANSCRIPT,
+        ai_opted_in,
+    )
+
+    if ai or not ai_opted_in(CLAUDE_CODE_TRANSCRIPT):
+        return
+    kinds = [k.strip() for k in os.environ.get(AI_SUMMARY_ENV, "").split(",")]
+    rest = [k for k in kinds if k and k != CLAUDE_CODE_TRANSCRIPT]
+    if rest:
+        os.environ[AI_SUMMARY_ENV] = ",".join(rest)
+    else:
+        os.environ.pop(AI_SUMMARY_ENV, None)
+    if ai_opted_in(CLAUDE_CODE_TRANSCRIPT):
+        # Core's own source policy turned it on: there is no switch left to take out.
+        raise RuntimeError(
+            "core's source policy turns AI transcript summaries on, but capture makes no LLM call here"
+        )
+    log.warning(
+        "%s names %s, but capture makes no LLM call here (llm_provider is none or not groq, "
+        "or capture is offline): transcript chunk summaries are extractive, no AI summary",
+        AI_SUMMARY_ENV,
+        CLAUDE_CODE_TRANSCRIPT,
     )
 
 

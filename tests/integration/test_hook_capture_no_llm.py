@@ -301,3 +301,36 @@ def test_internal_notes_make_no_llm_call(
 
 
 # Origin selection and its SMARTMEMORY_COSTLESS_ORIGINS rollback: core tests/unit/pipeline/test_costless_origin.py.
+
+
+@pytest.mark.parametrize(
+    ("provider", "bypass"),
+    [("openai", False), ("none", False), ("openai", True)],
+    ids=["openai", "none", "control-fix-bypassed-reaches-llm"],
+)
+def test_core_summary_switch_follows_capture_gate(
+    provider, bypass, lite_env, lite_ws, llm_calls, tmp_path, monkeypatch, caplog
+):
+    """FWD-MERGE-4 review HIGH: main's SMARTMEMORY_INGEST_AI_SUMMARY reaches core's admission,
+    which calls its LLM for the chunk summary itself. Capture's gate (groq only, online)
+    must govern that call too. The control row bypasses the fix and must reach the LLM."""
+    import smartmemory_app.capture_worker as capture_worker
+    from smartmemory.ingest.admission import AI_SUMMARY_ENV, CLAUDE_CODE_TRANSCRIPT
+
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", provider)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-key")
+    monkeypatch.setenv(AI_SUMMARY_ENV, CLAUDE_CODE_TRANSCRIPT)
+    if bypass:
+        monkeypatch.setattr(capture_worker, "_core_summary_follows", lambda ai: None)
+        try:
+            _capture(tmp_path, lite_ws)
+        except Exception:
+            pass  # a trapped LLM call may surface, only the attempt matters here
+        assert "call_llm" in llm_calls, (
+            f"precondition: without the fix core's summary must reach the LLM: {llm_calls}"
+        )
+        return
+    with caplog.at_level("WARNING", logger="smartmemory_app.capture_worker"):
+        _capture(tmp_path, lite_ws)
+    assert llm_calls == [], f"core summary admission reached the LLM: {llm_calls}"
+    assert "transcript chunk summaries are extractive" in caplog.text
