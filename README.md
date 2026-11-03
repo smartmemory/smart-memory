@@ -740,7 +740,8 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_MODE` | `local` or `remote`, overrides config file |
 | `SMARTMEMORY_API_KEY` | API key for remote mode, bypasses keychain |
 | `SMARTMEMORY_API_URL` | Remote API URL (default: `https://api.smartmemory.ai`) |
-| `SMARTMEMORY_TEAM_ID` | Team/workspace ID for remote mode |
+| `SMARTMEMORY_TEAM_ID` | Workspace ID for remote CLI commands, overrides the config file |
+| `SMARTMEMORY_WORKSPACE_ID` | CLI: the local-mode workspace (overrides `sm workspace switch` and the folder). MCP server: the remote workspace, and it wins over `SMARTMEMORY_TEAM_ID` when both are set (one WARNING names both) |
 | `SMARTMEMORY_DATA_DIR` | Local data directory (default: `~/.smartmemory`) |
 | `SMARTMEMORY_LLM_PROVIDER` | LLM provider for local enrichment |
 | `SMARTMEMORY_EMBEDDING_PROVIDER` | Embedding provider (`local`, `openai`, `ollama`) |
@@ -748,6 +749,12 @@ Env vars always override the config file, which is the correct path for Docker a
 | `SMARTMEMORY_ASYNC_ENRICHMENT` | Enable/disable background enrichment |
 | `SMARTMEMORY_LOG_LEVEL` | Logging threshold (default: `WARNING`). Set to `DEBUG` for startup context, daemon/fallback routing, and bounded request/response wire detail on stderr; `Authorization` and other credential-shaped fields are always redacted |
 | `SMARTMEMORY_NO_UPDATE_CHECK` | Set to `1` to turn off the daily update-available hint |
+| `SMARTMEMORY_HOOK_SYNC` | Set to `0` (or `hook_sync = false` under `[smartmemory]` in the config file) to stop the daemon refreshing `~/.claude/hooks/smartmemory-*.sh` at start. Without it, a hook you edited is never replaced: install and upgrade skip it with a WARNING naming it |
+| `CAPTURE_MAX_MB` | Largest transcript slice a session-end capture reads at once (default `50`). A larger transcript, or a larger new tail, is captured one slice per queue pass from where the last capture stopped, so nothing is skipped and other sessions are not held up |
+| `CAPTURE_MAX_RSS_MB` | Memory ceiling for the capture worker (default `3072`). Past it, between items, the worker hands the queue to a fresh worker and exits. The waiting item stays queued |
+| `SMARTMEMORY_CAPTURE_MAX` | Most capture workers a session end starts machine-wide (default `2`, `0` = no cap). A capped start loses nothing, the queued capture waits for a running worker |
+| `SMARTMEMORY_CAPTURE_HOLD` | Parks every session capture in `captures/held-all/` and starts no worker (default `1`, `0` = capture as before). Put them back with `sm lifecycle release-held`, then `sm lifecycle drain` |
+| `SMARTMEMORY_CAPTURE_HOLD_OVER_MB` | With the hold off, a transcript over this size goes to `captures/quarantine-large/` unread (default `50`, `0` = off). `sm lifecycle release-held --large` puts them back |
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM extraction |
 | `GROQ_API_KEY` | Groq API key, an alternative to OpenAI for LLM extraction |
 

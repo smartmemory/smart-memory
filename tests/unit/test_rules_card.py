@@ -59,7 +59,14 @@ def environment(tmp_path, monkeypatch):
     ],
 )
 def test_capture_replays_raw_fixture_and_persists_kind(
-    environment, monkeypatch, caplog, response, source, promoted, mixed_tags
+    environment,
+    monkeypatch,
+    caplog,
+    response,
+    source,
+    promoted,
+    mixed_tags,
+    provider_pin_isolated,
 ):
     mem = environment
     monkeypatch.setenv("GROQ_API_KEY", "fixture-only")
@@ -144,7 +151,7 @@ def test_card_eligibility_and_legacy_warning(environment, caplog):
     assert "[session:2026-09-26]" in card
     warnings = [r.message for r in caplog.records if "legacy lessons" in r.message]
     assert warnings == [
-        "Rules card classified 2 legacy lessons with rule regex; run smartmemory lifecycle reclassify"
+        "Rules card classified 2 legacy lessons with rule regex, run smartmemory lifecycle reclassify"
     ]
     environment._graph.search_nodes.assert_called_once_with(
         {"memory_type": "decision", "origin": ORIGIN}

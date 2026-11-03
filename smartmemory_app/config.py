@@ -291,6 +291,7 @@ class SmartMemoryConfig:
     daemon_port: int = 9014
     data_dir: str = "~/.smartmemory"
     crash_reports: bool = True
+    hook_sync: bool = True  # daemon start refreshes hooks (SM-HOOK-SYNC-CLOBBER-1)
 
 
 def config_path() -> Path:
@@ -335,11 +336,12 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
             if file_mode is not None and file_mode not in _VALID_MODES:
                 warnings.warn(
                     f"Invalid mode {file_mode!r} in config file {path} "
-                    f"(expected one of {sorted(_VALID_MODES)}) — treating as unconfigured.",
+                    f"(expected one of {sorted(_VALID_MODES)}), treating as unconfigured.",
                     stacklevel=2,
                 )
                 file_mode = None
             cfg.crash_reports = sm.get("crash_reports", True)
+            cfg.hook_sync = sm.get("hook_sync", True) is not False
             cfg.mode = file_mode
             cfg.api_url = remote.get("api_url", cfg.api_url)
             cfg.api_key_set = remote.get("api_key_set", False)
@@ -355,7 +357,7 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
             cfg.data_dir = local.get("data_dir", "~/.smartmemory")
         except Exception as exc:
             warnings.warn(
-                f"Failed to parse config at {path}: {exc} — treating as unconfigured.",
+                f"Failed to parse config at {path}: {exc} (treating as unconfigured).",
                 stacklevel=2,
             )
 
@@ -374,6 +376,11 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
         cfg.api_url = url
     if os.environ.get("SMARTMEMORY_API_KEY"):
         cfg.api_key_set = True  # presence satisfies the configured check
+    # The CLI's remote workspace. SMARTMEMORY_WORKSPACE_ID is not overlaid here: in the
+    # CLI it names the local daemon workspace (scope_header.local_override). The
+    # smartmemory-mcp server applies its own env rule before cfg.team_id
+    # (SMARTMEMORY_WORKSPACE_ID, then SMARTMEMORY_TEAM_ID, then this file value;
+    # MCP-WORKSPACE-ENV-PRECEDENCE-1), and saves with apply_env=False.
     if tid := os.environ.get("SMARTMEMORY_TEAM_ID"):
         cfg.team_id = tid
     if d := os.environ.get("SMARTMEMORY_DATA_DIR"):
@@ -392,6 +399,8 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
 
     if os.environ.get("SMARTMEMORY_CRASH_REPORTS") == "0":
         cfg.crash_reports = False
+    if os.environ.get("SMARTMEMORY_HOOK_SYNC") == "0":
+        cfg.hook_sync = False
 
     # Translate a local OpenAI-compatible provider into the env vars the core
     # extraction path already consumes. Done after file+env resolution so config
@@ -499,9 +508,11 @@ def save_config(cfg: SmartMemoryConfig) -> None:
             "team_id": cfg.team_id,
         },
     }
+    if not cfg.hook_sync:
+        data["smartmemory"]["hook_sync"] = False
     if cfg.mode is not None:
         data["smartmemory"]["mode"] = cfg.mode
-    elif cfg.crash_reports:
+    elif cfg.crash_reports and cfg.hook_sync:
         del data["smartmemory"]
     # CLI-ENV-DETECT-1: keep tables other writers own (per-project env decisions).
     from smartmemory_app.env_pin import carry_over_tables
@@ -583,8 +594,7 @@ def get_api_key() -> str:
             expects_key = True
         if expects_key:
             warnings.warn(
-                "No API key found. Set SMARTMEMORY_API_KEY env var "
-                "or run: smartmemory setup --mode remote --api-key sk_...",
+                "No API key found. Set SMARTMEMORY_API_KEY env var or run: sm login",
                 stacklevel=2,
             )
     return key
@@ -597,26 +607,30 @@ def set_api_key(key: str) -> None:
     Secret Service backend. Callers should tell users to set SMARTMEMORY_API_KEY
     as the env var fallback if this warns.
     """
+    from smartmemory_app.keyring_guard import set_secret
+
     try:
-        import keyring
-
-        keyring.set_password("smartmemory", "api_key", key)
-    except Exception:
-        if sys.platform == "win32":
-            from smartmemory_app.windows_credentials import store_key
-
-            # Failure to restrict the DACL is fatal. Never persist an exposed key.
-            store_key(key)
-            warnings.warn(
-                "OS keychain unavailable. API key stored in a user-only Windows credential file.",
-                stacklevel=2,
-            )
+        if set_secret(
+            "api_key", key, where="SMARTMEMORY_API_KEY or the Windows credential file"
+        ):
             return
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        from smartmemory_app.windows_credentials import store_key
+
+        # Failure to restrict the DACL is fatal. Never persist an exposed key.
+        store_key(key)
         warnings.warn(
-            "OS keychain unavailable — API key not persisted. "
-            "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",
+            "OS keychain unavailable. API key stored in a user-only Windows credential file.",
             stacklevel=2,
         )
+        return
+    warnings.warn(
+        "OS keychain unavailable: API key not persisted. "
+        "Set SMARTMEMORY_API_KEY env var to avoid re-entering on next run.",
+        stacklevel=2,
+    )
 
 
 def _detect_and_migrate() -> bool:

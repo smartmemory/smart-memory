@@ -9,6 +9,11 @@ POST /search             → /memory/search           (DAEMON-1: semantic search
 GET  /recall             → /memory/recall           (DAEMON-1: session context)
 POST /clear              → /memory/clear
 POST /reindex            → /memory/reindex          (re-embed all with current model)
+POST /vector/query       → /memory/vector/query     (WEB-VECTOR-SEARCH-TAB-1 U3: NN query; shapes = vector-contract.json)
+GET  /vector/stats       → /memory/vector/stats
+GET  /vector/items/{id}  → /memory/vector/items/{id}
+GET  /vector/missing     → /memory/vector/missing
+GET  /vector/projection  → /memory/vector/projection  (VEC-TAB-U6: 2D/3D map coordinates, ids only)
 GET  /{id}/neighbors     → /memory/{id}/neighbors  (BEFORE /{id} — declaration order matters; DIST-OBSIDIAN-LITE-1: each neighbor carries direction)
 GET  /{id}               → /memory/{id}
 PATCH /{id}              → /memory/{id}            (DIST-OBSIDIAN-LITE-1: CORE-CRUD-UPDATE-1 contract)
@@ -426,6 +431,139 @@ def recall_endpoint(
     return {"context": context}
 
 
+# ---------------------------------------------------------------------------
+# WEB-VECTOR-SEARCH-TAB-1 U3: read-only vector visibility. The Lite twins of
+# /memory/vector/* in the hosted service. Bodies are the core facade's
+# vector_* returns unchanged (smartmemory.managers.vector_inspect), so Lite and
+# the service share one shape: docs/features/WEB-VECTOR-SEARCH-TAB-1/vector-contract.json.
+# Declared before the /{memory_id} routes; every route is a read.
+# ---------------------------------------------------------------------------
+
+
+class VectorQueryRequest(BaseModel):
+    text: Optional[str] = None
+    embedding: Optional[list[float]] = None
+    top_k: Optional[int] = 10  # the core manager clamps to 50, never rejects
+    memory_type: Optional[str] = None
+    origin_prefix: Optional[str] = None
+    collection: str = "memory"
+    include_embedding: bool = False
+
+
+def _vector_read(facade_method: str, /, *args, **kwargs) -> dict:
+    """Call one core ``vector_*`` facade read and map its typed errors to the contract's statuses.
+
+    400 malformed request, 404 unknown collection / item not visible / no vector (``detail``
+    carries the contract token), 501 capability missing (remote-proxy mode too), 503
+    substrate or embedder failure. Nothing is ever turned into an empty page.
+    """
+    from smartmemory.managers.vector_inspect import (
+        VectorCapabilityUnsupported,
+        VectorNotFound,
+        VectorRequestError,
+    )
+    from smartmemory.stores.vector.errors import VectorSubstrateError
+
+    mem = _get_mem()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        raise HTTPException(
+            status_code=501,
+            detail="vector inspection not available in remote-proxy mode",
+        )
+    read = getattr(mem, facade_method, None)
+    if not callable(read):
+        log.warning(
+            "Vector read %s unavailable: the installed smartmemory-core has no such facade method",
+            facade_method,
+        )
+        raise HTTPException(
+            status_code=501,
+            detail=f"{facade_method} is not available in the installed smartmemory-core",
+        )
+    try:
+        with _rw_lock:
+            return read(*args, **kwargs)
+    except VectorRequestError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except VectorNotFound as e:
+        raise HTTPException(status_code=404, detail=e.detail) from e
+    except VectorCapabilityUnsupported as e:
+        raise HTTPException(status_code=501, detail=str(e)) from e
+    except (VectorSubstrateError, MissingModelError) as e:
+        log.warning("Vector read %s failed: %s", facade_method, e)
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
+@api.post("/vector/query")
+def vector_query(body: VectorQueryRequest) -> dict:
+    """Nearest in-scope neighbours of ``text`` (embedded here) or a raw ``embedding``."""
+    return _vector_read(
+        "vector_query",
+        text=body.text,
+        embedding=body.embedding,
+        top_k=body.top_k,
+        memory_type=body.memory_type,
+        origin_prefix=body.origin_prefix,
+        collection=body.collection,
+        include_embedding=body.include_embedding,
+    )
+
+
+@api.get("/vector/stats")
+def vector_stats() -> dict:
+    """Backend, embedder, per-collection counts, capabilities and drift warnings."""
+    return _vector_read("vector_stats")
+
+
+@api.get("/vector/missing")
+def vector_missing(
+    limit: int = 50, cursor: Optional[str] = None, collection: str = "memory"
+) -> dict:
+    """One page of memories semantic recall cannot reach (``total`` exact on Lite)."""
+    return _vector_read(
+        "vector_missing", limit=limit, cursor=cursor, collection=collection
+    )
+
+
+@api.get("/vector/projection")
+def vector_projection(
+    dims: str = "3",
+    method: str = "pca",
+    limit: Optional[str] = None,
+    collection: str = "memory",
+) -> dict:
+    """In-scope vectors projected to 2D/3D (VEC-TAB-U6): coordinates and ids, never vectors.
+
+    Params stay strings like the hosted route, so a bad ``dims``/``limit`` is the core's 400, not a 422.
+    """
+    return _vector_read(
+        "vector_projection",
+        dims=dims,
+        method=method,
+        limit=limit,
+        collection=collection,
+    )
+
+
+@api.get("/vector/items/{item_id}")
+def vector_item(
+    item_id: str,
+    top_k: int = 10,
+    collection: str = "memory",
+    include_embedding: bool = False,
+) -> dict:
+    """One item's vector row and its nearest neighbours (never the full vector)."""
+    return _vector_read(
+        "vector_inspect",
+        item_id,
+        top_k=top_k,
+        collection=collection,
+        include_embedding=include_embedding,
+    )
+
+
 @api.get("/{memory_id}/neighbors")
 def get_neighbors(memory_id: str) -> dict:
     """Neighbors with direction-tagged link types.
@@ -821,9 +959,12 @@ def ingest_endpoint(body: IngestRequest) -> dict:
 
     # Auto-stamp workspace_id so this item is filterable in scoped recall.
     workspace_id = body.workspace_id or derive_workspace_id(body.cwd)
-    properties = dict(body.properties or {})
-    # The stamped workspace wins: a caller property must not move an item out of the
-    # workspace the request (and the CLI's scope header) named.
+    from smartmemory_app.scope_header import without_caller_workspace
+
+    # A caller property never picks the workspace: with a resolved workspace the
+    # stamp replaces it, and with none (the untagged arm) it is dropped, so the item
+    # stays untagged instead of landing wherever the caller wrote.
+    properties = without_caller_workspace(body.properties)
     if workspace_id:
         properties["workspace_id"] = workspace_id
 
@@ -1242,7 +1383,7 @@ def ask_endpoint(body: AskRequest) -> dict:
                 log.warning("sm ask: crash report for the LLM failure was not sent")
             return JSONResponse(status_code=502, content=failure.payload())
         detail = (
-            "Python dependency 'openai' is missing; its SDK provides transport for "
+            "Python dependency 'openai' is missing, its SDK provides transport for "
             "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
             "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
             "(core-library users: pip install 'smartmemory-core[llm]')."
@@ -1251,7 +1392,7 @@ def ask_endpoint(body: AskRequest) -> dict:
     if not isinstance(answer, str) or not answer.strip():
         raise HTTPException(
             status_code=502,
-            detail="The configured LLM returned no answer; no fallback answer was generated.",
+            detail="The configured LLM returned no answer, no fallback answer was generated.",
         )
     direct, reasoning = _split_answer(answer)
     return {
@@ -1310,7 +1451,7 @@ def ingest_launch_event(body: dict) -> dict:
                 )
         else:
             log.warning(
-                "launch_metrics: remote mode but no API key available; writing local JSONL only"
+                "launch_metrics: remote mode but no API key available, writing local JSONL only"
             )
 
     record = {
@@ -1368,13 +1509,16 @@ def update_memory_item(memory_id: str, body: UpdateRequest) -> dict:
         )
     with _rw_lock:
         # CORE-CRUD-UPDATE-1: properties wins over content/metadata conveniences
-        props = dict(body.properties or {})
+        # WORKSPACE-PROP-BOUNDARY-1: an update never moves an item to another workspace.
+        from smartmemory_app.scope_header import without_caller_workspace
+
+        props = without_caller_workspace(body.properties)
         if body.content is not None and "content" not in props:
             props["content"] = body.content
         if body.metadata is not None:
             # Flat-merge metadata into properties; deep-merge happens on the
             # service side, but daemon's storage is single-level by convention.
-            for k, v in body.metadata.items():
+            for k, v in without_caller_workspace(body.metadata).items():
                 props.setdefault(k, v)
         try:
             mem.update_properties(

@@ -191,7 +191,7 @@ class ExploreClient:
             label = node_label(self.get_node(item_id), fallback=item_id)
         except ExploreUnavailable as exc:
             log.warning(
-                "explore: label lookup failed for %s (%s) — showing the raw id instead",
+                "explore: label lookup failed for %s (%s), showing the raw id instead",
                 item_id,
                 exc,
             )
@@ -228,7 +228,7 @@ class ExploreClient:
             if key in seen or len(rows) >= MAX_RELATION_ROWS:
                 if len(rows) >= MAX_RELATION_ROWS:
                     log.warning(
-                        "explore: relation rows capped at %d for %s — some edges are not shown",
+                        "explore: relation rows capped at %d for %s, some edges are not shown",
                         MAX_RELATION_ROWS,
                         item_id,
                     )
@@ -271,7 +271,7 @@ class ExploreClient:
                 deduped.append(entity_id)
         if len(deduped) > MAX_ENTITY_HOPS:
             log.warning(
-                "explore: %s has %d structural neighbours; walking only the first %d",
+                "explore: %s has %d structural neighbours, walking only the first %d",
                 item_id,
                 len(deduped),
                 MAX_ENTITY_HOPS,

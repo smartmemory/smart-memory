@@ -137,7 +137,7 @@ def _write_pid(root: Path) -> None:
         temporary.replace(pid_path)
     except OSError as exc:
         log.warning(
-            "Hook queue %s: worker.pid not written (%s); the hooks see no consumer and apply the depth cap",
+            "Hook queue %s: worker.pid not written (%s), so the hooks see no consumer and apply the depth cap",
             root,
             exc,
         )
@@ -252,7 +252,7 @@ def consume(
             idle_exit = 0.0 if not queue.hook_jobs(root) else idle_exit
         else:
             log.warning(
-                "Hook queue %s is held by another consumer (worker.lock); hook jobs wait until it lets go",
+                "Hook queue %s is held by another consumer (worker.lock), so hook jobs wait until it lets go",
                 root,
             )
             while not stop.is_set():
@@ -269,7 +269,7 @@ def consume(
             queue.recover_running(root, max_attempts=max_attempts)
         except Exception:  # noqa: BLE001 - orphans wait in running/ for the next start
             log.warning(
-                "Hook queue %s: recovering running/ failed; those jobs wait for the next start",
+                "Hook queue %s: recovering running/ failed, so those jobs wait for the next start",
                 root,
                 exc_info=True,
             )
@@ -370,7 +370,7 @@ def consume(
                         first or backoff >= ERROR_BACKOFF_MAX
                     ):  # first of a streak, then every 30 s
                         log.warning(
-                            "Hook queue consumer pass failed on %s; retrying in %.1fs, jobs wait on disk",
+                            "Hook queue consumer pass failed on %s, retrying in %.1fs, jobs wait on disk",
                             root,
                             backoff,
                             exc_info=True,
@@ -387,7 +387,7 @@ def run_remote_drainer(root: str | Path | None = None, **kwargs) -> int:
 
     if load_config().mode != "remote":
         log.warning(
-            "drain-hooks runs in remote mode only; in local mode the daemon is the one "
+            "drain-hooks runs in remote mode only. In local mode the daemon is the one "
             "consumer of the hook queue (start it with `smartmemory start`)"
         )
         return 0
@@ -429,7 +429,7 @@ class DaemonConsumer:
                 return
             except Exception:  # noqa: BLE001 - a dead consumer strands every hook write
                 log.warning(
-                    "Hook queue consumer stopped on an error; restarting it in %.0fs, hook jobs wait on disk",
+                    "Hook queue consumer stopped on an error, restarting it in %.0fs, hook jobs wait on disk",
                     delay,
                     exc_info=True,
                 )
@@ -474,7 +474,7 @@ class DaemonConsumer:
             if running and self._holds_queue():
                 queue.mark_interrupted(self.root, [{"_path": str(p)} for p in running])
             log.warning(
-                "Hook queue consumer still running after %.1fs at shutdown; its jobs stay in running/ and are retried on the next start without using an attempt",
+                "Hook queue consumer still running after %.1fs at shutdown, so its jobs stay in running/ and are retried on the next start without using an attempt",
                 timeout,
             )
             return False

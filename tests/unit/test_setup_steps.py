@@ -1,5 +1,6 @@
 """CLI-SETUP-UX-1: numbered setup steps, measured estimates, default local model none."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import click
@@ -174,14 +175,17 @@ def test_click_setup_numbers_every_step_including_the_daemon(tmp_path, capsys):
                 return_value={"status": "ok"},
             )
         )
-        # _setup_click builds the tracker and the daemon step is counted at its call site.
+        # _setup_click builds the tracker; the daemon step and the two checks after it
+        # (SETUP-RESUMABLE-1) share its counter.
         setup._setup_click("local", None)
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[")]
     starts = [ln for ln in lines if ln.endswith(" ...") or " ... (about " in ln]
-    assert len(starts) == 9
-    assert starts[0].startswith("[1/9] Saving your settings")
-    assert starts[-1] == "[9/9] Starting SmartMemory ..."  # no measurement, no estimate
-    assert sum(1 for ln in lines if " done (" in ln) == 9
+    assert len(starts) == 11
+    assert starts[0].startswith("[1/11] Saving your settings")
+    assert starts[8] == "[9/11] Starting SmartMemory ..."  # no measurement, no estimate
+    assert starts[9] == "[10/11] Checking which mode the CLI runs in ..."
+    assert starts[-1] == "[11/11] Saving and recalling a test memory ..."
+    assert sum(1 for ln in lines if " done (" in ln) == 11
 
 
 def test_apply_setup_result_reports_every_plan_step_in_order(tmp_path):
@@ -323,7 +327,12 @@ def test_choice_screens_and_prompts_have_no_em_dash_or_semicolon():
     texts.append(setup_tui.NO_MODEL_LABEL)
     for func in (
         setup._setup_local,
+        setup._ask_local_choices,  # SETUP-RESUMABLE-1: the prompts moved here
         setup._setup_click,
+        setup._finish_local_run,
+        setup._resume_setup,
+        setup._verify_after_tui,
+        setup._remote_login,
         setup._prompt_local_model,
         setup_tui.WelcomeScreen.compose,
         setup_tui.EmbeddingScreen.compose,
@@ -348,6 +357,118 @@ def test_download_bar_accepts_the_tqdm_display_calls_hf_xet_makes():
     bar.clear()
     bar.update(50)
     assert bar.pos == 0 and "50%" in lines[-1]
+
+
+# CLI-SETUP-UX-FU-F2: every progress event huggingface_hub sends to a bar either moves
+# the shown bytes or carries speed text the log line keeps. One row per event kind.
+# (id, calls on a 1000-byte bar, text the last log line holds, text it must not hold)
+_XET_EVENTS = [
+    ("transfer-only", [("update_transfer", 80)], "80 bytes of 1000 bytes (8%)", "B/s"),
+    (
+        "transfer-ahead-of-reconstruction",
+        [("update_transfer", 800), ("update", 50)],
+        "800 bytes of 1000 bytes (80%)",
+        "",
+    ),
+    (
+        "reconstruction-finishes",
+        [("update_transfer", 800), ("update", 1000)],
+        "(100%)",
+        "",
+    ),
+    # a plain HTTP download reports the same bytes through both calls: never summed
+    (
+        "http-same-bytes-twice",
+        [("update", 100), ("update_transfer", 100)],
+        "100 bytes of 1000 bytes (10%)",
+        "200 bytes",
+    ),
+    (
+        "transfer-speed-kept",
+        [("set_transfer_postfix_str", "  1.5MB/s  "), ("update_transfer", 80)],
+        "(8%), 1.5MB/s",
+        "",
+    ),
+    (
+        "reconstruction-speed-kept",
+        [("set_postfix_str", "  2.0MB/s  "), ("update", 10)],
+        "(1%), 2.0MB/s",
+        "",
+    ),
+    (
+        "transfer-speed-wins",
+        [
+            ("set_transfer_postfix_str", "1.5MB/s"),
+            ("set_postfix_str", "9.9MB/s"),
+            ("update_transfer", 80),
+        ],
+        ", 1.5MB/s",
+        "9.9MB/s",
+    ),
+    (
+        "unknown-speed-dropped",
+        [("set_transfer_postfix_str", "???B/s"), ("update_transfer", 80)],
+        "(8%)",
+        "?",
+    ),
+    (
+        "display-only-calls-change-nothing",
+        [("update", 10), ("set_description", "x"), ("refresh",), ("clear",)],
+        "10 bytes of 1000 bytes (1%)",
+        "B/s",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", _XET_EVENTS, ids=[c[0] for c in _XET_EVENTS])
+def test_download_bar_counts_every_progress_event(case):
+    from smartmemory_app.hf_progress import DownloadProgressReporter
+
+    _id, calls, holds, lacks = case
+    lines = []
+    bar = DownloadProgressReporter(lines.append, interval=0).new_bar(total=1000)
+    for method, *args in calls:
+        getattr(bar, method)(*args)
+    assert holds in lines[-1], lines
+    assert not lacks or lacks not in lines[-1], lines
+
+
+def test_real_xet_reporter_transfer_update_shows_progress():
+    """The reviewer's probe P5: the installed Xet reporter, transfer bytes only."""
+    import logging
+    from types import SimpleNamespace
+
+    from huggingface_hub.utils._xet_progress_reporting import (
+        XetDownloadProgressReporter,
+    )
+
+    from smartmemory_app.hf_progress import DownloadProgressReporter
+
+    lines = []
+    bar = DownloadProgressReporter(lines.append, interval=0).new_bar(total=1000)
+    xet = XetDownloadProgressReporter(
+        reconstruction_desc="model",
+        log_level=logging.INFO,
+        external_reconstruction_bar=bar,
+    )
+
+    def report(transferred):
+        xet.update_progress(
+            SimpleNamespace(
+                total_bytes_completed=0,
+                total_transfer_bytes_completed=transferred,
+                total_bytes=1000,
+                total_bytes_completion_rate=None,
+                total_transfer_bytes_completion_rate=1.5e6,
+            )
+        )
+
+    before = len(lines)
+    report(80)
+    assert len(lines) > before and "80 bytes" in lines[-1], lines
+    # Xet sends the speed text after the byte update, so it shows on the next line.
+    report(160)
+    assert "160 bytes" in lines[-1] and "B/s" in lines[-1], lines
 
 
 # ── fix round 1: setup promises only what it measured and does what the user chose ──
@@ -471,8 +592,15 @@ def test_no_local_model_queues_no_llm_extraction(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     class ForegroundRunner:
+        # CORE-INGEST-SPLIT-1: core reads runner.stages (pre_store_stage) to split prepare
+        # from apply; run_to is the prepare half, run_from the apply half.
+        stages = [SimpleNamespace(name=n) for n in ("classify", "store")]
+
         def run_to(self, **kwargs):
             return PipelineState(item_id="test_setupux_none", text="t", entity_ids={})
+
+        def run_from(self, state, *args, **kwargs):
+            return state
 
     with patch.dict(os.environ):
         for name in CLEAN_ENV_KEYS + ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_MODEL"):

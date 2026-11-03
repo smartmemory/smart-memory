@@ -156,7 +156,7 @@ def _next_seq() -> int:
                     _sse_seq = int(json.loads(path.read_text()).get("next_seq", 0))
                 except (OSError, ValueError, TypeError) as exc:
                     log.warning(
-                        "events-server: persisted SSE seq at %s is unreadable (%s); "
+                        "events-server: persisted SSE seq at %s is unreadable (%s), "
                         "restarting seq at 0. A client reconnecting across this "
                         "restart may discard fresh frames as already-seen.",
                         path,
@@ -285,9 +285,9 @@ def _fanout_sse(item: dict) -> None:
                 # No silent degradation: say what was lost and how the client
                 # recovers (it can resume from its Last-Event-ID).
                 log.warning(
-                    "events-server: SSE subscriber queue full — dropped frame "
+                    "events-server: SSE subscriber queue full: dropped frame "
                     "id=%s kind=%s seq=%s. The consumer is slower than the "
-                    "event rate; it can recover the gap by reconnecting with "
+                    "event rate, it can recover the gap by reconnecting with "
                     "Last-Event-ID.",
                     event_id,
                     frame.get("kind"),

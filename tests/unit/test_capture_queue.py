@@ -197,6 +197,41 @@ def test_missing_groq_key_fails_closed(monkeypatch):
         worker._memory()
 
 
+# MEM-SIZE-1: capture is costless unless the per-source AI opt-in is on (and capture is not offline).
+COSTLESS_ROWS = [
+    # (id, opt-in env, offline env, expected profile)
+    ("default: opt-in off, online", None, None, "costless"),
+    ("offline wins over the opt-in", "claude_code_transcript", "1", "costless"),
+    ("opt-in for another kind only", "web_page", None, "costless"),
+]
+
+
+@pytest.mark.parametrize("row", COSTLESS_ROWS, ids=[r[0] for r in COSTLESS_ROWS])
+def test_costless_capture_needs_no_groq_key(monkeypatch, row):
+    _, opt_in, offline, expected = row
+    for name, value in (
+        ("SMARTMEMORY_INGEST_AI_SUMMARY", opt_in),
+        ("SMARTMEMORY_CAPTURE_OFFLINE", offline),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "")
+    monkeypatch.setenv("SMARTMEMORY_EMBEDDING_PROVIDER", "")
+    factory = Mock()
+    monkeypatch.setattr("smartmemory.tools.factory.create_lite_memory", factory)
+    worker._memory()  # no GROQ_API_KEY and no raise
+    profile = factory.call_args.kwargs["pipeline_profile"]
+    assert profile.profile_name == expected
+    assert profile.llm_allowed is False
+    assert (
+        worker.os.environ["LLM_PROVIDER"] == ""
+    )  # no provider pin on the costless path
+    assert worker.os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] == "local"
+
+
 def _dead_hook(root, name, *, payload=True, **extra):
     body = root / "payloads" / f"{name}.json"
     if payload:
@@ -290,7 +325,9 @@ def test_requeue_adopted_spill_jobs_table(capsys):
     spill.mkdir(parents=True, exist_ok=True)
     stamps = ["20261025T100001000000Z", "20261025T100002000000Z"]
     for stamp in stamps:
-        envelope = {"v": 1, "phase": "observe", "payload": {"session_id": "s1"}}
+        # a Read payload passes the remote-skip classifier (SM-SPILL-ADOPT-CLASSIFY-1)
+        payload = {"session_id": "s1", "tool_name": "Read"}
+        envelope = {"v": 1, "phase": "observe", "payload": payload}
         (spill / f"{stamp}-7-observe.json").write_text(json.dumps(envelope))
     assert queue.adopt_spill(root) == 2
     for job in queue.hook_jobs(root):  # a real claim, then attempts exhausted

@@ -9,6 +9,9 @@ this module to guarantee it:
 * a ``launchctl`` shim first on PATH, so no process the test starts (in-process or a
   spawned daemon) can bootstrap or bootout a real job. Every call is logged and fails the test;
 * a ``socket.bind`` guard that fails the test that binds a real daemon port;
+* a ``socket.connect`` guard (CLI-TESTS-LIVE-HOST-CONNECTS-1) that fails any test that
+  connects to (or resolves) a non-loopback address or connects to a real daemon port, and proxy discovery is
+  switched off so an HTTP client cannot hide a live host behind a loopback proxy;
 * every ``subprocess.Popen`` the test creates is tracked and stopped at teardown.
 """
 
@@ -21,7 +24,9 @@ import re
 import socket
 import subprocess
 import sys
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from unittest import mock
 from pathlib import Path
 
 # 9014 is the sm local daemon, 9015 its retired events port (~/.ports, smartMemory row).
@@ -62,11 +67,13 @@ class HostGuard:
     launchctl_log: Path
     binds: list[str]
     shim: Path
+    connects: list[str] = field(default_factory=list)
 
     def forgive(self) -> None:
         """For the guard's own tests: they provoke a violation on purpose."""
         self.launchctl_log.write_text("")
         self.binds.clear()
+        self.connects.clear()
 
 
 class HostIsolationViolation(OSError):
@@ -205,6 +212,127 @@ def bind_guard(violations: list[str]):
         return real_bind(self, address, *args, **kwargs)
 
     return guarded
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
+PROXY_ENV_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+
+
+def connect_violation(address) -> str | None:
+    """Why a connect to ``address`` is refused, or None. Unix sockets and loopback pass,
+    except the real daemon ports."""
+    if not (isinstance(address, tuple) and len(address) >= 2):
+        return None
+    host, port = address[0], address[1]
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if host not in _LOOPBACK_HOSTS:
+        return f"connect {host}:{port}"
+    if port in REAL_DAEMON_PORTS:
+        return f"connect {host}:{port} (the owner's real daemon port)"
+    return None
+
+
+def connect_guard(violations: list[str], real_connect):
+    """A ``socket.connect`` / ``connect_ex`` that records and refuses a live-host connect."""
+
+    def guarded(self, address, *args, **kwargs):
+        why = connect_violation(address)
+        if why:
+            violations.append(why)
+            raise HostIsolationViolation(
+                errno.EACCES, f"test host isolation: {why} (use a mock transport)"
+            )
+        return real_connect(self, address, *args, **kwargs)
+
+    return guarded
+
+
+def lookup_guard(violations: list[str], real_getaddrinfo):
+    """A ``socket.getaddrinfo`` that records and refuses resolving a non-loopback name.
+
+    Resolution comes first, so on a machine with no DNS the connect guard never sees the
+    attempt a test made at a live host.
+    """
+
+    def guarded(host, *args, **kwargs):
+        name = host.decode("ascii", "replace") if isinstance(host, bytes) else host
+        if name not in _LOOPBACK_HOSTS and name not in (None, "", "0.0.0.0", "::"):
+            why = f"resolve {name}"
+            violations.append(why)
+            raise HostIsolationViolation(
+                errno.EACCES, f"test host isolation: {why} (use a mock transport)"
+            )
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    return guarded
+
+
+def install_connect_guard(monkeypatch, violations: list[str]) -> None:
+    """Guard every connect and drop proxy discovery (env and the OS proxy settings)."""
+    import urllib.request
+
+    for name in PROXY_ENV_NAMES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {})
+    # httpx and requests bind getproxies at import, so the urllib patch alone misses them.
+    for module_name in ("httpx._utils", "requests.utils"):
+        try:
+            module = __import__(module_name, fromlist=["getproxies"])
+        except ImportError:
+            continue
+        monkeypatch.setattr(module, "getproxies", lambda: {}, raising=False)
+    monkeypatch.setattr(
+        socket, "getaddrinfo", lookup_guard(violations, socket.getaddrinfo)
+    )
+    for attr in ("connect", "connect_ex"):
+        monkeypatch.setattr(
+            socket.socket,
+            attr,
+            connect_guard(violations, getattr(socket.socket, attr)),
+        )
+
+
+# Names the autouse fixtures in tests/conftest.py set for every test. A test that wipes
+# os.environ (patch.dict clear=True) loses them, so it goes through cleared_env().
+CONFTEST_ENV_SWITCHES = (
+    "SMARTMEMORY_CRASH_REPORTS",
+    "SMARTMEMORY_ENV_CHECK",
+    "SMARTMEMORY_DAEMON_PORT",
+    "SMARTMEMORY_NO_UPDATE_CHECK",
+    "SMARTMEMORY_DISABLE_LAUNCH_METRICS",
+    "SMARTMEMORY_CAPTURE_MAX",
+    "SMARTMEMORY_CAPTURE_HOLD",
+    "SMARTMEMORY_CAPTURE_HOLD_OVER_MB",
+    "CAPTURE_MAX_RSS_MB",
+    "PYTHON_KEYRING_BACKEND",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "PATH",
+)
+
+
+@contextmanager
+def cleared_env(extra: dict | None = None):
+    """``patch.dict(os.environ, extra, clear=True)`` that keeps the conftest switches.
+
+    The env is empty of everything else (provider keys, proxies), but crash reports stay
+    off, the inherited-env check stays off, and HOME, PATH and the daemon port stay the
+    isolated ones. ``extra`` wins over a kept name.
+    """
+    kept = {n: os.environ[n] for n in CONFTEST_ENV_SWITCHES if n in os.environ}
+    with mock.patch.dict(os.environ, {**kept, **(extra or {})}, clear=True):
+        yield
 
 
 _LAUNCHCTL_NAMES = ("launchctl", "/bin/launchctl", "/usr/bin/launchctl")

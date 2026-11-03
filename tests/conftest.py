@@ -11,6 +11,11 @@ pytest_plugins = ["tests._shared_db_guard"]
 
 # Never send automatic reports during tests, including import/collection failures.
 os.environ["SMARTMEMORY_CRASH_REPORTS"] = "0"
+# CLI-CRASH-REPORTER-TEST-GUARD-1: the senders are a no-op under any pytest run. This
+# suite lifts that so its stubbed-transport tests can drive them; test_report_test_guard.py
+# clears these to prove the guard itself.
+os.environ["SMARTMEMORY_CRASH_REPORTS_IN_TESTS"] = "1"
+os.environ["SMARTMEMORY_LAUNCH_METRICS_IN_TESTS"] = "1"
 # Suites set SMARTMEMORY_* on purpose: no inherited-variable prompt or warning
 # (CLI-ENV-DETECT-1). test_env_pin.py removes this to test the check itself.
 os.environ["SMARTMEMORY_ENV_CHECK"] = "0"
@@ -23,6 +28,93 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if "integration" in str(item.fspath):
             item.add_marker(pytest.mark.integration)
+
+
+# CLI-TEST-ENV-LEAK-1: provider/model/key variables. A test that leaves one changed
+# makes every later test read it (a leaked LLM_PROVIDER=groq failed 7 doctor rows).
+_PROVIDER_ENV_PREFIXES = (
+    "LLM_",
+    "SMARTMEMORY_",
+    "ANTHROPIC_",
+    "OPENAI_",
+    "GROQ_",
+    "GEMINI_",
+    "DEEPSEEK_",
+)
+_PROVIDER_ENV_SUFFIXES = ("_API_KEY", "_BASE_URL")
+
+
+def _provider_env_names(names):
+    return {
+        n
+        for n in names
+        if n.startswith(_PROVIDER_ENV_PREFIXES) or n.endswith(_PROVIDER_ENV_SUFFIXES)
+    }
+
+
+def _provider_env_snapshot():
+    return {n: os.environ[n] for n in _provider_env_names(list(os.environ))}
+
+
+def assert_provider_env_unchanged(before):
+    """Undo any provider env change since `before`, then fail naming the variables."""
+    after = _provider_env_snapshot()
+    leaked = sorted(
+        n for n in before.keys() | after.keys() if before.get(n) != after.get(n)
+    )
+    for name in leaked:
+        if name in before:
+            os.environ[name] = before[name]
+        else:
+            os.environ.pop(name, None)
+    assert not leaked, (
+        "Test leaked provider env vars (use monkeypatch.setenv/delenv or "
+        "mock.patch.dict(os.environ)): " + ", ".join(leaked)
+    )
+
+
+@pytest.fixture(autouse=True)
+def provider_env_leak_guard():
+    """Fail the test that leaves a provider env var changed, then undo the change.
+
+    Names only, never values. The fixtures that use monkeypatch or restore
+    SMARTMEMORY_* request this one, so it is set up first and its check runs
+    after their teardown.
+    """
+    before = _provider_env_snapshot()
+    yield
+    assert_provider_env_unchanged(before)
+
+
+@pytest.fixture(autouse=True)
+def capture_rss_guard_off(provider_env_leak_guard, monkeypatch):
+    """A pytest process can be over the worker's RSS default, so in-process worker runs
+    would recycle. Tests of the guard set CAPTURE_MAX_RSS_MB themselves. The spawn cap
+    counts real capture workers on this machine, so it is off unless a test sets it."""
+    monkeypatch.setenv("CAPTURE_MAX_RSS_MB", "1000000")
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_MAX", "0")
+    # CAPTURE-HOLD-ALL-1: the hold ships ON, so capture tests opt out. Hold tests set it.
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_HOLD", "0")
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_HOLD_OVER_MB", "0")
+
+
+@pytest.fixture
+def provider_pin_isolated(monkeypatch):
+    """Undo the provider pin that capture_lessons/_memory write straight to os.environ.
+
+    CLI-TEST-ENV-LEAK-1: session_lessons and capture_worker set LLM_PROVIDER,
+    LLM_API_KEY, OPENAI_BASE_URL and SMARTMEMORY_LLM_MODEL themselves, so a test
+    that calls them must have monkeypatch own those names first. setenv before
+    delenv, because delenv on an absent name records nothing to restore.
+    """
+    for name in (
+        "LLM_PROVIDER",
+        "LLM_API_KEY",
+        "OPENAI_BASE_URL",
+        "SMARTMEMORY_LLM_MODEL",
+    ):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +130,7 @@ def restore_billing_mode_env():
 
 
 @pytest.fixture(autouse=True)
-def isolated_support_diagnostics(monkeypatch, tmp_path):
+def isolated_support_diagnostics(provider_env_leak_guard, monkeypatch, tmp_path):
     """Never write user logs or make doctor probes against a live network."""
     if not os.environ.get("HF_HOME"):
         monkeypatch.setenv("HF_HOME", _REAL_HF_HOME)
@@ -48,6 +140,10 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # No login keychain exists under a redirected HOME: a real keyring write would pop a
+    # macOS "Keychain Not Found" dialog (CLI-KEYRING-NULL-GUARD-1). Tests that exercise the
+    # write path patch keyring.set_password and use the keyring_writes_enabled fixture.
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
     monkeypatch.setenv("APPDATA", str(home / "appdata"))
     from smartmemory_app import (
         bug_report,
@@ -85,6 +181,17 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
     from smartmemory_app import doctor
 
     monkeypatch.setattr(doctor, "run_checks", lambda context="doctor": [])
+    # SETUP-RESUMABLE-1: every setup step is checked against its real effect (model
+    # files, daemon health, a save-and-recall round trip). Suites that fake the
+    # install steps get an all-pass check here. tests/unit/test_setup_resumable.py
+    # restores the real one (setup_verify._verify_step) for the checks it tests.
+    from smartmemory_app import setup_verify
+
+    monkeypatch.setattr(
+        setup_verify,
+        "verify_step",
+        lambda key, choices: setup_verify.Check(True, f"{key} checked (test stub)"),
+    )
 
     # Detached-entry tests also install global handlers/hooks. Restore them per test.
     import logging
@@ -110,7 +217,7 @@ def isolated_support_diagnostics(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def restore_smartmemory_env():
+def restore_smartmemory_env(provider_env_leak_guard):
     """Undo SMARTMEMORY_* changes a test's code made straight to os.environ.
 
     env_pin (CLI-ENV-DETECT-1) applies a project's ignore/override decisions to
@@ -166,6 +273,9 @@ def host_isolation_guard(
 ):
     """No test reaches the owner's real daemon port, HOME or launchd job.
 
+    Network: a connect to any non-loopback address, or to 9014/9015, fails the test
+    (CLI-TESTS-LIVE-HOST-CONNECTS-1); proxy discovery is off so a loopback proxy cannot
+    hide one. Mock the transport (httpx.MockTransport), or listen on a loopback port.
     Port: SMARTMEMORY_DAEMON_PORT is the reserved test port (config, the daemon and
     the viewer all honour it), and a bind to 9014/9015 fails the test.
     launchd: the daemon module's job labels are scratch names, and a launchctl shim is
@@ -197,6 +307,12 @@ def host_isolation_guard(
         f"{host_isolation.TEST_LABEL_PREFIX}{token}.worker",
     )
     monkeypatch.setenv("SMARTMEMORY_DAEMON_PORT", str(cli_test_port))
+    # Core's SmartMemory() starts an update check against api.smartmemory.ai unless this
+    # is set (update_check._opted_out). Silent by contract; update-check tests set their own.
+    monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
+    # launch_metrics.emit POSTs to load_config().daemon_port, which is 9014 whenever a
+    # test replaces load_config with a bare SmartMemoryConfig. Tests of emit set it to 0.
+    monkeypatch.setenv("SMARTMEMORY_DISABLE_LAUNCH_METRICS", "1")
     monkeypatch.setattr(setup_mod, "DATA_DIR", home / ".smartmemory")
     monkeypatch.setattr(setup_mod, "CLAUDE_DIR", home / ".claude")
     monkeypatch.setattr(
@@ -214,35 +330,43 @@ def host_isolation_guard(
     monkeypatch.setenv("PATH", f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}")
 
     binds: list[str] = []
+    connects: list[str] = []
     spawned: list = []
     monkeypatch.setattr(socket.socket, "bind", host_isolation.bind_guard(binds))
+    host_isolation.install_connect_guard(monkeypatch, connects)
     monkeypatch.setattr(
         subprocess.Popen, "__init__", host_isolation.tracking_popen_init(spawned, shim)
     )
     try:
-        yield host_isolation.HostGuard(cli_test_port, launchctl_log, binds, shim)
+        yield host_isolation.HostGuard(
+            cli_test_port, launchctl_log, binds, shim, connects
+        )
     finally:
         host_isolation.stop_spawned(spawned)
     calls = host_isolation.real_launchctl_calls(launchctl_log)
     assert not calls, "test called launchctl (real launchd job): " + "; ".join(calls)
     assert not binds, "test bound the owner's real daemon port: " + "; ".join(binds)
+    assert not connects, "test connected to a live host: " + "; ".join(connects)
 
 
 @pytest.fixture(scope="session", autouse=True)
 def real_home_report_leak_gate():
     """Fail if a CLI or shell test adds reporting content to the real profile."""
+    from tests import _report_leak
+
     root = Path.home() / ".smartmemory"
-
-    def snapshot():
-        paths = [root / "hook-failures.tsv"]
-        paths.extend((root / "report-outbox").rglob("*"))
-        return {
-            str(p): p.read_bytes() for p in paths if p.is_file() and p.stat().st_size
-        }
-
-    before = snapshot()
+    before = _report_leak.snapshot(root)
     yield
-    gained = [p for p, content in snapshot().items() if before.get(p) != content]
+    # Live hooks drain this outbox during the run: young claims and put-back claims
+    # are not test content (OPS-REPORT-OUTBOX-SENDING-LEAK-1).
+    gained = _report_leak.leaks(before, _report_leak.snapshot(root))
     assert not gained, (
         "Tests leaked reporting content into the real home: " + ", ".join(gained)
     )
+
+
+@pytest.fixture
+def keyring_writes_enabled(monkeypatch):
+    """Let setup's keyring write sites reach a patched ``keyring.set_password``."""
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    monkeypatch.delenv("SMARTMEMORY_NO_KEYRING", raising=False)

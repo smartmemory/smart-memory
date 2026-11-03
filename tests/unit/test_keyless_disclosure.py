@@ -1,9 +1,28 @@
 """Caller disclosure follows core's effective route, not an API-key list."""
 
 import logging
-from unittest.mock import MagicMock, Mock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
+
+from tests._host_isolation import cleared_env
+
+
+def _write_config(tmp_path, monkeypatch, provider):
+    from smartmemory_app import config
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        f'[smartmemory]\nmode = "local"\n[local]\nllm_provider = "{provider}"\n'
+    )
+    monkeypatch.setattr(config, "config_path", lambda: cfg_path)
+
+
+@pytest.fixture
+def llm_on(tmp_path, monkeypatch):
+    """CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so a test that means "LLM on" says groq."""
+    _write_config(tmp_path, monkeypatch, "groq")
 
 
 def _write_config(tmp_path, monkeypatch, provider):
@@ -180,8 +199,13 @@ def test_effective_config_disclosure_through_storage_api_and_cli(
     item_id = "ba931e6b-83ac-4b4b-97e4-8bcdd03cfb30"
     work_graph = Mock()
     work_graph.add_run.return_value = "run-id"
+    # CORE-INGEST-SPLIT-1: core reads runner.stages (pre_store_stage) to split prepare from
+    # apply, so the fake carries the real stage order's tail; run_to is the prepare half and
+    # run_from the apply half, both stubbed to return the saved state.
     runner = Mock()
+    runner.stages = [SimpleNamespace(name=n) for n in ("classify", "store")]
     runner.run_to.return_value = PipelineState(item_id=item_id)
+    runner.run_from.return_value = PipelineState(item_id=item_id)
 
     def core_ingest(content, *, context, sync):
         # Exercise core's actual route resolution and deferred-work planning.
@@ -214,7 +238,8 @@ def test_effective_config_disclosure_through_storage_api_and_cli(
         return response.json()
 
     monkeypatch.setattr("smartmemory_app.cli._daemon_request", request)
-    with patch.dict("os.environ", {"BROWSER": "true", **credentials}, clear=True):
+    # cleared_env keeps tests/conftest.py's switches (crash reports off, env check off).
+    with cleared_env({"BROWSER": "true", **credentials}):
         storage.apply_runtime_config()
         monkeypatch.setenv("SMARTMEMORY_QUIET", "1")  # CLI-WORKSPACE-UX-1: header off
         result = CliRunner().invoke(cli, ["add", "Alice leads Atlas"])

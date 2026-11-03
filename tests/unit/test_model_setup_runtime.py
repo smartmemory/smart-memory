@@ -122,7 +122,7 @@ def test_setup_pinned_embedder_fetches_transitive_code(
         assert path == str(fetched)
         assert kwargs["trust_remote_code"] is True
         assert hf_models.downloads_allowed() is True
-        return Mock(encode=lambda text: [0.1] * 768)
+        return Mock(encode=lambda text, **kwargs: [0.1] * 768)
 
     with (
         patch("huggingface_hub.snapshot_download", side_effect=resolve),

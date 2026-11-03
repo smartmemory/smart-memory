@@ -116,7 +116,7 @@ def test_remote_ask_hosted_contract_and_rendering(hosted, reasoning):
         (
             401,
             {"detail": "bad token"},
-            ["API key is invalid or expired", "setup --mode remote"],
+            ["API key is invalid or expired", "Run: sm login"],
         ),
         (
             403,

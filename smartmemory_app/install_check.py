@@ -156,6 +156,40 @@ def run_native_checks() -> list[str]:
     return offline_checks("native")
 
 
+def last_store_version(data_dir) -> str | None:
+    """CLI-HOME-SHARED-ACROSS-ENVS-1: the sm version that last ran against this data dir.
+
+    The pass record ``first_run_check`` keeps is the store's only per-store version
+    record: the first command of each run under a new version rewrites it. Read it
+    before that refresh. No record or an unreadable one is ``None`` (no warning).
+    """
+    import json
+    from pathlib import Path
+
+    try:
+        record = json.loads(
+            (Path(data_dir) / ".install-check-pass.json").read_text(encoding="utf-8")
+        )
+        version = record.get("version")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return version if isinstance(version, str) and version else None
+
+
+def store_version_warning(previous: str | None, data_dir) -> str | None:
+    """One line when another sm version last used this store, else ``None``."""
+    from smartmemory_app import __version__
+
+    if previous is None or previous == __version__:
+        return None
+    return (
+        f"Warning: the store at {data_dir} was last used by smartmemory {previous}, "
+        f"and this is smartmemory {__version__}. Two versions sharing one store can "
+        "leave it in a mixed state. Give each environment its own store with "
+        "SMARTMEMORY_DATA_DIR (and its own SMARTMEMORY_DAEMON_PORT if you run the daemon)."
+    )
+
+
 def first_run_check(data_dir) -> None:
     """Cache only passes, retry failures, and report each failed version once."""
     import json

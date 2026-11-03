@@ -31,6 +31,7 @@ from xml.sax.saxutils import escape
 import click
 
 from smartmemory_app import console as _console
+from smartmemory_app.keyring_guard import keyring_disabled, set_secret
 from smartmemory_app.install_check import (
     PROXY_ENV_VARS,
     SOCKS_PROXY_ERROR,
@@ -325,18 +326,37 @@ HOOK_REGISTRATIONS = _get_hook_registrations(shell="bash")
 @click.option(
     "--api-url", help="Remote service base URL (overrides SMARTMEMORY_API_URL)."
 )
+@click.option(
+    "--restart",
+    is_flag=True,
+    default=False,
+    help="Start over: forget the saved progress of an unfinished run.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    default=False,
+    help="Accept the default for every question (local mode unless --mode says otherwise).",
+)
 @_doctor_after_setup  # SETUP-DOCTOR-1: show what the CLI will use, stop on a FAIL
 def setup(
     mode: str | None,
     api_key: str | None,
     for_tool: str | None,
     api_url: str | None = None,
+    restart: bool = False,
+    yes: bool = False,
 ) -> None:
     """First-run questionnaire: configure local or remote mode.
 
-    Three self-contained branches — each handles config, post-config, AND daemon
+    Three self-contained branches: each handles config, post-config, AND daemon
     start. No shared post-branch code to avoid double-start bugs.
     """
+    # SETUP-RESUMABLE-1: every step is checked after it runs and its result saved
+    # (setup_run.py). A re-run after an unfinished run resumes at the first step
+    # whose effect is gone. --restart starts over.
     installation = check_installation()
     if not installation.ok:
         raise click.ClickException(_SETUP_INSTALLATION_ERROR)
@@ -356,10 +376,35 @@ def setup(
             click.echo(
                 "Automatic anonymous crash reports are on. Disable: SMARTMEMORY_CRASH_REPORTS=0"
             )
+    from smartmemory_app import setup_state
+    from smartmemory_app.setup_run import SetupRun
+
+    if restart:
+        setup_state.clear()
+    else:
+        saved = SetupRun.resumable(mode=mode)
+        if saved is not None:
+            _resume_setup(saved, api_key=api_key, yes=yes)
+            if for_tool:
+                _setup_tool_config(for_tool)
+            return
+
+    if yes and mode is None:
+        mode = "local"
+    if (
+        yes
+        and mode == "remote"
+        and not (api_key or os.environ.get("SMARTMEMORY_API_KEY"))
+    ):
+        raise click.ClickException(
+            "Remote setup with --yes needs an API key.\n"
+            "Fix: run sm setup --mode remote --yes --api-key KEY"
+        )
+
     # Branch 1: Flags provided — use click flow directly
     # _setup_click() already handles daemon start for local mode internally
     if mode is not None:
-        _setup_click(mode, api_key, api_url)
+        _setup_click(mode, api_key, api_url, **({"yes": True} if yes else {}))
         if for_tool:
             _setup_tool_config(for_tool)
         return
@@ -396,7 +441,8 @@ def setup(
                     pass
                 if result.daemon_warming:
                     click.echo(_SETUP_WARMING_WARNING)
-                elif first_run:
+                _verify_after_tui()
+                if not result.daemon_warming and first_run:
                     click.echo("All done. Run 'sm tour' if this is your first time.")
             if for_tool:
                 _setup_tool_config(for_tool)
@@ -416,7 +462,11 @@ def setup(
 
 
 def _setup_click(
-    mode: str | None, api_key: str | None, api_url: str | None = None
+    mode: str | None,
+    api_key: str | None,
+    api_url: str | None = None,
+    *,
+    yes: bool = False,
 ) -> None:
     """Click-based setup flow (non-TUI). Self-contained: config + post-config."""
     if mode is None:
@@ -440,9 +490,8 @@ def _setup_click(
         from smartmemory_app.setup_steps import StepTracker
 
         tracker = StepTracker()
-        first_run = _setup_local(tracker)
-        with tracker.step("SmartMemory started", live=False):
-            daemon_status = _start_daemon_local()
+        first_run = _setup_local(tracker, **({"yes": True} if yes else {}))
+        daemon_status = _finish_local_run(tracker)
         if daemon_status and daemon_status.get("status") == "ok":
             if first_run:
                 click.echo("All done. Run 'sm tour' if this is your first time.")
@@ -465,6 +514,85 @@ def _setup_click(
             _lm_emit("setup.complete", props)
         except Exception:
             pass
+
+
+def _finish_local_run(tracker) -> dict:
+    """Start SmartMemory and run the checks: the steps after _setup_local, same counter."""
+    from smartmemory_app import setup_state
+    from smartmemory_app.setup_run import SetupRun
+
+    state = setup_state.load()
+    if state is None or state.choices.get("mode") != "local" or state.complete:
+        # _setup_local could not save its progress: start SmartMemory as before,
+        # but say that the checks were skipped.
+        logger.warning(
+            "Setup progress was not saved, so the mode and save-and-recall checks "
+            "did not run. Run: sm doctor"
+        )
+        with tracker.step("SmartMemory started", live=False):
+            return _start_daemon_local() or {}
+    run = SetupRun(state, tracker=tracker, check_restart=False)
+    run.run(run.index_of("daemon"))
+    return run.daemon_status
+
+
+def _resume_setup(state, *, api_key: str | None = None, yes: bool = False) -> None:
+    """Continue an unfinished run with its saved choices (no questions asked again)."""
+    from smartmemory_app.setup_run import SetupRun
+
+    if (
+        yes
+        and state.choices.get("mode") == "remote"
+        and not (api_key or os.environ.get("SMARTMEMORY_API_KEY"))
+    ):
+        from smartmemory_app.config import load_config
+
+        if not load_config(apply_env=False).api_key_set:
+            raise click.ClickException(
+                "Remote setup with --yes needs an API key.\n"
+                "Fix: run sm setup --mode remote --yes --api-key KEY"
+            )
+    run = SetupRun(state, api_key=api_key)
+    run.resume()
+    mode = state.choices.get("mode", "local")
+    if mode == "local":
+        if run.daemon_status.get("status") == "warming":
+            click.echo(_SETUP_WARMING_WARNING)
+        else:
+            click.echo("Done. SmartMemory is ready.")
+    else:
+        click.echo("\nSetup complete.")
+    try:
+        from smartmemory_app.launch_metrics import emit as _lm_emit
+
+        _lm_emit("setup.complete", {"mode": mode, "resumed": True})
+    except Exception:
+        pass
+
+
+def _verify_after_tui() -> None:
+    """Run the checks after the setup screen closes (it ran the install steps)."""
+    from smartmemory_app import setup_state
+    from smartmemory_app.setup_run import SetupRun
+
+    state = setup_state.load()
+    if state is None or state.choices.get("mode") != "local":
+        logger.warning(
+            "Setup progress was not saved, so the mode and save-and-recall checks "
+            "did not run. Run: sm doctor"
+        )
+        return
+    run = SetupRun(state, check_restart=False)
+    start = run.first_unrecorded()
+    if start < run.index_of("mode"):
+        total = len(run.plan)
+        raise click.ClickException(
+            f"Setup did not finish: step {start + 1} of {total} "
+            f"({run.plan[start].title}) did not complete.\n"
+            "Fix: run sm setup again. It resumes at that step."
+        )
+    click.echo("")
+    run.run(start)
 
 
 def _can_run_tui() -> bool:
@@ -498,6 +626,9 @@ def _start_daemon_local(
     from smartmemory_app.daemon import _retire_legacy_workers, _upgrade_worker_agent
 
     try:
+        from smartmemory_app.port_probe import ensure_daemon_port_free
+
+        ensure_daemon_port_free(on_log or click.echo)
         _upgrade_worker_agent()
         _retire_legacy_workers()
         launchd_ok = _install_launchd_plist()
@@ -551,7 +682,7 @@ def _start_daemon_local(
 _SETUP_WARMING_WARNING = (
     "Warning: SmartMemory daemon is still warming up. Setup is configured, "
     "but SmartMemory is not ready yet.\n"
-    "Check: sm status. Additional worker startup is deferred; once warmup finishes, run sm start --wait."
+    "Check: sm status. Additional worker startup is deferred, once warmup finishes, run sm start --wait."
 )
 
 
@@ -595,54 +726,25 @@ def _apply_setup_result(
                  Used by ProgressScreen for per-step UI updates.
         on_log: Optional sink for newline-only model download progress lines.
     """
-    from smartmemory_app.setup_steps import model_download_progress
-
-    from smartmemory_app.config import SmartMemoryConfig, save_config
+    from smartmemory_app.setup_run import SetupRun
 
     data_dir = str(Path(result.data_dir).expanduser())
-
-    cfg = SmartMemoryConfig(
-        mode=result.mode,
-        coreference=result.coreference,
-        llm_provider=result.llm_provider,
-        llm_model=result.llm_model,
-        embedding_provider=result.embedding_provider,
-        spacy_model=result.spacy_model,
-        data_dir=data_dir,
+    choices = {
+        "mode": result.mode,
+        "coreference": result.coreference,
+        "llm_provider": result.llm_provider,
+        "llm_model": result.llm_model,
+        "embedding_provider": result.embedding_provider,
+        "spacy_model": result.spacy_model,
+        "data_dir": data_dir,
+        "seed_dir": data_dir,
+    }
+    # SETUP-RESUMABLE-1: the same steps and checks as the text flow, saved after
+    # each one. The screen draws progress (quiet), and starts SmartMemory itself.
+    run = SetupRun.fresh(
+        choices, on_step=on_step, on_log=on_log, quiet=True, check_restart=False
     )
-    save_config(cfg)
-    if on_step:
-        on_step("Config written")
-
-    _ensure_spacy(result.spacy_model)
-    if on_step:
-        on_step("spaCy model ready")
-
-    with model_download_progress(on_log):
-        _ensure_embedding_model(cfg.embedding_provider)
-    if on_step and cfg.embedding_provider == "local":
-        on_step("Embedding model ready")
-
-    with model_download_progress(on_log):
-        _ensure_lazy_models()
-    if on_step:
-        on_step("Helper models ready")
-
-    _copy_hooks()
-    if on_step:
-        on_step("Hooks installed")
-
-    _copy_skills()
-    if on_step:
-        on_step("Skills installed")
-
-    _register_hooks()
-    if on_step:
-        on_step("Hooks registered")
-
-    _seed_data_dir(data_dir)
-    if on_step:
-        on_step("Patterns seeded")
+    run.run(stop_before="daemon")
 
 
 # ── Mode setup helpers ────────────────────────────────────────────────────────
@@ -689,9 +791,12 @@ def _read_env_from_profile(name: str) -> str:
     return _profile_lookup(name).value
 
 
-def _key_hint(key: str) -> str:
+def _masked_key_hint(key: str) -> str:
     """What a prompt may show of a stored key: its last four characters, never a prefix."""
     return "..." + key[-4:] if len(key) > 12 else "***"
+
+
+_key_hint = _masked_key_hint  # the 2.0 name for it (WRAPPER-2.0 key-masking port), same function
 
 
 def _persist_env_var(name: str, value: str) -> None:
@@ -702,13 +807,15 @@ def _persist_env_var(name: str, value: str) -> None:
     os.environ[name] = value
     if sys.platform == "win32":
         try:
-            import keyring
-
-            keyring.set_password("smartmemory", name, value)
-            click.echo("  Stored in Windows credential store for the daemon.")
+            if set_secret(name, value, where="this setup process"):
+                click.echo("  Stored in Windows credential store for the daemon.")
+            else:
+                click.echo(
+                    "  OS credential store disabled. The key is only set for this setup session."
+                )
         except Exception as exc:
             logger.warning(
-                "Credential persistence failed; key is only available in this setup process: %s",
+                "Credential persistence failed, key is only available in this setup process: %s",
                 redact_credentials(str(exc), (value,)),
             )
             click.echo(
@@ -775,23 +882,49 @@ def _prompt_local_model(provider: str) -> str:
     return "" if choice.lower() == "none" else choice
 
 
-def _setup_local(tracker=None) -> bool:
+# SETUP-RESUMABLE-1: what ``sm setup --yes`` answers to every local question.
+LOCAL_DEFAULTS = {
+    "mode": "local",
+    "coreference": False,
+    "llm_provider": "groq",
+    "llm_model": "",
+    "embedding_provider": "local",
+    "spacy_model": "en_core_web_sm",
+    "data_dir": "~/.smartmemory",
+}
+
+
+def _setup_local(tracker=None, *, yes: bool = False) -> bool:
     """Ask pipeline questions, write config, wire Claude Code hooks.
 
-    ``tracker`` is the run's ``StepTracker`` (the daemon step is counted by the caller).
+    ``tracker`` is the run's ``StepTracker`` (the daemon step and the checks after it
+    run in ``_finish_local_run``). ``yes`` takes every default with no prompt.
 
     All local deps (smartmemory-core, spaCy, usearch, filelock) are already
     installed as part of `pip install smartmemory` — no extra install step needed.
     """
-    from smartmemory_app.config import (
-        LOCAL_MODEL_PROVIDERS,
-        SmartMemoryConfig,
-        config_path,
-        save_config,
-    )
+    from smartmemory_app.config import config_path
+    from smartmemory_app.daemon import is_running
+    from smartmemory_app.setup_run import SetupRun
+    from smartmemory_app.setup_steps import StepTracker
 
     # DIST-UPDATE-HINT-1: read before save_config writes one.
     was_first_run = not config_path().exists()
+
+    choices = dict(LOCAL_DEFAULTS) if yes else _ask_local_choices()
+    choices["restart"] = is_running(require_healthy=False)
+    run = SetupRun.fresh(choices, tracker=tracker or StepTracker())
+    click.echo("")
+    # Stops before starting SmartMemory. A live daemon is stopped first so the
+    # lifecycle owner restarts it with the new config; the runner asks again after
+    # the downloads, since a daemon can start or stop while they run.
+    run.run(stop_before="daemon")
+    return was_first_run
+
+
+def _ask_local_choices() -> dict:
+    """The local-mode questions. Returns the choices (an LLM key goes to its store)."""
+    from smartmemory_app.config import LOCAL_MODEL_PROVIDERS
 
     coref = click.confirm(
         "\nEnable coreference resolution? "
@@ -825,7 +958,7 @@ def _setup_local(tracker=None) -> bool:
     if key_envvar:
         # Check env, then keychain, then shell profile
         existing = os.environ.get(key_envvar, "").strip()
-        if not existing:
+        if not existing and not keyring_disabled():
             try:
                 import keyring
 
@@ -842,27 +975,28 @@ def _setup_local(tracker=None) -> bool:
             if existing:
                 os.environ[key_envvar] = existing
         if existing:
-            masked = _key_hint(existing)
             api_key = click.prompt(
-                f"\n{key_envvar} ({masked}). Press Enter to keep, or paste new key",
-                hide_input=True,
+                f"\n{key_envvar} ({_masked_key_hint(existing)}). Press Enter to keep, or paste new key",
                 default="",
+                hide_input=True,
             )
         else:
             api_key = click.prompt(
                 f"\n{key_envvar} not set. Enter your API key (Enter to skip)",
-                hide_input=True,
                 default="",
+                hide_input=True,
             )
         if api_key.strip():
             _persist_env_var(key_envvar, api_key.strip())
             # Windows persistence and shell guidance are handled above.
             if sys.platform != "win32":
                 try:
-                    import keyring
-
-                    keyring.set_password("smartmemory", key_envvar, api_key.strip())
-                    click.echo("  Also stored in OS keychain.")
+                    if set_secret(key_envvar, api_key.strip()):
+                        click.echo("  Also stored in OS keychain.")
+                    else:
+                        click.echo(
+                            "  OS keychain disabled. Key kept in your shell profile only."
+                        )
                 except Exception as exc:
                     logger.warning(
                         "OS credential store unavailable, using shell profile: %s",
@@ -886,79 +1020,24 @@ def _setup_local(tracker=None) -> bool:
     spacy_model = f"en_core_web_{spacy_size}"
 
     data_dir = click.prompt("Default data directory", default="~/.smartmemory")
-
-    cfg = SmartMemoryConfig(
-        mode="local",
-        coreference=coref,
-        llm_provider=llm,
-        llm_model=llm_model,
-        embedding_provider=embedding,
-        spacy_model=spacy_model,
-        data_dir=data_dir,
-    )
-    from smartmemory_app.daemon import is_running, stop_daemon
-    from smartmemory_app.setup_steps import (
-        StepTracker,
-        local_setup_plan,
-        model_download_progress,
-    )
-
-    restart = is_running(require_healthy=False)
-    if tracker is None:
-        tracker = StepTracker()
-    tracker.set_plan(local_setup_plan(cfg.embedding_provider, restart=restart))
-    click.echo("")
-
-    with tracker.step("Config written", live=False):
-        save_config(cfg)
-
-    # Wire Claude Code hooks (preserved from original setup.py)
-    with tracker.step("spaCy model ready"):
-        _ensure_spacy(spacy_model)
-    if cfg.embedding_provider == "local":
-        with tracker.step("Embedding model ready") as log:
-            with model_download_progress(log):
-                _ensure_embedding_model(cfg.embedding_provider)
-    with tracker.step("Helper models ready") as log:
-        with model_download_progress(log):
-            _ensure_lazy_models()
-    with tracker.step("Hooks installed", live=False):
-        _copy_hooks()
-    with tracker.step("Skills installed", live=False):
-        _copy_skills()
-    with tracker.step("Hooks registered", live=False):
-        _register_hooks()
-    with tracker.step("Patterns seeded", live=False):
-        _seed_data_dir()
-
-    # Stop a live daemon so the lifecycle owner can restart it with the new config.
-    # Ask again here, after the downloads: a daemon can start or stop while they run.
-    now_running = is_running(require_healthy=False)
-    if now_running != restart:
-        restart = now_running
-        tracker.set_plan(local_setup_plan(cfg.embedding_provider, restart=restart))
-    if restart:
-        import time
-
-        with tracker.step("SmartMemory stopped"):
-            stop_daemon()
-            time.sleep(2)
-    return was_first_run
+    return {
+        "mode": "local",
+        "coreference": coref,
+        "llm_provider": llm,
+        "llm_model": llm_model,
+        "embedding_provider": embedding,
+        "spacy_model": spacy_model,
+        "data_dir": data_dir,
+    }
 
 
-def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
-    """Validate API key, store in OS keychain, write remote config."""
-    import httpx
-    from smartmemory_app.config import (
-        SmartMemoryConfig,
-        load_config,
-        save_config,
-        set_api_key,
-    )
-
-    api_url = (api_url or load_config().api_url).rstrip("/")
+def _remote_api_url(api_url: str | None) -> str:
+    """The remote base URL, refused when it carries credentials, a query or a fragment."""
     from urllib.parse import urlsplit
 
+    from smartmemory_app.config import load_config
+
+    api_url = (api_url or load_config().api_url).rstrip("/")
     parsed = urlsplit(api_url)
     if (
         parsed.scheme not in ("http", "https")
@@ -970,7 +1049,34 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         raise click.ClickException(
             "API URL must be an HTTP(S) base URL without credentials, query or fragment."
         )
+    return api_url
 
+
+def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
+    """Validate API key, store in OS keychain, write remote config, then check it.
+
+    SETUP-RESUMABLE-1: the steps are ``setup_steps.remote_setup_plan`` (login, hooks,
+    the mode check and a save-and-recall round trip), run and saved by setup_run.
+    The key itself is never saved in the progress file.
+    """
+    from smartmemory_app.setup_run import SetupRun
+
+    api_url = _remote_api_url(api_url)
+    choices = {"mode": "remote", "api_url": api_url}
+    run = SetupRun.fresh(choices, api_key=api_key)
+    run.run()
+    click.echo("Lifecycle hooks installed. Auto-recall and observation active.")
+
+
+def _remote_login(api_key: str | None, api_url: str | None = None) -> str:
+    """Check the API key against /auth/me, keep it in the OS keychain, write remote config.
+
+    Returns the account's default team id.
+    """
+    import httpx
+    from smartmemory_app.config import SmartMemoryConfig, save_config, set_api_key
+
+    api_url = _remote_api_url(api_url)
     api_key = api_key or os.environ.get("SMARTMEMORY_API_KEY")
     if not api_key:
         api_key = click.prompt(
@@ -1002,18 +1108,12 @@ def _setup_remote(api_key: str | None, api_url: str | None = None) -> None:
         mode="remote", api_url=api_url, api_key_set=True, team_id=team_id
     )
     save_config(cfg)
-
-    # DIST-AGENT-HOOKS-1: Wire hooks for remote mode too.
-    # Hooks call CLI which falls back to remote API via storage dispatch.
-    _copy_hooks()
     # HOOK-WRITE-QUEUE-1: no daemon in remote mode, so the write hooks start the
     # remote drainer (`smartmemory lifecycle drain-hooks`) for their queued jobs.
     from smartmemory_app.hook_consumer import set_remote_drain
 
     set_remote_drain(True)
-    _copy_skills()
-    _register_hooks()
-    click.echo("Lifecycle hooks installed. Auto-recall and observation active.")
+    return team_id
 
 
 def _setup_tool_config(tool: str) -> None:
@@ -1104,7 +1204,13 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
                 ) from exc
         from smartmemory_app.warm import warm_models
 
-        warm_models(reranker=False, strict=True)
+        try:
+            warm_models(reranker=False, strict=True, repair_hint=None)
+        except Exception as exc:
+            # Setup cannot tell the user to run setup; name the cause and a way out.
+            raise RuntimeError(
+                f"{str(exc).rstrip('. ')}. {_warm_failure_hint(service)}"
+            ) from exc
         if missing:
             click.echo(f"Downloaded local embedding model {model!r}.")
         else:
@@ -1120,6 +1226,20 @@ def _ensure_embedding_model(provider: str, *, missing: bool = False) -> None:
             os.environ.pop("SMARTMEMORY_EMBEDDING_PROVIDER", None)
         else:
             os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = previous
+
+
+def _warm_failure_hint(service) -> str:
+    """What to try after the embedder downloaded but would not load (CLI-SETUP-CIRCULAR-EMBED-1)."""
+    try:
+        backend = service.backend_name or ""
+    except Exception:
+        backend = ""
+    if backend.startswith("torch/"):
+        return (
+            "The torch runtime could not load the model. To use the ONNX runtime for this run, "
+            "set SMARTMEMORY_EMBEDDING_BACKEND=onnx and run sm setup again, or repair the torch install."
+        )
+    return "Run sm doctor for details."
 
 
 def _ensure_lazy_models() -> None:
@@ -1218,22 +1338,14 @@ def _ensure_spacy(
         ) from exc
 
 
-def _copy_hooks() -> None:
-    dest = CLAUDE_DIR / "hooks"
-    dest.mkdir(parents=True, exist_ok=True)
-    for src_name, dest_name in _HOOK_FILE_MAP.items():
-        src = HOOKS_SRC / src_name
-        if src.exists():
-            # bash reads a script while it runs: publish by rename, so a hook running at the
-            # swap keeps reading the old file whole instead of a mix of old and new bytes.
-            target = dest / dest_name
-            temporary = target.with_name(f".{dest_name}.{os.getpid()}.tmp")
-            try:
-                shutil.copy2(src, temporary)
-                os.replace(temporary, target)
-            except BaseException:
-                temporary.unlink(missing_ok=True)
-                raise
+def _copy_hooks() -> list[str]:
+    """Install the bundled hooks, never over a locally modified one (SM-HOOK-SYNC-CLOBBER-1).
+
+    Returns the hook names left in place; each gets a WARNING from hook_install.
+    """
+    from smartmemory_app.hook_install import install_hooks
+
+    return install_hooks(HOOKS_SRC, CLAUDE_DIR / "hooks", _HOOK_FILE_MAP)
 
 
 def _copy_skills() -> None:
@@ -1339,6 +1451,104 @@ def _seed_data_dir(data_dir: str | None = None) -> None:
     )  # seeds entity_patterns.jsonl if absent (side effect of __init__)
 
 
+def _daemon_can_read_key(name: str, value: str) -> bool:
+    """True when the daemon's own key lookup (keychain, then shell profile) finds ``value``.
+
+    A key that only lives in this shell's env is stored in the OS keychain, the same
+    place ``sm setup`` puts a key you type. Never raises. The key is never logged.
+    """
+    if keyring_disabled():
+        logger.warning(
+            "OS keychain disabled: %s is not stored in it, the daemon can only read it from the shell profile.",
+            name,
+        )
+        return _read_env_from_profile(name) == value
+    try:
+        import keyring
+
+        if keyring.get_password("smartmemory", name) == value:
+            return True
+        set_secret(name, value)
+        # A store that accepts a write but does not hand it back (a null backend)
+        # has not saved the key, so only the read-back counts.
+        if keyring.get_password("smartmemory", name) == value:
+            return True
+        logger.warning("OS credential store did not return the %s it was given", name)
+    except Exception as exc:
+        logger.warning(
+            "OS credential store unavailable for %s: %s",
+            name,
+            redact_credentials(str(exc), (value,)),
+        )
+    return _read_env_from_profile(name) == value
+
+
+def _installed_plist_key(name: str) -> str:
+    """The ``name`` value an installed daemon or worker plist holds ("" when none).
+
+    Plists written before SETUP-PLIST-PLAINTEXT-KEY-1 carried the provider key, and
+    for a key that only lived in the environment they were its only copy.
+    """
+    import plistlib
+
+    for plist_name in (PLIST_NAME, WORKER_PLIST_NAME):
+        try:
+            data = plistlib.loads((LAUNCH_AGENTS_DIR / plist_name).read_bytes())
+            value = data.get("EnvironmentVariables", {}).get(name, "")
+        except Exception:
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+# Schemes a proxy URL may carry. Anything before the last "@" of a proxy value is
+# its login, and a prefix that is not one of these schemes is part of that login.
+_PROXY_SCHEMES = re.compile(r"(?i)(?:https?|socks4a?|socks5h?)://")
+
+
+def _plist_env_value(name: str, value: str) -> str:
+    """The form of an env value that may be copied into a launchd plist.
+
+    A plist is a plaintext file in LaunchAgents, so the copy rule comes from the
+    VARIABLE, never from what its value looks like:
+
+    - ``*_PROXY`` and ``ALL_PROXY`` (any case) hold one proxy URL. Its login is
+      dropped whatever characters the password holds (``,``, ``/``, ``@``, ``:``,
+      ``%``-escapes), with or without a scheme, and a WARNING names the variable.
+    - ``NO_PROXY`` (any case) is a host list and ``HOME`` a path. Neither holds a
+      login, so both are copied as they are.
+
+    Any other name raises, so a new env-to-plist copy has to state its rule here.
+    """
+    upper = name.upper()
+    if upper == "NO_PROXY" or name == "HOME":
+        return value
+    if upper.endswith("_PROXY"):
+        return _proxy_without_login(name, value)
+    raise ValueError(f"no launchd plist copy rule for {name}")
+
+
+def _proxy_without_login(name: str, value: str) -> str:
+    """``value`` parsed as one proxy URL, with everything before its last ``@`` dropped."""
+    if "@" not in value:
+        return value
+    scheme = _PROXY_SCHEMES.match(value)
+    stripped = (scheme.group(0) if scheme else "") + value.rsplit("@", 1)[1]
+    logger.warning(
+        "%s holds a proxy login (user and password). It was left out of the "
+        "launchd plist so the login is not stored in a plaintext file",
+        name,
+    )
+    click.echo(
+        f"Warning: {name} holds a login. It was left out of the auto-start files, "
+        "so the background service connects without it. If your proxy requires a "
+        f"login, point {name} at a local forwarding proxy that needs none and "
+        "re-run sm setup."
+    )
+    return stripped
+
+
 def _install_launchd_plist() -> bool:
     """Install launchd plist for auto-start + crash recovery (macOS only).
 
@@ -1360,7 +1570,7 @@ def _install_launchd_plist() -> bool:
 
     if not PLIST_TEMPLATE.exists():
         click.echo(
-            "Warning: launchd plist template not found — skipping auto-start setup."
+            "Warning: launchd plist template not found, skipping auto-start setup."
         )
         return False
 
@@ -1375,29 +1585,54 @@ def _install_launchd_plist() -> bool:
     # override that shouldn't be baked into a persistent plist.
     data_dir = str(Path(cfg.data_dir).expanduser())
 
-    # Resolve GROQ_API_KEY from env or keyring
+    # The key never goes into the plist (a plaintext file in LaunchAgents). The
+    # daemon and the worker read it from the OS keychain or shell profile at boot
+    # (config.load_llm_keys_from_stores), so make sure one of those holds it.
     groq_key = os.environ.get("GROQ_API_KEY", "")
     if not groq_key:
         try:
             import keyring
 
-            groq_key = keyring.get_password("smartmemory", "groq_api_key") or ""
+            groq_key = (
+                keyring.get_password("smartmemory", "GROQ_API_KEY")
+                or keyring.get_password("smartmemory", "groq_api_key")
+                or ""
+            )
         except Exception:
             pass
+    # An installed plist written before SETUP-PLIST-PLAINTEXT-KEY-1 may hold the
+    # daemon's only persistent copy of the key, and the rewrite below removes it.
+    legacy_key = _installed_plist_key("GROQ_API_KEY")
+    if not groq_key:
+        groq_key = legacy_key
+    key_readable = not groq_key or _daemon_can_read_key("GROQ_API_KEY", groq_key)
+    # The invariant, checked right before the rewrite whatever the key's source
+    # (this shell, the old plist, or a key kept by pressing Enter in sm setup):
+    # never replace a plist that holds a key unless the daemon can read a key from
+    # a persistent store afterwards. Otherwise leave both files byte-identical.
+    if legacy_key and not key_readable:
+        click.echo(
+            "Warning: your Groq key could not be saved to the OS keychain, and the "
+            "existing auto-start files hold the only copy the background service can "
+            "read. The files were left as they are. Unlock the keychain or add "
+            "GROQ_API_KEY to your shell profile, then run sm setup again."
+        )
+        return (LAUNCH_AGENTS_DIR / PLIST_NAME).exists()
 
     proxy_env_xml = "".join(
         f"\n        <key>{name}</key>\n        <string>{escape(value)}</string>"
         for name in (*PROXY_ENV_VARS, "NO_PROXY", "no_proxy")
-        if (value := os.environ.get(name))
+        if (value := _plist_env_value(name, os.environ.get(name, "")))
     )
 
     replacements = {
         "{PYTHON_PATH}": python_path,
-        "{HOME}": escape(os.environ.get("HOME") or str(Path.home())),
+        "{HOME}": escape(
+            _plist_env_value("HOME", os.environ.get("HOME") or str(Path.home()))
+        ),
         "{DAEMON_PORT}": str(cfg.daemon_port),
         "{DATA_DIR}": data_dir,
         "{BIN_DIR}": bin_dir,
-        "{GROQ_API_KEY}": groq_key,
         "{PROXY_ENV_XML}": proxy_env_xml,
     }
 
@@ -1436,7 +1671,7 @@ def _install_launchd_plist() -> bool:
         main_call,
     ) in templates:
         if not template_path.exists():
-            click.echo(f"Warning: {display_name} plist template not found — skipping.")
+            click.echo(f"Warning: {display_name} plist template not found: skipping.")
             continue
 
         content = template_path.read_text()
@@ -1476,11 +1711,16 @@ def _install_launchd_plist() -> bool:
 
     if all_ok:
         click.echo("SmartMemory will auto-start on login and restart on crash.")
-        if groq_key:
+        if groq_key and key_readable:
             click.echo("Enrichment worker enabled (GROQ_API_KEY found).")
+        elif groq_key:
+            click.echo(
+                "Warning: GROQ_API_KEY is set in this shell only, so the background "
+                "service cannot read it. Run sm setup to store it in your OS keychain."
+            )
         else:
             click.echo(
-                "Warning: GROQ_API_KEY not found — enrichment worker won't extract relations."
+                "Warning: GROQ_API_KEY not found: enrichment worker won't extract relations."
             )
     return all_ok
 
@@ -1495,7 +1735,7 @@ except (ModuleNotFoundError, ImportError) as exc:
     if getattr(exc, "name", None) != "smartmemory_app":
         raise
     job_label = "{label}"
-    message = f"SmartMemory was removed; background job {{job_label}} switched itself off."
+    message = f"SmartMemory was removed, background job {{job_label}} switched itself off."
     data_dir = os.environ.get("SMARTMEMORY_DATA_DIR", os.path.expanduser("~/.smartmemory"))
     try:
         os.makedirs(data_dir, exist_ok=True)

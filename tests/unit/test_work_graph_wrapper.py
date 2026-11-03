@@ -29,8 +29,13 @@ def lite(tmp_path, monkeypatch):
     )
     # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so the offer test needs a provider;
     # the route mock above still decides whether one is reachable.
+    # A bare config defaults to 9014, the owner's real daemon: use the test port the
+    # conftest reserved (CLI-TESTS-LIVE-HOST-CONNECTS-1).
     cfg = config.SmartMemoryConfig(
-        mode="local", data_dir=str(tmp_path), llm_provider="groq"
+        mode="local",
+        data_dir=str(tmp_path),
+        llm_provider="groq",
+        daemon_port=int(os.environ["SMARTMEMORY_DAEMON_PORT"]),
     )
     monkeypatch.setattr(config, "load_config", lambda: cfg)
     monkeypatch.setattr(storage, "load_config", lambda: cfg)
@@ -125,7 +130,7 @@ def test_reextract_flags(lite, monkeypatch, flags, mode, count):
     )
     result = CliRunner().invoke(cli, ["admin", "reextract", *flags], input="y\n")
     assert result.exit_code == 0, result.output
-    assert f"{count} memories; about" in result.output
+    assert f"{count} memories, about" in result.output
     assert f"mode: {mode}" in result.output
     assert f"Queued {count} re-extraction runs" in result.output
     assert ("Queue re-extraction?" in result.output) == ("--yes" not in flags)
@@ -289,11 +294,13 @@ def test_daemon_starts_one_core_worker(tmp_path, monkeypatch):
     command = popen.call_args.args[0]
     assert command == [
         sys.executable,
+        "-P",
         "-m",
         "smartmemory_app.worker_entry",
         "--data-dir",
         str(tmp_path),
     ]
+    assert popen.call_args.kwargs["cwd"] == str(tmp_path)
     assert not list(tmp_path.glob("worker.*.pid"))
 
 

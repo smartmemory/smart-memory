@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import calendar
 import json
 import logging
@@ -15,8 +16,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 from smartmemory.utils.process import spawn_detached
+
+from smartmemory_app import capture_hold as hold
+from smartmemory_app import observe_classify
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +30,16 @@ log = logging.getLogger(__name__)
 CAPTURE_LLM_ENV = "SMARTMEMORY_CAPTURE_LLM"
 
 
+def _capture_opt_in_requested() -> bool:
+    """Either switch asks for AI on capture: ``SMARTMEMORY_CAPTURE_LLM=1`` (2.0) or core's per-source
+    ``SMARTMEMORY_INGEST_AI_SUMMARY`` naming ``claude_code_transcript`` (MEM-SIZE-1, main; FWD-MERGE-4)."""
+    if os.environ.get(CAPTURE_LLM_ENV, "").strip() == "1":
+        return True
+    from smartmemory.ingest.admission import CLAUDE_CODE_TRANSCRIPT, ai_opted_in
+
+    return ai_opted_in(CLAUDE_CODE_TRANSCRIPT)
+
+
 def capture_llm_opted_in() -> bool:
     """Whether transcript capture may call an LLM (extraction and session lessons). Default no.
 
@@ -33,9 +47,9 @@ def capture_llm_opted_in() -> bool:
     opt-in is ignored then (it would pin Groq behind the user's choice). An
     unreadable config keeps capture costless too. WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1:
     the opted-in pipeline and session lessons are Groq-only, so any provider other than
-    groq ignores the opt-in for the same reason.
+    groq ignores the opt-in for the same reason. Both opt-in switches pass these gates.
     """
-    if os.environ.get(CAPTURE_LLM_ENV, "").strip() != "1":
+    if not _capture_opt_in_requested():
         return False
     try:
         from smartmemory_app.config import llm_provider_none, load_config
@@ -113,28 +127,81 @@ def transition(job: dict, status: str, **details) -> dict:
         return _append(root, {**job, **details, "status": status})
 
 
+FORCED = "release_forced"
+
+
+def forced(job: dict) -> bool:
+    """True for an event released with ``--force``: the worker skips the hold and size knob."""
+    return bool(job.get(FORCED))
+
+
 def enqueue(
     session_id: str,
     transcript_path: str | None,
     workspace_id: str | None,
     cwd: str | None = None,
+    force: bool = False,
 ) -> dict:
+    """Queue a capture. At most one queued event per transcript: a newer one replaces it.
+
+    While SMARTMEMORY_CAPTURE_HOLD is on (the default) the event is parked in ``held-all/``
+    instead and comes back with status ``held``: callers spawn no worker for it.
+    ``force`` (the continuation of a forced release) skips the hold and marks the event
+    ``release_forced``. A newer event that replaces a forced one inherits the mark, so a
+    SessionEnd on a transcript the operator released never parks it again.
+    """
     root = capture_dir()
+    resolved = (
+        str(Path(transcript_path).expanduser().resolve()) if transcript_path else None
+    )
+    if resolved and hold.hold_on() and not force:
+        record = {
+            "capture_id": uuid.uuid4().hex,
+            "session_id": session_id,
+            "transcript_path": resolved,
+            "workspace_id": workspace_id,
+            "cwd": cwd,
+            "queued_at": time.time(),
+        }
+        with FileLock(str(root / "ledger.lock"), timeout=2):
+            hold.park(root, record, hold.HELD)
+        log.warning(
+            "Capture held for session %s (%s=1), release with `release-held`",
+            session_id,
+            hold.HOLD_ENV,
+        )
+        return {**record, "status": "held"}
     with FileLock(str(root / "ledger.lock"), timeout=2):
+        # A running item is not touched: the new event captures what it appends.
+        stale = (
+            [
+                j
+                for j in jobs(root)
+                if j["status"] == "queued" and j.get("transcript_path") == resolved
+            ]
+            if resolved
+            else []
+        )
+        force = force or any(forced(old) for old in stale)
         job = _append(
             root,
             {
                 "capture_id": uuid.uuid4().hex,
                 "session_id": session_id,
-                "transcript_path": str(Path(transcript_path).expanduser().resolve())
-                if transcript_path
-                else None,
+                "transcript_path": resolved,
                 "workspace_id": workspace_id,
                 "cwd": cwd,
                 "queued_at": time.time(),
                 "status": "queued",
+                **({FORCED: True} if force else {}),
             },
         )
+        # New event first: a crash between the two appends leaves a duplicate, never a gap.
+        for old in stale:
+            _append(
+                root,
+                {**old, "status": "superseded", "superseded_by": job["capture_id"]},
+            )
         if not transcript_path:
             message = "SessionEnd capture missing transcript_path"
             log.warning(message)
@@ -143,15 +210,85 @@ def enqueue(
     return job
 
 
+def hold_event(job: dict, dirname: str, why: str) -> None:
+    """Move a pending ledger event into a parking dir, one WARNING, status ``held``/``quarantined``."""
+    root = capture_dir()
+    with FileLock(str(root / "ledger.lock"), timeout=2):
+        hold.park(
+            root, job, dirname
+        )  # Durable first: a crash leaves it pending, not lost.
+        _append(
+            root,
+            {**job, "status": "held" if dirname == hold.HELD else "quarantined"},
+        )
+    log.warning(
+        "Capture %s for session %s parked in %s: %s",
+        job["capture_id"],
+        job.get("session_id"),
+        dirname,
+        why,
+    )
+
+
+DEFAULT_CAPTURE_MAX = 2
+_WORKER_PATTERN = "smartmemory_app.capture_worker"
+
+
+def _capture_max() -> int:
+    raw = os.environ.get("SMARTMEMORY_CAPTURE_MAX", "")
+    try:
+        return int(raw) if raw.strip() else DEFAULT_CAPTURE_MAX
+    except ValueError:
+        return DEFAULT_CAPTURE_MAX
+
+
+def _running_workers() -> int:
+    """Live capture workers machine-wide, as the hooks count theirs. 0 if pgrep fails."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", _WORKER_PATTERN],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    return len(out.stdout.split())
+
+
 def spawn_worker() -> None:
+    """Start a worker unless SMARTMEMORY_CAPTURE_MAX are already alive (0 = no cap).
+
+    The event is already durable, so a capped spawn loses nothing: a live worker or the
+    next SessionEnd drains it. Cap 2, not 1: a SessionEnd landing after the holder's last
+    scan must still be able to start one.
+    """
+    cap = _capture_max()
+    if cap > 0:
+        running = _running_workers()
+        if running >= cap:
+            # HOOK-LOAD-CAP-1 mechanism, same line shape as hooks/observe.sh.
+            with (capture_dir().parent / "hooks.log").open("a") as handle:
+                handle.write(
+                    f"WARNING: capture worker spawn skipped: {running} already running "
+                    f"(cap {cap}, HOOK-LOAD-CAP-1)\n"
+                )
+            return
+    spawn_successor()
+
+
+def spawn_successor() -> None:
+    """Start a worker with no cap check: a recycling worker replaces itself one for one."""
     root = capture_dir()
     with (root.parent / "hooks.log").open("a") as handle:
         spawn_detached(
-            [sys.executable, "-m", "smartmemory_app.capture_worker"],
+            [sys.executable, "-P", "-m", "smartmemory_app.capture_worker"],  # SM-DAEMON-CWD-1
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
             close_fds=True,
+            cwd=str(root.parent),  # SM-DAEMON-CWD-1: never inherit a launch dir that can be deleted
         )
 
 
@@ -180,6 +317,277 @@ def drain(timeout: float = 60) -> tuple[dict[str, int], int]:
         time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         result = counts()
     return result, 1 if result["error"] else 0
+
+
+_ACTIVE = {"queued", "running"}
+# Ledger states that mean a released event really reached the queue (a newer SessionEnd
+# for the same path may already have superseded it, which carries its work on).
+_REACHED = _ACTIVE | {"done", "error", "superseded"}
+
+
+class ReleaseRefused(Exception):
+    """The hold would park every event again."""
+
+
+def _blocked(tpath: str | None, mb: float | None, force: bool) -> str | None:
+    """Why the worker could not capture this event, or None. Checked per transcript path."""
+    if not tpath:
+        return "the event has no transcript path"
+    if mb is None:
+        return f"its transcript {tpath} cannot be read"
+    limit = hold.over_mb()
+    if not force and limit > 0 and mb > limit:
+        return (
+            f"its transcript is {mb:.0f} MB, over {hold.OVER_ENV}={limit:g}, "
+            "the worker would park it again (use --force)"
+        )
+    return None
+
+
+def _release_one(root, path, event, keep, newest_id, snapshot, queued_by_path, force):
+    """Move one parked event to the ledger under the lock. Raises Timeout/OSError."""
+    cid, tpath = event["capture_id"], event.get("transcript_path")
+    body = {k: v for k, v in event.items() if k != FORCED}
+    with FileLock(str(root / "ledger.lock"), timeout=2):
+        current = snapshot.get(cid, {})
+        active = current.get("status") in _ACTIVE
+        if keep:
+            # An event already queued is left alone unless --force must add its mark.
+            if not active or (force and not forced(current)):
+                for old in queued_by_path.pop(tpath, []):
+                    if old["capture_id"] != cid:
+                        _append(
+                            root, {**old, "status": "superseded", "superseded_by": cid}
+                        )
+                _append(
+                    root,
+                    {**body, "status": "queued", **({FORCED: True} if force else {})},
+                )
+        elif not active:
+            _append(root, {**body, "status": "superseded", "superseded_by": newest_id})
+        path.unlink(missing_ok=True)
+
+
+def release_held(
+    large: bool = False, dry_run: bool = False, force: bool = False
+) -> list[tuple[str, dict, float | None, str | None]]:
+    """Re-queue every parked event once. Returns (action, event, transcript MB, why) per file.
+
+    Actions: ``released`` (queued and read back from the ledger), ``superseded`` (an older
+    event for a path whose newest one is released), ``left`` (not released, the file stays
+    parked, one WARNING with the reason) and ``lost`` (moved, but the ledger read-back does
+    not show it queued, one WARNING). Without ``force`` an event whose transcript is over
+    the size knob is left: the worker would park it again. With ``force`` the queued event
+    is marked ``release_forced`` and the worker captures it past the hold and the knob.
+    A missing or unreadable transcript is always left. Spawns no worker: follow with
+    ``sm lifecycle drain``. A dry run moves nothing and logs nothing.
+    """
+    root = capture_dir()
+    source = hold.LARGE if large else hold.HELD
+    events = hold.parked(root, source)
+    sizes = {
+        e.get("transcript_path"): hold.size_mb(e.get("transcript_path"))
+        for _, e in events
+    }
+    if not dry_run and not force and hold.hold_on():
+        raise ReleaseRefused(f"{hold.HOLD_ENV} is on, the worker would park them again")
+    blocked = {tpath: _blocked(tpath, mb, force) for tpath, mb in sizes.items()}
+    newest = {e.get("transcript_path"): e["capture_id"] for _, e in events}
+    snapshot = {record["capture_id"]: record for record in jobs(root)}
+    queued_by_path: dict = {}
+    for record in snapshot.values():
+        if record["status"] in _ACTIVE:
+            queued_by_path.setdefault(record.get("transcript_path"), []).append(record)
+    done = []
+    for path, event in events:
+        cid, tpath = event["capture_id"], event.get("transcript_path")
+        why = blocked.get(tpath)
+        if why is None:
+            keep = newest[tpath] == cid
+            action = "released" if keep else "superseded"
+            if not dry_run:
+                try:
+                    _release_one(
+                        root,
+                        path,
+                        event,
+                        keep,
+                        newest[tpath],
+                        snapshot,
+                        queued_by_path,
+                        force,
+                    )
+                except (Timeout, OSError) as exc:
+                    action, why = "left", f"{type(exc).__name__}: {exc}"
+        else:
+            action = "left"
+        if action == "left" and not dry_run:
+            log.warning(
+                "Capture %s for session %s not released, left in %s: %s",
+                cid,
+                event.get("session_id"),
+                source,
+                why,
+            )
+        done.append((action, event, sizes.get(tpath), why))
+    return done if dry_run else _read_back(root, done, force)
+
+
+def _read_back(root, done, force):
+    """Report ``released`` only for events the ledger now shows queued (or past it)."""
+    latest = {record["capture_id"]: record for record in jobs(root)}
+    checked = []
+    for action, event, mb, why in done:
+        if action == "released":
+            record = latest.get(event["capture_id"], {})
+            status = record.get("status")
+            if status not in _REACHED or (
+                status in _ACTIVE and force and not forced(record)
+            ):
+                why = f"the ledger shows {status or 'no record'} after the release"
+                log.warning(
+                    "Capture %s for session %s was moved but is not queued: %s",
+                    event["capture_id"],
+                    event.get("session_id"),
+                    why,
+                )
+                action = "lost"
+        checked.append((action, event, mb, why))
+    return checked
+
+
+def run_release(large: bool, dry_run: bool, force: bool) -> int:
+    """CLI body shared by ``capture_queue release-held`` and ``sm lifecycle release-held``.
+
+    Exit 0 when every event was released or superseded, 1 when the release was refused or
+    any event was left or lost (a dry run exits 1 when any event would be left).
+    """
+    try:
+        done = release_held(large, dry_run, force)
+    except ReleaseRefused as exc:
+        print(f"refused: {exc}. Use --force to release anyway.", file=sys.stderr)
+        return 1
+    for action, event, mb, why in done:
+        size = "missing" if mb is None else f"{mb:.1f} MB"
+        line = f"{'would ' if dry_run else ''}{action} {event.get('session_id')} {size}"
+        print(f"{line}: {why}" if why else line)
+    tally = {
+        a: sum(d[0] == a for d in done)
+        for a in ("released", "superseded", "left", "lost")
+    }
+    failed = tally["left"] + tally["lost"]
+    summary = (
+        f"{len(done)} event(s): {tally['released']} released, {tally['superseded']} "
+        f"superseded, {failed} not released."
+    )
+    if tally["released"] and not dry_run:
+        summary += " Run `sm lifecycle drain` to start a worker."
+    print(summary)
+    return 1 if failed else 0
+
+
+ERROR_TEXT_MAX = 200
+
+
+def requeue_errors(
+    ids: list[str] | None = None, dry_run: bool = False
+) -> list[tuple[str, str, str, str, str | None]]:
+    """Move each ``error`` job back to ``queued`` once. Returns (action, id, old, new, error).
+
+    Actions: ``requeued`` (written once, new status ``queued``), ``skipped`` (a matched job
+    that is not ``error``: ``done``, ``queued``, ``running``, ``superseded`` or parked
+    ``held``, left alone, new status = old status) and ``unknown`` (an ``--id`` that
+    matches nothing). ``ids`` limits the move to those capture ids. Without ``ids`` only
+    error jobs are returned, since every other job is simply not in scope. ``error`` is the
+    previous error text truncated to ``ERROR_TEXT_MAX``. The ledger lock is held from the
+    read to the write, so a second call (or a racing worker) finds the job already
+    ``queued`` and skips it. A dry run writes nothing. Spawns no worker: follow with
+    ``sm lifecycle drain``.
+    """
+    root = capture_dir()
+    wanted = list(dict.fromkeys(ids)) if ids else None
+    out: list[tuple[str, str, str, str, str | None]] = []
+    with FileLock(str(root / "ledger.lock"), timeout=2):
+        current = {j["capture_id"]: j for j in jobs(root)}
+        parked = {e["capture_id"]: e for _, e in hold.parked(root, hold.HELD)}
+        for cid in wanted if wanted is not None else list(current):
+            job = current.get(cid)
+            if job is None:
+                if cid in parked:
+                    out.append(("skipped", cid, "held", "held", None))
+                elif wanted is not None:
+                    out.append(("unknown", cid, "unknown", "unknown", None))
+                continue
+            status = job["status"]
+            if status != "error":
+                if wanted is not None:
+                    out.append(("skipped", cid, status, status, None))
+                continue
+            text = (job.get("error") or "")[:ERROR_TEXT_MAX]
+            if not dry_run:
+                body = {
+                    k: v for k, v in job.items() if k not in ("error", "recorded_at")
+                }
+                _append(
+                    root,
+                    {
+                        **body,
+                        "status": "queued",
+                        "requeued_from": "error",
+                        "previous_error": text,
+                    },
+                )
+            out.append(("requeued", cid, "error", "queued", text))
+    return out
+
+
+def run_requeue_errors(ids: list[str] | None, dry_run: bool) -> int:
+    """CLI body of ``sm lifecycle requeue --errors``. One line per job, exit 1 on an unknown id."""
+    try:
+        done = requeue_errors(ids, dry_run)
+    except Timeout as exc:
+        print(f"refused: the capture ledger is locked: {exc}", file=sys.stderr)
+        return 1
+    for action, cid, old, new, text in done:
+        line = f"{'would ' if dry_run else ''}{action} {cid} {old} -> {new}"
+        print(f"{line}: {text}" if text else line)
+    tally = {
+        a: sum(d[0] == a for d in done) for a in ("requeued", "skipped", "unknown")
+    }
+    summary = (
+        f"{len(done)} job(s): {tally['requeued']} requeued, {tally['skipped']} "
+        f"skipped, {tally['unknown']} unknown."
+    )
+    if tally["requeued"] and not dry_run:
+        summary += " Run `sm lifecycle drain` to start a worker."
+    print(summary)
+    return 1 if tally["unknown"] else 0
+
+
+RELEASE_HELP = (
+    "Move parked capture events back to the queue once, one line per event. Default source "
+    "is held-all/, --large uses quarantine-large/. Refused while SMARTMEMORY_CAPTURE_HOLD is "
+    "on unless --force. Without --force an event over SMARTMEMORY_CAPTURE_HOLD_OVER_MB is "
+    "left parked with a warning, since the worker would park it again. --force marks the "
+    "events so the worker captures them past the hold and the size knob. An event whose "
+    "transcript is missing is always left. Exits 1 if any event is left. --dry-run lists "
+    "without moving. Starts no worker: follow with `sm lifecycle drain`."
+)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="capture_queue")
+    sub = parser.add_subparsers(dest="command", required=True)
+    rel = sub.add_parser("release-held", help=RELEASE_HELP, description=RELEASE_HELP)
+    rel.add_argument("--large", action="store_true", help="release quarantine-large/")
+    rel.add_argument("--dry-run", action="store_true", help="list, move nothing")
+    rel.add_argument(
+        "--force",
+        action="store_true",
+        help="release past the hold and the size knob, the worker captures them",
+    )
+    args = parser.parse_args(argv)
+    return run_release(args.large, args.dry_run, args.force)
 
 
 # ── Hook write queue (HOOK-WRITE-QUEUE-1) ──────────────────────────────────────
@@ -261,7 +669,7 @@ def _contain_payloads(root: Path, record: dict) -> None:
         if str(root) not in _foreign_payload_roots:
             _foreign_payload_roots.add(str(root))
             log.warning(
-                "Hook queue %s: a record names %s outside this queue; reading payloads from %s "
+                "Hook queue %s: a record names %s outside this queue, reading payloads from %s "
                 "instead (one warning per queue)",
                 root,
                 value,
@@ -525,7 +933,7 @@ def hook_io_failure(
     _io_failures.pop(key, None)
     if not dead_letter:
         log.warning(
-            "Hook %s job %s (session %s) was written but its record could not be removed after %d attempts; "
+            "Hook %s job %s (session %s) was written but its record could not be removed after %d attempts, so "
             "it stays in %s and the next daemon start writes it a second time: %s",
             job.get("phase"),
             path.name,
@@ -544,7 +952,7 @@ def hook_io_failure(
             max_attempts - 1
         )  # try the rename again after the next backoff
         log.warning(
-            "Hook %s job %s (session %s) not moved to dead/ either (%s); it stays in %s and is retried",
+            "Hook %s job %s (session %s) not moved to dead/ either (%s), so it stays in %s and is retried",
             job.get("phase"),
             path.name,
             job.get("session_id"),
@@ -604,7 +1012,7 @@ def recover_running(root: Path, *, max_attempts: int) -> int:
             except OSError as again:
                 log.warning(
                     "Hook %s job %s (session %s) left in running/ by a dead worker could not be requeued "
-                    "(%s, then %s); it waits there until the next start",
+                    "(%s, then %s), so it waits there until the next start",
                     job.get("phase"),
                     source.name,
                     job.get("session_id"),
@@ -638,7 +1046,7 @@ def mark_interrupted(root: Path, jobs: list[dict]) -> None:
         )
     except OSError as exc:
         log.warning(
-            "Hook queue %s: interrupted jobs not recorded (%s); recovery counts them as attempts",
+            "Hook queue %s: interrupted jobs not recorded (%s), so recovery counts them as attempts",
             root,
             exc,
         )
@@ -656,7 +1064,8 @@ def requeue_dead_hooks(
     """Move hook ``dead/`` records back to ``queue/`` with a fresh attempt count.
 
     Returns (action, file name, detail). ``requeued`` keeps ``queued_ns`` so the job takes its
-    old place in its session's order. ``skipped`` covers a raw ``spill-*`` file (a malformed spill
+    old place in its session's order. ``quarantined`` is an adopted observe spill job that the
+    remote-skip classifier rejects (``_quarantine_dead_spill``). ``skipped`` covers a raw ``spill-*`` file (a malformed spill
     envelope, not a job; an adopted spill job requeues like any other), a record with no known
     phase, a payload that is gone, and a name that is already in queue/ or running/. ``unknown`` is a requested name not in dead/. ``names``
     limits the move (file names, ``.json`` optional).
@@ -710,6 +1119,27 @@ def requeue_dead_hooks(
         if any((root / sub / name).exists() for sub in ("queue", "running")):
             out.append(("skipped", name, "already in queue/ or running/"))
             continue
+        # SM-SPILL-ADOPT-CLASSIFY-1: an adopted observe spill may predate the remote-skip check.
+        why = (
+            _classify_job_payload(record)
+            if is_spill and record["phase"] == "observe"
+            else None
+        )
+        if why is not None:
+            if not dry_run:
+                try:
+                    _quarantine_dead_spill(root, path, record, why)
+                except (OSError, ValueError) as exc:  # stays in dead/, never queued
+                    out.append(
+                        (
+                            "skipped",
+                            name,
+                            f"rejected ({why}), left in dead/: {type(exc).__name__}",
+                        )
+                    )
+                    continue
+            out.append(("quarantined", name, why))
+            continue
         if not dry_run:
             for key in ("attempts", "last_error", "failed_at"):
                 record.pop(key, None)
@@ -728,11 +1158,12 @@ def run_requeue_dead_hooks(
     for action, name, detail in done:
         print(f"{'would ' if dry_run else ''}{action} {name}: {detail}")
     tally = {
-        a: sum(d[0] == a for d in done) for a in ("requeued", "skipped", "unknown")
+        a: sum(d[0] == a for d in done)
+        for a in ("requeued", "quarantined", "skipped", "unknown")
     }
     print(
-        f"{len(done)} record(s): {tally['requeued']} requeued, {tally['skipped']} "
-        f"skipped, {tally['unknown']} unknown."
+        f"{len(done)} record(s): {tally['requeued']} requeued, {tally['quarantined']} "
+        f"quarantined, {tally['skipped']} skipped, {tally['unknown']} unknown."
     )
     return 1 if tally["unknown"] else 0
 
@@ -811,7 +1242,7 @@ def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
     _spill_warn_once(
         path,
         "malformed",
-        "Hook spill file %s is malformed, moving it to %s/dead/spill-%s; its write is lost until requeued by hand: %s",
+        "Hook spill file %s is malformed, moving it to %s/dead/spill-%s, so its write is lost until requeued by hand: %s",
         path.name,
         root,
         path.name,
@@ -830,6 +1261,70 @@ def _dead_letter_spill(root: Path, path: Path, error: str) -> None:
             exc,
             error,
         )
+
+
+# SM-SPILL-ADOPT-CLASSIFY-1: an observe spill that the remote-skip classifier rejects (``observe_classify``,
+# the ops hook's OBSERVE-SPILL-SKIP-REMOTE-1 check) is never queued. It moves to ``hook-spill/quarantine/``,
+# the folder ops ``observe_drain.py`` moves its own rejects to; ``adopt_spill`` lists only top-level files,
+# so a quarantined file is never adopted again. Logs name the file and the reject class, never the payload.
+SPILL_QUARANTINE = "quarantine"
+
+
+def _spill_quarantine_dir(spill_dir: Path) -> Path:
+    quarantine = spill_dir / SPILL_QUARANTINE
+    quarantine.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return quarantine
+
+
+def _quarantine_spill(spill_dir: Path, path: Path, why: str) -> None:
+    """Move one rejected spill file aside. ``OSError`` keeps it in place for a later pass (never queued)."""
+    quarantine = _spill_quarantine_dir(spill_dir)
+    try:
+        path.rename(quarantine / path.name)
+    except FileNotFoundError:
+        return
+    log.warning(
+        "Hook spill file %s not adopted: remote or infra payload, not provably local (%s), "
+        "moved to %s (SM-SPILL-ADOPT-CLASSIFY-1)",
+        path.name,
+        why,
+        quarantine,
+    )
+
+
+def _classify_job_payload(record: dict) -> str | None:
+    """Reject class for a queued observe job's payload file, or None. Unreadable = reject (fail closed)."""
+    try:
+        payload = json.loads(Path(record["payload_path"]).read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return observe_classify.CLASSIFIER_FAILED
+    return observe_classify.classify(payload)
+
+
+def _quarantine_dead_spill(root: Path, path: Path, record: dict, why: str) -> None:
+    """Turn a rejected adopted spill job in ``dead/`` back into a spill envelope in the quarantine folder.
+
+    The envelope is written durably before the job's payload and record are deleted, so a crash
+    between them leaves a copy in both places; the next requeue rewrites the same quarantine file.
+    """
+    spill_name = record.get("spill")
+    if not (isinstance(spill_name, str) and _SPILL_NAME.match(spill_name)):
+        spill_name = path.name
+    payload_path = Path(record["payload_path"])
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    quarantine = _spill_quarantine_dir(hook_spill_dir(root))
+    envelope = {"v": 1, "phase": record["phase"], "payload": payload}
+    _write_durable(quarantine / spill_name, json.dumps(envelope) + "\n")
+    payload_path.unlink(missing_ok=True)
+    path.unlink(missing_ok=True)
+    log.warning(
+        "Hook job %s not requeued: remote or infra payload, not provably local (%s), "
+        "moved to %s/%s (SM-SPILL-ADOPT-CLASSIFY-1)",
+        path.name,
+        why,
+        quarantine,
+        spill_name,
+    )
 
 
 def adopt_spill(root: Path, spill_dir: Path | None = None) -> int:
@@ -942,6 +1437,11 @@ def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
         )
         return False
     payload = envelope["payload"]
+    if phase == "observe":
+        why = observe_classify.classify(payload)  # never raises: an error is a reject
+        if why is not None:
+            _quarantine_spill(spill_dir, path, why)
+            return False
     body = payload if isinstance(payload, dict) else {}
     session = body.get("session_id")
     cwd = body.get("cwd")
@@ -970,7 +1470,7 @@ def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
         _spill_warn_once(
             path,
             "unlink",
-            "Hook spill file %s is queued as %s but was not deleted; if its job finishes first, "
+            "Hook spill file %s is queued as %s but was not deleted: if its job finishes first, "
             "the next pass queues it a second time: %s",
             name,
             job_name,
@@ -978,8 +1478,12 @@ def _adopt_one(root: Path, spill_dir: Path, path: Path) -> bool:
         )
     if phase == "distill":
         log.warning(
-            "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none); "
+            "Spilled distill %s adopted without a prompt snapshot (the spilling hook took none), so "
             "its response is stored unpaired with its prompt",
             name,
         )
     return True
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

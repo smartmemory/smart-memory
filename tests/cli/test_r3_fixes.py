@@ -277,11 +277,10 @@ def test_toml_only_data_dir_hook_marker_agreement(monkeypatch, tmp_path):
     )
     assert config.load_config().data_dir == str(custom)
     # Override only the unrelated fixture's fake log path with config's real path.
-    monkeypatch.setattr(
-        bug_report,
-        "debug_log_path",
-        lambda: Path(config.load_config().data_dir) / "cli-debug.log",
-    )
+    config_log = lambda: Path(config.load_config().data_dir) / "cli-debug.log"  # noqa: E731
+    monkeypatch.setattr(bug_report, "debug_log_path", config_log)
+    # The reporter resolves the install id and outbox beside this same path.
+    monkeypatch.setattr(crash_reporter, "debug_log_path", config_log)
     hook = Path(__import__("smartmemory_app").__file__).parent / "hooks/recall.sh"
     env = os.environ.copy()
     env["PATH"] = "/usr/bin:/bin"

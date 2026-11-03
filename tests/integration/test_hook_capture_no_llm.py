@@ -66,6 +66,7 @@ def lite_env(tmp_path, monkeypatch):
     for name in (
         "SMARTMEMORY_CAPTURE_OFFLINE",
         "SMARTMEMORY_CAPTURE_LLM",
+        "SMARTMEMORY_INGEST_AI_SUMMARY",
         "SMARTMEMORY_COSTLESS_ORIGINS",
         "SMARTMEMORY_WORKSPACE_ID",
         "SMARTMEMORY_LLM_MODEL",
@@ -212,8 +213,10 @@ def _capture(tmp_path, ws):
             "cwd": str(tmp_path),
         }
     )
-    # Session lessons are an LLM step: costless capture skips them with a named degradation.
-    assert "SMARTMEMORY_CAPTURE_LLM=1" in result["degradation"]
+    # Session lessons are an LLM step: costless capture skips them (MEM-SIZE-1, not a degradation, so the
+    # whole-file retry never re-runs the import for them).
+    assert result["lessons_skipped"] is True
+    assert not result.get("degradation"), result.get("degradation")
     assert result["chunks_ingested"] >= 1
 
 

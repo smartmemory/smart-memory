@@ -182,7 +182,7 @@ def show_reextract_offer(emit) -> None:
             emit(offer)
     except Exception:
         log.warning(
-            "Re-extraction notice unavailable; run sm admin reextract to inspect the backlog",
+            "Re-extraction notice unavailable, run sm admin reextract to inspect the backlog",
             exc_info=True,
         )
 

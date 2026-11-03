@@ -123,6 +123,7 @@ def sqlite_golden(tmp_path, monkeypatch, isolated_support_diagnostics):
                 monkeypatch.delenv(name)
         for name, value in {
             "HOME": str(home),
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
             "USERPROFILE": str(home),
             "APPDATA": str(home / "appdata"),
             "XDG_CONFIG_HOME": str(home / ".config"),

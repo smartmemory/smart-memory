@@ -2,11 +2,15 @@
 
 import contextlib
 import json
+import logging
 import os
 import shutil
+import socket
 import sqlite3
 import time
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 REINDEX = "Fix: smartmemory admin reindex (re-embeds saved items)"
 LEXICAL = "Fix: smartmemory rebuild --lexical"
@@ -69,6 +73,33 @@ def _item_count(data_dir: Path) -> int | None:
         ).fetchone()[0]
 
 
+def describe_snapshot(state: dict, rows: int | None):
+    """`UsearchVectorBackend.describe()` answered from one collection's committed state.
+
+    Opening the real backend creates files, migrates legacy snapshots and waits on the
+    daemon's write lock (measured 2026-10-21: an empty directory gained `memory.fts.db`,
+    and a held writer blocked construction 5.26 s against this probe's ~1 s budget), so the
+    doctor reads the state read-only and borrows the backend class's own `describe()` over
+    it. Name, tenancy, capabilities and the dimension/model fields therefore come from the
+    one implementation `/vector/stats` uses (`tests/test_local_api_vector.py` pins equality).
+    `state` is the `vec_state_*` rows, `rows` the `vec_meta_*` membership count or None.
+    """
+    import threading
+
+    from smartmemory.stores.vector.backends.usearch import UsearchVectorBackend
+
+    class _Snapshot(UsearchVectorBackend):
+        def __init__(self):  # no files, no SQLite connection: state only
+            self._lock = threading.RLock()
+            self._dim = json.loads(state.get("dim", "null"))
+            self._model_id = json.loads(state.get("model_id", "null"))
+
+        def count(self):
+            return rows
+
+    return _Snapshot().describe()
+
+
 def vector_rows(data_dir: Path, expected_dimension: int | None) -> list[str]:
     """Discover collection paths from committed usearch state, including reindex snapshots."""
     from usearch.index import Index
@@ -84,10 +115,21 @@ def vector_rows(data_dir: Path, expected_dimension: int | None) -> list[str]:
                 quoted = table.replace('"', '""')
                 state = dict(db.execute(f'SELECT k, v FROM "{quoted}"'))
                 filename = json.loads(state.get("index_file", "null"))
-                dimension = json.loads(state.get("dim", "null"))
                 if filename is not None and Path(filename).name != filename:
                     raise ValueError("Invalid index filename in vector state")
-                collections.append((filename, dimension, state.get("collection_name")))
+                meta = f"vec_meta_{table[len('vec_state_') :]}".replace('"', '""')
+                try:
+                    membership = db.execute(
+                        f'SELECT count(*) FROM "{meta}"'
+                    ).fetchone()[0]
+                except sqlite3.OperationalError:
+                    membership = (
+                        None  # state without its membership table: unknown, not fatal
+                    )
+                info = describe_snapshot(state, membership)
+                collections.append(
+                    (filename, info.dimension, state.get("collection_name"))
+                )
     # Legacy snapshots with no committed state are inspected without migration.
     if not collections:
         collections = [
@@ -253,7 +295,7 @@ def lock_row(data_dir: Path) -> str:
         return "Write lock: OK (absent)"
     return (
         "Write lock: warning: ownership unverified (lock file exists, no verified owner metadata). "
-        "Fix: smartmemory stop and disconnect MCP clients before writing; no lock was acquired or deleted."
+        "Fix: smartmemory stop and disconnect MCP clients before writing, no lock was acquired or deleted."
     )
 
 
@@ -279,7 +321,7 @@ def dependency_rows(data_dir: Path):
         if backend.priority > 0 or os.name == "nt"
         else "warning: no usable backend"
     )
-    hint = ". Fix: smartmemory setup --mode remote" if status != "OK" else ""
+    hint = ". Fix: sm login" if status != "OK" else ""
     yield f"Keyring: {status} ({name}{fallback}){hint}"
     if os.name == "nt":
         from smartmemory_app.setup import _resolve_hook_shell
@@ -301,9 +343,58 @@ def dependency_rows(data_dir: Path):
             ". Fix: free disk space, then smartmemory setup" if free < 1024**3 else ""
         )
         yield f"Free disk {name}: {'warning: <1 GB' if free < 1024**3 else 'OK'} ({free // (1024**2)} MiB){hint}"
+    yield from daemon_port_rows(load_config().daemon_port)
+
+
+def _port_probe_row(port: int) -> str:
+    """Identify the port's holder without listing other processes' sockets.
+
+    macOS lets only root list system-wide sockets, so ``psutil.net_connections``
+    raises AccessDenied for an ordinary user even when the holder is our own
+    daemon. A loopback connect says whether anything listens, and the daemon's
+    ``/health`` reply says whether that something is SmartMemory.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(0.5)
+        listening = probe.connect_ex(("127.0.0.1", port)) == 0
+    if not listening:
+        return f"Daemon port: OK ({port}, free)"
+    from smartmemory_app.daemon import _health_response
+
+    try:
+        health = _health_response(2).json()
+    except Exception:
+        health = {}
+    if health.get("service") == "smartmemory":
+        return f"Daemon port: OK ({port}, SmartMemory listener)"
+    from smartmemory_app.port_probe import STALE, UNKNOWN, probe_port
+
+    held = probe_port(port)
+    if held.state in (STALE, UNKNOWN):
+        return _restart_row(port, held)
+    return (
+        f"Daemon port: warning: {port} is in use by a process that does not answer as SmartMemory. "
+        f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
+    )
+
+
+def _restart_row(port: int, held) -> str:
+    """A holder that is, or may be, our own daemon: restart it, never "change ports"."""
+    who = f" ({held.holder})" if held.pid else ""
+    what = (
+        "an older or hung SmartMemory daemon"
+        if held.state == "stale"
+        else "a process that is not answering and could not be identified (it may be a hung SmartMemory daemon)"
+    )
+    return (
+        f"Daemon port: warning: {port} is held by {what}{who}. "
+        f"Fix: smartmemory stop, then smartmemory start"
+    )
+
+
+def daemon_port_rows(port: int):
     import psutil
 
-    port = load_config().daemon_port
     try:
         listeners = [
             c
@@ -311,22 +402,36 @@ def dependency_rows(data_dir: Path):
             if c.laddr.port == port and c.status == psutil.CONN_LISTEN
         ]
         for connection in listeners:
-            process = psutil.Process(connection.pid) if connection.pid else None
-            command = " ".join(process.cmdline()) if process else ""
-            if (
-                "smartmemory_app.viewer_server" in command
-                or "smartmemory" in command
-                and " start" in command
-            ):
+            # Identity by handshake (CLI-PORT-CONFLICT-1), not a command-line guess.
+            from smartmemory_app.port_probe import LIVE, STALE, UNKNOWN, probe_port
+
+            held = probe_port(port)
+            if held.state == LIVE:
                 yield f"Daemon port: OK ({port}, SmartMemory listener)"
+            elif held.state in (STALE, UNKNOWN):
+                yield _restart_row(port, held)
             else:
+                who = f" ({held.holder})" if held.pid else ""
                 yield (
-                    f"Daemon port: warning: {port} held by a non-SmartMemory or unverified process. "
+                    f"Daemon port: warning: {port} held by a non-SmartMemory or unverified process{who}. "
                     f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"
                 )
         if not listeners:
             yield f"Daemon port: OK ({port}, free)"
+    except psutil.AccessDenied as exc:
+        log.warning(
+            "Daemon port %s: system-wide socket listing denied (%s, macOS needs root), "
+            "identifying the holder by connect probe and /health instead",
+            port,
+            exc,
+        )
+        yield _port_probe_row(port)
     except (psutil.Error, OSError) as exc:
+        log.warning(
+            "Daemon port %s: socket listing failed (%s), so the port holder is not identified",
+            port,
+            type(exc).__name__,
+        )
         yield (
             f"Daemon port: warning: owner unavailable ({type(exc).__name__}). "
             f"Fix: choose a free SMARTMEMORY_DAEMON_PORT, then smartmemory start"

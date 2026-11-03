@@ -390,3 +390,48 @@ def test_warmup_handled_failure_keeps_traceback(monkeypatch, tmp_path):
     text = (tmp_path / "daemon.log").read_text()
     assert "Background startup failed" in text and "Traceback" in text
     assert KEY not in text
+
+
+# SUPPORT-BUNDLE-REDACT-1: env-sourced values print as $NAME (env) in every
+# archive member, the same contract `sm doctor` follows. One row per env name
+# a member can carry, with the member that carries it.
+_BUNDLE_ENV = [
+    ("SMARTMEMORY_TEAM_ID", "config.txt"),
+    ("SMARTMEMORY_LLM_PROVIDER", "config.txt"),
+    ("SMARTMEMORY_LLM_MODEL", "config.txt"),
+    ("SMARTMEMORY_EMBEDDING_PROVIDER", "config.txt"),
+    ("SMARTMEMORY_DATA_DIR", "doctor.txt"),
+    ("OPENAI_MODEL", "cli-debug.log"),
+    ("SMARTMEMORY_WORKSPACE_ID", "daemon.log"),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "member"), _BUNDLE_ENV, ids=[n for n, _ in _BUNDLE_ENV]
+)
+def test_bundle_members_mask_env_values(name, member, monkeypatch, tmp_path):
+    canary = f"DR1CANARY_{name}_73a"
+    monkeypatch.setenv(name, canary)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(
+        bug_report, "debug_log_path", lambda: tmp_path / "cli-debug.log"
+    )
+    for log in ("cli-debug.log", "daemon.log"):
+        (tmp_path / log).write_text(f"2026-10-17 12:00:00 INFO seen {canary} here\n")
+    doctor_output = f"Storage: Data directory: {canary}, writable\nDoctor finished with OSError: {canary}\n"
+    texts = support.support_texts(doctor_output, "my own message")
+    assert set(texts) >= {
+        "doctor.txt",
+        "environment.txt",
+        "config.txt",
+        "cli-debug.log",
+        "daemon.log",
+    }
+    for text_name, text in texts.items():
+        assert canary not in text, text_name
+    assert f"${name} (env)" in texts[member]
+    path = support.write_support_bundle(
+        tmp_path / "support.zip", doctor_output, texts=texts
+    )
+    with zipfile.ZipFile(path) as archive:
+        assert all(canary not in archive.read(n).decode() for n in archive.namelist())

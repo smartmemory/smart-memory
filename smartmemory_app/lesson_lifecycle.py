@@ -141,7 +141,7 @@ def failed_claim(receipt, identity, reason):
         receipt.get("lifecycle_unverified_claims", 0) + 1
     )
     log.warning(
-        "Session lifecycle claim %s rejected: %s; keeping both", identity, reason
+        "Session lifecycle claim %s rejected: %s, keeping both", identity, reason
     )
 
 
@@ -273,7 +273,7 @@ def downgrade(row, reason):
     row["relation"] = "unrelated"
     row["downgrade_reason"] = reason
     log.info(
-        "Session lesson pair %s/%s: %s; keeping both",
+        "Session lesson pair %s/%s: %s, keeping both",
         row["lesson"],
         row["old_id"],
         reason,
@@ -502,7 +502,7 @@ def validate_pairs(pairs, turns, rows, receipt, changes):
         else:
             chosen = min(successors, key=lambda r: r["lesson"])
             log.info(
-                "Successor primary fallback for %s: %s marked; lowest lesson %s",
+                "Successor primary fallback for %s: %s marked, lowest lesson %s",
                 old_id,
                 len(primary),
                 chosen["lesson"],

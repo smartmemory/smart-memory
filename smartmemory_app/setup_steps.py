@@ -88,6 +88,36 @@ def local_setup_plan(
     return steps
 
 
+# SETUP-RESUMABLE-1: the checks that prove setup worked, run after the install steps.
+# Neither has a measurement row, so neither prints an estimate (only the real elapsed time).
+VERIFY_STEPS = (
+    PlanStep("mode", "Mode checked", "Checking which mode the CLI runs in"),
+    PlanStep(
+        "roundtrip", "Save and recall checked", "Saving and recalling a test memory"
+    ),
+)
+
+
+def remote_setup_plan() -> list[PlanStep]:
+    """The ordered steps of a remote setup, checks included."""
+    return [
+        PlanStep("auth", "Remote login checked", "Checking your API key"),
+        PlanStep("hooks", "Hooks installed", "Installing Claude Code hooks"),
+        PlanStep("skills", "Skills installed", "Installing Claude Code skills"),
+        PlanStep("register", "Hooks registered", "Registering the hooks"),
+        *VERIFY_STEPS,
+    ]
+
+
+def setup_plan(
+    mode: str, embedding_provider: str = "local", *, restart: bool = False
+) -> list[PlanStep]:
+    """The one ordered step list of a setup run: install steps, then the checks."""
+    if mode == "remote":
+        return remote_setup_plan()
+    return [*local_setup_plan(embedding_provider, restart=restart), *VERIFY_STEPS]
+
+
 def format_estimate(seconds: float) -> str:
     """Round a measured duration to a phrase that follows "about", never to false precision."""
     if seconds <= 5:

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from smartmemory_app.config import get_api_key, set_api_key
+from smartmemory_app.hints import LOGIN_HINT
 
 log = logging.getLogger(__name__)
 
@@ -169,7 +170,7 @@ class RemoteMemory:
         """Explicit hosted operation: raise on errors, preserving quota details."""
         if not self._access_token:
             raise RemoteBackendError(
-                "No SmartMemory API key configured. Run: smartmemory setup --mode remote --api-key KEY",
+                f"No SmartMemory API key configured. {LOGIN_HINT}",
                 401,
             )
         result = self._request(method, path, **kwargs)
@@ -179,7 +180,7 @@ class RemoteMemory:
             detail = body.get("detail", body) if isinstance(body, dict) else body
             detail = detail if isinstance(detail, str) else json.dumps(detail)
             if status == 401:
-                message = "SmartMemory API key is invalid or expired. Run: smartmemory setup --mode remote --api-key KEY"
+                message = f"SmartMemory API key is invalid or expired. {LOGIN_HINT}"
             elif status in (403, 429):
                 message = (
                     f"SmartMemory service refused the request (HTTP {status}): {detail}"
@@ -419,7 +420,7 @@ class RemoteMemory:
             )
         if any(key not in response for key in result.parse_summary()):
             log.warning(
-                "Server omitted code diagnostic evidence; missing counts/outcomes reported as unknown"
+                "Server omitted code diagnostic evidence, missing counts/outcomes reported as unknown"
             )
         result.entities_created, result.edges_created = expected
         result.replaced = True
@@ -437,7 +438,7 @@ class RemoteMemory:
             result.embeddings_generated = embedded
             if embedded < result.entities_created:
                 log.warning(
-                    "Hosted code index embedded %d of %d entities; semantic code search coverage is partial.",
+                    "Hosted code index embedded %d of %d entities, semantic code search coverage is partial.",
                     embedded,
                     result.entities_created,
                 )

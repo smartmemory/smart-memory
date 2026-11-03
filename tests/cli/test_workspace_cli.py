@@ -171,6 +171,15 @@ def remote(isolated, monkeypatch):
             return httpx.Response(200, json=TEAMS)
         if path.endswith("/memory/ingest"):
             return httpx.Response(200, json={"item_id": "remote_item"})
+        if path.endswith("/memory/routing/session") and request.method == "PUT":
+            # WS-ROUTING-4: svc-api's session lever; `session_status` makes it refuse.
+            status = state.get("session_status", 200)
+            body = json.loads(request.content)
+            if status != 200:
+                return httpx.Response(
+                    status, json={"detail": "insufficient_team_permissions"}
+                )
+            return httpx.Response(200, json={**body, "set_via": "cli_switch"})
         return httpx.Response(404, json={"detail": f"unexpected {path}"})
 
     transport = httpx.MockTransport(handle)
@@ -372,6 +381,7 @@ REMOTE_ROWS = [
         "out": ["Created workspace Launch (ws_created", "sm workspace switch Launch"],
         "posted": {"name": "Launch", "team_id": DEFAULT_TEAM},
         "team_after": DEFAULT_TEAM,
+        "session_puts": [],
     },
     {
         "id": "remote-create-switch-custom-team",
@@ -380,6 +390,12 @@ REMOTE_ROWS = [
         "out": ["Created workspace Launch"],
         "posted": {"name": "Launch", "team_id": "team_x"},
         "team_after": "ws_created00000000000000000000000",
+        "session_puts": [
+            {
+                "workspace_id": "ws_created00000000000000000000000",
+                "client_key": "app:cli",
+            }
+        ],
     },
     {
         "id": "remote-create-duplicate-name",
@@ -393,6 +409,7 @@ REMOTE_ROWS = [
         "exit": 0,
         "out": [f"Switched to workspace Demo ({OTHER_WS})", "MISMATCH"],
         "team_after": OTHER_WS,
+        "session_puts": [{"workspace_id": OTHER_WS, "client_key": "app:cli"}],
     },
     {
         "id": "remote-switch-by-id",
@@ -401,6 +418,7 @@ REMOTE_ROWS = [
         "exit": 0,
         "out": ["Switched to workspace Personal", "MATCH"],
         "team_after": DEFAULT_TEAM,
+        "session_puts": [{"workspace_id": DEFAULT_TEAM, "client_key": "app:cli"}],
     },
     {
         "id": "remote-switch-unknown",
@@ -408,6 +426,7 @@ REMOTE_ROWS = [
         "exit": 1,
         "out": ["No workspace named or numbered 'nope'", "--force"],
         "team_after": DEFAULT_TEAM,
+        "session_puts": [],
     },
     {
         "id": "remote-switch-env-var-wins-warning",
@@ -417,12 +436,37 @@ REMOTE_ROWS = [
         "err": ["SMARTMEMORY_TEAM_ID is set in this shell and wins"],
         "team_after": OTHER_WS,
     },
+    # WS-ROUTING-4: the server refuses or predates the session lever. The local switch still happens, with a WARNING.
+    {
+        "id": "remote-switch-session-refused-warns",
+        "session_status": 403,
+        "args": ["workspace", "switch", "Demo"],
+        "exit": 0,
+        "out": [f"Switched to workspace Demo ({OTHER_WS})"],
+        "err": [
+            "WARNING: server-side selection not saved",
+            "HTTP 403",
+            "still uses the new workspace",
+        ],
+        "team_after": OTHER_WS,
+        "session_puts": [{"workspace_id": OTHER_WS, "client_key": "app:cli"}],
+    },
+    {
+        "id": "remote-switch-older-service-warns",
+        "session_status": 404,
+        "args": ["workspace", "switch", "Demo"],
+        "exit": 0,
+        "err": ["WARNING: server-side selection not saved", "HTTP 404"],
+        "team_after": OTHER_WS,
+    },
 ]
 
 
 @pytest.mark.parametrize("row", REMOTE_ROWS, ids=[r["id"] for r in REMOTE_ROWS])
 def test_workspace_remote(remote, monkeypatch, row):
-    calls, _ = remote
+    calls, state = remote
+    if "session_status" in row:
+        state["session_status"] = row["session_status"]
     cfg = config.load_config()
     cfg.team_id = row.get("team", DEFAULT_TEAM)
     config.save_config(cfg)
@@ -443,6 +487,13 @@ def test_workspace_remote(remote, monkeypatch, row):
         assert json.loads(posts[-1].content) == row["posted"]
     if "team_after" in row:
         assert saved_team_id() == row["team_after"]
+    if "session_puts" in row:
+        puts = [
+            c
+            for c in calls
+            if c.method == "PUT" and c.url.path == "/api/memory/routing/session"
+        ]
+        assert [json.loads(c.content) for c in puts] == row["session_puts"]
     paths = {c.url.path for c in calls}
     assert {"/api/auth/me", "/api/memory/workspaces", "/api/memory/teams"} <= paths
 

@@ -93,10 +93,7 @@ def doctor_summary(*, timeout: float = 9.0) -> list[str]:
 def relevant_hint(exc: BaseException, rows: list[str]) -> str:
     text = str(exc).lower()
     if "key validation" in text or "api url" in text or "remote authentication" in text:
-        return (
-            "Remote authentication failed. "
-            "Fix: smartmemory setup --mode remote --api-url <your-service> --api-key <valid-key>"
-        )
+        return "Remote authentication failed. Fix: sm login"
     priorities = (
         ("busy" in text or "reset refused" in text, "Write lock"),
         ("bash" in text, "Git Bash"),
@@ -149,6 +146,7 @@ def handled_install_failure(
             "queued": "Automatic crash report queued for the next CLI or daemon start.",
             "disabled": "Automatic crash reporting disabled (SMARTMEMORY_CRASH_REPORTS=0 or config).",
             "suppressed": "Automatic crash report suppressed (duplicate or rate limit).",
+            "expected": "Expected condition, not a crash: no report sent.",
             "failed": "Automatic crash report could not be sent. Run smartmemory report --zip.",
         }.get(result.status, f"Report ID {result.report_id}")
         click.echo(notice, err=True)

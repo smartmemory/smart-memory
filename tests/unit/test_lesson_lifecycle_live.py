@@ -11,7 +11,7 @@ from tests._capture_llm import opt_in_capture_llm
 FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_lifecycle_live"
 
 
-def test_live_responses_three_sessions(tmp_path, monkeypatch):
+def test_live_responses_three_sessions(tmp_path, monkeypatch, provider_pin_isolated):
     from smartmemory.pipeline.config import PipelineConfig
     from smartmemory.tools.factory import create_lite_memory
 

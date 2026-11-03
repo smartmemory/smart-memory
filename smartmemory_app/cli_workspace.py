@@ -531,10 +531,37 @@ def _switch_local(ws_id: Optional[str], label: str) -> None:
     _warn_env_wins(ENV_WORKSPACE, os.environ.get(ENV_WORKSPACE), ws_id or "")
 
 
+SESSION_CLIENT_KEY = "app:cli"
+
+
 def _switch_remote(cfg, ws_id: str) -> None:
     cfg.team_id = ws_id
     save_config(cfg)
     _warn_env_wins(ENV_TEAM, os.environ.get(ENV_TEAM), ws_id)
+    _save_session_selection(cfg, ws_id)
+
+
+def _save_session_selection(cfg, ws_id: str) -> None:
+    """WS-ROUTING-4: also save the pick server-side, so a header-less write from this client lands there too.
+
+    The local config stays the CLI's own source of truth, so a refusal or an older service warns and the switch
+    still succeeds. No mismatch preflight: the switch itself just changed the workspace on purpose.
+    """
+    from smartmemory_app.remote_cli import _request_memory
+
+    try:
+        _request_memory(
+            cfg,
+            "PUT",
+            "/memory/routing/session",
+            json={"workspace_id": ws_id, "client_key": SESSION_CLIENT_KEY},
+        )
+    except Exception as exc:  # the local switch already happened; say what was lost
+        click.echo(
+            f"WARNING: server-side selection not saved ({exc}). "
+            "The CLI still uses the new workspace from its config.",
+            err=True,
+        )
 
 
 @workspace_group.command("switch")

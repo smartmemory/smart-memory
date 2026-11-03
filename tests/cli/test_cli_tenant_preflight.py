@@ -232,7 +232,7 @@ def test_mismatch_config_source_names_the_setup_command(hosted, monkeypatch):
     result = run(["search", "web"])
     assert result.exit_code == 0, result.output
     assert f"workspace {CLI_TEAM} (from the config file)" in result.stderr
-    assert "smartmemory setup --mode remote" in result.stderr
+    assert "`sm login`" in result.stderr
 
 
 def test_mismatch_with_results_warns_without_the_empty_hint(hosted):

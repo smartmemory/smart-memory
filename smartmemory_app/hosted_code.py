@@ -48,7 +48,7 @@ def prepare_code_index(
             )
         if revision.dirty:
             log.warning(
-                "Hosted code index of %s includes uncommitted changes; stamped %s",
+                "Hosted code index of %s includes uncommitted changes, stamped %s",
                 root,
                 commit_hash,
             )

@@ -647,7 +647,7 @@ def _close_memory(memory) -> None:
             memory._graph.backend.close()
     except Exception as exc:
         log.warning(
-            "SmartMemory shutdown error — session data may not be fully persisted: %s",
+            "SmartMemory shutdown error: session data may not be fully persisted: %s",
             exc,
         )
 
@@ -799,7 +799,7 @@ def llm_extraction_warning() -> str | None:
     if available:
         return None
     return (
-        "LLM entity/relation extraction unavailable (no usable provider configured); "
+        "LLM entity/relation extraction unavailable (no usable provider configured), "
         "ruler extraction and local enrichers still run. "
         "Run `smartmemory setup` to configure an LLM provider."
     )
@@ -1155,7 +1155,7 @@ def search(
     if search_kwargs.get("origin") is not None and load_config().mode == "remote":
         raise NotImplementedError(
             "--origin is not supported in remote mode: the hosted search API "
-            "does not accept origin filters. Use local mode or remove --origin."
+            "does not accept origin filters. Remove --origin."
         )
     mem = get_memory()
     # Forward documented core options. Unknown extension keys still drop, while
@@ -1188,7 +1188,7 @@ def search(
     if isinstance(mem, RemoteMemory):
         if filters:
             raise NotImplementedError(
-                "Property filters are not supported in remote mode. Use local mode or remove --<property> flags."
+                "Property filters are not supported in remote mode. Remove --<property> flags."
             )
         return mem.search(query, top_k, **core_kwargs)
     # Wildcard: return ALL memory nodes (not entity/relation/pattern nodes).
@@ -1479,6 +1479,8 @@ def recall(
         # C8: a lookup that failed is not "no decisions". The answer says the decisions were lost.
         context_partial = (*context_partial, _DECISIONS_LOST_REASON)
 
+    # CORE-RECALL-NO-MANUAL-SCAN-1: hook recall takes graph search's empty answer as
+    # final. Needs core >= 1.5.33 (older SmartMemory.search has no `manual_scan`).
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
     # U5.21 (C4): every fetch (the first included) is clamped to what core's read gate can examine, and rows a
@@ -1499,15 +1501,17 @@ def recall(
         # U5.21 (C3): a short page is exhaustion only when core did not report that answer as partial.
         partial = False
         if query:
-            found = mem.search(query, top_k=fetch_k)
+            found = mem.search(query, top_k=fetch_k, manual_scan=False)
             partial_names = gated_partial_coverage(found, where="recall search")
             partial = bool(partial_names)
             raw = examined(found, fetch_k, "recall search")
             results = eligible(raw)
             exhausted = len(raw) < fetch_k and not partial
         elif cwd:
-            found_recent = mem.search("", top_k=fetch_k, sort_by="recency")
-            found_semantic = mem.search(cwd, top_k=fetch_k)
+            found_recent = mem.search(
+                "", top_k=fetch_k, sort_by="recency", manual_scan=False
+            )
+            found_semantic = mem.search(cwd, top_k=fetch_k, manual_scan=False)
             partial_recent = gated_partial_coverage(
                 found_recent, where="recall recency search"
             )
@@ -1531,7 +1535,7 @@ def recall(
                 len(semantic) < fetch_k and not partial_semantic
             )
         else:
-            found = mem.search("", top_k=fetch_k, sort_by="recency")
+            found = mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
             partial_names = gated_partial_coverage(found, where="orient recency search")
             partial = bool(partial_names)
             raw = examined(found, fetch_k, "orient recency search")
@@ -1671,6 +1675,23 @@ def get(item_id: str) -> dict:
         return mem.get(item_id) or {}  # already a dict
     item = mem.get(resolve_readonly_item_id(mem._graph.backend, item_id))
     return _result_dict(item) if item else {}
+
+
+def delete(item_id: str) -> bool:
+    """Delete one memory, as the daemon's DELETE /memory/{id} does. True when it existed.
+
+    Local deletes take the same cross-process write lock as ingest(). Used by
+    sm setup to remove its save-and-recall test memory when no daemon answers.
+    """
+    mem = get_memory()
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        mem.request("DELETE", f"/memory/{item_id}")
+        return True
+    data_path = _data_path if _data_path is not None else _resolve_data_dir()
+    with _get_lock_file(data_path):
+        return bool(mem.delete(item_id))
 
 
 def get_mirror_state(data_dir: str | None = None):

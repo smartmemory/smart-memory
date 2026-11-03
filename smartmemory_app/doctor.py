@@ -27,6 +27,7 @@ are what this command exists to show.
 from __future__ import annotations
 
 import functools
+import ipaddress
 import json
 import logging
 import os
@@ -37,8 +38,8 @@ import tomllib
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
-from urllib.parse import urlsplit
+from typing import Any, Callable, Iterable, Mapping, Optional
+from urllib.parse import quote, urlsplit
 
 log = logging.getLogger(__name__)
 
@@ -329,8 +330,11 @@ _MASKED_PREFIXES = ("SMARTMEMORY_", "EXTRACTOR_")
 _ATTRIBUTED: set[str] = set()
 
 
-def _value_forms(value: str) -> set[str]:
-    """``value`` plus the forms the CLI prints it in (trimmed, expanded, resolved, URL host)."""
+def _value_forms(value: str, min_len: int = 4) -> set[str]:
+    """``value`` plus the forms the CLI prints it in (trimmed, expanded, resolved, URL host).
+
+    Forms shorter than ``min_len`` are dropped.
+    """
     forms = {value, value.rstrip("/")}
     try:
         expanded = os.path.expanduser(value)
@@ -348,11 +352,18 @@ def _value_forms(value: str) -> set[str]:
                     forms.add(f"{parts.hostname}:{parts.port}")
         except ValueError:
             pass
-    return {form for form in forms if len(form) >= 4}
+    # A value inside a JSON record, a repr or a URL is printed escaped, and the
+    # escaped text no longer contains the raw value.
+    for form in list(forms):
+        forms |= {json.dumps(form)[1:-1], repr(form)[1:-1], quote(form, safe="")}
+    return {form for form in forms if len(form) >= max(min_len, 1)}
 
 
 def _value_patterns(value: str) -> list[str]:
-    """Regexes for every printed form of ``value``, matched case-insensitively.
+    """Regexes for every printed form of an env value, matched case-insensitively.
+
+    This is the guessing pass for values nobody declared secret (``sm doctor``
+    output). Supplied secrets and identifiers use ``_exact_value_patterns``.
 
     Forms of 4+ characters match anywhere. A shorter value matches as a whole
     token when it holds a digit or symbol, and only quoted or after ``=`` when it
@@ -367,8 +378,89 @@ def _value_patterns(value: str) -> list[str]:
         if short.isalpha():
             patterns.append(rf"(?<=['\"=]){escaped}(?=['\"]|[\s,.)]|$)")
         else:
-            patterns.append(rf"(?<!\w){escaped}(?!\w)")
+            patterns.append(_whole_token(escaped))
     return patterns
+
+
+# Where a whole token may start: the start of the text, a non-word character, or a
+# complete escape sequence. Archive members hold escaped text (a JSON record, a
+# repr, a URL), where the ``n`` of ``\n`` is a word character but the decoded text
+# has a newline there, so ``\nabc`` holds the token ``abc``. Escapes ending in a
+# symbol (``\"``, ``\\``, ``\/``) already end in a non-word character. A token
+# ends at the end of the text or a non-word character, which covers a following
+# escape (it starts with a backslash or ``%``).
+_TOKEN_START = (
+    r"(?:(?<!\w)"
+    r"|(?<=\\[ntrbf])"  # JSON and repr one-letter escapes
+    r"|(?<=\\x[0-9A-Fa-f]{2})"  # repr
+    r"|(?<=\\u[0-9A-Fa-f]{4})"  # JSON and repr
+    r"|(?<=\\U[0-9A-Fa-f]{8})"  # repr
+    r"|(?<=%[0-9A-Fa-f]{2}))"  # URL quoting
+)
+_TOKEN_END = r"(?!\w)"
+
+
+def _whole_token(escaped: str) -> str:
+    """The regex for ``escaped`` (already ``re.escape``d) as one whole token."""
+    return f"{_TOKEN_START}{escaped}{_TOKEN_END}"
+
+
+def _exact_value_patterns(value: str) -> list[str]:
+    """Regexes for every printed form of a supplied secret or identifier.
+
+    No length or character-class rule decides whether a form is masked: a form of
+    4+ characters matches anywhere, a shorter one (one letter, two digits, ``a1``)
+    matches as a whole token (``_whole_token``), so ``abc`` goes in ``team abc``,
+    ``'abc'``, a JSON record, after an escape such as ``\\n`` in JSON-escaped text,
+    or a message that is only ``abc``, and stays in ``abcdef`` and ``xabcx``.
+    """
+    forms = set()
+    for raw in {value, value.strip()}:
+        if raw:
+            forms |= _value_forms(raw, min_len=1)
+    return [
+        re.escape(form) if len(form) >= 4 else _whole_token(re.escape(form))
+        for form in forms
+    ]
+
+
+def _mask_spans(text: str, labelled_patterns: Iterable[tuple[str, str]]) -> str:
+    """Replace every match of every pattern in ``text`` with its label, in one pass.
+
+    Matches are found on the original text and overlapping matches are merged, so
+    one label can never hide part of another value or be rewritten by a later one.
+    """
+    spans = sorted(
+        (match.start(), match.end(), label)
+        for pattern, label in labelled_patterns
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE)
+        if match.end() > match.start()
+    )
+    merged: list[tuple[int, int, str]] = []
+    for start, end, label in spans:
+        if merged and start < merged[-1][1]:
+            first, last, kept = merged[-1]
+            if end - start > last - first:
+                kept = label
+            merged[-1] = (first, max(last, end), kept)
+        else:
+            merged.append((start, end, label))
+    pieces, position = [], 0
+    for start, end, label in merged:
+        pieces += [text[position:start], label]
+        position = end
+    pieces.append(text[position:])
+    return "".join(pieces)
+
+
+# An identifier (team, workspace, tenant id) names who the user is, so a purely
+# numeric one is masked like any other. A bare number in other env values (a port)
+# says nothing about the user and stays visible.
+_IDENTIFIER_NAME = re.compile(r"(?:TEAM|WORKSPACE|TENANT)_ID$", re.IGNORECASE)
+
+
+def is_identifier_name(name: str) -> bool:
+    return bool(_IDENTIFIER_NAME.search(name))
 
 
 def _masked_name(name: str) -> bool:
@@ -398,12 +490,38 @@ def mask_env_values(text: str, environ: Optional[Mapping[str, str]] = None) -> s
         derived = DERIVED_ENV.get(name)
         if not value or (derived and derived[1] == value):
             continue
-        if value.strip().lower() in _CLOSED_VALUES or value.strip().isdigit():
+        if value.strip().lower() in _CLOSED_VALUES or (
+            value.strip().isdigit() and not is_identifier_name(name)
+        ):
             continue
-        pairs += [(pattern, f"${name} (env)") for pattern in _value_patterns(value)]
-    for pattern, label in sorted(pairs, key=lambda pair: -len(pair[0])):
-        text = re.sub(pattern, lambda _m, label=label: label, text, flags=re.IGNORECASE)
-    return text
+        pairs.append((value, f"${name} (env)"))
+    return _mask_spans(
+        text,
+        [
+            (pattern, label)
+            for value, label in pairs
+            if value and value.strip()
+            for pattern in _value_patterns(value)
+        ],
+    )
+
+
+def mask_exact_values(text: str, labelled: Iterable[tuple[str, str]]) -> str:
+    """Replace every printed form of each ``(value, label)`` in ``text`` with its label.
+
+    Matching is by the exact supplied value, whatever its length, character class,
+    letter case or escaping (JSON, repr, URL), never by a pattern that guesses what a
+    secret looks like (``_exact_value_patterns``).
+    """
+    return _mask_spans(
+        text,
+        [
+            (pattern, label)
+            for value, label in labelled
+            if value and value.strip()
+            for pattern in _exact_value_patterns(value)
+        ],
+    )
 
 
 class _MaskingFilter(logging.Filter):
@@ -563,16 +681,48 @@ def _ready(ctx: Context) -> tuple:
 # ── rows ────────────────────────────────────────────────────────────────────
 
 
+def _conda_env_kind(prefix: str) -> Optional[str]:
+    """ "env" for a dedicated conda env, "base" for the shared conda root, else None.
+
+    A conda env is not a ``python -m venv`` venv: ``sys.prefix == sys.base_prefix``
+    inside it, so the venv test alone calls every conda user "not isolated". The
+    interpreter's own prefix is the evidence (``conda-meta`` exists in every conda
+    prefix), not the shell's CONDA_* variables, which a script or cron job lacks.
+    """
+    root = Path(prefix)
+    try:
+        if not (root / "conda-meta").is_dir():
+            return None
+        # The root install holds the other envs and the conda front end.
+        shared = (root / "envs").is_dir() or (root / "condabin").is_dir()
+    except OSError:
+        return None
+    return "base" if shared else "env"
+
+
 def check_python(ctx: Context) -> Row:
     version = ".".join(str(part) for part in ctx.python_version)
-    in_venv = ctx.prefix != ctx.base_prefix
-    where = f"venv {ctx.prefix}" if in_venv else f"system Python {ctx.executable}"
+    conda = _conda_env_kind(ctx.prefix) if ctx.prefix == ctx.base_prefix else None
+    in_venv = ctx.prefix != ctx.base_prefix or conda == "env"
+    if conda == "env":
+        where = f"conda env {ctx.prefix}"
+    elif in_venv:
+        where = f"venv {ctx.prefix}"
+    else:
+        where = f"system Python {ctx.executable}"
     if tuple(ctx.python_version[:2]) < (3, 11):
         return Row(
             "Python",
             FAIL,
             f"{version} ({where}). SmartMemory needs 3.11 or newer.",
             "Install Python 3.11+, then reinstall SmartMemory in a fresh venv.",
+        )
+    if conda == "base":
+        return Row(
+            "Python",
+            WARN,
+            f"{version}, in the shared conda base environment ({ctx.executable})",
+            "Install in its own env (conda create -n smartmemory python=3.11) or with pipx or uv tool, so other projects cannot change its packages.",
         )
     if not in_venv:
         return Row(
@@ -584,6 +734,20 @@ def check_python(ctx: Context) -> Row:
     return Row("Python", PASS, f"{version}, {where}")
 
 
+def _is_loopback(url: str) -> bool:
+    """True for a URL on this machine (localhost or a loopback address)."""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def check_config(ctx: Context) -> Row:
     path = ctx.config_path()
     if ctx.platform == "win32":
@@ -591,7 +755,16 @@ def check_config(ctx: Context) -> Row:
     else:
         moved_by = "XDG_CONFIG_HOME" if ctx.environ.get("XDG_CONFIG_HOME") else None
     where = f"{path} (location set by env {moved_by})" if moved_by else str(path)
-    if not path.exists():
+    try:
+        config_exists = path.exists()
+    except OSError as exc:
+        return Row(
+            "Config file",
+            WARN,
+            f"not checked: {where} cannot be read ({type(exc).__name__})",
+            f"Fix the permissions on {path.parent}, then run: sm doctor",
+        )
+    if not config_exists:
         return Row(
             "Config file",
             WARN,
@@ -601,10 +774,11 @@ def check_config(ctx: Context) -> Row:
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
     except OSError as exc:
+        # Cannot check: an unreadable file says nothing about what is in it.
         return Row(
             "Config file",
-            FAIL,
-            f"{where} cannot be read ({type(exc).__name__})",
+            WARN,
+            f"not checked: {where} cannot be read ({type(exc).__name__})",
             f"Fix the permissions on {path}, then run: sm doctor",
         )
     except tomllib.TOMLDecodeError:
@@ -740,14 +914,14 @@ def check_credentials(ctx: Context) -> Row:
             "API key",
             WARN,
             f"not checked: {exc} could not be read",
-            "Set SMARTMEMORY_API_KEY for this shell, or run: sm setup --mode remote --api-key KEY",
+            "Set SMARTMEMORY_API_KEY for this shell, or run: sm login",
         )
     if source is None:
         return Row(
             "API key",
             FAIL,
             "none found (checked env SMARTMEMORY_API_KEY and the OS keychain)",
-            "Run: sm setup --mode remote --api-key KEY",
+            "Run: sm login",
         )
     return Row("API key", PASS, f"present (from {source})")
 
@@ -825,7 +999,7 @@ def check_tenant(ctx: Context) -> Row:
             WARN,
             f"not checked: no API key{' (' + unread + ' unreadable)' if unread else ''}, "
             f"so the account behind the CLI is unknown. Workspace: {ws_text}.",
-            "Run: sm setup --mode remote --api-key KEY",
+            "Run: sm login",
         )
     url = f"{_api_url(ctx)}/auth/me"
     url_label = _shown(
@@ -853,7 +1027,7 @@ def check_tenant(ctx: Context) -> Row:
             "Tenant and workspace",
             FAIL,
             "the service rejected the API key (HTTP 401)",
-            "Create a new key in the console, then run: sm setup --mode remote --api-key KEY",
+            "Create a new key in the console, then run: sm login",
         )
     if status != 200 or not isinstance(body, dict):
         return Row(
@@ -1442,19 +1616,19 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
 
     provider = route.provider
     app_provider = (cfg.llm_provider or "none").lower()
+    # storage.apply_runtime_config holds core's route off while a local provider has
+    # no model (CLI-SETUP-UX-1), whatever else is set: an OPENAI_BASE_URL, a provider
+    # key, a pinned provider. So no branch below may answer PASS for it.
+    held = local_llm_without_model(cfg)
+    no_model = f"provider {app_provider} has no model chosen. {NO_LOCAL_MODEL_OFF_LINE}"
+    no_model_fix = "Run: sm config llm_model <model name>, then sm restart"
+    if held and not route.from_base_url:
+        return row(WARN, no_model, no_model_fix)
     # An explicit base URL wins over a pin too (call_llm skips the pin then).
     if app_provider in _LOCAL_OPENAI_PROVIDERS and (
         not route.pin or route.from_base_url
     ):
         if not route.from_base_url:
-            if local_llm_without_model(cfg):
-                # storage.apply_runtime_config holds core's route off for this state
-                # (CLI-SETUP-UX-1), so the row says that, not "calls do not go to it".
-                return row(
-                    WARN,
-                    f"provider {app_provider} has no model chosen. {NO_LOCAL_MODEL_OFF_LINE}",
-                    "Run: sm config llm_model <model name>, then sm restart",
-                )
             return row(
                 WARN,
                 f"{route_text}. llm_provider {app_provider} is set, but LLM calls do not go to it.",
@@ -1468,6 +1642,13 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
                 ),
             )
         except Exception as exc:
+            if not _is_loopback(route.probe_url):
+                # Cannot check: a remote endpoint may be unreachable only from here.
+                return row(
+                    WARN,
+                    f"not checked: {route_text}, not answering ({type(exc).__name__})",
+                    "Check your network and the endpoint, then run: sm doctor",
+                )
             return row(
                 FAIL,
                 f"{route_text}, not answering ({type(exc).__name__})",
@@ -1478,6 +1659,12 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
                 FAIL,
                 f"{route_text}, answered HTTP {status}",
                 f"Check {app_provider} is serving its OpenAI-compatible API, then run: sm doctor",
+            )
+        if held:
+            # An explicit endpoint is probed (it still tells you the server is up),
+            # but extraction stays off until a model is chosen.
+            return row(
+                WARN, f"{route_text}, server answering. {no_model}", no_model_fix
             )
         return row(PASS, f"{route_text}, server answering, no key needed")
     if not route.pin and app_provider == "claude-agent" and route.endpoint:
@@ -1643,11 +1830,13 @@ def _check_daemon(ctx: Context) -> Row:
             "Run: sm restart. If it stays degraded, run: sm report",
         )
     if status == "warming":
+        from smartmemory_app.daemon_diagnosis import WARMING_NOTE
+
         return Row(
             "Local daemon",
             WARN,
             f"still loading models on {port}",
-            "Wait a minute, then run: sm status",
+            f"{WARMING_NOTE} Check again in a minute: sm status",
         )
     if status != "ok":
         return Row(
@@ -1661,10 +1850,11 @@ def _check_hosted_service(ctx: Context) -> Row:
     try:
         status, body = _ready(ctx)
     except Exception as exc:
+        # Cannot check: no answer may mean this machine is offline, not that the service is down.
         return Row(
             "SmartMemory service",
-            FAIL,
-            f"{url} unreachable ({type(exc).__name__})",
+            WARN,
+            f"not checked: {url} unreachable ({type(exc).__name__})",
             "Check your network and SMARTMEMORY_API_URL, then run: sm doctor",
         )
     body = body if isinstance(body, dict) else {}
@@ -1686,6 +1876,44 @@ def check_service(ctx: Context) -> Row:
     if _mode(ctx) == "remote":
         return _check_hosted_service(ctx)
     return _check_daemon(ctx)
+
+
+# SQLite errors that say this process could not read the store, not that the store
+# is damaged: another process holds it, or the OS refused the open (permissions, a
+# read-only volume, a directory in its place). Damage ("file is not a database",
+# "malformed") is a DatabaseError that matches none of these and stays FAIL.
+_SQLITE_IN_USE = ("locked", "busy")
+_SQLITE_UNREADABLE = (
+    "unable to open",
+    "permission",
+    "readonly",
+    "read-only",
+    "disk i/o",
+)
+
+
+def _sqlite_in_use(exc: sqlite3.Error) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        word in str(exc).lower() for word in _SQLITE_IN_USE
+    )
+
+
+def _sqlite_unreadable(exc: sqlite3.Error) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and any(
+        word in str(exc).lower() for word in _SQLITE_UNREADABLE
+    )
+
+
+def _store_not_checked(
+    db_label: str, where: str, exc: Exception, ignored: str = ""
+) -> Row:
+    """Cannot check: the OS would not let doctor read the store, which says nothing about its contents."""
+    return Row(
+        "Graph backend",
+        WARN,
+        f"not checked: SQLite store {db_label} (from {where}) cannot be read ({type(exc).__name__}){ignored}",
+        f"Fix the permissions on {db_label}, then run: sm doctor",
+    )
 
 
 def check_graph(ctx: Context) -> Row:
@@ -1739,7 +1967,11 @@ def check_graph(ctx: Context) -> Row:
             f" The config file data_dir ({cfg_dir}) is not used by sm commands run from"
             " this shell. Only the login auto-start daemon reads it."
         )
-    if not db.exists():
+    try:
+        db_exists = db.exists()
+    except OSError as exc:
+        return _store_not_checked(db_label, where, exc, ignored)
+    if not db_exists:
         return Row(
             "Graph backend",
             WARN,
@@ -1753,6 +1985,16 @@ def check_graph(ctx: Context) -> Row:
         finally:
             conn.close()
     except sqlite3.Error as exc:
+        if _sqlite_in_use(exc):
+            # Cannot check: another process holds the store, which is normal while it runs.
+            return Row(
+                "Graph backend",
+                WARN,
+                f"not checked: SQLite store {db_label} (from {where}) is in use by another process ({type(exc).__name__})",
+                "Run: sm stop, then sm doctor",
+            )
+        if _sqlite_unreadable(exc):
+            return _store_not_checked(db_label, where, exc, ignored)
         return Row(
             "Graph backend",
             FAIL,

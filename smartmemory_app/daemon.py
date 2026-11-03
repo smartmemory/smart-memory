@@ -94,7 +94,7 @@ def _remaining(limit: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError(
-            "Lifecycle deadline expired; shutdown did not complete or startup remains unverified."
+            "Lifecycle deadline expired, shutdown did not complete or startup remains unverified."
         )
     return min(limit, remaining)
 
@@ -111,7 +111,7 @@ def _run_command(command, *, limit: float = 5, **kwargs):
         return result
     except subprocess.TimeoutExpired:
         raise TimeoutError(
-            f"{command[0]} {command[1]} timed out; lifecycle operation unverified"
+            f"{command[0]} {command[1]} timed out, lifecycle operation unverified"
         ) from None
 
 
@@ -185,7 +185,7 @@ def _launchd_loaded(label: str) -> bool:
         return False
     if r.returncode == 112 and "Could not find domain for user gui:" in r.stderr:
         log.warning(
-            "Skipping launchd inspection/bootout for %s: GUI domain absent; using unmanaged PID shutdown",
+            "Skipping launchd inspection/bootout for %s: GUI domain absent, using unmanaged PID shutdown",
             label,
         )
         return False
@@ -210,13 +210,13 @@ def _launchd_bootout(label: str) -> bool:
             if result.returncode == 0:
                 return True
             log.warning(
-                "launchd bootout via %s failed; restart prevention unverified: %s",
+                "launchd bootout via %s failed, restart prevention unverified: %s",
                 cmd[1],
                 redact_credentials(result.stderr.strip()),
             )
         except OSError as exc:
             log.warning(
-                "launchd bootout via %s unavailable; restart prevention unverified: %s",
+                "launchd bootout via %s unavailable, restart prevention unverified: %s",
                 cmd[1],
                 redact_credentials(str(exc)),
             )
@@ -296,6 +296,36 @@ def _health_response(limit: float):
     return response
 
 
+_WARNED_FOREIGN: set[int] = set()
+
+
+def _warn_foreign_listener() -> None:
+    port = _port()
+    if port not in _WARNED_FOREIGN:
+        _WARNED_FOREIGN.add(port)
+        log.warning(
+            "Port %s answers /health but not as SmartMemory, so the daemon is treated as not running. "
+            "Run: sm doctor --ports",
+            port,
+        )
+
+
+def _refuse_held_port() -> None:
+    """Before spawning: a port held by something else is named, not discovered after a crash."""
+    from smartmemory_app.config import config_path
+    from smartmemory_app.port_probe import (
+        FOREIGN,
+        STALE,
+        UNKNOWN,
+        conflict_message,
+        probe_port,
+    )
+
+    held = probe_port(_port())
+    if held.state in (FOREIGN, STALE, UNKNOWN):
+        raise RuntimeError(conflict_message(held, config_path()))
+
+
 def is_running(require_healthy: bool = True) -> bool:
     """Check daemon is running AND is SmartMemory (not a random process on the port).
 
@@ -310,6 +340,7 @@ def is_running(require_healthy: bool = True) -> bool:
         _remaining(2)
         data = r.json()
         if data.get("service") != "smartmemory":
+            _warn_foreign_listener()
             return False
         if require_healthy and data.get("status") != "ok":
             return False
@@ -461,6 +492,8 @@ def start_daemon(
         not wait_until_ready or existing.get("status") != "warming"
     ):
         return existing
+    if existing is None:
+        _refuse_held_port()
 
     data = _data_dir()
     data.mkdir(parents=True, exist_ok=True)
@@ -569,6 +602,7 @@ def start_daemon(
         proc = spawn_detached(
             [
                 sys.executable,
+                "-P",  # SM-DAEMON-CWD-1: cwd never shadows site-packages (python >= 3.11)
                 "-c",
                 f"from smartmemory_app.viewer_server import main; main(port={port}, open_browser=False)",
             ],
@@ -576,6 +610,7 @@ def start_daemon(
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=env,
+            cwd=str(data),  # SM-DAEMON-CWD-1: never inherit a launch dir that can be deleted
         )
 
     # Phase 1: Wait for port to open (fast socket check, no httpx timeout)
@@ -612,10 +647,15 @@ def start_daemon(
     status = get_status()
     if status is None:
         proc.terminate()
+        from smartmemory_app.config import config_path
+        from smartmemory_app.port_probe import conflict_message, probe_port
+
+        held = probe_port(port)
         raise RuntimeError(
             _startup_failure_message(
-                f"SmartMemory could not start because port {port} is in use. "
-                "Stop the other process, then run `sm status`.",
+                conflict_message(held, config_path())
+                if held.state != "free"
+                else f"SmartMemory could not start: port {port} did not answer as SmartMemory.",
                 log_path,
             )
         )
@@ -734,7 +774,7 @@ def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
                 pid = int(pid_file.read_text().strip())
             except ValueError:
                 log.warning(
-                    "Legacy PID identity lost in %s; retirement cannot be verified",
+                    "Legacy PID identity lost in %s, retirement cannot be verified",
                     pid_file,
                 )
                 raise RuntimeError(f"Invalid legacy PID file: {pid_file}") from None
@@ -748,7 +788,7 @@ def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
                     )
                 if any("smartmemory_app.enrichment_worker" in arg for arg in arguments):
                     log.warning(
-                        "Legacy worker %s has no cooperative stop protocol; terminating, final flush unverified",
+                        "Legacy worker %s has no cooperative stop protocol, terminating, final flush unverified",
                         pid,
                     )
                     if not terminate_process(pid, timeout=_remaining(5)):
@@ -759,11 +799,11 @@ def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
                     retired = True
                 else:
                     log.warning(
-                        "Legacy PID %s was reused; stale worker identity discarded without signalling",
+                        "Legacy PID %s was reused, stale worker identity discarded without signalling",
                         pid,
                     )
             else:
-                log.warning("Legacy worker %s is gone; removing stale PID file", pid)
+                log.warning("Legacy worker %s is gone, removing stale PID file", pid)
             pid_file.unlink(missing_ok=True)
     except (OSError, RuntimeError) as exc:
         if recover_queue:
@@ -772,9 +812,9 @@ def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
             except sqlite3.Error as count_error:
                 count = f"unknown (queue inspection failed: {count_error})"
         else:
-            count = "unknown (SQLite queue inspection deferred; shutdown budget reserved for stopping processes)"
+            count = "unknown (SQLite queue inspection deferred, shutdown budget reserved for stopping processes)"
         log.warning(
-            "Legacy retirement unverified; %s processing rows remain unrecovered; replacement blocked: %s",
+            "Legacy retirement unverified, %s processing rows remain unrecovered, replacement blocked: %s",
             count,
             exc,
         )
@@ -787,7 +827,7 @@ def _retire_legacy_workers(*, recover_queue: bool = True) -> bool:
             # startup repeats quiescence checks and recovers before replacement.
             log.warning(
                 "SQLite legacy queue migration and processing-row recovery deferred "
-                "until startup; shutdown budget reserved for stopping processes"
+                "until startup, shutdown budget reserved for stopping processes"
             )
             return retired
         from smartmemory.pipeline.work_graph.sqlite_store import SQLiteWorkGraph
@@ -833,6 +873,7 @@ def _start_workers(num_workers: int = 1) -> None:
         spawn_detached(
             [
                 sys.executable,
+                "-P",  # SM-DAEMON-CWD-1
                 "-m",
                 "smartmemory_app.worker_entry",
                 "--data-dir",
@@ -842,6 +883,7 @@ def _start_workers(num_workers: int = 1) -> None:
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
             env=os.environ.copy(),
+            cwd=str(data),  # SM-DAEMON-CWD-1
         )
 
 
@@ -858,7 +900,7 @@ def _stop_core_worker() -> None:
     while spawn.worker_is_running(data):
         remaining = verify_until - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("Core worker exit unverified; replacement blocked")
+            raise TimeoutError("Core worker exit unverified, replacement blocked")
         _pause(min(0.01, remaining))
     _remaining(STOP_TIMEOUT)
 
@@ -871,7 +913,7 @@ def _stop_workers() -> None:
         _retire_legacy_workers(recover_queue=False)
     except (OSError, RuntimeError) as exc:
         log.warning(
-            "Legacy retirement failed during stop; continuing shutdown: %s", exc
+            "Legacy retirement failed during stop, continuing shutdown: %s", exc
         )
     if sys.platform == "darwin" and _launchd_loaded(_LAUNCHD_WORKER_LABEL):
         _launchd_bootout(_LAUNCHD_WORKER_LABEL)
@@ -895,7 +937,7 @@ def stop_daemon() -> None:
                 if not _launchd_bootout(label) and _launchd_loaded(label):
                     raise RuntimeError(
                         _startup_failure_message(
-                            f"Failed to bootout launchd job {label}; stop unverified.",
+                            f"Failed to bootout launchd job {label}, stop unverified.",
                             _data_dir() / "daemon.log",
                             include_job_state=True,
                         )
@@ -922,7 +964,7 @@ def stop_daemon() -> None:
             raise
         except Exception as exc:
             log.warning(
-                "Daemon health identity unavailable; inspecting PID marker: %s", exc
+                "Daemon health identity unavailable, inspecting PID marker: %s", exc
             )
             _remaining(2)
 
@@ -940,11 +982,11 @@ def stop_daemon() -> None:
         arguments = process_cmdline(pid)
         if not arguments:
             raise RuntimeError(
-                f"Cannot inspect daemon PID {pid}; stop withheld, marker retained"
+                f"Cannot inspect daemon PID {pid}, stop withheld, marker retained"
             )
         if not any("smartmemory_app.viewer_server" in arg for arg in arguments):
             log.warning(
-                "Daemon PID %s was reused; stale marker discarded without signalling",
+                "Daemon PID %s was reused, stale marker discarded without signalling",
                 pid,
             )
             pf.unlink(missing_ok=True)
@@ -952,7 +994,7 @@ def stop_daemon() -> None:
     if not pid:
         return
     if not isinstance(pid, int) or pid <= 0:
-        raise RuntimeError("Invalid daemon health PID; stop withheld")
+        raise RuntimeError("Invalid daemon health PID, stop withheld")
 
     request = _data_dir() / f".daemon.stop-{pid}"
     try:
@@ -967,14 +1009,14 @@ def stop_daemon() -> None:
                 "smartmemory_app.viewer_server" in arg for arg in arguments
             ):
                 raise RuntimeError(
-                    f"Daemon PID {pid} identity unavailable; escalation withheld"
+                    f"Daemon PID {pid} identity unavailable, escalation withheld"
                 )
             log.warning(
-                "Daemon %s did not stop cooperatively; terminating, final flush unverified",
+                "Daemon %s did not stop cooperatively, terminating, final flush unverified",
                 pid,
             )
             if not terminate_process(pid, timeout=_remaining(2)):
-                raise RuntimeError(f"Daemon {pid} exit unverified; marker retained")
+                raise RuntimeError(f"Daemon {pid} exit unverified, marker retained")
         # Process exit alone does not prove the service has stopped. Keep the
         # marker while health still responds, sharing the same absolute deadline
         # and cancelling even a continuously trickling response body.

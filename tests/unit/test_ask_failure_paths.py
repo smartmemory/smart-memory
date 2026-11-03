@@ -383,9 +383,8 @@ PROVIDER_ROWS = [
     ("openai", "", "gpt-4.1-mini", "gpt-4.1-mini"),
     ("groq", "llama-3.3-70b-versatile", None, "llama-3.3-70b-versatile"),
     # claude-agent / anthropic / deepseek come from LLM_PROVIDER_TABLE (CLI-PROVIDER-ROUTE-1):
-    # claude-agent pins the SDK alias, anthropic pins a claude-* id (on core 2.0 the
-    # wrapper's route guard refuses it until core routes claude-* to api.anthropic.com),
-    # deepseek is not a supported provider (no pin).
+    # claude-agent pins the SDK alias, anthropic pins a claude-* id that core now routes to
+    # api.anthropic.com with ANTHROPIC_API_KEY, deepseek is not a supported provider (no pin).
     ("claude-agent", "", None, "sonnet"),
     ("none", "", None, None),
     ("anthropic", "", None, "claude-haiku-4-5-20251001"),

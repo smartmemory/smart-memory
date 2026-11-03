@@ -18,7 +18,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_classifier"
 
 
 @pytest.fixture
-def replay(monkeypatch, tmp_path):
+def replay(monkeypatch, tmp_path, provider_pin_isolated):
     monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "ws")
@@ -297,5 +297,5 @@ def test_reclassify_failed_batch_untouched(replay, monkeypatch):
     monkeypatch.setattr("smartmemory_app.storage.get_memory", lambda: mem)
     result = CliRunner().invoke(lifecycle_reclassify, ["--batch-size", "2"])
     assert result.exit_code != 0
-    assert "batch 2; this batch was not written" in result.output
+    assert "batch 2, this batch was not written" in result.output
     assert [c.args[0] for c in mem.update_properties.call_args_list] == ["d0", "d1"]

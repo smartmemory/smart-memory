@@ -16,6 +16,8 @@ def hook_cli_on_path(monkeypatch):
     monkeypatch.setenv(
         "PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
     )
+    # HOOK-LOAD-CAP-1: recall.sh skips on a busy host; these tests need it to run.
+    monkeypatch.setenv("SMARTMEMORY_HOOK_LOAD_MAX", "0")
 
 
 def _unused_local_port() -> int:

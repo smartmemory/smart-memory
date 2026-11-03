@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+from tests._host_isolation import cleared_env
+
 
 # --- format_recall_lines -----------------------------------------------------
 
@@ -141,7 +143,7 @@ def test_derive_workspace_env_override():
 def test_derive_workspace_none_cwd_returns_none():
     from smartmemory_app.recall_format import derive_workspace_id
 
-    with patch.dict(os.environ, {}, clear=True):
+    with cleared_env():
         assert derive_workspace_id(None) is None
 
 
@@ -153,7 +155,7 @@ def test_derive_workspace_realpath_canonicalizes(tmp_path):
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real)
-    with patch.dict(os.environ, {}, clear=True):
+    with cleared_env():
         ws_real = derive_workspace_id(str(real))
         ws_link = derive_workspace_id(str(link))
     assert ws_real == ws_link
@@ -164,7 +166,7 @@ def test_derive_workspace_deterministic(tmp_path):
     from smartmemory_app.recall_format import derive_workspace_id
 
     p = str(tmp_path)
-    with patch.dict(os.environ, {}, clear=True):
+    with cleared_env():
         assert derive_workspace_id(p) == derive_workspace_id(p)
 
 
@@ -175,7 +177,7 @@ def test_derive_workspace_distinct_paths(tmp_path):
     b = tmp_path / "b"
     a.mkdir()
     b.mkdir()
-    with patch.dict(os.environ, {}, clear=True):
+    with cleared_env():
         assert derive_workspace_id(str(a)) != derive_workspace_id(str(b))
 
 

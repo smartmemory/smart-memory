@@ -29,7 +29,15 @@ class _DownloadBar:
         self._reporter = reporter
         self.total = total
         self.n = initial
+        # Xet reports two counters: reconstructed bytes (update) and bytes received
+        # from the network (update_transfer). A plain HTTP download reports the same
+        # bytes through both, so the bar shows the larger one, never their sum.
+        self.transferred = 0
         self._reporter._register(self)
+
+    @property
+    def progress(self) -> float:
+        return max(self.n, self.transferred)
 
     def update(self, amount: float = 1) -> None:
         self.n += amount
@@ -39,22 +47,34 @@ class _DownloadBar:
         self._reporter._changed(self)
 
     # CLI-SETUP-UX-1: huggingface_hub's Xet reporter also calls these tqdm display
-    # methods (the missing set_postfix_str printed a traceback during setup). Text
-    # decoration has no meaning for a byte counter, so they accept and ignore it.
+    # methods (the missing set_postfix_str printed a traceback during setup).
+    # CLI-SETUP-UX-FU-F2: a transfer update is a progress event, so it counts, and
+    # the speed text it sends is kept for the next log line.
     pos = 0
 
-    def set_postfix_str(self, *_args: object, **_kwargs: object) -> None:
-        return None
+    def set_postfix_str(
+        self, text: object = "", *_args: object, **_kwargs: object
+    ) -> None:
+        self._reporter._set_speed(text, transfer=False)
 
-    set_transfer_postfix_str = set_description = set_postfix_str
+    def set_transfer_postfix_str(
+        self, text: object = "", *_args: object, **_kwargs: object
+    ) -> None:
+        self._reporter._set_speed(text, transfer=True)
+
+    def set_description(self, *_args: object, **_kwargs: object) -> None:
+        return None
 
     def refresh(self, *_args: object, **_kwargs: object) -> None:
         return None
 
     clear = refresh
 
-    def update_transfer(self, *_args: object, **_kwargs: object) -> None:
-        return None
+    def update_transfer(
+        self, amount: float = 1, *_args: object, **_kwargs: object
+    ) -> None:
+        self.transferred += amount
+        self._reporter._changed(self)
 
     def __enter__(self) -> "_DownloadBar":
         return self
@@ -79,6 +99,19 @@ class DownloadProgressReporter:
         self._last_emit = float("-inf")
         self._bars: list[_DownloadBar] = []
         self._lock = threading.Lock()
+        self._speed = ""
+        self._transfer_speed = ""
+
+    def _set_speed(self, text: object, *, transfer: bool) -> None:
+        """Keep the latest speed text ("1.2MB/s"). Unknown speeds ("???B/s") are dropped."""
+        speed = " ".join(str(text).split())
+        if not speed or speed.startswith("???") or not speed.endswith("B/s"):
+            speed = ""
+        with self._lock:
+            if transfer:
+                self._transfer_speed = speed
+            else:
+                self._speed = speed
 
     def new_bar(self, *, total: int | None, initial: int = 0) -> _DownloadBar:
         return _DownloadBar(self, total=total, initial=initial)
@@ -94,19 +127,21 @@ class DownloadProgressReporter:
             now = self._clock()
             if not force and now - self._last_emit < self._interval:
                 return
-            downloaded = sum(float(bar.n) for bar in self._bars)
+            downloaded = sum(float(bar.progress) for bar in self._bars)
             totals = [bar.total for bar in self._bars]
             total = sum(float(value) for value in totals if value is not None)
             all_known = bool(totals) and all(value is not None for value in totals)
             self._last_emit = now
+            speed = self._transfer_speed or self._speed
+            suffix = f", {speed}" if speed else ""
             if all_known and total > 0:
                 percent = min(100, round(downloaded * 100 / total))
                 line = (
                     "Downloading the local AI model: "
-                    f"{_format_bytes(downloaded)} of {_format_bytes(total)} ({percent}%)"
+                    f"{_format_bytes(downloaded)} of {_format_bytes(total)} ({percent}%){suffix}"
                 )
             else:
-                line = f"Downloading the local AI model: {_format_bytes(downloaded)} received"
+                line = f"Downloading the local AI model: {_format_bytes(downloaded)} received{suffix}"
             # Every update is one complete line. Never emit tqdm's carriage-return redraws.
             self._emit(line.replace("\r", " ").replace("\n", " "))
 

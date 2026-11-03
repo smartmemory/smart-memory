@@ -41,6 +41,9 @@ def hook_stub(tmp_path, monkeypatch):
     # Failing stubs make hooks write failure markers under $HOME; keep them out of the real home.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    # HOOK-LOAD-CAP-1: recall's load skip reads the real host load1; these tests exercise the payload path.
+    # (The observe/learn/distill caps are gone: HOOK-WRITE-QUEUE-1.)
+    monkeypatch.setenv("SMARTMEMORY_HOOK_LOAD_MAX", "0")
     for name in ("OUTPUT", "ARGS", "DONE"):
         monkeypatch.setenv(f"STUB_{name}", str(tmp_path / name.lower()))
     # Only remote mode still starts a drainer from the hook (HOOK-WRITE-QUEUE-1: in local

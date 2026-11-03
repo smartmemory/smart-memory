@@ -145,7 +145,7 @@ class WorkspaceMismatch:
             )
         else:
             fix = (
-                "Use the web workspace: run `smartmemory setup --mode remote`, "
+                "Use the web workspace: run `sm login`, "
                 "which resets the workspace to your login default."
             )
         return (

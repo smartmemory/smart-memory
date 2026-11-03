@@ -70,7 +70,7 @@ def _traced_injection(method: Callable) -> Callable:
                 latency_ms=recall_format.time_ms() - started,
                 ranked_ids=ranked_ids,
                 payload=output,
-                error="; ".join(diagnostic["errors"]) or None,
+                error=", ".join(diagnostic["errors"]) or None,
                 degradations=diagnostic["degradations"],
                 excluded_non_memory=diagnostic.get("excluded_non_memory", 0),
                 skipped_reason=diagnostic.get("skipped_reason")
@@ -107,7 +107,7 @@ def as_text(value: Any) -> str:
     try:
         return json.dumps(value, default=str)
     except (TypeError, ValueError) as exc:
-        log.warning("Hook payload lost JSON representation; using string: %s", exc)
+        log.warning("Hook payload lost JSON representation, using string: %s", exc)
         return str(value)
 
 
@@ -339,9 +339,9 @@ class MemoryLifecycle:
                 self._save_state()
         except Exception as e:
             if strict:
-                log.warning("Observe ingest failed; the queued job will retry: %s", e)
+                log.warning("Observe ingest failed, the queued job will retry: %s", e)
                 raise
-            log.warning("Observe ingest failed; tool observation lost: %s", e)
+            log.warning("Observe ingest failed, tool observation lost: %s", e)
 
         # CORE-CODE-PROVENANCE-1 Phase 2a — durable code-authorship evidence, in its
         # OWN try/except so a failure here cannot regress the episodic write above.
@@ -353,7 +353,7 @@ class MemoryLifecycle:
                     # than dropping the capture invisibly.
                     if not getattr(self, "_warned_no_transcript", False):
                         log.warning(
-                            "Provenance capture skipped: no transcript_path on %s event; "
+                            "Provenance capture skipped: no transcript_path on %s event, "
                             "code-authorship evidence will not be persisted for this session.",
                             tool_name,
                         )
@@ -382,7 +382,7 @@ class MemoryLifecycle:
                         )
         except Exception as e:
             log.warning(
-                "Provenance persist failed; code-authorship evidence lost: %s", e
+                "Provenance persist failed, code-authorship evidence lost: %s", e
             )
 
     def distill(
@@ -430,9 +430,9 @@ class MemoryLifecycle:
                 return receipt
         except Exception as e:
             if strict:
-                log.warning("Distill ingest failed; the queued job will retry: %s", e)
+                log.warning("Distill ingest failed, the queued job will retry: %s", e)
                 raise
-            log.warning("Distill ingest failed; turn pair lost: %s", e)
+            log.warning("Distill ingest failed, turn pair lost: %s", e)
 
         # Clear current turn (consumed)
         if not queued or (self._current_user_turn or "") == user_turn:
@@ -468,9 +468,9 @@ class MemoryLifecycle:
                 return receipt
         except Exception as e:
             if strict:
-                log.warning("Learn ingest failed; the queued job will retry: %s", e)
+                log.warning("Learn ingest failed, the queued job will retry: %s", e)
                 raise
-            log.warning("Learn ingest failed; error memory lost: %s", e)
+            log.warning("Learn ingest failed, error memory lost: %s", e)
 
     def persist(
         self, cwd: str | None = None, transcript_path: str | None = None
@@ -551,7 +551,7 @@ class MemoryLifecycle:
             return similarity < self._config.topic_threshold
         except Exception as exc:
             record_hook_degradation(
-                "Recall lost topic gating; recalling without similarity", exc
+                "Recall lost topic gating, recalling without similarity", exc
             )
             return True  # fail open — recall when unsure
 
@@ -643,7 +643,7 @@ class MemoryLifecycle:
             self._rules_card_workspace = data.get("rules_card_workspace")
         except (json.JSONDecodeError, OSError) as e:
             record_hook_degradation(
-                "Failed to load session state; prior session context lost", e
+                "Failed to load session state, prior session context lost", e
             )
 
     def _save_state(self) -> None:
@@ -671,14 +671,14 @@ class MemoryLifecycle:
                     tmp.unlink(missing_ok=True)
         except (OSError, Timeout) as e:
             record_hook_degradation(
-                "Failed to save session state; current session updates lost", e
+                "Failed to save session state, current session updates lost", e
             )
 
     def _delete_state(self) -> None:
         try:
             self._state_path().unlink(missing_ok=True)
         except OSError as exc:
-            log.warning("Failed to delete session state; stale state retained: %s", exc)
+            log.warning("Failed to delete session state, stale state retained: %s", exc)
 
     @classmethod
     def cleanup_stale_sessions(cls, max_age_hours: int = 24) -> int:

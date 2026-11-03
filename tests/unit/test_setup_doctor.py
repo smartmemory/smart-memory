@@ -92,7 +92,11 @@ def build(
     env = {"XDG_CONFIG_HOME": str(cfg_root), **(environ or {})}
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    if config is not None:
+    if (
+        config == "unreadable"
+    ):  # a directory where the file should be: read_text raises OSError
+        (cfg_root / "smartmemory" / "config.toml").mkdir(parents=True, exist_ok=True)
+    elif config is not None:
         (cfg_root / "smartmemory").mkdir(parents=True, exist_ok=True)
         (cfg_root / "smartmemory" / "config.toml").write_text(config)
     data_dir = (
@@ -541,11 +545,12 @@ CASES = [
         "ready, version 9.9.9",
     ),
     (
+        # DOCTOR-CANNOT-CHECK-WARN-1: no answer is "not checked" (was FAIL).
         "service-remote-unreachable",
         {"config": REMOTE_CFG},
         "service",
-        FAIL,
-        "api.example.test unreachable",
+        WARN,
+        "not checked: https://api.example.test unreachable",
     ),
     (
         "service-remote-not-ready",
@@ -622,6 +627,177 @@ def test_doctor_row(case, monkeypatch, tmp_path):
     assert text in result.detail, result
     if status != PASS:
         assert result.fix or key == "inherited", result
+
+
+def _store_locked(monkeypatch):
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(doctor.sqlite3, "connect", locked)
+
+
+# DOCTOR-CANNOT-CHECK-WARN-1: the class is "the probe could not get an answer for a
+# reason that belongs to this machine" (permission, offline, lock). One row per
+# probe boundary doctor has, each paired with the row that must stay FAIL when
+# the same boundary gives a definite answer.
+_OLLAMA_MODEL = LOCAL_CFG + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
+CANNOT_CHECK = [
+    # (id, build kwargs, row key, patch, status, text)
+    (
+        "config-unreadable",
+        {"config": "unreadable"},
+        "config",
+        None,
+        WARN,
+        "not checked:",
+    ),
+    (
+        "config-unreadable-text",
+        {"config": "unreadable"},
+        "config",
+        None,
+        WARN,
+        "cannot be read (IsADirectoryError)",
+    ),
+    ("service-offline", {"config": REMOTE_CFG}, "service", None, WARN, "not checked:"),
+    (
+        "llm-remote-endpoint-offline",
+        {
+            "config": _OLLAMA_MODEL,
+            "environ": {"OPENAI_BASE_URL": "http://llm.example.test:11434/v1"},
+        },
+        "llm",
+        None,
+        WARN,
+        "not checked:",
+    ),
+    ("store-locked", {"store": "ok"}, "graph", _store_locked, WARN, "not checked:"),
+    # definite answers stay FAIL
+    (
+        "config-bad-toml",
+        {"config": "mode = = ="},
+        "config",
+        None,
+        FAIL,
+        "not valid TOML",
+    ),
+    (
+        "service-not-ready",
+        {"config": REMOTE_CFG, "http": {f"{API}/ready": (503, READY_GRAPH_DOWN)}},
+        "service",
+        None,
+        FAIL,
+        "not ready",
+    ),
+    (
+        "llm-loopback-down",
+        {"config": _OLLAMA_MODEL},
+        "llm",
+        None,
+        FAIL,
+        "not answering",
+    ),
+    ("store-corrupt", {"store": "corrupt"}, "graph", None, FAIL, "cannot be opened"),
+]
+
+
+@pytest.mark.parametrize("case", CANNOT_CHECK, ids=[c[0] for c in CANNOT_CHECK])
+def test_cannot_check_is_warn_and_definite_failure_is_fail(case, monkeypatch, tmp_path):
+    _id, kwargs, key, patch, status, text = case
+    ctx = build(monkeypatch, tmp_path, **kwargs)
+    if patch:
+        patch(monkeypatch)
+    result = row(ctx, key)
+    assert result.status == status, result
+    assert text in result.detail, result
+    assert result.fix, result
+
+
+# CLI-FU-SWEEP-1a (SM-SETUP-BATCH-1 LOW): a local provider with no model has core's route
+# held off whatever else is set, so no input may bring the LLM row to PASS. One row per
+# input that used to route past the no-model check, plus the controls that must not warn.
+_BASE = "http://llm.example.test:11434/v1"
+_NO_MODEL = LOCAL_CFG + '[local]\nllm_provider = "{p}"\n'
+_WITH_MODEL = LOCAL_CFG + '[local]\nllm_provider = "ollama"\nllm_model = "llama3.2"\n'
+NO_MODEL_HELD = [
+    # (id, build kwargs, status, text)
+    (
+        "ollama-base-url",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "lmstudio-base-url",
+        {
+            "config": _NO_MODEL.format(p="lmstudio"),
+            "environ": {"OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "ollama-provider-key",
+        {"config": _NO_MODEL.format(p="ollama"), "environ": {"GROQ_API_KEY": "g"}},
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "ollama-pinned-provider",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"LLM_PROVIDER": "groq", "GROQ_API_KEY": "g"},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    (
+        "ollama-base-url-and-key",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"OPENAI_BASE_URL": _BASE, "OPENAI_API_KEY": "k"},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        WARN,
+        "no model chosen",
+    ),
+    # controls: a model chosen (config or env) is not held, so the endpoint is probed
+    (
+        "control-config-model-base-url",
+        {
+            "config": _WITH_MODEL,
+            "environ": {"OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        PASS,
+        "server answering",
+    ),
+    (
+        "control-env-model-base-url",
+        {
+            "config": _NO_MODEL.format(p="ollama"),
+            "environ": {"SMARTMEMORY_LLM_MODEL": "llama3.2", "OPENAI_BASE_URL": _BASE},
+            "http": {f"{_BASE}/models": (200, {})},
+        },
+        PASS,
+        "server answering",
+    ),
+]
+
+
+@pytest.mark.parametrize("case", NO_MODEL_HELD, ids=[c[0] for c in NO_MODEL_HELD])
+def test_local_provider_without_model_is_never_pass(case, monkeypatch, tmp_path):
+    _id, kwargs, status, text = case
+    result = row(build(monkeypatch, tmp_path, **kwargs), "llm")
+    assert result.status == status, result
+    assert text in result.detail, result
+    if status == WARN:
+        assert "sm config llm_model" in result.fix, result
 
 
 def test_tour_context_rows(monkeypatch, tmp_path):
@@ -1405,6 +1581,144 @@ def test_fix_r1_probe(probe, monkeypatch, tmp_path, capsys):
     got = run(monkeypatch, tmp_path)
     with capsys.disabled():
         print(f"\nPROBE {_id}: {got}")
+
+
+# CLI-FU-SWEEP-1a H5: every way the OS can refuse doctor a read of the store is "not
+# checked" (WARN naming it), and only damage the store itself reports stays FAIL.
+# Real files and real permissions where the OS can produce the cause, a patched
+# sqlite3.connect where only SQLite can (lock and busy words, a read-only volume).
+
+
+def _chmod(path, mode):
+    path.chmod(mode)
+
+
+def _unreadable_db(monkeypatch, data_dir):
+    _chmod(data_dir / "memory.db", 0)
+
+
+def _unsearchable_dir(monkeypatch, data_dir):
+    _chmod(data_dir, 0)
+
+
+def _db_is_a_directory(monkeypatch, data_dir):
+    (data_dir / "memory.db").unlink()
+    (data_dir / "memory.db").mkdir()
+
+
+def _raises(exc):
+    def patch(monkeypatch, data_dir):
+        def connect(*args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(doctor.sqlite3, "connect", connect)
+
+    return patch
+
+
+_perm = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores permissions"
+)
+SQLITE_READ_ROWS = [
+    # (how the read goes wrong, status, text), one id per cause
+    pytest.param(
+        _unreadable_db, WARN, "cannot be read", marks=_perm, id="db-permission-denied"
+    ),
+    pytest.param(
+        _unsearchable_dir,
+        WARN,
+        "cannot be read",
+        marks=_perm,
+        id="data-dir-not-searchable",
+    ),
+    pytest.param(_db_is_a_directory, WARN, "cannot be read", id="db-is-a-directory"),
+    pytest.param(
+        _raises(sqlite3.OperationalError("unable to open database file")),
+        WARN,
+        "cannot be read (OperationalError)",
+        id="open-refused",
+    ),
+    pytest.param(
+        _raises(sqlite3.OperationalError("attempt to write a readonly database")),
+        WARN,
+        "cannot be read (OperationalError)",
+        id="read-only-volume",
+    ),
+    pytest.param(
+        _raises(sqlite3.OperationalError("database table is locked")),
+        WARN,
+        "in use by another process",
+        id="lock-busy",
+    ),
+    # damage the store itself reports is a definite answer
+    pytest.param(
+        _raises(sqlite3.DatabaseError("database disk image is malformed")),
+        FAIL,
+        "cannot be opened",
+        id="malformed",
+    ),
+    pytest.param(
+        _raises(sqlite3.DatabaseError("file is not a database")),
+        FAIL,
+        "cannot be opened",
+        id="not-a-database",
+    ),
+]
+
+
+@pytest.mark.parametrize("break_it,status,text", SQLITE_READ_ROWS)
+def test_unreadable_sqlite_store_is_not_checked_and_damage_is_fail(
+    break_it, status, text, monkeypatch, tmp_path
+):
+    ctx = build(monkeypatch, tmp_path, store="ok")
+    data_dir = tmp_path / "home" / ".smartmemory"
+    assert row(ctx, "graph").status == PASS  # healthy before the read goes wrong
+    try:
+        break_it(monkeypatch, data_dir)
+        result = doctor.check_graph(
+            ctx
+        )  # called directly: collect() would hide a crash as WARN
+    finally:
+        for path in (
+            data_dir,
+            data_dir / "memory.db",
+        ):  # the dir first: it gates the file
+            if path.exists():
+                path.chmod(0o700 if path.is_dir() else 0o600)
+    assert result.status == status, result
+    assert text in result.detail, result
+    assert result.fix, result
+    if status == WARN and "in use" not in text:
+        assert "not checked:" in result.detail and "memory.db" in result.detail, result
+
+
+@_perm
+def test_unreadable_config_directory_is_not_checked(monkeypatch, tmp_path):
+    ctx = build(monkeypatch, tmp_path)
+    cfg_dir = tmp_path / "xdg" / "smartmemory"
+    cfg_dir.chmod(0)
+    try:
+        result = doctor.check_config(ctx)
+    finally:
+        cfg_dir.chmod(0o700)
+    assert result.status == WARN and "not checked:" in result.detail, result
+    assert "cannot be read (PermissionError)" in result.detail, result
+
+
+@_perm
+def test_unreadable_healthy_sqlite_is_cannot_check(monkeypatch, tmp_path):
+    """The r1 reviewer's replay: PASS, then WARN while unreadable, then PASS again."""
+    ctx = build(monkeypatch, tmp_path, store="ok")
+    db = tmp_path / "home" / ".smartmemory" / "memory.db"
+    assert doctor.check_graph(ctx).status == PASS
+    try:
+        db.chmod(0)
+        result = doctor.check_graph(ctx)
+    finally:
+        db.chmod(0o600)
+    assert doctor.check_graph(ctx).status == PASS
+    assert result.status == WARN, "permission prevents checking a healthy SQLite store"
+    assert "not checked:" in result.detail
 
 
 def test_llm_route_resolves_against_installed_core(monkeypatch, tmp_path):

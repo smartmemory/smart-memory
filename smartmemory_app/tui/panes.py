@@ -61,7 +61,7 @@ class RelationsPane(ListView):
         groups = view.grouped()
         if not groups:
             self.append(
-                RelationRowItem("[dim](no relations — infra edges are filtered)[/dim]")
+                RelationRowItem("[dim](no relations: infra edges are filtered)[/dim]")
             )
             return
         for relation_type, rows in groups:

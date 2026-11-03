@@ -48,6 +48,11 @@ def emit(event_type: str, props: Optional[Mapping[str, Any]] = None) -> bool:
     """
     if os.environ.get("SMARTMEMORY_DISABLE_LAUNCH_METRICS") == "1":
         return False
+    from smartmemory_app.crash_reporter import under_test
+
+    if under_test() and os.environ.get("SMARTMEMORY_LAUNCH_METRICS_IN_TESTS") != "1":
+        log.debug("launch_metrics: no-op under pytest event=%s", event_type)
+        return False
     if event_type not in VALID_EVENT_TYPES:
         log.warning("launch_metrics: rejected unknown event_type=%s", event_type)
         return False

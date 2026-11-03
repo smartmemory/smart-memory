@@ -215,7 +215,7 @@ def code_index_cmd(
         # stdout. NEVER swallow silently — the rule of no_silent_fallbacks.
         cap = 20
         click.echo(
-            f"[code:index] warning: {len(result.errors)} parse error(s); showing first {min(cap, len(result.errors))}",
+            f"[code:index] warning: {len(result.errors)} parse error(s), showing first {min(cap, len(result.errors))}",
             err=True,
         )
         for line in result.errors[:cap]:
