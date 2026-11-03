@@ -766,6 +766,38 @@ def _normalize_ingest_result(result) -> str | dict:
     return resolved if isinstance(resolved, str) else str(resolved)
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        log.warning("%s=%r is not a positive integer, using %d", name, raw, default)
+        return default
+    return value
+
+
+# LITE-RECALL-WIDEN-UNBOUNDED-1: recall doubles its fetch while filtering leaves slots empty. A workspace that matches
+# no row (a session in a fresh git worktree) doubled until one page held the whole store: a full-table read per round,
+# under the backend lock, for hours. The widest fetch is this multiple of top_k, and never below the floor.
+#   SMARTMEMORY_RECALL_WIDEN_FACTOR   widest recall fetch, as a multiple of top_k (8)
+_RECALL_WIDEN_FACTOR = _positive_int_env("SMARTMEMORY_RECALL_WIDEN_FACTOR", 8)
+_RECALL_WIDEN_FLOOR = 16
+
+
+def _recall_fetch_ceiling(requested: int, first_fetch: int) -> int:
+    """The widest fetch one recall round may ask for; never below the first fetch, so round 1 is unchanged."""
+    return max(first_fetch, _RECALL_WIDEN_FLOOR, _RECALL_WIDEN_FACTOR * requested)
+
+
+def _recall_clock() -> float:
+    """Epoch seconds: the clock a recall ``deadline`` is read on (``lifecycle_api`` stamps it from ``time.time``)."""
+    return time.time()
+
+
 def _split_recall_counts(top_k: int) -> tuple[int, int]:
     """Split recall budget between recency and semantic passes.
 
@@ -1333,8 +1365,12 @@ def recall(
     workspace_id: str | None = None,
     strict: bool | None = None,
     exclude_ids: list[str] | None = None,
+    deadline: float | None = None,
 ) -> str:
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
+
+    ``deadline`` (epoch seconds, ``time.time``): a widening round does not start past it. Without one the fetch
+    ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
 
     Bug fixes vs legacy:
       - empty-content items skipped
@@ -1485,7 +1521,9 @@ def recall(
     fetch_k = max(1, requested * (2 if query else 1))
     # U5.21 (C4): every fetch (the first included) is clamped to what core's read gate can examine, and rows a
     # callee returns beyond the fetch are not used.
-    cap = _gated_fetch_cap()
+    # LITE-RECALL-WIDEN-UNBOUNDED-1: the smaller of the gate's bound and the recall ceiling (a multiple of top_k).
+    gate_cap = _gated_fetch_cap()
+    cap = min(_recall_fetch_ceiling(requested, fetch_k), gate_cap)
     fetch_k = min(fetch_k, cap)
 
     def examined(found, bound: int, where: str) -> list:
@@ -1558,7 +1596,14 @@ def recall(
                 if partial
                 else "the page came back full"
             )
+            if cap < gate_cap:
+                stopped = f"ceiling: {stopped}"
             # C3/C8: candidates past the bound were not examined, so the answer is partial whatever made the stop.
+            partial_names = (*partial_names, FETCH_BOUND_REASON)
+            break
+        if deadline is not None and _recall_clock() >= deadline:
+            # The next round would start past the read's deadline: deeper candidates were not examined either.
+            stopped = "deadline"
             partial_names = (*partial_names, FETCH_BOUND_REASON)
             break
         fetch_k = min(fetch_k * 2, cap)

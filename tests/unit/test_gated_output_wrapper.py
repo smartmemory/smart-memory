@@ -75,6 +75,13 @@ CAP = 200  # min(lane_gate.DEFAULT_MAX_SCAN, read_port.MAX_PAGE_LIMIT)
 FETCH_BOUND = "fetch_bound"  # the client's own reason: it stopped at the widest fetch it may ask for
 
 
+@pytest.fixture(autouse=True)
+def _gate_bound_is_the_widest_recall(monkeypatch):
+    """These rows pin the gate's bound (CAP). The recall ceiling (LITE-RECALL-WIDEN-UNBOUNDED-1, 8 x top_k by default)
+    would stop a top_k=3 recall first; it is raised here and pinned in test_recall_widen_bound.py."""
+    monkeypatch.setattr(storage, "_RECALL_WIDEN_FACTOR", 10**6)
+
+
 def gate_warning(where, names="complete, read_gate_scan_budget_spent"):
     return (
         GATE_LOG,
