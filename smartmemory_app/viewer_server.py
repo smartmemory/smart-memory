@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from smartmemory_app.local_api import api as _local_api
+from smartmemory_app.loopback_gate import LoopbackGate
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 9014
@@ -258,6 +259,11 @@ def _build_app() -> FastAPI:
             except Exception:
                 pass
         return await call_next(request)
+
+    # LITE-LOOPBACK-HOST-GATE-1: add_middleware inserts at the front of the user
+    # middleware list and the stack wraps that list outermost-first, so registering the
+    # gate after _version_guard makes it run first, before every route and mount.
+    app.add_middleware(LoopbackGate)
 
     # One probe per store-touching /health field (HOOK-CONSUMER-SCAN-1). Single-flight: a
     # slow offer scan (every node, under the backend lock) is joined, never stacked.

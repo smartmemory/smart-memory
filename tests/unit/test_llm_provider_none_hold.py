@@ -160,7 +160,9 @@ def _daemon(monkeypatch):
     from smartmemory_app.viewer_server import _build_app
 
     apply_runtime_config()  # viewer_server.main runs it at daemon start
-    return TestClient(_build_app(), raise_server_exceptions=False)
+    return TestClient(
+        _build_app(), base_url="http://localhost", raise_server_exceptions=False
+    )
 
 
 def _tour_client(client):

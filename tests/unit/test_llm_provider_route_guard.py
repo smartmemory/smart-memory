@@ -254,7 +254,9 @@ def _daemon_ask():
     from smartmemory_app.viewer_server import _build_app
 
     _runtime()
-    client = TestClient(_build_app(), raise_server_exceptions=False)
+    client = TestClient(
+        _build_app(), base_url="http://localhost", raise_server_exceptions=False
+    )
     return client.post("/memory/ask", json={"question": QUESTION})
 
 

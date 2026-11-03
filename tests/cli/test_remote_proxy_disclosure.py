@@ -36,7 +36,7 @@ def proxy(monkeypatch, tmp_path):
     monkeypatch.setattr("smartmemory_app.work_graph.get_work_status", forbidden)
     previous_state = viewer_server._get_startup_state()
     viewer_server._set_startup_state(None)
-    with TestClient(viewer_server._build_app()) as client:
+    with TestClient(viewer_server._build_app(), base_url="http://localhost") as client:
         try:
             yield client
         finally:

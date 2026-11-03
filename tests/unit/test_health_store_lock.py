@@ -85,7 +85,7 @@ def _client(backend, offer, work):
         p.start()
     from smartmemory_app.viewer_server import _build_app
 
-    return TestClient(_build_app()), patches
+    return TestClient(_build_app(), base_url="http://localhost"), patches
 
 
 def test_health_answers_while_the_store_is_busy(tmp_path):

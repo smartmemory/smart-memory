@@ -92,7 +92,7 @@ def test_whitespace_health_endpoint(tmp_path, monkeypatch, message, secret):
         mode="local", llm_provider="none", embedding_provider="local"
     )
     with (
-        TestClient(_build_app()) as client,
+        TestClient(_build_app(), base_url="http://localhost") as client,
         patch("smartmemory_app.config.load_config", return_value=config),
         patch("smartmemory_app.config.llm_key_present", return_value=False),
         patch("smartmemory_app.storage.get_memory", side_effect=RuntimeError(message)),
