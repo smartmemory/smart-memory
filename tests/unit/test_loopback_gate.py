@@ -218,3 +218,111 @@ def test_refusals_log_one_rate_limited_warning(client, caplog, monkeypatch):
     assert "x" * 101 not in lines[0]
     assert "POST" in lines[1] and "https://evil.example" in lines[1]
     assert "2 more refusals" in lines[1]
+
+
+RECALL = "/memory/recall?include_snapshot=false&top_k=0&query=attacker-marker"
+LOCAL_HOST = {"Host": f"127.0.0.1:{PORT}"}
+
+
+@pytest.fixture
+def recall_spies():
+    """The storage recall and the trace writer a cross-site GET /memory/recall would reach."""
+    with (
+        patch("smartmemory_app.storage.recall", return_value="ctx") as recall,
+        patch("smartmemory_app.recall_format._trace") as trace,
+    ):
+        yield recall, trace
+
+
+def _assert_recall_not_reached(response, recall_spies, body):
+    recall, trace = recall_spies
+    assert response.status_code == 403
+    assert response.json() == body
+    recall.assert_not_called()
+    trace.assert_not_called()
+
+
+@pytest.mark.parametrize("site", ["cross-site", "same-site"])
+def test_cross_site_get_recall_is_refused_by_fetch_metadata(client, recall_spies, site):
+    response = client.get(RECALL, headers={**LOCAL_HOST, "Sec-Fetch-Site": site})
+
+    _assert_recall_not_reached(response, recall_spies, loopback_gate.FETCH_SITE_REFUSED)
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "null"])
+def test_foreign_origin_get_recall_is_refused(client, recall_spies, origin):
+    response = client.get(RECALL, headers={**LOCAL_HOST, "Origin": origin})
+
+    _assert_recall_not_reached(response, recall_spies, loopback_gate.ORIGIN_REFUSED)
+
+
+def test_repeated_fetch_site_header_is_refused(client, recall_spies):
+    response = client.get(
+        RECALL,
+        headers=[
+            ("Host", LOCAL_HOST["Host"]),
+            ("Sec-Fetch-Site", "same-origin"),
+            ("Sec-Fetch-Site", "none"),
+        ],
+    )
+
+    _assert_recall_not_reached(response, recall_spies, loopback_gate.FETCH_SITE_REFUSED)
+
+
+@pytest.mark.parametrize(
+    "extra", [{"Sec-Fetch-Site": "same-origin"}, {"Sec-Fetch-Site": "none"}, {}]
+)
+def test_same_origin_user_and_non_browser_gets_reach_recall(
+    client, recall_spies, extra
+):
+    response = client.get(RECALL, headers={**LOCAL_HOST, **extra})
+
+    recall, _ = recall_spies
+    assert response.status_code == 200
+    assert response.json() == {"context": "ctx"}
+    recall.assert_called_once()
+
+
+def test_obsidian_origin_passes_even_with_cross_site_fetch_metadata(client, store):
+    response = client.delete(
+        "/memory/item-1",
+        headers={
+            **LOCAL_HOST,
+            "Origin": "app://obsidian.md",
+            "Sec-Fetch-Site": "cross-site",
+        },
+    )
+
+    assert response.status_code == 204
+    store.delete.assert_called_once_with("item-1")
+
+
+def test_viewer_page_is_served_for_same_origin_fetch_metadata(client):
+    served = client.get(
+        "/", headers={"Host": f"localhost:{PORT}", "Sec-Fetch-Site": "same-origin"}
+    )
+
+    assert served.status_code == 200
+    assert "<html" in served.text.lower()
+
+
+@pytest.mark.parametrize("host", ["evil.example:" + "9" * 5000, "localhost:99999"])
+def test_oversized_host_port_gets_the_fixed_refusal(
+    client, handler_spies, caplog, host
+):
+    with caplog.at_level(logging.WARNING, logger=loopback_gate.__name__):
+        response = client.get("/memory/graph/full", headers={"Host": host})
+
+    _assert_refused(response, handler_spies, loopback_gate.HOST_REFUSED)
+    assert [r.levelno for r in caplog.records if r.name == loopback_gate.__name__] == [
+        logging.WARNING
+    ]
+
+
+def test_cross_site_refusal_logs_a_warning(client, recall_spies, caplog):
+    with caplog.at_level(logging.WARNING, logger=loopback_gate.__name__):
+        client.get(RECALL, headers={**LOCAL_HOST, "Sec-Fetch-Site": "cross-site"})
+
+    lines = [r.getMessage() for r in caplog.records if r.name == loopback_gate.__name__]
+    assert len(lines) == 1
+    assert "GET" in lines[0] and "fetch-site" in lines[0] and "cross-site" in lines[0]
