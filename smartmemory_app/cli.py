@@ -2316,8 +2316,7 @@ def _render_ask_relations(result: dict) -> None:
 @click.option(
     "--limit",
     default=8,
-    show_default=True,
-    help="Memories used as evidence, one per source memory.",
+    help="Memories used as evidence, one per source memory. Default: 8.",
     type=click.IntRange(min=1),
 )
 @click.option(
