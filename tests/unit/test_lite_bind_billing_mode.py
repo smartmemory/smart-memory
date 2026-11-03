@@ -132,6 +132,7 @@ def test_spawned_child_interpreter_binds(tmp_path):
 NOT_BOUND = {
     "diagnostic_worker": "offline child of diagnostic_process, never resolves the mode or builds a store, env is inherited",
     "enrichment_worker": "retired, logs one warning and exits",
+    "capture_queue": "`python -m smartmemory_app.capture_queue release-held` (from main) only moves held transcripts back into the queue, never resolves the mode or builds a store; `sm lifecycle release-held` is the bound CLI path",
     "setup": "`python -m smartmemory_app.setup` runs the setup wizard, which spawns no memory; the CLI group binds",
 }
 BOUND = {"cli", "viewer_server", "worker_entry", "capture_worker"}

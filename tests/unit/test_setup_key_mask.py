@@ -29,6 +29,9 @@ def test_profile_write_failure_never_echoes_key(monkeypatch, capsys):
     def boom(self, *a, **kw):
         raise OSError(f"disk refused export GROQ_API_KEY={KEY}")
 
+    # The helper loads the key into os.environ: monkeypatch owns the name first.
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    monkeypatch.delenv("GROQ_API_KEY")
     monkeypatch.setattr(Path, "write_text", boom)
     monkeypatch.setattr(
         "builtins.open", lambda *a, **kw: (_ for _ in ()).throw(OSError(f"nope {KEY}"))
@@ -90,6 +93,15 @@ def _row_keyring_warning(monkeypatch, caplog, tmp_path, capsys):
     def refuse(*args):
         raise RuntimeError(f"keychain refused {KEY}")
 
+    # Main's conftest sets the keyring null guard (CLI-KEYRING-NULL-GUARD-1): lift it, as
+    # the keyring_writes_enabled fixture does, so setup reaches the refusing set_password.
+    from smartmemory_app import keyring_guard
+
+    monkeypatch.delenv(keyring_guard.NO_KEYRING_ENV, raising=False)
+    monkeypatch.delenv(keyring_guard.BACKEND_ENV, raising=False)
+    # setup loads the typed key into os.environ: monkeypatch owns the name first.
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    monkeypatch.delenv("GROQ_API_KEY")
     monkeypatch.setattr(click, "prompt", fake_prompt)
     monkeypatch.setattr(click, "confirm", lambda *a, **kw: False)
     monkeypatch.setattr(setup, "_persist_env_var", lambda n, v: None)

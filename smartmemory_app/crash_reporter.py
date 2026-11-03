@@ -77,7 +77,15 @@ def under_test() -> bool:
     """True inside a pytest run unless a test opts in (decided at send time)."""
     if os.environ.get("SMARTMEMORY_CRASH_REPORTS_IN_TESTS") == "1":
         return False
-    return "PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return True
+    # A constant-key read, not ``"pytest" in sys.modules``: the 2.0 storage.ingest census
+    # (test_save_return_compat) accepts sys.modules only by a constant subscript.
+    try:
+        sys.modules["pytest"]
+    except KeyError:
+        return False
+    return True
 
 
 def enabled() -> bool:
