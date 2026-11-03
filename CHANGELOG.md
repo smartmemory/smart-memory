@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.36 (2026-11-03)
+
+core 1.5.36: the Lite entity-graph lane no longer reads every node per search, which held the live Lite viewer daemon at 9-11 GB (SM-VIEWER-LEAK-1). No wrapper code changes.
+
 ## 1.5.35 (2026-11-02)
 
 core 1.5.35: coreference `auto` no longer picks Apple MPS, which grew the Lite daemon's memory without bound (SM-VIEWER-RSS-1, D-0031). No wrapper code changes.
