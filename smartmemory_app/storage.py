@@ -630,6 +630,38 @@ def _normalize_ingest_result(result) -> str | dict:
     return str(result)
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        log.warning("%s=%r is not a positive integer, using %d", name, raw, default)
+        return default
+    return value
+
+
+# LITE-RECALL-WIDEN-UNBOUNDED-1: recall doubles its fetch while filtering leaves slots empty. A workspace that matches
+# no row (a session in a fresh git worktree) doubled until one page held the whole store: a full-table read per round,
+# under the backend lock, for hours. The widest fetch is this multiple of top_k, and never below the floor.
+#   SMARTMEMORY_RECALL_WIDEN_FACTOR   widest recall fetch, as a multiple of top_k (8)
+_RECALL_WIDEN_FACTOR = _positive_int_env("SMARTMEMORY_RECALL_WIDEN_FACTOR", 8)
+_RECALL_WIDEN_FLOOR = 16
+
+
+def _recall_fetch_ceiling(requested: int, first_fetch: int) -> int:
+    """The widest fetch one recall round may ask for; never below the first fetch, so round 1 is unchanged."""
+    return max(first_fetch, _RECALL_WIDEN_FLOOR, _RECALL_WIDEN_FACTOR * requested)
+
+
+def _recall_clock() -> float:
+    """Epoch seconds: the clock a recall ``deadline`` is read on (``lifecycle_api`` stamps it from ``time.time``)."""
+    return time.time()
+
+
 def _split_recall_counts(top_k: int) -> tuple[int, int]:
     """Split recall budget between recency and semantic passes.
 
@@ -1013,8 +1045,12 @@ def recall(
     workspace_id: str | None = None,
     strict: bool | None = None,
     exclude_ids: list[str] | None = None,
+    deadline: float | None = None,
 ) -> str:
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
+
+    ``deadline`` (epoch seconds, ``time.time``): a widening round does not start past it. Without one the fetch
+    ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
 
     Bug fixes vs legacy:
       - empty-content items skipped
@@ -1142,10 +1178,12 @@ def recall(
     # final. Needs core >= 1.5.33 (older SmartMemory.search has no `manual_scan`).
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
+    ceiling = _recall_fetch_ceiling(requested, fetch_k)
     recent_k, semantic_k = _split_recall_counts(requested)
     results = []
     body = ""
     emitted = 0
+    stopped = ""
     while requested:
         if query:
             raw = list(mem.search(query, top_k=fetch_k, manual_scan=False))
@@ -1181,14 +1219,35 @@ def recall(
         emitted = body.count("\n- ") if body else 0
         if emitted >= requested or exhausted:
             break
-        fetch_k *= 2
+        # LITE-RECALL-WIDEN-UNBOUNDED-1: the next round neither passes the ceiling nor starts past the deadline.
+        if fetch_k >= ceiling:
+            stopped = "ceiling"
+            break
+        if deadline is not None and _recall_clock() >= deadline:
+            stopped = "deadline"
+            break
+        fetch_k = min(fetch_k * 2, ceiling)
 
+    partial = []
     if emitted < requested:
-        log.warning(
-            "recall shortfall: requested=%d emitted=%d, eligible distinct candidates exhausted",
-            requested,
-            emitted,
-        )
+        if stopped:
+            log.warning(
+                "recall shortfall: requested=%d emitted=%d; stopped widening at a fetch of %d (%s), so eligible "
+                "candidates past it are not shown",
+                requested,
+                emitted,
+                fetch_k,
+                stopped,
+            )
+            partial = [
+                f"Recall partial: stopped widening at a fetch of {fetch_k} ({stopped})"
+            ]
+        else:
+            log.warning(
+                "recall shortfall: requested=%d emitted=%d, eligible distinct candidates exhausted",
+                requested,
+                emitted,
+            )
 
     # 7. Compose: body + optional snapshot frame
     if body and frame:
@@ -1216,6 +1275,8 @@ def recall(
         emitted=emitted,
         snapshot_used=bool(frame),
         latency_ms=time_ms() - t0,
+        # The 1.5 answer is a plain str: a bound stop is recorded on the hook trace record.
+        **({"degradations": partial} if partial else {}),
     )
 
     return out

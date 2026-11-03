@@ -156,11 +156,12 @@ class MemoryLifecycle:
     # ── Phase methods ──────────────────────────────────────────────────
 
     @_traced_injection
-    def orient(self, cwd: str | None = None) -> str:
+    def orient(self, cwd: str | None = None, deadline: float | None = None) -> str:
         """Phase 1: Session start — recall previous context with progressive disclosure.
 
         Returns the separately budgeted rules card followed by orient_budget context.
-        Clears stale session state for fresh start.
+        Clears stale session state for fresh start. ``deadline`` (epoch seconds) bounds
+        each recall's widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
         """
         if not self._config.enabled:
             skip_injection("disabled")
@@ -192,7 +193,9 @@ class MemoryLifecycle:
         exclusions = (
             {"exclude_ids": self._rules_card_ids} if self._rules_card_ids else {}
         )
-        context = recall(cwd, top_k=10, **exclusions)
+        # LITE-RECALL-WIDEN-UNBOUNDED-1: the read phase's deadline reaches the widening loop.
+        bounds = {"deadline": deadline} if deadline is not None else {}
+        context = recall(cwd, top_k=10, **exclusions, **bounds)
 
         # Also look for patterns and decisions if cwd provided. This MUST go
         # through the workspace-scoped recall path, not storage.search: search
@@ -208,6 +211,7 @@ class MemoryLifecycle:
                     query=f"patterns conventions decisions for {os.path.basename(cwd)}",
                     include_snapshot=False,
                     **exclusions,
+                    **bounds,
                 )
             except Exception as exc:
                 record_hook_degradation("Orient lost patterns context", exc)
@@ -234,7 +238,9 @@ class MemoryLifecycle:
         self._save_state()
 
     @_traced_injection
-    def recall(self, prompt: str, cwd: str | None = None) -> str:
+    def recall(
+        self, prompt: str, cwd: str | None = None, deadline: float | None = None
+    ) -> str:
         """Phase 2: Per-prompt recall — always captures prompt, optionally injects context.
 
         Scoped by `cwd` → workspace (HOOK-RECALL-RELEVANCE-1). Routing through
@@ -270,8 +276,14 @@ class MemoryLifecycle:
                 and self._rules_card_workspace == derive_workspace_id(cwd)
             ):
                 exclusions["exclude_ids"] = self._rules_card_ids
+            bounds = {"deadline": deadline} if deadline is not None else {}
             block = scoped_recall(
-                cwd, top_k=5, query=prompt, include_snapshot=False, **exclusions
+                cwd,
+                top_k=5,
+                query=prompt,
+                include_snapshot=False,
+                **exclusions,
+                **bounds,
             )
         except Exception as e:
             record_hook_error("Recall lost search context", e)

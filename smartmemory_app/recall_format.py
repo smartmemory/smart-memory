@@ -464,7 +464,8 @@ def derive_workspace_id(cwd: str | None) -> str | None:
     Strategy:
       1. SMARTMEMORY_WORKSPACE_ID env var wins.
       2. Otherwise: realpath(cwd) → optional `git rev-parse --show-toplevel` →
-         realpath again → sha1[:12], prefixed `ws_`.
+         realpath again → sha1[:12], prefixed `ws_`. A linked git worktree
+         resolves to its main checkout (``_checkout_root``), so both share one id.
       3. None cwd returns None.
 
     Symlinked paths collapse to the same id as the real path.
@@ -478,16 +479,24 @@ def derive_workspace_id(cwd: str | None) -> str | None:
     canonical = os.path.realpath(cwd)
     try:
         result = subprocess.run(
-            ["git", "-C", canonical, "rev-parse", "--show-toplevel"],
+            [
+                "git",
+                "-C",
+                canonical,
+                "rev-parse",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
             timeout=1,
             check=True,
         )
-        toplevel = result.stdout.strip()
-        if toplevel:
-            canonical = os.path.realpath(toplevel)
+        toplevel, *dirs = result.stdout.splitlines() or [""]
+        if toplevel.strip():
+            canonical = _checkout_root(canonical, toplevel.strip(), dirs)
     except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         log.warning(
             "workspace lost git-root resolution, using cwd %s: %s", canonical, exc
@@ -495,6 +504,27 @@ def derive_workspace_id(cwd: str | None) -> str | None:
 
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
     return f"ws_{digest}"
+
+
+def _checkout_root(cwd: str, toplevel: str, dirs: list[str]) -> str:
+    """The checkout a workspace id names (LITE-RECALL-WIDEN-UNBOUNDED-1).
+
+    ``--show-toplevel`` of a linked worktree is the worktree itself, so a session
+    there got a fresh, empty workspace (and recall widened over the whole store
+    looking for it). A linked worktree's git dir differs from its common dir, the
+    main repo's ``.git``; the main checkout is that directory's parent. A plain
+    checkout (git dir == common dir), a submodule (common dir ``.git/modules/<n>``)
+    and a bare repo's worktree (common dir ``<n>.git``) keep their toplevel, so
+    their ids are unchanged. ``dirs`` are rev-parse's ``--git-dir`` and
+    ``--git-common-dir`` lines, relative to ``cwd`` or absolute.
+    """
+    root = os.path.realpath(toplevel)
+    if len(dirs) != 2:
+        return root
+    git_dir, common = (os.path.realpath(os.path.join(cwd, d.strip())) for d in dirs)
+    if git_dir != common and os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return root
 
 
 # --- Trace -------------------------------------------------------------------

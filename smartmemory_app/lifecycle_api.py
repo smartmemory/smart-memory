@@ -141,7 +141,10 @@ def _drop(phase: str, why: str) -> dict:
 async def _read_phase(request: Request, phase: str, work) -> dict:
     """Run a read phase (orient, recall) on the read pool under a time cap.
 
-    Answers ``{"context": work(body)}``. Three cases answer ``{"context": ""}``, the
+    Answers ``{"context": work(body, start_by)}``: ``start_by`` (epoch seconds) is the
+    deadline the work's recall widening checks before each round, so a started worker
+    stops widening once the answer can no longer be used (LITE-RECALL-WIDEN-UNBOUNDED-1).
+    Three cases answer ``{"context": ""}``, the
     shape the hook client already treats as "nothing to inject", each with a WARNING
     and a running count:
 
@@ -173,7 +176,7 @@ async def _read_phase(request: Request, phase: str, work) -> dict:
         late = time.time() - start_by
         if late >= 0:
             raise _Expired(f"reached a read slot {late:.2f}s past its deadline")
-        return work(body)
+        return work(body, start_by)
 
     try:
         result = await asyncio.wait_for(_run_on(_read_pool, run), timeout=budget)
@@ -222,7 +225,11 @@ def _load_lifecycle_config() -> dict:
 @lifecycle_router.post("/orient")
 async def orient(request: Request):
     return await _read_phase(
-        request, "orient", lambda body: _get_lifecycle(body).orient(cwd=body.get("cwd"))
+        request,
+        "orient",
+        lambda body, deadline: _get_lifecycle(body).orient(
+            cwd=body.get("cwd"), deadline=deadline
+        ),
     )
 
 
@@ -236,8 +243,8 @@ async def recall(request: Request):
     return await _read_phase(
         request,
         "recall",
-        lambda body: _get_lifecycle(body).recall(
-            body.get("prompt", ""), cwd=body.get("cwd")
+        lambda body, deadline: _get_lifecycle(body).recall(
+            body.get("prompt", ""), cwd=body.get("cwd"), deadline=deadline
         ),
     )
 
