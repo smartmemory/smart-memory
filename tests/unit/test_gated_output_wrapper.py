@@ -56,6 +56,8 @@ NOISE = (
     ("smartmemory.redis_gate", "activation boost disabled"),
     ("smartmemory.redis_gate", "retrieval tracking disabled"),
     ("smartmemory.search.read_runner_adapter", "switch sm2_read_runner_default OFF"),
+    # core 2.0 U9.9 (bdfd30f8e): once per process per branch name, so it lands on whichever row reaches that branch first
+    ("smartmemory.search.read_runner_adapter", "read runner not used ("),
     (
         "smartmemory.memory.pipeline.stages.search",
         "SmartGraph returned no usable candidates",
