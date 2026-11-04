@@ -161,7 +161,8 @@ class MemoryLifecycle:
 
         Returns the separately budgeted rules card followed by orient_budget context.
         Clears stale session state for fresh start. ``deadline`` (epoch seconds) bounds
-        each recall's widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
+        each recall's widening, and no lookup starts once it has passed
+        (LITE-RECALL-WIDEN-UNBOUNDED-1).
         """
         if not self._config.enabled:
             skip_injection("disabled")
@@ -175,19 +176,23 @@ class MemoryLifecycle:
         self._turn_count = 0
         self._observation_count = 0
 
-        from smartmemory_app.storage import recall
+        from smartmemory_app.storage import recall, recall_deadline_passed
 
         self._rules_card_ids = []
         self._rules_card_workspace = derive_workspace_id(cwd)
         card = ""
         if self._config.rules_card_enabled:
-            try:
-                from smartmemory_app.rules_card import build_rules_card
+            if recall_deadline_passed(deadline):
+                # RCLWIDEN-CX F1: the daemon has already answered; nothing new starts.
+                record_hook_degradation("Orient skipped rules card", "deadline passed")
+            else:
+                try:
+                    from smartmemory_app.rules_card import build_rules_card
 
-                card = build_rules_card(cwd, budget=self._config.rules_card_budget)
-                self._rules_card_ids = recall_format.payload_ids(card)
-            except Exception as exc:
-                record_hook_degradation("Orient lost rules card", exc)
+                    card = build_rules_card(cwd, budget=self._config.rules_card_budget)
+                    self._rules_card_ids = recall_format.payload_ids(card)
+                except Exception as exc:
+                    record_hook_degradation("Orient lost rules card", exc)
 
         # Get recent + relevant memories
         exclusions = (
@@ -203,7 +208,12 @@ class MemoryLifecycle:
         # returns the shared team's memories regardless of which project this
         # session is in (the sibling of the recall-hook leak fixed in 7bbeb63).
         patterns = ""
-        if cwd:
+        if cwd and recall_deadline_passed(deadline):
+            # RCLWIDEN-CX F1: the first recall spent the deadline; the patterns recall does not start.
+            record_hook_degradation(
+                "Orient skipped patterns context", "deadline passed"
+            )
+        elif cwd:
             try:
                 patterns = recall(
                     cwd,

@@ -662,6 +662,11 @@ def _recall_clock() -> float:
     return time.time()
 
 
+def recall_deadline_passed(deadline: float | None) -> bool:
+    """True once ``deadline`` (epoch seconds) has passed. Without a deadline the clock is not read."""
+    return deadline is not None and _recall_clock() >= deadline
+
+
 def _split_recall_counts(top_k: int) -> tuple[int, int]:
     """Split recall budget between recency and semantic passes.
 
@@ -1049,8 +1054,8 @@ def recall(
 ) -> str:
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
 
-    ``deadline`` (epoch seconds, ``time.time``): a widening round does not start past it. Without one the fetch
-    ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
+    ``deadline`` (epoch seconds, ``time.time``): no lookup or round starts past it, the first round included. Without
+    one the fetch ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
 
     Bug fixes vs legacy:
       - empty-content items skipped
@@ -1103,7 +1108,12 @@ def recall(
     # 1. Optional snapshot frame (graph-mirrored markdown from CORE-SUMMARY-1)
     excluded = set()
     frame = ""
-    if include_snapshot:
+    # LITE-RECALL-WIDEN-UNBOUNDED-1 (RCLWIDEN-CX F1): no lookup, channel or round starts once the deadline has passed,
+    # the first included. ``stopped`` names why widening ended; the one shortfall WARNING below reports it.
+    stopped = (
+        "deadline" if include_snapshot and recall_deadline_passed(deadline) else ""
+    )
+    if include_snapshot and not stopped:
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
         except Exception as exc:  # noqa: BLE001
@@ -1164,12 +1174,16 @@ def recall(
                 kept.append(r)
         return kept
 
+    if not stopped and recall_deadline_passed(deadline):
+        stopped = "deadline"
+    lessons = []
     try:
-        lessons = eligible(
-            matching_lessons(
-                mem._graph.search_nodes({"memory_type": "decision"}), query
+        if not stopped:
+            lessons = eligible(
+                matching_lessons(
+                    mem._graph.search_nodes({"memory_type": "decision"}), query
+                )
             )
-        )
     except Exception as exc:
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
@@ -1183,8 +1197,9 @@ def recall(
     results = []
     body = ""
     emitted = 0
-    stopped = ""
-    while requested:
+    rounds = 0
+    while requested and not stopped:
+        rounds += 1
         if query:
             raw = list(mem.search(query, top_k=fetch_k, manual_scan=False))
             results = eligible(raw)
@@ -1223,7 +1238,7 @@ def recall(
         if fetch_k >= ceiling:
             stopped = "ceiling"
             break
-        if deadline is not None and _recall_clock() >= deadline:
+        if recall_deadline_passed(deadline):
             stopped = "deadline"
             break
         fetch_k = min(fetch_k * 2, ceiling)
@@ -1231,17 +1246,16 @@ def recall(
     partial = []
     if emitted < requested:
         if stopped:
+            where = f"at a fetch of {fetch_k}" if rounds else "before the first fetch"
             log.warning(
-                "recall shortfall: requested=%d emitted=%d; stopped widening at a fetch of %d (%s), so eligible "
+                "recall shortfall: requested=%d emitted=%d; stopped widening %s (%s), so eligible "
                 "candidates past it are not shown",
                 requested,
                 emitted,
-                fetch_k,
+                where,
                 stopped,
             )
-            partial = [
-                f"Recall partial: stopped widening at a fetch of {fetch_k} ({stopped})"
-            ]
+            partial = [f"Recall partial: stopped widening {where} ({stopped})"]
         else:
             log.warning(
                 "recall shortfall: requested=%d emitted=%d, eligible distinct candidates exhausted",
