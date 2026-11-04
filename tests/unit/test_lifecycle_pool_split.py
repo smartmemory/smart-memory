@@ -38,7 +38,7 @@ class _Fake:
             self.gate.wait(BLOCK_S)
         return value
 
-    def recall(self, prompt, cwd=None, deadline=None):
+    def recall(self, prompt, cwd=None, deadline=None, on_partial=None):
         self.deadlines["recall"] = deadline
         return self._work("recall", f"test_ctx:{prompt}")
 

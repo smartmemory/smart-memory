@@ -53,7 +53,7 @@ def _env_number(name: str, default, cast):
 # and every later recall queued behind them (DAEMON-RECALL-STARVE-1, 2026-10-30).
 #   SMARTMEMORY_LIFECYCLE_THREADS       write pool: observe, distill, learn, persist (4)
 #   SMARTMEMORY_LIFECYCLE_READ_THREADS  read pool: orient, recall (4)
-#   SMARTMEMORY_LIFECYCLE_RECALL_CAP    seconds a read may run before it answers empty (4.5)
+#   SMARTMEMORY_LIFECYCLE_RECALL_CAP    seconds a read may run before it answers with what it has (4.5)
 _PHASE_THREADS = _env_number("SMARTMEMORY_LIFECYCLE_THREADS", 4, int)
 _phase_pool = ThreadPoolExecutor(
     max_workers=_PHASE_THREADS, thread_name_prefix="smartmemory-lifecycle"
@@ -71,7 +71,7 @@ _RECALL_CAP_S = _env_number("SMARTMEMORY_LIFECYCLE_RECALL_CAP", 4.5, float)
 CLIENT_DEADLINE_KEY = "client_deadline"
 _REPLY_MARGIN_S = 0.25  # left for the answer to reach the client before its deadline
 
-_read_counts = {"dropped": 0, "capped": 0}
+_read_counts = {"dropped": 0, "capped": 0, "partial": 0}
 _read_counts_lock = threading.Lock()
 
 
@@ -109,6 +109,27 @@ class _Expired(Exception):
     """A queued read reached a pool slot after its answer was no longer wanted."""
 
 
+class _PartialAnswer:
+    """The latest answer a running read offered, for the route to send if its cap passes first.
+
+    LITE-RECALL-READ-SNAPSHOT-1: the route used to answer ``""`` at the cap even when the worker already held good
+    rows (a live probe: 4 lines found, 0 delivered). ``offer`` runs on the worker thread, ``latest`` on the loop.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._text = ""
+
+    def offer(self, text: str) -> None:
+        if text:
+            with self._lock:
+                self._text = text
+
+    def latest(self) -> str:
+        with self._lock:
+            return self._text
+
+
 def _client_deadline(phase: str, body: dict) -> float | None:
     raw = body.get(CLIENT_DEADLINE_KEY)
     if raw is None:
@@ -141,10 +162,12 @@ def _drop(phase: str, why: str) -> dict:
 async def _read_phase(request: Request, phase: str, work) -> dict:
     """Run a read phase (orient, recall) on the read pool under a time cap.
 
-    Answers ``{"context": work(body, start_by)}``: ``start_by`` (epoch seconds) is the
-    deadline the work's recall widening checks before each round, so a started worker
+    Answers ``{"context": work(body, start_by, partial)}``: ``start_by`` (epoch seconds) is
+    the deadline the work's recall widening checks before each round, so a started worker
     stops widening once the answer can no longer be used (LITE-RECALL-WIDEN-UNBOUNDED-1).
-    Three cases answer ``{"context": ""}``, the
+    ``partial`` is a ``_PartialAnswer`` the work may offer answers-so-far to: a started
+    worker that has not finished at the cap is answered with the latest one, with a
+    WARNING (LITE-RECALL-READ-SNAPSHOT-1). Three cases answer ``{"context": ""}``, the
     shape the hook client already treats as "nothing to inject", each with a WARNING
     and a running count:
 
@@ -152,8 +175,8 @@ async def _read_phase(request: Request, phase: str, work) -> dict:
       before the work is queued: ``work`` never runs;
     - the work was still queued at the cap or deadline: it is cancelled, or skipped
       when it reaches a slot, so ``work`` never runs;
-    - the work started but did not finish within the cap: the route answers at the
-      cap. Python cannot kill a thread, so that worker runs until ``work`` returns
+    - the work started but did not finish within the cap and had offered nothing: the
+      route answers at the cap. Python cannot kill a thread, so that worker runs until ``work`` returns
       and holds one read slot meanwhile. The read pool's size bounds how many such
       stragglers can pile up, and observe/distill/learn/persist never wait for them
       because they run on the write pool.
@@ -171,18 +194,31 @@ async def _read_phase(request: Request, phase: str, work) -> dict:
     if budget <= 0:
         return _drop(phase, "client deadline leaves no time to answer")
     start_by = now + budget
+    partial = _PartialAnswer()
 
     def run():
         late = time.time() - start_by
         if late >= 0:
             raise _Expired(f"reached a read slot {late:.2f}s past its deadline")
-        return work(body, start_by)
+        return work(body, start_by, partial)
 
     try:
         result = await asyncio.wait_for(_run_on(_read_pool, run), timeout=budget)
     except _Expired as exc:
         return _drop(phase, str(exc))
     except TimeoutError:
+        text = partial.latest()
+        if text:
+            log.warning(
+                "Lifecycle %s answered partial at its %.2fs cap: %d chars from the rows found so far, "
+                "rows a later round would add are not sent; a started worker finishes in the "
+                "background (partial so far: %d)",
+                phase,
+                budget,
+                len(text),
+                _count("partial"),
+            )
+            return {"context": text}
         log.warning(
             "Lifecycle %s answered empty at its %.2fs cap; a started worker "
             "finishes in the background (capped so far: %d)",
@@ -227,7 +263,7 @@ async def orient(request: Request):
     return await _read_phase(
         request,
         "orient",
-        lambda body, deadline: _get_lifecycle(body).orient(
+        lambda body, deadline, _partial: _get_lifecycle(body).orient(
             cwd=body.get("cwd"), deadline=deadline
         ),
     )
@@ -243,8 +279,11 @@ async def recall(request: Request):
     return await _read_phase(
         request,
         "recall",
-        lambda body, deadline: _get_lifecycle(body).recall(
-            body.get("prompt", ""), cwd=body.get("cwd"), deadline=deadline
+        lambda body, deadline, partial: _get_lifecycle(body).recall(
+            body.get("prompt", ""),
+            cwd=body.get("cwd"),
+            deadline=deadline,
+            on_partial=partial.offer,
         ),
     )
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+Hook recall answers while the hook-queue drain writes (LITE-RECALL-READ-SNAPSHOT-1). Needs `smartmemory-core` with `SQLiteBackend.flush_deferred_access` (the same unit's core change); on an older core recall reads as before and logs that once.
+
+- fix(recall), LITE-RECALL-READ-SNAPSHOT-1 (a live store answered 0 of 5 recalls at the 4.5 s cap while the drain held the graph lock, and logged 7,603 workspace-drop WARNINGs in 28 min): `storage.recall` runs its local reads inside the store's read-only WAL snapshot (`_recall_snapshot`), so they take no graph lock and never queue behind the writer; the snapshot can trail the writer by its open batch. Access stamps the snapshot deferred are flushed non-blocking after it. Where the store cannot serve a snapshot (no read pool, an in-memory store, an open write transaction on this thread, an older core) recall reads as before, with one WARNING per process naming why.
+- fix(recall), same unit: the decision lookup filters workspaces in SQL (`_workspace_decisions`, core `search_nodes_in_workspace`) and keeps exactly the rows the old full scan kept; without it, it scans as before with one WARNING.
+- fix(daemon), same unit: `/lifecycle/recall` answers with the latest partial answer when its cap passes before the recall returns (`_PartialAnswer`, `storage.recall(on_partial=)`, `MemoryLifecycle.recall(on_partial=)`), with a WARNING and a `partial` count, instead of `""`. Partials are published after the decision lookup, the recency channel and each round, in the final answer's shape and trimmed to the recall budget. `/lifecycle/orient` still answers empty at its cap.
+- test, same unit: `tests/unit/test_recall_read_snapshot.py` (the route's partial and empty answers at the cap; the SQL decision lookup keeps what the full scan kept, strict and not, and its fallback warns once; on a real Lite store a recall answers in full while a writer holds the graph RLock, and answers partial with the decision rows while it also holds the vector index locks). `tests/unit/test_lifecycle_pool_split.py`: the fake takes `on_partial`.
+
 ## 1.5.38 (2026-11-03)
 
 Recall no longer widens without end, and git worktrees share their checkout's memories. Needs `smartmemory-core` 1.5.38 (pinned exactly).

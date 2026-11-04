@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -1051,11 +1051,17 @@ def recall(
     strict: bool | None = None,
     exclude_ids: list[str] | None = None,
     deadline: float | None = None,
+    on_partial: Callable[[str], None] | None = None,
 ) -> str:
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
 
     ``deadline`` (epoch seconds, ``time.time``): no lookup or round starts past it, the first round included. Without
     one the fetch ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
+
+    ``on_partial`` (LITE-RECALL-READ-SNAPSHOT-1) is called with the answer the rows found so far make, in the final
+    answer's shape, each time that grows: after the decision lookup, after the recency channel, after each round. The
+    daemon's read route answers with the latest one when its cap passes before this returns. Local reads run on the
+    store's read-only WAL snapshot (``read_connection``), off the graph lock the hook-queue writer holds.
 
     Bug fixes vs legacy:
       - empty-content items skipped
@@ -1068,19 +1074,7 @@ def recall(
 
     Remote mode delegates to RemoteMemory.recall (same param contract).
     """
-    from smartmemory.origin_policy import filter_by_tiers, get_default_tiers
-    from smartmemory_app.recall_format import (
-        _item_to_recall_dict,
-        filter_hook_items,
-        matching_lessons,
-        _trace,
-        derive_workspace_id,
-        format_recall_lines,
-        payload_ids,
-        record_hook_degradation,
-        recall_item_label,
-        time_ms,
-    )
+    from smartmemory_app.recall_format import time_ms
 
     t0 = time_ms()
     mem = get_memory()
@@ -1096,6 +1090,53 @@ def recall(
             strict=strict,
             **({"exclude_ids": exclude_ids} if exclude_ids else {}),
         )
+
+    with _recall_snapshot(mem):
+        out = _recall_local(
+            mem,
+            t0,
+            cwd,
+            top_k,
+            query=query,
+            include_snapshot=include_snapshot,
+            workspace_id=workspace_id,
+            strict=strict,
+            exclude_ids=exclude_ids,
+            deadline=deadline,
+            on_partial=on_partial,
+        )
+    _flush_recall_access(mem)
+    return out
+
+
+def _recall_local(
+    mem,
+    t0: float,
+    cwd: str | None,
+    top_k: int,
+    *,
+    query: str | None,
+    include_snapshot: bool,
+    workspace_id: str | None,
+    strict: bool | None,
+    exclude_ids: list[str] | None,
+    deadline: float | None,
+    on_partial: Callable[[str], None] | None,
+) -> str:
+    """The local half of ``recall``, on the snapshot ``recall`` binds."""
+    from smartmemory.origin_policy import filter_by_tiers, get_default_tiers
+    from smartmemory_app.recall_format import (
+        _item_to_recall_dict,
+        filter_hook_items,
+        matching_lessons,
+        _trace,
+        derive_workspace_id,
+        format_recall_lines,
+        payload_ids,
+        record_hook_degradation,
+        recall_item_label,
+        time_ms,
+    )
 
     workspace_id = workspace_id or derive_workspace_id(cwd)
     if strict is None:
@@ -1180,13 +1221,26 @@ def recall(
     try:
         if not stopped:
             lessons = eligible(
-                matching_lessons(
-                    mem._graph.search_nodes({"memory_type": "decision"}), query
-                )
+                matching_lessons(_workspace_decisions(mem, workspace_id, strict), query)
             )
     except Exception as exc:
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
+
+    def publish(rows):
+        """Offer the answer ``rows`` make now (LITE-RECALL-READ-SNAPSHOT-1); never raises into the recall."""
+        if on_partial is None:
+            return
+        try:
+            part = format_recall_lines(
+                [_item_to_recall_dict(r) for r in lessons + rows],
+                top_k=requested,
+                lessons_first=not query,
+            )
+            if part or frame:
+                on_partial(_compose_recall(part, frame))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("recall partial answer not published: %s", exc)
 
     # CORE-RECALL-NO-MANUAL-SCAN-1: hook recall takes graph search's empty answer as
     # final. Needs core >= 1.5.33 (older SmartMemory.search has no `manual_scan`).
@@ -1198,6 +1252,8 @@ def recall(
     body = ""
     emitted = 0
     rounds = 0
+    if requested:
+        publish([])
     while requested and not stopped:
         rounds += 1
         if query:
@@ -1208,8 +1264,10 @@ def recall(
             recent = list(
                 mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
             )
+            recent_rows = eligible(recent)
+            publish(recent_rows)
             semantic = list(mem.search(cwd, top_k=fetch_k, manual_scan=False))
-            recent_rows, semantic_rows = eligible(recent), eligible(semantic)
+            semantic_rows = eligible(semantic)
             # Preserve ceil(k/2) recency first, then floor(k/2) semantic.
             # Overflow from either channel can replace missing/duplicate slots.
             results = (
@@ -1232,6 +1290,7 @@ def recall(
             lessons_first=not query,
         )
         emitted = body.count("\n- ") if body else 0
+        publish(results)
         if emitted >= requested or exhausted:
             break
         # LITE-RECALL-WIDEN-UNBOUNDED-1: the next round neither passes the ceiling nor starts past the deadline.
@@ -1264,14 +1323,7 @@ def recall(
             )
 
     # 7. Compose: body + optional snapshot frame
-    if body and frame:
-        out = f"{body}\n\n{frame}"
-    elif body:
-        out = body
-    elif frame:
-        out = f"## SmartMemory Context\n\n{frame}"
-    else:
-        out = ""
+    out = _compose_recall(body, frame)
 
     # 8. Trace (never raises)
     _trace(
@@ -1294,6 +1346,123 @@ def recall(
     )
 
     return out
+
+
+def _compose_recall(body: str, frame: str) -> str:
+    """The recall answer: the ranked body, then the optional snapshot frame."""
+    if body and frame:
+        return f"{body}\n\n{frame}"
+    if body:
+        return body
+    if frame:
+        return f"## SmartMemory Context\n\n{frame}"
+    return ""
+
+
+# LITE-RECALL-READ-SNAPSHOT-1: the fallbacks below log once per process each, naming what the recall loses.
+_RECALL_FALLBACK_WARNED: set[str] = set()
+
+
+def _warn_recall_fallback(reason: str, message: str, *args) -> None:
+    if reason in _RECALL_FALLBACK_WARNED:
+        return
+    _RECALL_FALLBACK_WARNED.add(reason)
+    log.warning(message + " (logged once per process)", *args)
+
+
+@contextmanager
+def _recall_snapshot(mem):
+    """Run a recall's local reads on the store's read-only WAL snapshot (LITE-RECALL-READ-SNAPSHOT-1).
+
+    Core's ``SQLiteBackend.read_connection()`` binds this thread to a snapshot connection with no graph RLock (the
+    SQLite search lanes run on the calling thread), so a recall never queues behind the hook-queue writer's transaction.
+    The snapshot can trail that writer by its open batch. Where the store cannot serve one, the recall reads on the
+    writer connection as before and the fallback is logged once.
+    """
+    backend = getattr(getattr(mem, "_graph", None), "backend", None)
+    enter = getattr(backend, "read_connection", None)
+    if not callable(enter):
+        _warn_recall_fallback(
+            "no-read-pool",
+            "recall reads take the store's graph lock and can wait on the writer: %s has no read_connection()",
+            type(backend).__name__,
+        )
+        yield
+        return
+    if not callable(getattr(type(backend), "flush_deferred_access", None)):
+        # A core before LITE-RECALL-READ-SNAPSHOT-1 writes on the search path (access stamps, the lexical repair fence),
+        # which fails on a snapshot thread: there the snapshot would cost the lexical lane, so read as before.
+        _warn_recall_fallback(
+            "core-writes-on-read",
+            "recall reads take the store's graph lock and can wait on the writer: this core's search writes on the "
+            "read path (needs smartmemory-core with SQLiteBackend.flush_deferred_access)",
+        )
+        yield
+        return
+    if not getattr(backend, "read_pool_available", False):
+        _warn_recall_fallback(
+            "memory",
+            "recall reads take the store's graph lock and can wait on the writer: the store is in-memory",
+        )
+        yield
+        return
+    from smartmemory.graph.backends.sqlite import ReadConnectionWriteError
+
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(enter())
+        except ReadConnectionWriteError:
+            _warn_recall_fallback(
+                "write-tx",
+                "recall reads on the writer connection: this thread holds an open write transaction",
+            )
+        yield
+
+
+def _flush_recall_access(mem) -> None:
+    """Write the access stamps the snapshot recall deferred, unless the writer holds the lock (then the next does)."""
+    flush = getattr(
+        getattr(getattr(mem, "_graph", None), "backend", None),
+        "flush_deferred_access",
+        None,
+    )
+    if not callable(flush):
+        return
+    try:
+        flush(blocking=False)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "recall access stamps not flushed, they wait for the next write: %s", exc
+        )
+
+
+def _workspace_decisions(mem, workspace_id: str | None, strict: bool) -> list:
+    """Decision nodes for the recall's workspace, filtered in SQL (LITE-RECALL-READ-SNAPSHOT-1).
+
+    Keeps this workspace's decisions, plus unscoped ones unless ``strict``: the rows ``eligible`` keeps, which still
+    checks each. Every recall used to load every decision in the store and drop the other workspaces' ones in Python
+    (7,603 drop WARNINGs in 28 min on a live store). With no workspace, or on a core without
+    ``search_nodes_in_workspace``, it loads them all as before.
+    """
+    if workspace_id:
+        lookup = getattr(mem._graph, "search_nodes_in_workspace", None)
+        if callable(lookup):
+            try:
+                return lookup(
+                    {"memory_type": "decision"},
+                    workspace_id,
+                    include_unscoped=not strict,
+                )
+            except NotImplementedError as exc:
+                reason = str(exc)
+        else:
+            reason = "core has no search_nodes_in_workspace"
+        _warn_recall_fallback(
+            "decision-scan",
+            "recall loads every decision and filters workspaces in Python: %s",
+            reason,
+        )
+    return mem._graph.search_nodes({"memory_type": "decision"})
 
 
 def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:

@@ -249,9 +249,16 @@ class MemoryLifecycle:
 
     @_traced_injection
     def recall(
-        self, prompt: str, cwd: str | None = None, deadline: float | None = None
+        self,
+        prompt: str,
+        cwd: str | None = None,
+        deadline: float | None = None,
+        on_partial: Callable[[str], None] | None = None,
     ) -> str:
         """Phase 2: Per-prompt recall — always captures prompt, optionally injects context.
+
+        ``on_partial`` (LITE-RECALL-READ-SNAPSHOT-1) receives each partial answer the recall makes, already trimmed
+        to the recall budget, for the daemon route to answer with if its cap passes first.
 
         Scoped by `cwd` → workspace (HOOK-RECALL-RELEVANCE-1). Routing through
         storage.recall (not storage.search) matters in remote mode: search sends
@@ -287,6 +294,10 @@ class MemoryLifecycle:
             ):
                 exclusions["exclude_ids"] = self._rules_card_ids
             bounds = {"deadline": deadline} if deadline is not None else {}
+            if on_partial is not None:
+                bounds["on_partial"] = lambda part: on_partial(
+                    self._trim_to_budget(part)
+                )
             block = scoped_recall(
                 cwd,
                 top_k=5,
