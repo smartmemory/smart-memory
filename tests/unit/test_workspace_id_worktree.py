@@ -7,6 +7,7 @@ id they had before (``ws_`` + sha1 of the realpath of the toplevel, or of the cw
 
 import hashlib
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -51,6 +52,13 @@ def repo(path):
     return path
 
 
+needs_git = pytest.mark.skipif(
+    shutil.which("git") is None,
+    reason="runner image has no git (OPS-RUNNER-IMAGE-GIT-1); the lander runs these locally until after 2.0",
+)
+
+
+@needs_git
 def test_worktree_shares_the_main_checkout_id(tmp):
     main = repo(tmp / "main")
     git("worktree", "add", "-q", "-b", "test_wt", str(tmp / "wt"), cwd=main)
@@ -61,6 +69,7 @@ def test_worktree_shares_the_main_checkout_id(tmp):
     assert derive_workspace_id(str(tmp / "wt" / "deep")) == base_id(main)
 
 
+@needs_git
 def test_plain_checkout_and_non_git_dir_keep_their_ids(tmp):
     plain = repo(tmp / "plain")
     loose = tmp / "loose"
@@ -74,6 +83,7 @@ def test_plain_checkout_and_non_git_dir_keep_their_ids(tmp):
     assert derive_workspace_id(str(loose)) == base_id(loose)
 
 
+@needs_git
 def test_bare_repo_worktree_keeps_its_own_id(tmp):
     """No main checkout exists for a bare repo: each worktree keeps the id it had (its toplevel)."""
     seed = repo(tmp / "seed")
