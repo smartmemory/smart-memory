@@ -36,7 +36,7 @@ def item(name, workspace):
 @pytest.fixture
 def core(monkeypatch):
     """A fake store of STORE_ROWS rows; ``calls`` records (text, top_k) per fetch, ``traces`` the trace records."""
-    state = SimpleNamespace(calls=[], traces=[], rows=[], clock=[], now=0.0)
+    state = SimpleNamespace(calls=[], traces=[], rows=[], clock=[], now=0.0, lookups=[])
     monkeypatch.setattr(recall_format, "_trace", lambda **kw: state.traces.append(kw))
     monkeypatch.setattr("smartmemory.origin_policy.get_default_tiers", lambda _: {1, 2})
     monkeypatch.setattr(
@@ -54,7 +54,9 @@ def core(monkeypatch):
         state.clock.append(state.now)
         return state.now
 
-    no_decisions = SimpleNamespace(search_nodes=lambda _query: [])
+    no_decisions = SimpleNamespace(
+        search_nodes=lambda query: state.lookups.append(query) or []
+    )
     monkeypatch.setattr(
         storage,
         "get_memory",
@@ -127,7 +129,8 @@ def test_deadline_passing_mid_loop_stops_at_the_next_round(core, caplog):
     # Rounds end at t=1 and t=2; the deadline 1.5 has passed before round 3 would start.
     out = recall(top_k=10, deadline=1.5)
     assert [k for _, k in core.calls] == [10, 20]
-    assert core.clock == [1.0, 2.0]
+    # Read before round 1, then before each later round.
+    assert core.clock == [0.0, 1.0, 2.0]
     assert out == ""
     assert shortfalls(caplog) == [
         "recall shortfall: requested=10 emitted=0; stopped widening at a fetch of 20 (deadline), so eligible "
@@ -140,7 +143,8 @@ def test_recall_that_fills_on_round_one_makes_one_fetch(core, caplog):
     core.rows = [item(f"r{i}", "ws_fresh") for i in range(STORE_ROWS)]
     out = recall(top_k=10, deadline=1e12)
     assert core.calls == [("", 10)]
-    assert core.clock == []  # no widening round, so the deadline is never read
+    # Read once, before round 1; no widening round follows.
+    assert core.clock == [0.0]
     assert out.count("\n- ") == 10
     assert shortfalls(caplog) == []
     assert type(out) is str
@@ -171,6 +175,8 @@ def test_lifecycle_passes_its_deadline_to_every_recall(monkeypatch):
     monkeypatch.setattr(storage, "recall", lookup)
     monkeypatch.setattr(MemoryLifecycle, "_save_state", lambda self: None)
     monkeypatch.setattr(MemoryLifecycle, "_should_recall", lambda self, prompt: True)
+    # Every deadline here is still ahead.
+    monkeypatch.setattr(storage, "_recall_clock", lambda: 0.0)
     lc = MemoryLifecycle("test_widen", LifecycleConfig(rules_card_enabled=False))
 
     lc.orient("/tmp/project", deadline=123.0)
@@ -182,3 +188,61 @@ def test_lifecycle_passes_its_deadline_to_every_recall(monkeypatch):
     # No deadline: the call shape is the one before this change.
     lc.orient("/tmp/project")
     assert all("deadline" not in c.kwargs for c in lookup.call_args_list)
+
+
+def test_expired_on_entry_starts_no_lookup_and_no_fetch(core, caplog):
+    """RCLWIDEN-CX F1: a deadline that passed before recall began starts no lookup and no round, on every channel."""
+    core.rows = [item(f"r{i}", "ws_fresh") for i in range(STORE_ROWS)]
+    channels = [
+        dict(include_snapshot=True),
+        dict(include_snapshot=False, query="facts"),
+        dict(include_snapshot=False, cwd="/tmp/project"),
+    ]
+    for channel in channels:
+        caplog.clear()
+        core.calls.clear(), core.lookups.clear(), core.clock.clear()
+        out = storage.recall(
+            workspace_id="ws_fresh", strict=False, top_k=10, deadline=0.0, **channel
+        )
+        assert core.calls == [] and core.lookups == [], channel
+        assert core.clock == [0.0], channel
+        assert out == ""
+        assert shortfalls(caplog) == [
+            "recall shortfall: requested=10 emitted=0; stopped widening before the first fetch (deadline), so "
+            "eligible candidates past what core examined are not shown"
+        ]
+        assert type(out) is PartialText and out.partial == (FETCH_BOUND,)
+
+
+def test_orient_does_not_start_its_patterns_recall_after_the_deadline(
+    monkeypatch, caplog
+):
+    """RCLWIDEN-CX F1: orient's first recall spends the deadline, so its patterns recall never starts."""
+    from smartmemory_app import rules_card
+
+    now = [0.0]
+    monkeypatch.setattr(storage, "_recall_clock", lambda: now[0])
+
+    def first_recall_spends_the_deadline(*args, **kwargs):
+        now[0] = 10.0
+        return ""
+
+    lookup = Mock(side_effect=first_recall_spends_the_deadline)
+    monkeypatch.setattr(storage, "recall", lookup)
+    build = Mock(return_value="")
+    monkeypatch.setattr(rules_card, "build_rules_card", build)
+    monkeypatch.setattr(MemoryLifecycle, "_save_state", lambda self: None)
+    lc = MemoryLifecycle("test_widen", LifecycleConfig(rules_card_enabled=True))
+
+    lc.orient("/tmp/project", deadline=5.0)
+    assert build.call_count == 1 and lookup.call_count == 1
+    assert "patterns" not in str(lookup.call_args)
+    assert "Orient skipped patterns context: deadline passed" in caplog.text
+
+    # Already past the deadline when orient begins: the rules card does not start either. The one recall it still
+    # hands the deadline to makes no fetch (test_expired_on_entry_starts_no_lookup_and_no_fetch).
+    lookup.reset_mock(), build.reset_mock(), caplog.clear()
+    lc.orient("/tmp/project", deadline=5.0)
+    assert build.call_count == 0 and lookup.call_count == 1
+    assert lookup.call_args.kwargs["deadline"] == 5.0
+    assert "Orient skipped rules card: deadline passed" in caplog.text

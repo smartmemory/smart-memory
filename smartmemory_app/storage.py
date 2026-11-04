@@ -798,6 +798,11 @@ def _recall_clock() -> float:
     return time.time()
 
 
+def recall_deadline_passed(deadline: float | None) -> bool:
+    """True once ``deadline`` (epoch seconds) has passed. Without a deadline the clock is not read."""
+    return deadline is not None and _recall_clock() >= deadline
+
+
 def _split_recall_counts(top_k: int) -> tuple[int, int]:
     """Split recall budget between recency and semantic passes.
 
@@ -1432,7 +1437,12 @@ def recall(
     frame = ""
     # U5.21 (C3/C8): why the optional context that rides on the answer is incomplete.
     context_partial: tuple[str, ...] = ()
-    if include_snapshot:
+    # LITE-RECALL-WIDEN-UNBOUNDED-1 (RCLWIDEN-CX F1): no lookup, channel or round starts once the deadline has passed,
+    # the first included. ``stopped`` names why widening ended; the one shortfall WARNING below reports it.
+    stopped = (
+        "deadline" if include_snapshot and recall_deadline_passed(deadline) else ""
+    )
+    if include_snapshot and not stopped:
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
             # The frame is one newest row: a partial answer means the newest one may be unexamined. The reader's WARNING
@@ -1503,12 +1513,16 @@ def recall(
                 kept.append(r)
         return kept
 
+    if not stopped and recall_deadline_passed(deadline):
+        stopped = "deadline"
+    lessons = []
     try:
-        lessons = eligible(
-            matching_lessons(
-                mem._graph.search_nodes({"memory_type": "decision"}), query
+        if not stopped:
+            lessons = eligible(
+                matching_lessons(
+                    mem._graph.search_nodes({"memory_type": "decision"}), query
+                )
             )
-        )
     except Exception as exc:
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
@@ -1531,11 +1545,13 @@ def recall(
 
     recent_k, semantic_k = _split_recall_counts(requested)
     results = []
-    partial_names: tuple[str, ...] = ()
+    # A deadline that passed before the first round: no candidate was examined, so the answer is partial.
+    partial_names: tuple[str, ...] = (FETCH_BOUND_REASON,) if stopped else ()
     body = ""
     emitted = 0
-    stopped = ""
-    while requested:
+    rounds = 0
+    while requested and not stopped:
+        rounds += 1
         # U5.21 (C3): a short page is exhaustion only when core did not report that answer as partial.
         partial = False
         if query:
@@ -1601,7 +1617,7 @@ def recall(
             # C3/C8: candidates past the bound were not examined, so the answer is partial whatever made the stop.
             partial_names = (*partial_names, FETCH_BOUND_REASON)
             break
-        if deadline is not None and _recall_clock() >= deadline:
+        if recall_deadline_passed(deadline):
             # The next round would start past the read's deadline: deeper candidates were not examined either.
             stopped = "deadline"
             partial_names = (*partial_names, FETCH_BOUND_REASON)
@@ -1611,11 +1627,11 @@ def recall(
     if emitted < requested:
         if stopped:
             log.warning(
-                "recall shortfall: requested=%s emitted=%d; stopped widening at a fetch of %d (%s), so eligible "
+                "recall shortfall: requested=%s emitted=%d; stopped widening %s (%s), so eligible "
                 "candidates past what core examined are not shown",
                 _count_text(requested),
                 emitted,
-                fetch_k,
+                f"at a fetch of {fetch_k}" if rounds else "before the first fetch",
                 stopped,
             )
         else:
