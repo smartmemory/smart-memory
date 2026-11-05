@@ -11,6 +11,7 @@ Local deps (smartmemory-core, filelock) are hard dependencies — always availab
 from __future__ import annotations
 
 import atexit
+import inspect
 import logging
 import math
 import os
@@ -854,7 +855,7 @@ def _list_all_memories(mem) -> list[dict]:
 
 # All explicit caller-settable SmartMemory.search parameters, plus documented kwargs.
 # `limit` is deliberately excluded: this wrapper binds/clamps `top_k`, its sole result-count knob.
-# The contract test enumerates the live facade signature; unknown keys still drop.
+# The contract test enumerates the live facade signature; unknown keys warn and drop.
 _ALLOWED = frozenset(
     {
         "conversation_context",
@@ -877,6 +878,7 @@ _ALLOWED = frozenset(
         "include_retracted",
         "as_of_date",
         "as_of_strict",
+        "valid_at",
         "since",
         "until",
         "enable_hybrid",
@@ -887,6 +889,7 @@ _ALLOWED = frozenset(
         "metadata_filter",
         "include_reference",
         "memory_types",
+        "manual_scan",
     }
 )
 
@@ -909,7 +912,7 @@ def search(
         memory_type: Restrict to a single memory type (e.g. "decision").
         **search_kwargs: Recall tuning forwarded to the core engine
                  (decompose_query, channel_weights, multi_hop, max_hops,
-                 budget_ms, semantic_hops). Unknown keys are dropped so
+                 budget_ms, semantic_hops, valid_at). Unknown keys warn and are dropped so
                  callers/contract drift never raise TypeError here.
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
@@ -919,7 +922,7 @@ def search(
             "does not accept origin filters. Use local mode or remove --origin."
         )
     mem = get_memory()
-    # Forward documented core options. Unknown extension keys still drop, while
+    # Forward documented core options. Unknown extension keys warn and drop, while
     # the enumerating contract test prevents known facade parameters being lost.
     #
     # CORE-RETRACTED-RECALL-1 (2026-08-05): the lifecycle-visibility and
@@ -932,12 +935,31 @@ def search(
     # with no error. `include_retracted` would have been the fourth victim.
     #
     # Note the failure mode this allowlist creates: an unknown key is dropped
-    # rather than raising, so a param is either wired here or it silently means
+    # rather than raising, so a param is either wired here or a warning says it means
     # nothing. Anything added to SmartMemory.search() that callers can set MUST
     # be added here or explicitly documented as excluded beside `_ALLOWED`.
     core_kwargs = {
         k: v for k, v in search_kwargs.items() if k in _ALLOWED and v is not None
     }
+    dropped = sorted(search_kwargs.keys() - _ALLOWED)
+    if dropped:
+        log.warning("Search dropped unsupported kwargs: %s", ", ".join(dropped))
+    if "valid_at" in core_kwargs:
+        # Older pinned cores predate valid-time search. Do not retry a failed
+        # search: a TypeError from inside core is not a signature mismatch.
+        try:
+            params = inspect.signature(mem.search).parameters
+            supports_valid_at = "valid_at" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):
+            supports_valid_at = False
+        if not supports_valid_at:
+            core_kwargs.pop("valid_at")
+            log.warning(
+                "Search dropped valid_at: core search does not expose support for it. "
+                "Historical valid-time filtering is unavailable, upgrade smartmemory-core."
+            )
     # `include_reference` is bound by this wrapper rather than captured in
     # search_kwargs, so it must be forwarded explicitly on the core search path.
     if include_reference:
