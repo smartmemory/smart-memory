@@ -907,28 +907,47 @@ def search(
     dropped = sorted(search_kwargs.keys() - _ALLOWED)
     if dropped:
         log.warning("Search dropped unsupported kwargs: %s", ", ".join(dropped))
-    if "valid_at" in core_kwargs:
-        # Older pinned cores predate valid-time search. Do not retry a failed
-        # search: a TypeError from inside core is not a signature mismatch.
-        try:
-            params = inspect.signature(mem.search).parameters
-            supports_valid_at = "valid_at" in params or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
-            )
-        except (TypeError, ValueError):
-            supports_valid_at = False
-        if not supports_valid_at:
-            core_kwargs.pop("valid_at")
-            log.warning(
-                "Search dropped valid_at: core search does not expose support for it. "
-                "Historical valid-time filtering is unavailable, upgrade smartmemory-core."
-            )
     # `include_reference` is bound by this wrapper rather than captured in
     # search_kwargs, so it must be forwarded explicitly on the core search path.
     if include_reference:
         core_kwargs["include_reference"] = include_reference
     if memory_type:
         core_kwargs["memory_type"] = memory_type
+    if core_kwargs:
+        # Inspect once for all forwarded options. Never retry a failed search:
+        # TypeError inside core is not evidence of a signature mismatch.
+        try:
+            params = inspect.signature(mem.search).parameters
+            accepts_kwargs = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            accepted = {
+                name
+                for name, param in params.items()
+                if param.kind
+                in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                )
+            }
+        except (TypeError, ValueError):
+            accepts_kwargs, accepted = False, set()
+        unsupported = (
+            sorted(core_kwargs.keys() - accepted) if not accepts_kwargs else []
+        )
+        if unsupported:
+            for key in unsupported:
+                core_kwargs.pop(key)
+            historical = (
+                " Historical valid-time filtering is unavailable, upgrade smartmemory-core."
+                if "valid_at" in unsupported
+                else ""
+            )
+            log.warning(
+                "Search dropped %s: core search does not expose support for these options.%s",
+                ", ".join(unsupported),
+                historical,
+            )
     from smartmemory_app.remote_backend import RemoteMemory
 
     if isinstance(mem, RemoteMemory):

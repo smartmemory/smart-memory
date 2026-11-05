@@ -80,7 +80,22 @@ def test_unknown_kwargs_warn_once_and_limit_stays_excluded(lite, caplog):
     assert "limit" not in storage._ALLOWED
 
 
-def test_older_core_warns_instead_of_raising(lite, monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"valid_at": "2026-04-10"},
+        {"manual_scan": False},
+        {"manual_scan": False, "valid_at": "2026-04-10"},
+        {key: True for key in storage._ALLOWED - {"sort_by", "origin"}},
+    ],
+    ids=["valid-at", "manual-scan", "manual-scan-and-valid-at", "all-options"],
+)
+def test_older_core_warns_instead_of_raising(lite, monkeypatch, caplog, options):
+    from smartmemory.models.memory_item import MemoryItem
+
+    item_id = lite.add(
+        MemoryItem(content="test_valid_at: older core result", memory_type="semantic")
+    )
     real_search = lite.search
     calls = []
 
@@ -91,12 +106,15 @@ def test_older_core_warns_instead_of_raising(lite, monkeypatch, caplog):
 
     monkeypatch.setattr(lite, "search", old_search)
     with caplog.at_level(logging.WARNING, logger=storage.__name__):
-        assert storage.search("", valid_at="2026-04-10", sort_by="recency") == []
+        results = storage.search("", sort_by="recency", **options)
+    assert item_id in [r["item_id"] for r in results]
     assert calls == [("", 5, "recency")]
     warnings = [r for r in caplog.records if r.name == storage.__name__]
     assert len(warnings) == 1
-    assert "valid_at" in warnings[0].message
-    assert "historical" in warnings[0].message.lower()
+    assert warnings[0].levelno == logging.WARNING
+    assert all(key in warnings[0].message for key in options)
+    if "valid_at" in options:
+        assert "historical" in warnings[0].message.lower()
 
 
 @requires_valid_at
