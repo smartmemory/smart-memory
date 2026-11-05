@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.40 (2026-11-05)
+
+Pin bump only: `smartmemory-mcp` 1.5.27, whose local `memory_supersede` passes `valid_from` to core `ingest_superseding`, so the old item's valid-time close is written in the same supersession unit as the retirement (DHRUV-CODING-RULE-P0-1 fix r2 F4). `smartmemory-core` moves to 1.5.40 in lockstep (code identical to 1.5.39).
+
 ## 1.5.39 (2026-11-05)
 
 DHRUV-CODING-RULE-P0-1 batch: search can ask which rule was in force on a date (`valid_at`), and a reversal note supersedes the rule it reverses. Needs `smartmemory-core` 1.5.39 (pinned exactly); `smartmemory-mcp` pin 1.5.23 to 1.5.26 (adds `memory_supersede`).
