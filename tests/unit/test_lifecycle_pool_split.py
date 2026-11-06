@@ -27,6 +27,7 @@ class _Fake:
 
     def __init__(self, gate: threading.Event, block: set):
         self.gate, self.block = gate, block
+        self.deadlines: dict[str, float | None] = {}
         self.calls: list[str] = []
         self.started = threading.Semaphore(0)
 
@@ -37,10 +38,12 @@ class _Fake:
             self.gate.wait(BLOCK_S)
         return value
 
-    def recall(self, prompt, cwd=None):
+    def recall(self, prompt, cwd=None, deadline=None):
+        self.deadlines["recall"] = deadline
         return self._work("recall", f"test_ctx:{prompt}")
 
-    def orient(self, cwd=None):
+    def orient(self, cwd=None, deadline=None):
+        self.deadlines["orient"] = deadline
         return self._work("orient", "test_orient_ctx")
 
     def persist(self, cwd=None, transcript_path=None):
@@ -280,3 +283,32 @@ def test_client_stamps_deadline_on_reads_only(monkeypatch):
     assert stamped["/lifecycle/observe"] is None
     for path in ("/lifecycle/recall", "/lifecycle/orient"):
         assert before + 5.0 <= stamped[path] <= time.time() + 5.0, path
+
+
+def test_read_routes_hand_their_deadline_to_the_work(daemon, monkeypatch):
+    """LITE-RECALL-WIDEN-UNBOUNDED-1: the read phase's ``start_by`` reaches lc.orient / lc.recall as ``deadline``,
+    so a started recall stops widening once its answer can no longer be used."""
+    app, fake = daemon
+    monkeypatch.setattr(lifecycle_api, "_RECALL_CAP_S", 4.5)
+    client_deadline = time.time() + 3.0
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://daemon"
+        ) as client:
+            before = time.time()
+            await _post(client, "/lifecycle/orient", {"session_id": "s", "cwd": "/tmp"})
+            await _post(
+                client,
+                "/lifecycle/recall",
+                _recall("ok", **{lifecycle_api.CLIENT_DEADLINE_KEY: client_deadline}),
+            )
+            return before
+
+    before = asyncio.run(run())
+    # No client deadline: the cap alone. A client deadline: the earlier one, less the reply margin.
+    assert before + 4.5 <= fake.deadlines["orient"] <= time.time() + 4.5
+    assert fake.deadlines["recall"] == pytest.approx(
+        client_deadline - lifecycle_api._REPLY_MARGIN_S, abs=1e-6
+    )
