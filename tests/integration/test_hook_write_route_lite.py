@@ -135,3 +135,54 @@ def test_hook_write_phase_route(
             f"Lifecycle {phase} write failed; {lost} not stored: RuntimeError: test_hookws store refused"
         ]
         assert _tagged(lite_store, origin, tag) == before
+
+
+@pytest.mark.parametrize("phase", ["orient", "recall"])
+def test_read_deadline_stops_before_sqlite_fetch(
+    lite_store, monkeypatch, caplog, phase
+):
+    """A deadline spent after dispatch must reach storage, with one visible partial warning."""
+    from smartmemory.search.results import PartialText
+    from smartmemory_app import lifecycle_api
+    from smartmemory_app.lifecycle import MemoryLifecycle
+
+    observed = []
+    original = storage.recall
+
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        observed.append(result)
+        return result
+
+    def forbidden_fetch(*args, **kwargs):
+        raise AssertionError("a daemon read started a store fetch after its deadline")
+
+    # Keep the actual lifecycle and SQLite store. Advance only storage's clock to
+    # represent time spent between dispatch and the first lookup, without sleeping.
+    monkeypatch.setattr(storage, "recall", capture)
+    monkeypatch.setattr(storage, "_recall_clock", lambda: float("inf"))
+    monkeypatch.setattr(storage.get_memory(), "search", forbidden_fetch)
+    monkeypatch.setattr(MemoryLifecycle, "_should_recall", lambda self, prompt: True)
+    monkeypatch.setattr(
+        lifecycle_api, "_load_lifecycle_config", lambda: {"rules_card_enabled": False}
+    )
+    app = FastAPI()
+    app.include_router(lifecycle_api.lifecycle_router, prefix="/lifecycle")
+    with caplog.at_level(logging.WARNING):
+        with TestClient(app) as client:
+            response = client.post(
+                f"/lifecycle/{phase}",
+                json={
+                    "session_id": f"test_deadline_twin_{phase}",
+                    "prompt": "Explain the deadline",
+                },
+            )
+    assert response.status_code == 200
+    assert response.json() == {"context": ""}
+    assert len(observed) == 1
+    assert isinstance(observed[0], PartialText)
+    assert observed[0].partial == ("fetch_bound",)
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert "before the first fetch (deadline)" in warnings[0]
+    assert "candidates past what core examined are not shown" in warnings[0]

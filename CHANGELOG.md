@@ -3,6 +3,7 @@
 ## Unreleased
 
 - fix(storage), SM-SCOPED-VALIDITY-1 U11: preserve `business_scope` and `valid_at` through local and remote search adapters, including independent transaction-time queries and core validation errors. Retain the live facade census for `manual_scan` and `exclude_speculative`. Real Lite tests cover site rollout boundaries, sponsor fallback, predecessor selection and schedule correction.
+- fix, LITE-2.0-RECALL-DEADLINE-TWIN-1: daemon orient and recall now pass their read-phase deadline into lifecycle work. Recall stops starting new fetch rounds after that deadline, preserves partial coverage, and logs one WARNING naming the candidates cut by the deadline. Ports the missing handoff from release 1.5.38 (`bcec3f923d89`) while retaining the existing 2.0 fetch bounds and workspace IDs.
 
 - test, LITE-2.0-RUNNER-GIT-SKIP-1: the three git-dependent tests in `tests/unit/test_workspace_id_worktree.py` skip when no `git` binary is on PATH (the runner image has none, OPS-RUNNER-IMAGE-GIT-1); the lander runs them locally until after 2.0. Test markers only.
 - FWD-MERGE-4 (2026-11-04): main forward-merged into 2.0 again (main's 2026-10-18 to 2026-10-30 work: wrapper releases 1.5.28 to 1.5.31, incremental and costless transcript capture with release-held and requeue, the daemon port finder, the lifecycle read pool, hook install that never overwrites a locally modified hook, the live-host connect guard for tests). Where both lines fixed the same thing, the merge keeps the stricter rule:
