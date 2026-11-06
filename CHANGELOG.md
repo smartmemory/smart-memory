@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## Unreleased - RECALL-CONFLICT-FLAG-1
+
+- Forward strict conflict reads through the local search allowlist used by MCP.
+
 ## Unreleased
 
 - LITE-2.0-WORKER-SPAWN-SAFEPATH-1: Start the on-demand Lite worker with Python safe-path mode and the resolved data directory as its working directory, preventing imports from the caller's directory. Preserve both protections in worker-spawn regression tests.
