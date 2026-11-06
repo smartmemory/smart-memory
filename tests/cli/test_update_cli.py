@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -75,17 +76,20 @@ def test_update_available_runs_pip_and_restarts_running_daemon(tmp_path, monkeyp
     assert "SmartMemory is ready." in result.output
     assert run.call_args_list == [
         call(
-            [sys.executable, "-m", "pip", "install", "-U", "smartmemory"],
+            [sys.executable, "-P", "-m", "pip", "install", "-U", "smartmemory"],
+            cwd=str(Path(sys.executable).resolve().parent),
             check=False,
         ),
         call(
             [
                 sys.executable,
+                "-P",
                 "-c",
                 "from importlib.metadata import version; print(version('smartmemory'))",
             ],
             capture_output=True,
             text=True,
+            cwd=str(Path(sys.executable).resolve().parent),
             check=False,
         ),
     ]
@@ -114,7 +118,8 @@ def test_update_pip_failure_exits_nonzero_without_restart(monkeypatch):
     assert "SmartMemory update failed (pip exited with status 7)." in result.output
     assert "daemon was not restarted" in result.output
     run.assert_called_once_with(
-        [sys.executable, "-m", "pip", "install", "-U", "smartmemory"],
+        [sys.executable, "-P", "-m", "pip", "install", "-U", "smartmemory"],
+        cwd=str(Path(sys.executable).resolve().parent),
         check=False,
     )
     stop.assert_not_called()

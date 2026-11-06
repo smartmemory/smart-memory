@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- LITE-2.0-SPAWN-SAFEPATH-ADJACENT-1: Tour, offline diagnostics, and update subprocesses use Python safe-path mode and an explicit resolved working directory so modules in the caller directory cannot shadow child imports.
 - LITE-2.0-WORKER-SPAWN-SAFEPATH-1: Start the on-demand Lite worker with Python safe-path mode and the resolved data directory as its working directory, preventing imports from the caller's directory. Preserve both protections in worker-spawn regression tests.
 
 - DRIFT-V3-DHRUV-BOUNDARIES-1: preserve dated and scoped search forwarding, warn when unknown options or options unsupported by an older core are dropped, and never retry a failed core search.
