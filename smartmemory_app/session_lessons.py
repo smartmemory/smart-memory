@@ -127,7 +127,13 @@ class SessionLessonExtractor(ReasoningExtractor):
             "counterparty/API/system rejection or error code, a required format or "
             "limit, or a standing policy the user, owner or a partner stated. Do not tag design "
             "choices, code structure facts, status, or what was tried as constraints. "
-            "Preserve exact identifiers and limitations. "
+            "Preserve exact identifiers and limitations. Quote each explicit standing rule verbatim "
+            "after its attribution, retaining negation, exceptions, scope and units. "
+            "Keep the source category of every identifier: ports are not error codes, "
+            "HTTP statuses are not ports, versions are not numeric limits, and branch "
+            "names are not release approvals. For example, 'Never use ports 9010, "
+            "9012 or 9013 in this project' must retain 'ports', all three numbers and "
+            "'Never'. Do not reinterpret that policy as a ban on error codes. "
             "Quote the conclusion text where possible. Return [] if none.\n\n" + text
         )
 
