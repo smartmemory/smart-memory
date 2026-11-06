@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.41 (2026-11-06)
+
+Pin bump only: `smartmemory-core` 1.5.41, a security patch: the transcript and spaCy model installer child processes run Python with `-P` from the interpreter's own directory, so a file in the caller's working directory can no longer be imported in their place (CORE-SPAWN-SAFEPATH-F1F2-1). `smartmemory-mcp` stays 1.5.27.
+
 ## 1.5.40 (2026-11-05)
 
 Pin bump only: `smartmemory-mcp` 1.5.27, whose local `memory_supersede` passes `valid_from` to core `ingest_superseding`, so the old item's valid-time close is written in the same supersession unit as the retirement (DHRUV-CODING-RULE-P0-1 fix r2 F4). `smartmemory-core` moves to 1.5.40 in lockstep (code identical to 1.5.39).
