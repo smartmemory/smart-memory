@@ -531,3 +531,12 @@ def test_daemon_missing_model_message_reaches_user_unchanged(
     assert message in capsys.readouterr().out.splitlines()
     embedder.assert_not_called()
     assert "Run sm setup" in viewer_server._last_warmup_failure
+
+
+def test_scoped_validity_retains_live_facade_parameter_census():
+    """New public search qualifiers must not silently disappear in the adapter."""
+    from tests.unit.test_search_hop_surface import (
+        test_enumerating_core_search_allowlist,
+    )
+
+    test_enumerating_core_search_allowlist()

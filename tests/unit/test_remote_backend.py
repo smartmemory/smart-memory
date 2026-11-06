@@ -414,3 +414,30 @@ def test_recall_no_stale_marker_when_fresh(recall_remote, monkeypatch):
         result = recall_remote.recall(cwd="/project", top_k=10)
     assert "⚠" not in result
     assert "fresh remote memory" in result
+
+
+def test_scoped_search_preserves_qualifiers_in_request_body(
+    remote, ingest_requests, monkeypatch
+):
+    """The wrapper must preserve both independent dates and business scope on the wire."""
+    from smartmemory_app import storage
+
+    monkeypatch.setattr(storage, "get_memory", lambda: remote)
+    storage.search(
+        "CRF",
+        top_k=1,
+        business_scope={"site": "B"},
+        valid_at="2026-02-08T00:00:00Z",
+        as_of_date="2026-01-02T12:00:00Z",
+    )
+    request = ingest_requests[0]
+    assert request.method == "POST"
+    assert request.url.path == "/memory/search"
+    assert json.loads(request.content) == {
+        "query": "CRF",
+        "top_k": 1,
+        "enable_hybrid": True,
+        "business_scope": {"site": "B"},
+        "valid_at": "2026-02-08T00:00:00Z",
+        "as_of_date": "2026-01-02T12:00:00Z",
+    }
