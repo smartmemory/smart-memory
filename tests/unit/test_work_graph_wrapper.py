@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from unittest.mock import Mock
@@ -13,8 +14,8 @@ from fastapi.testclient import TestClient
 from filelock import FileLock
 
 
-@pytest.fixture
-def lite(tmp_path, monkeypatch):
+@pytest.fixture(params=["receipt", "legacy"])
+def lite(tmp_path, monkeypatch, request):
     from smartmemory_app import config, storage
     from smartmemory_app.local_api import api
 
@@ -42,6 +43,19 @@ def lite(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "is_configured", lambda: True)
     monkeypatch.setattr(storage, "_memory", None)
     monkeypatch.setattr(storage, "_data_path", None)
+    if request.param == "legacy":
+        # G49 rollback arm, kept explicitly beside the default admitted-run arm.
+        monkeypatch.setenv(
+            "SMARTMEMORY_SWITCHES",
+            "sm2_switch_registry=on,sm2_save_local_receipt=off,"
+            "sm2_save_local_admission=off,sm2_save_common_receipt=off,"
+            "sm2_reextract_admission=off",
+        )
+    from smartmemory.configuration import switches
+
+    # The registry caches the resolved environment. Invalidate through its public
+    # deployment-layer API for each explicitly selected test arm.
+    switches.set_deployment_layer({}, "test-work-graph")
     app = FastAPI()
     app.mount("/memory", api)
     lock = FileLock(tmp_path / ".worker.lock")
@@ -52,6 +66,39 @@ def lite(tmp_path, monkeypatch):
     finally:
         lock.release()
         storage._shutdown()
+        switches.set_deployment_layer({}, "test-work-graph-cleanup")
+
+
+def work_counts(memory):
+    """Count the selected producer's durable queue, never treat an empty legacy queue as lost work.
+
+    G49 (FULL-ALIGN-1/design.md:154), implemented by core save/admission_switch.py:
+    the default receipt arm installs the tail in wg_box of its admitted run.
+    """
+    from smartmemory.configuration import switches
+    from smartmemory.save.lite_save_admission import owner_admission
+
+    if not switches.is_on("sm2_save_local_receipt"):
+        return memory._work_graph.stats()
+    assert memory._work_graph.stats()["runs"] == 0
+    binding = owner_admission(memory._lite_admission)
+    status = binding.lifecycle.stats(scope=binding.lifecycle.scope)
+    assert status["unsupported"] == {"runs": 0, "boxes": 0}
+    return {**status["boxes"], "runs": sum(status["runs"].values())}
+
+
+def assert_tail(memory, kind, state):
+    """Check persisted admitted-box identity and state, independently of aggregate counters."""
+    from smartmemory.configuration import switches
+    from smartmemory_app import storage
+
+    if switches.is_on("sm2_save_local_receipt"):
+        with sqlite3.connect(storage._data_path / "memory.db") as conn:
+            rows = conn.execute(
+                "SELECT kind,status FROM wg_box ORDER BY kind"
+            ).fetchall()
+        assert ("save:foreground", "done") in rows, rows
+        assert rows.count((kind, state)) == 1, rows
 
 
 def route_cli(monkeypatch, client):
@@ -74,7 +121,8 @@ def test_keyless_add(lite, monkeypatch, daemon_up):
         monkeypatch.setattr("smartmemory_app.cli._daemon_request", lambda *a, **k: None)
     result = CliRunner().invoke(cli, ["add", "Alice works at Anthropic in London."])
     assert result.exit_code == 0, result.output
-    assert memory._work_graph.stats()["pending"] == 1
+    assert work_counts(memory)["pending"] == 1
+    assert_tail(memory, "stage:enrich", "pending")
     nodes = memory.graph.get_all_nodes_scoped()
     assert any(n.get("extraction_status") == "ruler_only" for n in nodes)
     assert not any(n.get("extraction_status") == "llm_enriched" for n in nodes)
@@ -87,7 +135,7 @@ def test_keyless_hook_save(lite):
     MemoryLifecycle("test-work-graph").observe(
         "Bash", {"command": "pwd"}, "A project directory"
     )
-    assert memory._work_graph.stats()["runs"] == 1
+    assert work_counts(memory)["runs"] == 1
 
 
 @pytest.mark.parametrize("queued", [False, True])
@@ -134,7 +182,7 @@ def test_reextract_flags(lite, monkeypatch, flags, mode, count):
     assert f"mode: {mode}" in result.output
     assert f"Queued {count} re-extraction runs" in result.output
     assert ("Queue re-extraction?" in result.output) == ("--yes" not in flags)
-    assert memory._work_graph.stats()["runs"] == 2 + count
+    assert work_counts(memory)["runs"] == 2 + count
     assert memory._work_graph.get_meta("reextract_decision") == "accepted"
 
 
@@ -147,15 +195,16 @@ def test_reextract_decline_and_abort(lite):
     runner = CliRunner()
     result = runner.invoke(cli, ["admin", "reextract"], input="n\n")
     assert result.exit_code != 0
-    assert memory._work_graph.stats()["runs"] == 1
+    assert work_counts(memory)["runs"] == 1
     assert memory._work_graph.get_meta("reextract_decision") is None
     result = runner.invoke(cli, ["admin", "reextract", "--decline"])
     assert result.exit_code == 0, result.output
     assert memory._work_graph.get_meta("reextract_decision") == "declined"
-    assert memory._work_graph.stats()["runs"] == 1
+    assert work_counts(memory)["runs"] == 1
 
 
-def test_status_offer_and_requeue(lite, monkeypatch):
+@pytest.mark.parametrize("lite", ["legacy"], indirect=True)
+def test_legacy_status_offer_and_requeue(lite, monkeypatch):
     from smartmemory_app import storage
     from smartmemory_app.cli import cli
 
@@ -193,8 +242,40 @@ def test_status_offer_and_requeue(lite, monkeypatch):
     memory._work_graph.fail(box, "test", retryable=False)
     result = CliRunner().invoke(cli, ["worker", "requeue-dead"])
     assert result.exit_code == 0, result.output
-    assert memory._work_graph.stats()["pending"] == 1
-    assert memory._work_graph.stats()["dead"] == 0
+    assert work_counts(memory)["pending"] == 1
+    assert work_counts(memory)["dead"] == 0
+
+
+@pytest.mark.parametrize("lite", ["receipt"], indirect=True)
+def test_receipt_status_offer_and_requeue(lite, monkeypatch):
+    """G53 admitted-run status/requeue, beside the legacy summary's rollback coverage."""
+    from smartmemory.save.lite_save_admission import owner_admission
+    from smartmemory_app import storage, viewer_server
+
+    memory, _, _ = lite
+    storage.ingest("Alice works at Anthropic.", origin="cli:add")
+    binding = owner_admission(memory._lite_admission)
+    lifecycle = binding.lifecycle
+    assert work_counts(memory)["pending"] == 1
+    assert_tail(memory, "stage:enrich", "pending")
+    monkeypatch.setattr(
+        "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
+    )
+    health = TestClient(viewer_server._build_app(), base_url="http://localhost")
+    assert (
+        "1 memories were saved without an LLM"
+        in health.get("/health").json()["reextract_offer"]
+    )
+    box = lifecycle.claim(10)
+    assert box is not None and box.kind == "stage:enrich"
+    assert work_counts(memory)["running"] == 1
+    lifecycle.fail(box, "test-work-graph", retryable=False)
+    assert work_counts(memory)["dead"] == 1
+    assert lifecycle.requeue(box.run_id) == 1
+    assert work_counts(memory)["pending"] == 1
+    assert work_counts(memory)["running"] == 0
+    assert work_counts(memory)["dead"] == 0
+    assert_tail(memory, "stage:enrich", "pending")
 
 
 def test_api_reextract(lite):
@@ -206,7 +287,7 @@ def test_api_reextract(lite):
     assert response.status_code == 200, response.text
     assert response.json()["queued"] == 1
     assert response.json()["mode"] == "ruler"
-    assert memory._work_graph.stats()["runs"] == 2
+    assert work_counts(memory)["runs"] == 2
 
 
 def test_daemon_reads_worker_extract_fresh(lite, tmp_path, monkeypatch):
@@ -260,7 +341,10 @@ extraction_worker._run_llm_extraction = lambda content: {"status": "ok", "extrac
         assert result.returncode == 0, result.stdout + result.stderr
     finally:
         lock.acquire(timeout=5)
-    assert memory._work_graph.stats()["done"] >= 1
+    assert work_counts(memory)["done"] >= 1
+    assert work_counts(memory)["pending"] == 0
+    assert_tail(memory, "extract", "done")
+    assert_tail(memory, "stage:enrich", "done")
     assert (
         client.get(f"/memory/{item_id}").json()["extraction_status"] == "llm_enriched"
     )

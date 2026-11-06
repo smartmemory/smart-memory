@@ -3,6 +3,7 @@
 ## Unreleased
 
 - LITE-2.0-WORKER-SPAWN-SAFEPATH-1: Start the on-demand Lite worker with Python safe-path mode and the resolved data directory as its working directory, preventing imports from the caller's directory. Preserve both protections in worker-spawn regression tests.
+- LITE-2.0-WORKGRAPH-WRAPPER-RED-1: verify Lite deferred work in the admitted receipt queue introduced by the 2.0 cutover, alongside the legacy rollback queue. Keep real SQLite coverage of keyless saves, re-extraction and cross-process worker completion.
 
 - DRIFT-V3-DHRUV-BOUNDARIES-1: preserve dated and scoped search forwarding, warn when unknown options or options unsupported by an older core are dropped, and never retry a failed core search.
 
