@@ -16,6 +16,7 @@ from smartmemory_app.session_lessons import (
     SessionLessonExtractor,
     _choose_lesson_kind,
     _normalize_lesson_content,
+    _only_attributed_rules,
     _prepare_lesson_decisions,
     _promote_rules,
 )
@@ -56,7 +57,11 @@ def inspect_transcript(transcript):
             f"{transcript}: reasoning trace contained no lessons/decisions"
         )
     # A failed classifier is a failed live measurement, not a successful fallback.
-    kinds = classify_lessons([d.content for d in decisions], {})
+    kinds = (
+        ["constraint"] * len(decisions)
+        if _only_attributed_rules(decisions, tagged_by_content, attributed_by_content, text)
+        else classify_lessons([d.content for d in decisions], {})
+    )
     counts = {"constraint": 0, "finding": 0}
     for decision, classifier_kind in zip(decisions, kinds):
         kind, kind_source = _choose_lesson_kind(
