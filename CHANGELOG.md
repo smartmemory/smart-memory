@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.42 (2026-11-06)
+
+Pin bump only: `smartmemory-core` 1.5.42, a security patch: URL document loading and link expansion fetch only through the core SafeFetcher SSRF boundary (public destinations only, DNS pinned, redirects re-checked per hop, size and time limits), so ingested text or a document URL can no longer make the process request loopback, private or cloud-metadata addresses (CORE-DOC-LOADER-SAFEFETCH-1.5.42). `smartmemory-mcp` stays 1.5.28.
+
 ## 1.5.41 (2026-11-06)
 
 Pin bump only: `smartmemory-core` 1.5.41, a security patch: the transcript and spaCy model installer child processes run Python with `-P` from the interpreter's own directory, so a file in the caller's working directory can no longer be imported in their place (CORE-SPAWN-SAFEPATH-F1F2-1). `smartmemory-mcp` pin moves to 1.5.28 (the latest published MCP, synced by release.sh).
