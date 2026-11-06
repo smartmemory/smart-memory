@@ -442,19 +442,19 @@ def test_configured_provider_still_routes(
 # Every worker the wrapper causes to start is the held wrapper entry
 # ---------------------------------------------------------------------------
 
-WRAPPER_ENTRY = ["-m", "smartmemory_app.worker_entry"]
+WRAPPER_ENTRY = ["-P", "-m", "smartmemory_app.worker_entry"]
 
 
 @pytest.fixture
 def spawned(monkeypatch):
-    """argv of every detached spawn, core's and the wrapper's: recorded, never run."""
+    """Arguments of every detached spawn, core's and the wrapper's: recorded, never run."""
     import smartmemory.pipeline.work_graph.spawn as core_spawn
     import smartmemory.utils.process as process
 
-    seen: list[list[str]] = []
+    seen: list[tuple[list[str], dict]] = []
 
-    def record(argv, **_kwargs):
-        seen.append([str(arg) for arg in argv])
+    def record(argv, **kwargs):
+        seen.append(([str(arg) for arg in argv], kwargs))
 
     monkeypatch.setattr(core_spawn, "spawn_detached", record)
     monkeypatch.setattr(process, "spawn_detached", record)
@@ -463,10 +463,66 @@ def spawned(monkeypatch):
 
 def _assert_wrapper_entry(spawned, tmp_path):
     assert len(spawned) == 1, spawned
-    argv = spawned[0]
-    assert argv[1:3] == WRAPPER_ENTRY, f"spawned {argv[1:]}, not the held wrapper entry"
+    argv, kwargs = spawned[0]
+    assert argv[1:4] == WRAPPER_ENTRY, f"spawned {argv[1:]}, not the held wrapper entry"
     assert argv[argv.index("--idle-exit") + 1] == "300", argv
     assert argv[argv.index("--data-dir") + 1].startswith(str(tmp_path.resolve())), argv
+    assert kwargs["cwd"] == str((tmp_path / "data").resolve()), kwargs
+
+
+def test_on_demand_worker_ignores_hostile_caller_directory(monkeypatch, tmp_path):
+    """A real child must import the trusted entry and start in the resolved data dir."""
+    from smartmemory.utils import process
+    from smartmemory_app.worker_entry import spawn_worker_if_idle
+
+    trusted = tmp_path / "trusted"
+    package = trusted / "smartmemory_app"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    receipt = tmp_path / "receipt.json"
+    # A tiny trusted child payload keeps this process-boundary test offline and
+    # avoids draining unrelated queued work. The producer and Popen are real.
+    (package / "worker_entry.py").write_text(
+        "import json, pathlib, sys\n"
+        f"pathlib.Path({str(receipt)!r}).write_text(json.dumps({{"
+        "'cwd': str(pathlib.Path.cwd()), 'safe_path': sys.flags.safe_path}))\n"
+    )
+    caller = tmp_path / "hostile-caller"
+    shadow = caller / "smartmemory_app"
+    shadow.mkdir(parents=True)
+    marker = tmp_path / "shadow-imported"
+    (shadow / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+    )
+    (shadow / "worker_entry.py").write_text("")
+    data = tmp_path / "data"
+    data.mkdir()
+    (tmp_path / "data-link").symlink_to(data, target_is_directory=True)
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("PYTHONPATH", str(trusted))
+    children = []
+    real_spawn = process.spawn_detached
+
+    def track(*args, **kwargs):
+        child = real_spawn(*args, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(process, "spawn_detached", track)
+    try:
+        assert spawn_worker_if_idle("../data-link") is True
+        assert len(children) == 1
+        assert children[0].wait(timeout=10) == 0
+        assert not marker.exists(), "child imported code from the caller's directory"
+        assert json.loads(receipt.read_text()) == {
+            "cwd": str(data.resolve()),
+            "safe_path": True,
+        }
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)
 
 
 def _spawn_core_after_hold(monkeypatch, tmp_path):
@@ -545,7 +601,8 @@ def test_spawned_wrapper_worker_still_extracts_with_groq(
     storage.get_memory().ingest(NOTE)
     assert placements and all(placements), placements
     _assert_wrapper_entry(spawned, tmp_path)
-    data_dir = spawned[0][spawned[0].index("--data-dir") + 1]
+    argv, _kwargs = spawned[0]
+    data_dir = argv[argv.index("--data-dir") + 1]
     storage._shutdown()
     monkeypatch.setattr(storage, "_memory", None)
 

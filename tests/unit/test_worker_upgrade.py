@@ -308,7 +308,8 @@ def test_save_on_demand_child_inherits_config(tmp_path, monkeypatch):
     # only the final worker command with a child that records its inherited env.
     def capture(command, **kwargs):
         # WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: the held wrapper entry, never core's CLI worker.
-        assert command[1:3] == ["-m", "smartmemory_app.worker_entry"], command
+        assert command[1:4] == ["-P", "-m", "smartmemory_app.worker_entry"], command
+        assert kwargs["cwd"] == str(tmp_path.resolve()), kwargs
         destination = tmp_path / "child-env.json"
         script = (
             "import os,json,pathlib; pathlib.Path("
@@ -526,17 +527,30 @@ def _run_v2(data_dir, *, idle_exit, lease, v2=None):
 @pytest.mark.parametrize(
     "run_worker, expected, warns",
     [
-        (_run_v1, ("legacy", "d", 1.0, 2.0), True),  # older core: no v2 param, no lite_handlers
-        (_run_v2, ("v2", "d", 1.0, 2.0, None), False),  # current core, switch OFF: v2=None
+        (
+            _run_v1,
+            ("legacy", "d", 1.0, 2.0),
+            True,
+        ),  # older core: no v2 param, no lite_handlers
+        (
+            _run_v2,
+            ("v2", "d", 1.0, 2.0, None),
+            False,
+        ),  # current core, switch OFF: v2=None
     ],
     ids=["older-core-no-v2", "current-core-switch-off"],
 )
-def test_run_configured_worker_core_shapes(monkeypatch, caplog, run_worker, expected, warns):
+def test_run_configured_worker_core_shapes(
+    monkeypatch, caplog, run_worker, expected, warns
+):
     from smartmemory_app import worker_entry
 
     monkeypatch.setattr(worker_entry, "apply_runtime_config", lambda: None)
     monkeypatch.setattr("smartmemory.pipeline.work_graph.worker.run_worker", run_worker)
     monkeypatch.setattr(worker_entry, "_v2_config", lambda data_dir: None)
     with caplog.at_level(logging.WARNING, logger="smartmemory_app.worker_entry"):
-        assert worker_entry.run_configured_worker("d", idle_exit=1.0, lease=2.0) == expected
+        assert (
+            worker_entry.run_configured_worker("d", idle_exit=1.0, lease=2.0)
+            == expected
+        )
     assert any("legacy drain only" in r.message for r in caplog.records) is warns

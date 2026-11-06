@@ -35,6 +35,7 @@ def spawn_worker_if_idle(data_dir) -> bool:
             spawn_detached(
                 [
                     sys.executable,
+                    "-P",
                     "-m",
                     "smartmemory_app.worker_entry",
                     "--data-dir",
@@ -45,6 +46,7 @@ def spawn_worker_if_idle(data_dir) -> bool:
                 stdin=subprocess.DEVNULL,
                 stdout=output,
                 stderr=subprocess.STDOUT,
+                cwd=str(path),
             )
         return True
     except Exception:
