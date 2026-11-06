@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- DRIFT-V3-DHRUV-BOUNDARIES-1: preserve dated and scoped search forwarding, warn when unknown options or options unsupported by an older core are dropped, and never retry a failed core search.
+
 - fix(storage), SM-SCOPED-VALIDITY-1 U11: preserve `business_scope` and `valid_at` through local and remote search adapters, including independent transaction-time queries and core validation errors. Retain the live facade census for `manual_scan` and `exclude_speculative`. Real Lite tests cover site rollout boundaries, sponsor fallback, predecessor selection and schedule correction.
 
 - test, LITE-2.0-RUNNER-GIT-SKIP-1: the three git-dependent tests in `tests/unit/test_workspace_id_worktree.py` skip when no `git` binary is on PATH (the runner image has none, OPS-RUNNER-IMAGE-GIT-1); the lander runs them locally until after 2.0. Test markers only.
