@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Session lesson processing receipt",
-  "description": "Trusted role/content records accompany JSON serialized prompt text. Attribution equals a complete user sentence, allowing whitespace differences only. Canonicalization and classifier bypass require a single unambiguous standing directive or prohibition and only assistant acknowledgments. Scoped reports, past events and one-off tasks retain model/classifier authority.",
+  "description": "Trusted role/content records accompany JSON serialized prompt text. Attribution equals a complete user sentence, allowing whitespace differences only. Canonicalization and classifier bypass require a single unambiguous standing directive, prohibition or project-scoped definition and only assistant acknowledgments. Scoped definitions fix a term meaning through is, means, refers to or treat as, including contrasts. Scoped reports, past events and one-off tasks retain model/classifier authority.",
   "type": "object",
   "required": [
     "lesson_output_diagnostics"

@@ -15,7 +15,11 @@ Parse the entire JSON response, validate the schema before constructing a trace,
 and do not truncate rules. One deterministic post-step handles an unambiguous
 conversation containing exactly one single-line standing rule and only bare
 acknowledgments: replace redundant/paraphrased model rows with that source rule.
-This repair requires an unambiguous standing directive or prohibition. A scope
+This repair requires an unambiguous standing directive, prohibition or scoped
+term definition. Definitions such as "In this project, X is/means Y, not Z",
+"For this project, X refers to Y" and "In this project, treat X as Y" fix a term's
+meaning and are standing policies. They share canonicalization, classifier bypass
+and assistant acknowledgment collapse with directives and prohibitions. A scope
 phrase alone, a status report, a past event or a one-off task never qualifies.
 Otherwise model output, including `[]`, stands and classification remains active.
 The producer carries trusted role/content records alongside its JSON serialized

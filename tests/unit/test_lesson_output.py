@@ -205,7 +205,7 @@ def test_rule_only_probe_uses_source_kind_without_classifier(
         }
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert gate["evaluate"](rows) == []
-    assert len(classified) == 2  # Declarative statements retain classifier authority.
+    assert classified == []  # Scoped definitions use the standing-policy bypass too.
 
 
 def test_overflow_keeps_rule_and_warns_about_findings(caplog):

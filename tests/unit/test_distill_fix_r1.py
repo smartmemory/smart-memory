@@ -152,7 +152,6 @@ def test_slice_receipt_keeps_loss_from_earlier_slice():
         "In this project, the old export must have failed yesterday.",
         "In this project, use the new runner today.",
         "In this project, we must fix this task.",
-        "In this project, API version 2.0 is a version, not an HTTP status.",
     ],
 )
 def test_ambiguous_and_oneoff_text_never_bypasses_classifier(user):

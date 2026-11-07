@@ -45,6 +45,14 @@ _PAST = re.compile(
     r"\b(?:yesterday|last week|previously|used to|had to|today|tonight|this task|this time|this once)\b",
     re.I,
 )
+# A project-scoped meaning assignment, not a report about an operation's state.
+_DEFINITION = re.compile(
+    r"^(?i:(?:in|for) this project),?\s+"
+    r"(?:(?i:treat)\s+.+?\s+(?i:as)\s+\S.*|"
+    r".+?\s+(?i:means|refers to)\s+\S.*|"
+    r".+?\s+(?i:is)\s+(?!(?i:an?\s+(?:success|failure|failed|failing|completed|cancelled|pending|bit|little|work in progress)\b))"
+    r"(?:an?\s+\S.+|[\"'`].+|[A-Z][\w.-]*[.!]?))$"
+)
 _ACK = re.compile(
     r"(?:Understood\.|Got it\.|OK\.|I will follow this standing rule\.)\s*", re.I
 )
@@ -91,6 +99,8 @@ def _normalized(content):
 def _standing_policy(content):
     if _PAST.search(content):
         return False
+    if _DEFINITION.match(content):
+        return True
     directive = re.sub(
         r"^(?:(?:in|for) this project|from now on|for (?:all )?future[^,]*),?\s*",
         "",

@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- SM-HOOKS-2-0-1 distill fix R2: preserve project-scoped term definitions as standing policies, including exact source canonicalization, classifier bypass and acknowledgment collapse. Keep status, task and past-event refusals, trusted attribution and receipt diagnostics.
+
 - SM-HOOKS-2-0-1: validate session lesson JSON before trace construction, preserve complete source rules and deduplicate bare acknowledgments with a source-backed repair. Refuse invalid or unsupported output with WARNING and no model retry. Live quality remains subject to the unchanged 20-rule gate.
 
 - SM-HOOKS-2-0-1 (side branch): lesson extraction explicitly preserves a standing rule's identifier categories, negation, exceptions, scope and units, quoting the source rule. Add a fixed 20-rule offline acceptance gate for the existing read-only lesson probe, including the reserved-ports regression. No model quality claim or installed-runtime switch is made.
