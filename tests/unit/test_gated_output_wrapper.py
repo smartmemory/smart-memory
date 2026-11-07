@@ -217,8 +217,8 @@ RECALL_ROWS = [
         1,
         [(t, k) for k in (3, 6, 12, 24, 48, 96, 192, 200) for t in ("", "/project")],
         ["test_u521_5"],
-        ("read_gate_scan_budget_spent", FETCH_BOUND),
-        [gate_warning("recall workspace search", "read_gate_scan_budget_spent")] * 8
+        (*PARTIAL, FETCH_BOUND),
+        [gate_warning("recall workspace search")] * 8
         + [(STORAGE_LOG, "WARNING", SHORTFALL_BOUND % 1)],
     ),
     (
@@ -913,7 +913,7 @@ def test_a_gate_refusal_propagates_from_search_and_is_logged_once(unbound, caplo
     The wrapper must not answer with an empty list."""
     backend = unbound._graph.backend
     with backend._lock:
-        backend._conn.execute("CREATE TABLE sm2_intake (id TEXT)")
+        backend._conn.execute("CREATE TABLE IF NOT EXISTS sm2_intake (id TEXT)")
     with pytest.raises(PendingFacadeUnavailable):
         storage.search("atlas", top_k=3)
     core_logger = "smartmemory.search.pending_facade"
