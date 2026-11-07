@@ -3,6 +3,9 @@
 ## Unreleased - RECALL-CONFLICT-FLAG-1
 
 - Forward strict conflict reads through the local search allowlist used by MCP.
+## Unreleased - DOC-2.0-PARITY-R5B-NOTES-1 (2026-11-06)
+
+- Lite access counts now track public retrievals. Internal ingestion lookups no longer increment `access_count` or refresh `last_accessed`. Wildcard search now records returned items through core search. Returned get and search counters show the value before the current read, so fresh saves can show lower counts than 1.5. See core CHANGELOG SEC-PROPS-FIELD-1 (2026-10-12), fixes r1 and r2.
 
 ## Unreleased
 
