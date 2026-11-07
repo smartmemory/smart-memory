@@ -1,5 +1,6 @@
 """Session conclusions through core's reasoning and decision extractors."""
 
+import hashlib
 import json
 import logging
 import os

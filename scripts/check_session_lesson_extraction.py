@@ -16,6 +16,7 @@ from smartmemory_app.session_lessons import (
     SessionLessonExtractor,
     _choose_lesson_kind,
     _normalize_lesson_content,
+    _only_attributed_rules,
     _prepare_lesson_decisions,
     _promote_rules,
 )
