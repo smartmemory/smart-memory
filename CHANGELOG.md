@@ -1,5 +1,9 @@
 # Changelog — smartmemory
 
+## Unreleased - RECALL-CONFLICT-FLAG-1
+
+- Forward strict conflict reads through the local search allowlist used by MCP.
+
 ## Unreleased
 
 - LITE-2.0-SPAWN-SAFEPATH-ADJACENT-1: Tour, offline diagnostics, and update subprocesses use Python safe-path mode and an explicit resolved working directory so modules in the caller directory cannot shadow child imports.
