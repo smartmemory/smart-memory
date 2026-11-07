@@ -250,6 +250,22 @@ RECALL_ROWS = [
 def test_recall_widens_to_the_bound_and_says_when_the_answer_is_partial(
     world, caplog, case, arm, budget, asked, ids, names, warnings
 ):
+    if case == "workspace on partial":
+        # The cwd is a lexical content query. Give only this row more matching
+        # candidates than max_scan=1, all retired so the visible seed stays the same.
+        for n in range(2):
+            world.mem._graph.backend.add_node(
+                f"test_u521_workspace_partial_{n}",
+                {
+                    "content": f"project budget note {n}",
+                    "origin": "user:test",
+                    "retired": True,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "kind": "x",
+                    "metadata": {"kind": "x"},
+                },
+                memory_type="semantic",
+            )
     world.budget["max_scan"] = budget
     out = recall(**arm)
     assert world.calls == asked
