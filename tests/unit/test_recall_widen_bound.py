@@ -83,8 +83,8 @@ def shortfalls(caplog):
 def test_no_matching_row_stops_at_the_ceiling(core, caplog):
     core.rows = [item(f"r{i}", "ws_other") for i in range(STORE_ROWS)]
     out = recall(top_k=10)
-    # Orient (no query): 10, 20, 40, then the ceiling 8 x 10 = 80. log2(80 / 10) + 1 = 4 rounds.
-    assert [k for _, k in core.calls] == [10, 20, 40, 80]
+    # Orient (no query): 10, then one widen directly to the existing ceiling 8 x 10 = 80.
+    assert [k for _, k in core.calls] == [10, 80]
     assert out == ""
     assert shortfalls(caplog) == [
         "recall shortfall: requested=10 emitted=0; stopped widening at a fetch of 80 (ceiling: the page came back "
@@ -97,11 +97,11 @@ def test_ceiling_bounds_query_and_workspace_channels(core, caplog):
     core.rows = [item(f"r{i}", "ws_other") for i in range(STORE_ROWS)]
     recall(top_k=5, query="atlas")
     # Query: first fetch 2 x 5 = 10, ceiling 40.
-    assert core.calls == [("atlas", 10), ("atlas", 20), ("atlas", 40)]
+    assert core.calls == [("atlas", 10), ("atlas", 40)]
     core.calls.clear()
     recall(top_k=4, cwd="/project")
     # Both channels per round; ceiling max(16, 8 x 4) = 32.
-    assert core.calls == [(t, k) for k in (4, 8, 16, 32) for t in ("", "/project")]
+    assert core.calls == [(t, k) for k in (32,) for t in ("", "/project")]
     assert len(shortfalls(caplog)) == 2 and all(
         "(ceiling: " in m for m in shortfalls(caplog)
     )
@@ -121,19 +121,19 @@ def test_gate_bound_still_wins_when_it_is_smaller(core, caplog):
 def test_top_k_one_uses_the_floor(core):
     core.rows = [item(f"r{i}", "ws_other") for i in range(STORE_ROWS)]
     recall(top_k=1)
-    assert [k for _, k in core.calls] == [1, 2, 4, 8, 16]
+    assert [k for _, k in core.calls] == [1, 16]
 
 
 def test_deadline_passing_mid_loop_stops_at_the_next_round(core, caplog):
     core.rows = [item(f"r{i}", "ws_other") for i in range(STORE_ROWS)]
-    # Rounds end at t=1 and t=2; the deadline 1.5 has passed before round 3 would start.
-    out = recall(top_k=10, deadline=1.5)
-    assert [k for _, k in core.calls] == [10, 20]
+    # The first round ends at t=1, after the deadline, so the widen must not start.
+    out = recall(top_k=10, deadline=0.5)
+    assert [k for _, k in core.calls] == [10]
     # Read before round 1, then before each later round.
-    assert core.clock == [0.0, 1.0, 2.0]
+    assert core.clock == [0.0, 1.0]
     assert out == ""
     assert shortfalls(caplog) == [
-        "recall shortfall: requested=10 emitted=0; stopped widening at a fetch of 20 (deadline), so eligible "
+        "recall shortfall: requested=10 emitted=0; stopped widening at a fetch of 10 (deadline), so eligible "
         "candidates past what core examined are not shown"
     ]
     assert type(out) is PartialText and out.partial == (FETCH_BOUND,)
@@ -153,7 +153,7 @@ def test_recall_that_fills_on_round_one_makes_one_fetch(core, caplog):
 def test_short_store_is_exhaustion_not_a_bound(core, caplog):
     core.rows = [item(f"r{i}", "ws_other") for i in range(15)]
     recall(top_k=10)
-    assert [k for _, k in core.calls] == [10, 20]
+    assert [k for _, k in core.calls] == [10, 80]
     assert shortfalls(caplog) == [
         "recall shortfall: requested=10 emitted=0; eligible distinct candidates exhausted"
     ]
@@ -246,3 +246,55 @@ def test_orient_does_not_start_its_patterns_recall_after_the_deadline(
     assert build.call_count == 0 and lookup.call_count == 1
     assert lookup.call_args.kwargs["deadline"] == 5.0
     assert "Orient skipped rules card: deadline passed" in caplog.text
+
+
+@pytest.mark.parametrize("arm", [{}, {"query": "atlas"}, {"cwd": "/project"}])
+def test_ninety_percent_foreign_keeps_legacy_results_with_two_searches(core, arm):
+    """The old final window held eight local rows. Keep all eight without rescanning intermediate windows."""
+    core.rows = [item(f"r{i}", "ws_fresh" if i % 10 == 9 else "ws_other") for i in range(80)]
+    out = recall(top_k=10, **arm)
+    expected = [f"r{i}" for i in range(9, 80, 10)]
+    assert [line.split("[mem:")[1].split("]")[0] for line in out.splitlines() if "[mem:" in line] == expected
+    assert len(core.calls) <= 2
+    assert max(k for _, k in core.calls) == 80
+
+
+def test_real_sqlite_foreign_workspace_fixture(tmp_path, monkeypatch, caplog):
+    """Exercise the actual recency lane on a disposable SQLite store, no models or services."""
+    from datetime import datetime, timedelta, timezone
+    from smartmemory.tools.factory import create_lite_memory
+    from smartmemory.save.read_port import InMemoryPendingStore
+
+    mem = create_lite_memory(data_dir=str(tmp_path / "test_refetch"), spawn_worker=False)
+    calls = []
+    real_search = mem.search
+
+    def search(text, **kwargs):
+        calls.append(kwargs["top_k"])
+        return real_search(text, **kwargs)
+
+    monkeypatch.setattr(mem, "search", search)
+    monkeypatch.setattr(storage, "get_memory", lambda: mem)
+    monkeypatch.setattr(recall_format, "_trace", lambda **kw: None)
+    monkeypatch.setattr(storage, "_RECALL_WIDEN_FACTOR", 8)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    try:
+        for n in range(80):
+            mem._graph.backend.add_node(
+                f"test_refetch_{n:03d}",
+                {"content": f"atlas fixture {n}", "origin": "user:test",
+                 "created_at": (base + timedelta(seconds=80 - n)).isoformat(),
+                 "confidence": 1.0,
+                 "metadata": {"workspace_id": "ws_fresh" if n % 10 == 9 else "ws_other"}},
+                memory_type="semantic",
+            )
+        mem.bind_pending_reads(InMemoryPendingStore(), workspace_hidden=False)
+        out = recall(top_k=10)
+        assert calls == [10, 80]
+        assert [line.split("[mem:")[1].split("]")[0] for line in out.splitlines() if "[mem:" in line] == [
+            f"test_refetch_{n:03d}" for n in range(9, 80, 10)
+        ]
+        assert getattr(out, "partial", ()) == (FETCH_BOUND,)
+        assert any("requested=10 emitted=8" in msg for msg in shortfalls(caplog))
+    finally:
+        mem.close()
