@@ -188,7 +188,7 @@ DROPPED = [
 ]
 
 # (case, arm kwargs, scan budget, the (text, fetch) pairs core was asked, ids emitted, carrier names, WARNINGs)
-# The ON/partial rows widen 6/12/24/48/96/192 and stop at 200: never the 384/768/1536 the old fake core allowed. The
+# SM-LITE-RECALL-REFETCH-LOOP-1: single lanes jump to 200 after one shortfall. cwd spends two searches at 200. The
 # complete rows stop on the first short page (exhaustion proved). The orient arm has no lexical lane, so a lane budget cannot make it partial.
 Q = "atlas budget"
 RECALL_ROWS = [
@@ -196,10 +196,10 @@ RECALL_ROWS = [
         "query on partial",
         {"query": Q},
         1,
-        [(Q, k) for k in (6, 12, 24, 48, 96, 192, 200)],
+        [(Q, k) for k in (6, 200)],
         [],
         (*PARTIAL, FETCH_BOUND),
-        [gate_warning("recall search")] * 7
+        [gate_warning("recall search")] * 2
         + [(STORAGE_LOG, "WARNING", SHORTFALL_BOUND % 0)],
     ),
     (
@@ -215,17 +215,17 @@ RECALL_ROWS = [
         "workspace on partial",
         {"cwd": "/project"},
         1,
-        [(t, k) for k in (3, 6, 12, 24, 48, 96, 192, 200) for t in ("", "/project")],
+        [(t, k) for k in (200,) for t in ("", "/project")],
         ["test_u521_5"],
         ("read_gate_scan_budget_spent", FETCH_BOUND),
-        [gate_warning("recall workspace search", "read_gate_scan_budget_spent")] * 8
+        [gate_warning("recall workspace search", "read_gate_scan_budget_spent")]
         + [(STORAGE_LOG, "WARNING", SHORTFALL_BOUND % 1)],
     ),
     (
         "workspace on complete",
         {"cwd": "/project"},
         None,
-        [("", 3), ("/project", 3)],
+        [("", 200), ("/project", 200)],
         ["test_u521_5"],
         (),
         [(STORAGE_LOG, "WARNING", SHORTFALL_EXHAUSTED % 1)],
@@ -355,7 +355,7 @@ def floor_drops(fetches, eligible=()):
     ]
 
 
-ON_FETCHES = (3, 6, 12, 24, 48, 96, 192, 200)
+ON_FETCHES = (3, 200)
 
 # (case, the newest row made eligible or None, fetches, ids emitted, names carried, WARNINGs minus NOISE).
 # ON stops at the bound on a FULL page (core's answer complete) and the answer carries ``fetch_bound``, empty or not.
@@ -526,9 +526,11 @@ OVER_ROWS = [
         lambda: _recall_ids(cwd="/project"),
         o(0, 1, 2),
         [
-            over("recall recency search", 9, 3),
-            over("recall workspace search", 9, 3),
-            *dup_drops(o(0, 1, 2)),
+            over("recall recency search", 600, 200),
+            over("recall workspace search", 600, 200),
+            *dup_drops(o(0, 1)),
+            *cap_drops(o(*range(3, 200))),
+            *dup_drops(o(*range(2, 200))),
         ],
     ),
     (

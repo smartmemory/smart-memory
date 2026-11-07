@@ -1418,7 +1418,9 @@ def recall(
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
 
     ``deadline`` (epoch seconds, ``time.time``): a widening round does not start past it. Without one the fetch
-    ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
+    ceiling bounds the candidate window (LITE-RECALL-WIDEN-UNBOUNDED-1). Candidate retrieval uses at most
+    two searches: a single lane widens once to that ceiling, while cwd recall reads both lanes once at the ceiling
+    (SM-LITE-RECALL-REFETCH-LOOP-1). The optional snapshot lookup is separate.
 
     Bug fixes vs legacy:
       - empty-content items skipped
@@ -1581,7 +1583,11 @@ def recall(
     # LITE-RECALL-WIDEN-UNBOUNDED-1: the smaller of the gate's bound and the recall ceiling (a multiple of top_k).
     gate_cap = _gated_fetch_cap()
     cap = min(_recall_fetch_ceiling(requested, fetch_k), gate_cap)
-    fetch_k = min(fetch_k, cap)
+    # cwd recall spends its two-search budget on one recency and one semantic query.
+    # Single-lane recall keeps the cheap first page, then jumps to the same final
+    # window the old doubling loop could reach. Intermediate windows only repeated
+    # expensive lane scans and could not add candidates beyond that final window.
+    fetch_k = cap if cwd and not query else min(fetch_k, cap)
 
     def examined(found, bound: int, where: str) -> list:
         return list(gated_fetch_bound(found, bound, where=where))
@@ -1665,7 +1671,7 @@ def recall(
             stopped = "deadline"
             partial_names = (*partial_names, FETCH_BOUND_REASON)
             break
-        fetch_k = min(fetch_k * 2, cap)
+        fetch_k = cap
 
     if emitted < requested:
         if stopped:
