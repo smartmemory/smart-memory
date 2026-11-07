@@ -4,8 +4,9 @@
 - The workspace partial row now also expects `complete` (CHANGELOG U5.21: a spent scan budget reports `complete` False), and the refusal test creates `sm2_intake` with `IF NOT EXISTS` since core creates it at construction when `sm2_save_local_admission` is ON.
 
 ## Unreleased - D-0139 gate rollback: RECALL-CONFLICT-FLAG-1 (2026-11-07)
+## Unreleased - RECALL-CONFLICT-FLAG-1 D-0139 dependency repair
 
-- Exclude the side-branch merge after its paired gate introduced a failure. Earlier entries remain as history. See REL-2.0-MERGE-D0139-1/gates/smart-memory-bisection.json.
+- Revalidate the restored adapter against its fixed core dependency and retain its typed conflict evidence boundary.
 
 ## Unreleased - D-0139 gate rollback: SM-HOOKS-2-0-1 (2026-11-07)
 
