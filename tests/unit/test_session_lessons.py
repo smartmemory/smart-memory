@@ -486,8 +486,7 @@ def test_standing_rule_boundary_recorded_shapes(lesson_env, monkeypatch, case):
     constraint = None
     if case == "future-aside":
         request += " By the way, for future reports, dates must be ISO-8601."
-        # Exact source casing is part of the producer contract, including asides.
-        constraint = "User-stated rule: for future reports, dates must be ISO-8601."
+        constraint = "User-stated rule: For future reports, dates must be ISO-8601."
     elif case == "provider-rejection":
         constraint = "Report provider rejects duplicate references with ERR-17."
     contents = findings + (["CONSTRAINT: " + constraint] if constraint else [])
