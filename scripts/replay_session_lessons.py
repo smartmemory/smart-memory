@@ -19,10 +19,6 @@ def replay(results, transcripts):
     for key, rows in grouped.items():
         path = Path(transcripts) / (key + ".jsonl")
         conversation, _ = parse_transcript(str(path), min_turns=1)
-        text = "\n\n".join(
-            f"Turn {i} ({turn['role']}):\n{turn['content']}"
-            for i, turn in enumerate(conversation.turns)
-        )
         # The malformed raw JSON was not retained. An error marker must refuse,
         # never manufacture provider output or silently recover missing evidence.
         payload = (
@@ -38,7 +34,7 @@ def replay(results, transcripts):
                 if "content" in row
             ]
         )
-        parsed = parse_output(json.dumps(payload), text)
+        parsed = parse_output(json.dumps(payload), conversation.turns)
         if parsed is None:
             output.append(
                 {"transcript": str(path), "error": "historical output refused"}

@@ -72,6 +72,8 @@ class SessionLessonExtractor(ReasoningExtractor):
     """Keep the final turn; core's generic prompt only reads the first 4k chars."""
 
     lesson_usage = None
+    trusted_turns = ()
+    lesson_output_diagnostics = None
 
     def _extract_implicit(self, text):
         # Ingestion shares this context; never attribute its last usage to lessons.
@@ -88,7 +90,8 @@ class SessionLessonExtractor(ReasoningExtractor):
         from smartmemory.models.reasoning import ReasoningStep, ReasoningTrace
         from smartmemory_app.lesson_output import parse_output
 
-        rows = parse_output(response, original_text)
+        rows = parse_output(response, self.trusted_turns)
+        self.lesson_output_diagnostics = rows.diagnostics if rows is not None else None
         if not rows or len(rows) < self.cfg.min_steps:
             return None
         # Core's generic parser truncates each step at 1000 characters. Rules
@@ -109,7 +112,8 @@ class SessionLessonExtractor(ReasoningExtractor):
             "type is thought, action, observation, decision, conclusion or reflection. "
             "content is a nonempty string. One conclusion per explicit standing rule: "
             "content must equal CONSTRAINT: User-stated rule: followed by the verbatim "
-            "user rule, with one space after the final colon. Do not add quote marks "
+            "complete user source sentence, including any introductory aside, with one space "
+            "after the final colon. Do not add quote marks "
             "or explanatory scope. Preserve the original punctuation, negation, "
             "exceptions, units, identifier category and scope exactly. "
             "A bare acknowledgment or promise to comply is not an implementation "
@@ -204,17 +208,22 @@ def _prepare_lesson_decisions(decisions):
     return decisions, tagged_by_content, attributed_by_content
 
 
-def _only_attributed_rules(decisions, tagged, attributed, text):
+def _only_attributed_rules(decisions, tagged, attributed, trusted_turns):
     from smartmemory_app.lesson_output import isolated_rule
 
-    return isolated_rule(text) is not None and bool(decisions) and all(
-        tagged[d.content] and attributed[d.content] for d in decisions
+    return (
+        isolated_rule(trusted_turns) is not None
+        and bool(decisions)
+        and all(tagged[d.content] and attributed[d.content] for d in decisions)
     )
 
 
 def _choose_lesson_kind(content, tagged, attributed, classifier_kind=None):
     """Honor an extractor-tagged standing rule; otherwise trust the classifier."""
-    if tagged and attributed:
+    from smartmemory_app.lesson_output import _standing_policy
+
+    source = _ATTRIBUTED_RULE.sub("", content, count=1)
+    if tagged and attributed and _standing_policy(source):
         if classifier_kind == "finding":
             log.info(
                 "Attributed standing rule overrides classifier finding: %s", content
@@ -294,10 +303,7 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
         os.environ["LLM_PROVIDER"] = "groq"
         os.environ["LLM_API_KEY"] = os.environ["GROQ_API_KEY"]
         os.environ["OPENAI_BASE_URL"] = "https://api.groq.com/openai/v1"
-        text = "\n\n".join(
-            f"Turn {i} ({turn['role']}):\n{turn['content']}"
-            for i, turn in enumerate(turns)
-        )
+        text = json.dumps(turns, ensure_ascii=False)
         extractor = SessionLessonExtractor(
             ReasoningExtractorConfig(
                 prefer_explicit_markup=False,
@@ -307,9 +313,14 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
                 min_steps=1,
             )
         )
+        extractor.trusted_turns = tuple(dict(turn) for turn in turns)
         try:
             trace = extractor.extract(text).get("reasoning_trace")
         finally:
+            if extractor.lesson_output_diagnostics is not None:
+                receipt["lesson_output_diagnostics"] = (
+                    extractor.lesson_output_diagnostics
+                )
             if extractor.lesson_usage is not None:
                 receipt["lesson_usage"] = extractor.lesson_usage
         if trace is None:
@@ -333,7 +344,9 @@ def _capture_lessons(mem, job, turns, item_ids, session_date, path):
             # Do not risk losing them to an unnecessary classifier JSON response.
             kinds = (
                 ["constraint"] * len(decisions)
-                if _only_attributed_rules(decisions, tagged_by_content, attributed_by_content, text)
+                if _only_attributed_rules(
+                    decisions, tagged_by_content, attributed_by_content, turns
+                )
                 else classify_lessons([d.content for d in decisions], receipt)
             )
         except Exception as exc:

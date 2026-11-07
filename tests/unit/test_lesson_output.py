@@ -11,7 +11,10 @@ from smartmemory.plugins.extractors.reasoning import ReasoningExtractorConfig
 
 
 def conversation(rule, assistant="Understood. I will follow this standing rule."):
-    return f"Turn 0 (user):\n{rule}\n\nTurn 1 (assistant):\n{assistant}"
+    return [
+        {"role": "user", "content": rule},
+        {"role": "assistant", "content": assistant},
+    ]
 
 
 def test_contract_matches_documented_schema():
@@ -52,10 +55,11 @@ def test_source_repair_keeps_long_rule_and_exception(caplog):
         + "completed checkpoint " * 75
         + "except after owner approval."
     )
-    trace = SessionLessonExtractor(
-        ReasoningExtractorConfig(min_steps=1)
-    )._parse_llm_response(
-        '[{"type":"decision","content":"Assistant will comply."}]', conversation(rule)
+    extractor = SessionLessonExtractor(ReasoningExtractorConfig(min_steps=1))
+    extractor.trusted_turns = conversation(rule)
+    trace = extractor._parse_llm_response(
+        '[{"type":"decision","content":"Assistant will comply."}]',
+        json.dumps(extractor.trusted_turns),
     )
     assert len(trace.steps) == 1
     assert trace.steps[0].type == "conclusion"
@@ -170,13 +174,29 @@ def test_rule_only_probe_uses_source_kind_without_classifier(
     # DecisionExtractor run. This verifies wiring, not live model quality.
     monkeypatch.setattr(
         "smartmemory.plugins.extractors.reasoning.call_llm",
-        lambda **kwargs: (None, "[]"),
+        lambda **kwargs: (
+            None,
+            json.dumps(
+                [
+                    {
+                        "type": "conclusion",
+                        "content": "CONSTRAINT: User-stated rule: "
+                        + json.loads(kwargs["user_content"].split("\n\n")[-1])[0][
+                            "content"
+                        ],
+                    }
+                ]
+            ),
+        ),
     )
 
-    def forbidden(*args):
-        raise AssertionError("source-verified rules must not call the classifier")
+    classified = []
 
-    monkeypatch.setattr(probe, "classify_lessons", forbidden)
+    def classifier(contents, receipt):
+        classified.extend(contents)
+        return ["constraint"] * len(contents)
+
+    monkeypatch.setattr(probe, "classify_lessons", classifier)
     monkeypatch.setenv("GROQ_API_KEY", "synthetic-only")
     for transcript in sorted(tmp_path.glob("*.jsonl")):
         assert probe.inspect_transcript(str(transcript)) == {
@@ -185,6 +205,7 @@ def test_rule_only_probe_uses_source_kind_without_classifier(
         }
     rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert gate["evaluate"](rows) == []
+    assert len(classified) == 2  # Declarative statements retain classifier authority.
 
 
 def test_overflow_keeps_rule_and_warns_about_findings(caplog):

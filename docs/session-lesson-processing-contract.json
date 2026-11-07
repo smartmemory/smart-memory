@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Session lesson processing receipt",
+  "description": "Trusted role/content records accompany JSON serialized prompt text. Attribution equals a complete user sentence, allowing whitespace differences only. Canonicalization and classifier bypass require a single unambiguous standing directive or prohibition and only assistant acknowledgments. Scoped reports, past events and one-off tasks retain model/classifier authority.",
+  "type": "object",
+  "required": [
+    "lesson_output_diagnostics"
+  ],
+  "properties": {
+    "lesson_output_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_repairs",
+        "duplicates_removed",
+        "findings_dropped"
+      ],
+      "properties": {
+        "source_repairs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicates_removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "findings_dropped": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "lessons_complete": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lesson_output_diagnostics": {
+            "properties": {
+              "findings_dropped": {
+                "minimum": 1
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "lessons_complete": {
+            "const": false
+          }
+        }
+      }
+    }
+  ]
+}

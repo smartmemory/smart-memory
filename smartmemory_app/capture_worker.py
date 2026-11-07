@@ -199,6 +199,7 @@ def import_capture(
                             "lesson_ids",
                             "lesson_transitions",
                             "lessons_complete",
+                            "lesson_output_diagnostics",
                             "lessons_skipped",
                             "degradation",
                         )
@@ -279,6 +280,18 @@ def _merge(receipts: list[dict]) -> dict:
     merged["item_ids"] = [i for r in receipts for i in r.get("item_ids", [])]
     if any("lesson_ids" in r for r in receipts):
         merged["lesson_ids"] = [i for r in receipts for i in r.get("lesson_ids", [])]
+    diagnostics = [
+        r["lesson_output_diagnostics"]
+        for r in receipts
+        if "lesson_output_diagnostics" in r
+    ]
+    if diagnostics:
+        merged["lesson_output_diagnostics"] = {
+            key: sum(row.get(key, 0) for row in diagnostics)
+            for key in ("source_repairs", "duplicates_removed", "findings_dropped")
+        }
+    if any(r.get("lessons_complete") is False for r in receipts):
+        merged["lessons_complete"] = False
     degraded = [r["degradation"] for r in receipts if r.get("degradation")]
     if degraded:
         merged["degradation"] = " / ".join(degraded)
@@ -290,6 +303,7 @@ _RECEIPT_LESSON_KEYS = (
     "lesson_ids",
     "lesson_transitions",
     "lessons_complete",
+    "lesson_output_diagnostics",
     "lessons_skipped",
     "degradation",
 )

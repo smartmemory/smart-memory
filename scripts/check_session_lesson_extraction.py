@@ -27,9 +27,7 @@ def inspect_transcript(transcript):
     if conversation is None:
         raise ValueError(f"{transcript}: transcript contains no conversational turns")
     turns = conversation.turns
-    text = "\n\n".join(
-        f"Turn {i} ({turn['role']}):\n{turn['content']}" for i, turn in enumerate(turns)
-    )
+    text = json.dumps(turns, ensure_ascii=False)
     extractor = SessionLessonExtractor(
         ReasoningExtractorConfig(
             prefer_explicit_markup=False,
@@ -39,6 +37,7 @@ def inspect_transcript(transcript):
             min_steps=1,
         )
     )
+    extractor.trusted_turns = tuple(dict(turn) for turn in turns)
     trace = extractor.extract(text).get("reasoning_trace")
     if trace is None:
         raise ValueError(f"{transcript}: reasoning extraction returned no usable trace")
@@ -59,7 +58,9 @@ def inspect_transcript(transcript):
     # A failed classifier is a failed live measurement, not a successful fallback.
     kinds = (
         ["constraint"] * len(decisions)
-        if _only_attributed_rules(decisions, tagged_by_content, attributed_by_content, text)
+        if _only_attributed_rules(
+            decisions, tagged_by_content, attributed_by_content, turns
+        )
         else classify_lessons([d.content for d in decisions], {})
     )
     counts = {"constraint": 0, "finding": 0}

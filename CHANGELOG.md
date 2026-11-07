@@ -1,5 +1,7 @@
 # Changelog — smartmemory
 
+- SM-HOOKS-2-0-1 distill fix R1: require standing-policy semantics for deterministic repair, bind attribution to trusted turns and complete sentences, and expose repair/dedupe/drop diagnostics in capture receipts with partial completion on drops.
+
 ## Unreleased
 
 - SM-HOOKS-2-0-1: validate session lesson JSON before trace construction, preserve complete source rules and deduplicate bare acknowledgments with a source-backed repair. Refuse invalid or unsupported output with WARNING and no model retry. Live quality remains subject to the unchanged 20-rule gate.
