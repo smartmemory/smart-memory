@@ -20,6 +20,15 @@
 - LITE-2.0-SPAWN-SAFEPATH-ADJACENT-1: Tour, offline diagnostics, and update subprocesses use Python safe-path mode and an explicit resolved working directory so modules in the caller directory cannot shadow child imports.
 - LITE-2.0-WORKER-SPAWN-SAFEPATH-1: Start the on-demand Lite worker with Python safe-path mode and the resolved data directory as its working directory, preventing imports from the caller's directory. Preserve both protections in worker-spawn regression tests.
 - LITE-2.0-WORKGRAPH-WRAPPER-RED-1: verify Lite deferred work in the admitted receipt queue introduced by the 2.0 cutover, alongside the legacy rollback queue. Keep real SQLite coverage of keyless saves, re-extraction and cross-process worker completion.
+- SM-HOOKS-2-0-1 distill fix R1: require standing-policy semantics for deterministic repair, bind attribution to trusted turns and complete sentences, and expose repair/dedupe/drop diagnostics in capture receipts with partial completion on drops.
+
+## Unreleased
+
+- SM-HOOKS-2-0-1 distill fix R2: preserve project-scoped term definitions as standing policies, including exact source canonicalization, classifier bypass and acknowledgment collapse. Keep status, task and past-event refusals, trusted attribution and receipt diagnostics.
+
+- SM-HOOKS-2-0-1: validate session lesson JSON before trace construction, preserve complete source rules and deduplicate bare acknowledgments with a source-backed repair. Refuse invalid or unsupported output with WARNING and no model retry. Live quality remains subject to the unchanged 20-rule gate.
+
+- SM-HOOKS-2-0-1 (side branch): lesson extraction explicitly preserves a standing rule's identifier categories, negation, exceptions, scope and units, quoting the source rule. Add a fixed 20-rule offline acceptance gate for the existing read-only lesson probe, including the reserved-ports regression. No model quality claim or installed-runtime switch is made.
 
 - DRIFT-V3-DHRUV-BOUNDARIES-1: preserve dated and scoped search forwarding, warn when unknown options or options unsupported by an older core are dropped, and never retry a failed core search.
 

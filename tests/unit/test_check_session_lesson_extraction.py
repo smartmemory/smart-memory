@@ -99,6 +99,7 @@ def test_failure_continues_and_deltas_match_repeated_runs(
         return SimpleNamespace(turns=[{"role": "user", "content": path}]), None
 
     def extract(text):
+        text = json.loads(text)[0]["content"]
         contents = (
             []
             if text.endswith("bad") and failure == "empty"

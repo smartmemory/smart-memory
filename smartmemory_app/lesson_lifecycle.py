@@ -624,5 +624,7 @@ def apply_plan(mem, plan, path):
             }
             for r in rows
         )
-    receipt["lessons_complete"] = True
+    receipt["lessons_complete"] = not receipt.get(
+        "lesson_output_diagnostics", {}
+    ).get("findings_dropped", 0)
     return receipt
