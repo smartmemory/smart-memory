@@ -1,7 +1,3 @@
-## Unreleased - D-0139 merge resolution
-
-- Preserve the reviewed lesson attribution helper and digest imports when combining session lesson changes.
-
 ## Unreleased - D-0139 gate rollback: RECALL-CONFLICT-FLAG-1 (2026-11-07)
 
 - Exclude the side-branch merge after its paired gate introduced a failure. Earlier entries remain as history. See REL-2.0-MERGE-D0139-1/gates/smart-memory-bisection.json.
