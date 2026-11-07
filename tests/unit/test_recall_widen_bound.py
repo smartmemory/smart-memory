@@ -260,7 +260,7 @@ def test_ninety_percent_foreign_keeps_legacy_results_with_two_searches(core, arm
 
 
 def test_real_sqlite_foreign_workspace_fixture(tmp_path, monkeypatch, caplog):
-    """Exercise the actual recency lane on a disposable SQLite store, no models or services."""
+    """Exercise the actual recency lane on disposable SQLite, using locally installed Lite prerequisites."""
     from datetime import datetime, timedelta, timezone
     from smartmemory.tools.factory import create_lite_memory
     from smartmemory.save.read_port import InMemoryPendingStore

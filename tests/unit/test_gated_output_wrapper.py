@@ -528,9 +528,9 @@ OVER_ROWS = [
         [
             over("recall recency search", 600, 200),
             over("recall workspace search", 600, 200),
-            *dup_drops(o(0, 1)),
+            *dup_drops(o(0)),
             *cap_drops(o(*range(3, 200))),
-            *dup_drops(o(*range(2, 200))),
+            *dup_drops(o(*range(1, 200))),
         ],
     ),
     (
