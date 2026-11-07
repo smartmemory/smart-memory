@@ -168,7 +168,7 @@ def test_tagged_attributed_rule_overrides_finding(
     result = capture_lessons(
         mem,
         dict(session_id="s", workspace_id="ws", transcript_path="/tmp/s"),
-        [dict(role="user", content="For future exports, preserve the slug case.")],
+        [dict(role="user", content=content)],
         [],
     )
     assert result["lessons_complete"]
@@ -225,7 +225,7 @@ def test_attribution_and_tag_each_need_the_other(
     result = capture_lessons(
         mem,
         dict(session_id="s", workspace_id="ws", transcript_path="/tmp/s"),
-        [dict(role="user", content=content.split("— ")[-1])],
+        [dict(role="user", content=content)],
         [],
     )
     assert result["lessons_complete"]
