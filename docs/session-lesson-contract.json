@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Session lesson extraction output",
+  "type": "array",
+  "maxItems": 8,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "type",
+      "content"
+    ],
+    "properties": {
+      "type": {
+        "enum": [
+          "thought",
+          "action",
+          "observation",
+          "decision",
+          "conclusion",
+          "reflection"
+        ]
+      },
+      "content": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}
