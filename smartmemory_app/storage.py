@@ -1158,7 +1158,6 @@ _ALLOWED = frozenset(
         "valid_at",
         "as_of_date",
         "as_of_strict",
-        "fail_if_conflicted",
         "since",
         "until",
         "enable_hybrid",

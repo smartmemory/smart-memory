@@ -1,3 +1,7 @@
+## Unreleased - D-0139 gate rollback: RECALL-CONFLICT-FLAG-1 (2026-11-07)
+
+- Exclude the side-branch merge after its paired gate introduced a failure. Earlier entries remain as history. See REL-2.0-MERGE-D0139-1/gates/smart-memory-bisection.json.
+
 ## Unreleased - D-0139 gate rollback: SM-HOOKS-2-0-1 (2026-11-07)
 
 - Exclude the side-branch merge after its paired gate introduced a failure. Earlier entries remain as history. See REL-2.0-MERGE-D0139-1/gates/smart-memory-bisection.json.
