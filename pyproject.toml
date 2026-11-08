@@ -13,6 +13,8 @@ dependencies = [
     "smartmemory-core[lite,wikipedia,typescript]==2.0.0",  # EXACT pin — wrapper and core versions move in lockstep
     "openai>=1.0.0,<3",                    # SDK transport for Groq and compatible providers
     "filelock>=3.12",                    # cross-process SQLite write locking
+    "smartmemory-client>=2.0.0rc1,<2.1",  # remote API client (s1-chat 2026-11-09, REL-2.0-RC2-CLIENT-DEP-1); the
+                                     # rc1 lower bound admits 2.0.0rcN without --pre, <2.1 holds the release line
     "smartmemory-mcp==2.0.0",         # EXACT pin, independent of the core release sync chain.
                                      # release.sh bumps to the latest published MCP before building
                                      # and refreshes uv.lock if tracked. Unreachable PyPI leaves the

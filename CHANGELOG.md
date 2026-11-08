@@ -1,3 +1,7 @@
+## Unreleased - REL-2.0-RC2-CLIENT-DEP-1: the wrapper depends on smartmemory-client (2026-11-09)
+
+- `pyproject.toml`: `smartmemory-client>=2.0.0rc1,<2.1` (decision by s1-chat, read back to the owner, reversible before 2.0.0). One `pip install smartmemory==2.0.0rcN` now brings the client too; rc1 needed a second install line. The rc1 lower bound names a pre-release, so pip admits 2.0.0rcN without `--pre`, and `<2.1` keeps the client on the 2.0 line.
+
 ## Unreleased - REL-2.0-VERSION-BUMP-1: version 2.0.0 (2026-11-08)
 
 - Version set to 2.0.0 on the 2.0 branch (wrapper pins `smartmemory-core==2.0.0` and `smartmemory-mcp==2.0.0`). No tag, no publish (D-0138).
