@@ -310,6 +310,14 @@ def host_isolation_guard(
     # Core's SmartMemory() starts an update check against api.smartmemory.ai unless this
     # is set (update_check._opted_out). Silent by contract; update-check tests set their own.
     monkeypatch.setenv("SMARTMEMORY_NO_UPDATE_CHECK", "1")
+    # An operator-set Redis endpoint lets Lite's optional Redis clients dial it
+    # (core redis_gate.redis_allowed rule 1), so a runner's REDIS_HOST=redis sidecar
+    # turned every real Lite search into a live connect. A Lite user sets none of these;
+    # a test that means a Redis endpoint sets its own after this fixture.
+    from smartmemory.redis_gate import OPERATOR_ENV, PIPELINE_ENV
+
+    for name in (*OPERATOR_ENV, *PIPELINE_ENV):
+        monkeypatch.delenv(name, raising=False)
     # launch_metrics.emit POSTs to load_config().daemon_port, which is 9014 whenever a
     # test replaces load_config with a bare SmartMemoryConfig. Tests of emit set it to 0.
     monkeypatch.setenv("SMARTMEMORY_DISABLE_LAUNCH_METRICS", "1")
