@@ -125,3 +125,14 @@ def test_formatter_warns_for_each_discard(caplog):
     ]:
         assert name in caplog.text and reason in caplog.text
     assert all(record.levelname == "WARNING" for record in caplog.records)
+
+
+def test_storage_recall_labels_surfaced_successor(run_recall):
+    """MCP-2.0-DHRUV-SUPERSESSION-LABEL-TWIN-1 fix r1: the native path renders `[replaces <id8>]`."""
+    successor = item("new1", content="Use the lab-confirmed code.")
+    successor.metadata = {"via_supersession_of": "old-rule-123456789"}
+    out = run_recall([], [successor, item("plain")], query="code")
+    assert out.splitlines()[1:] == [
+        "- [semantic] [date?] [mem:new1] [replaces old-rule] Use the lab-confirmed code.",
+        "- [semantic] [date?] [mem:plain] plain",
+    ]
