@@ -1,3 +1,7 @@
+## Unreleased - REL-2.0-VERSION-BUMP-1: version 2.0.0 (2026-11-08)
+
+- Version set to 2.0.0 on the 2.0 branch (wrapper pins `smartmemory-core==2.0.0` and `smartmemory-mcp==2.0.0`). No tag, no publish (D-0138).
+
 ## Unreleased - CORE-2.0-OPENAI3-PIN-1 (2026-11-08)
 
 - Cap `openai` below 3 (`openai>=1.0.0,<3`). openai 3.x builds on httpx2, which core's `destination_pin.py` refuses by design, so Groq calls failed closed on a fresh install. Test `tests/unit/test_openai_dependency_cap.py` asserts the bound.
