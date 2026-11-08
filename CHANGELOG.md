@@ -306,6 +306,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
 
 ## [Unreleased]
 
+- REL-1.5.32-OPENAI3-PIN-1: cap `openai` below 3 (`openai>=1.0.0,<3`). openai 3.x uses httpx2, which core's destination pin refuses, so Groq and OpenAI calls failed on fresh installs that resolved openai 3.x.
 - CLI-SEARCH-PROP-ORDER-1: `sm search --project X "query"` (property flags before the query) no longer errors with "Unsupported property option or missing value". Property flags now work in any position on every property-taking command (`add`, `search`) through one shared `PropertyCommand`; `--help` shows the flag-first order.
 
 ## [1.5.25] - 2026-10-09

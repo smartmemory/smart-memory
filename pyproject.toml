@@ -11,7 +11,7 @@ dependencies = [
     "rfc8785>=0.1.4",           # mirror frozen-context integrity
 
     "smartmemory-core[lite,wikipedia,typescript]==1.5.42",  # EXACT pin — wrapper and core versions move in lockstep
-    "openai>=1.0.0",                    # SDK transport for Groq and compatible providers
+    "openai>=1.0.0,<3",                 # SDK transport for Groq and compatible providers
     "filelock>=3.12",                    # cross-process SQLite write locking
     "smartmemory-mcp==1.5.28",         # EXACT pin, independent of the core release sync chain.
                                      # release.sh bumps to the latest published MCP before building
