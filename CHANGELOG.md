@@ -1,3 +1,7 @@
+## Unreleased - CORE-2.0-OPENAI3-PIN-1 (2026-11-08)
+
+- Cap `openai` below 3 (`openai>=1.0.0,<3`). openai 3.x builds on httpx2, which core's `destination_pin.py` refuses by design, so Groq calls failed closed on a fresh install. Test `tests/unit/test_openai_dependency_cap.py` asserts the bound.
+
 ## Unreleased - MCP-2.0-DHRUV-SUPERSESSION-LABEL-TWIN-1 fix r1 (2026-11-08)
 
 - Native Lite recall (`format_recall_lines`) renders ` [replaces <id8>]` after the `[mem:<id>]` tag when an item carries `via_supersession_of` (top level, attribute or metadata). Same text as `smartmemory_mcp.result_labels.supersession_label`, copied because the pinned MCP release has no such module; a parity row on each side asserts it.
