@@ -1,3 +1,7 @@
+## Unreleased - MCP-2.0-DHRUV-SUPERSESSION-LABEL-TWIN-1 fix r1 (2026-11-08)
+
+- Native Lite recall (`format_recall_lines`) renders ` [replaces <id8>]` after the `[mem:<id>]` tag when an item carries `via_supersession_of` (top level, attribute or metadata). Same text as `smartmemory_mcp.result_labels.supersession_label`, copied because the pinned MCP release has no such module; a parity row on each side asserts it.
+
 ## Unreleased - WRAPPER-2.0-WORKSPACE-PARTIAL-TEST-ROW-1 (2026-11-07)
 
 - Give the workspace partial recall test its own matching candidates so it exercises a spent scan budget while preserving the shared seed and strict assertions.
