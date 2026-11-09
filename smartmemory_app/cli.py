@@ -3474,6 +3474,56 @@ def doctor_cmd(
     )
 
 
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _valid_email(value: str) -> bool:
+    local, _, domain = value.partition("@")
+    return bool(
+        local and domain and "@" not in domain and not any(c.isspace() for c in value)
+    )
+
+
+def _report_contact_email(
+    email: str | None, no_email: bool, yes: bool
+) -> tuple[str | None, bool]:
+    """(email, typed_at_prompt): --email, then the stored contact_email, then one tty prompt."""
+    if no_email:
+        return None, False
+    if email is not None:
+        email = email.strip()
+        if not _valid_email(email):
+            raise click.UsageError("--email needs an address like name@example.com.")
+        return email, False
+    from smartmemory_app.config import load_config
+
+    stored = load_config().contact_email
+    if stored:
+        return stored, False
+    if yes or not _stdin_is_tty():
+        return None, False
+    typed = click.prompt(
+        "Email for support to reply (optional, Enter to skip)",
+        default="",
+        show_default=False,
+    ).strip()
+    if not typed:
+        return None, False
+    if not _valid_email(typed):
+        click.echo("That does not look like an email address. Skipping it.")
+        return None, False
+    return typed, True
+
+
+def _remember_contact_email(email: str) -> None:
+    from smartmemory_app.config import load_config, save_config
+
+    cfg = load_config(apply_env=False)
+    cfg.contact_email = email
+    save_config(cfg)
+
+
 @cli.command("report")
 @click.argument(
     "report_args",
@@ -3506,6 +3556,10 @@ def doctor_cmd(
 @click.option(
     "--yes", is_flag=True, help="Confirm the support upload without a prompt."
 )
+@click.option("--email", help="Contact email for support to reply to (with --send).")
+@click.option(
+    "--no-email", is_flag=True, help="Do not ask for or send a contact email."
+)
 def report_cmd(
     report_args: tuple[str, ...],
     severity: str,
@@ -3514,6 +3568,8 @@ def report_cmd(
     yes: bool = False,
     zip_bundle: bool = False,
     bundle_path: Path | None = None,
+    email: str | None = None,
+    no_email: bool = False,
 ) -> None:
     """Format a tracker bug report with local CLI diagnostics.
 
@@ -3551,14 +3607,23 @@ def report_cmd(
         )
         click.echo("Includes redacted CLI and daemon log tails (up to 30 KB each).")
         click.echo("Credentials, memory bodies and home-directory names are removed.")
+        contact, typed = _report_contact_email(email, no_email, yes)
+        if contact:
+            click.echo(f"Includes your contact email: {contact}")
         if not yes and not click.confirm(
             "Send this to SmartMemory support?", default=False
         ):
             click.echo("Cancelled. Nothing sent.")
             return
+        if (
+            typed
+            and not yes
+            and click.confirm("Remember this email for future reports?", default=False)
+        ):
+            _remember_contact_email(contact)
         from smartmemory_app.crash_reporter import bounded_report
 
-        result = bounded_report(send_support_report, texts)
+        result = bounded_report(send_support_report, texts, contact)
         if result.status == "sent":
             click.echo(
                 f"Sent. Report ID: {result.report_id}. Quote this ID to support@smartmemory.ai."

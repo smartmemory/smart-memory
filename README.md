@@ -882,6 +882,11 @@ report ID to support@smartmemory.ai. If delivery cannot be confirmed within the 
 the upload is queued and saves a local support zip. With reporting disabled, it
 only saves the local zip.
 
+`report --send` can include a contact email so support can reply. Pass `--email you@example.com`,
+or answer the one optional prompt (Enter skips it, and you can choose to remember the address as
+`contact_email` in the config file's `[smartmemory]` section). `--no-email` and `--yes` never prompt.
+Only this explicit send carries an email, automatic crash reports stay anonymous, and `--zip` is unchanged.
+
 `smartmemory report --zip` creates a local support archive. Existing queued reports
 may retry on CLI startup, unless reporting is disabled.
 Email the file at the printed path to support@smartmemory.ai. The archive includes

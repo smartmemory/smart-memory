@@ -1,3 +1,7 @@
+## Unreleased - CLI-REPORT-SEND-EMAIL-1: `report --send` takes an optional contact email (2026-11-10)
+
+- `smartmemory report --send` resolves a contact email from `--email`, then the stored `contact_email` (`[smartmemory]` in config.toml, written only after an explicit "remember" yes), then one optional tty prompt. `--no-email`, `--yes` and non-tty input never prompt. The email is sent as `contact_email` and as PostHog `$set.email` (with `$process_person_profile` true, otherwise PostHog drops `$set`) so support can identify the reporter. It is attached after `private_value`, so the redactor is unchanged. `--zip`, `report_exception` and `report_event` never carry an email. Tests: `tests/cli/test_report_send_email.py`.
+
 ## Unreleased - REL-2.0-RC2-CLIENT-DEP-1: the wrapper depends on smartmemory-client (2026-11-09)
 
 - `pyproject.toml`: `smartmemory-client>=2.0.0rc1,<2.1` (decision by s1-chat, read back to the owner, reversible before 2.0.0). One `pip install smartmemory==2.0.0rcN` now brings the client too; rc1 needed a second install line. The rc1 lower bound names a pre-release, so pip admits 2.0.0rcN without `--pre`, and `<2.1` keeps the client on the 2.0 line.

@@ -291,6 +291,8 @@ class SmartMemoryConfig:
     daemon_port: int = 9014
     data_dir: str = "~/.smartmemory"
     crash_reports: bool = True
+    # CLI-REPORT-SEND-EMAIL-1: support contact, stored only on an explicit yes
+    contact_email: str = ""
     hook_sync: bool = True  # daemon start refreshes hooks (SM-HOOK-SYNC-CLOBBER-1)
 
 
@@ -341,6 +343,8 @@ def load_config(apply_env: bool = True) -> SmartMemoryConfig:
                 )
                 file_mode = None
             cfg.crash_reports = sm.get("crash_reports", True)
+            email = sm.get("contact_email", "")
+            cfg.contact_email = email if isinstance(email, str) else ""
             cfg.hook_sync = sm.get("hook_sync", True) is not False
             cfg.mode = file_mode
             cfg.api_url = remote.get("api_url", cfg.api_url)
@@ -491,7 +495,10 @@ def save_config(cfg: SmartMemoryConfig) -> None:
     path = config_path()
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     data: dict = {
-        "smartmemory": {"crash_reports": cfg.crash_reports},
+        "smartmemory": {
+            "crash_reports": cfg.crash_reports,
+            **({"contact_email": cfg.contact_email} if cfg.contact_email else {}),
+        },
         "local": {
             "coreference": cfg.coreference,
             "llm_provider": cfg.llm_provider,
@@ -512,7 +519,7 @@ def save_config(cfg: SmartMemoryConfig) -> None:
         data["smartmemory"]["hook_sync"] = False
     if cfg.mode is not None:
         data["smartmemory"]["mode"] = cfg.mode
-    elif cfg.crash_reports and cfg.hook_sync:
+    elif cfg.crash_reports and cfg.hook_sync and not cfg.contact_email:
         del data["smartmemory"]
     # CLI-ENV-DETECT-1: keep tables other writers own (per-project env decisions).
     from smartmemory_app.env_pin import carry_over_tables

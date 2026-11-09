@@ -213,6 +213,7 @@ def _capture(
     hosts: tuple[str, ...] | None = None,
     wait: float = 0.4,
     manual: bool = False,
+    contact_email: str | None = None,
 ) -> ReportResult:
     key = os.environ.get("SMARTMEMORY_CRASH_REPORT_KEY", PUBLIC_PROJECT_KEY)
     if not key.startswith("phc_"):
@@ -230,6 +231,14 @@ def _capture(
         "distinct_id": _install_id(data_dir),
         "properties": properties,
     }
+    if contact_email:
+        # Typed on purpose for a manual send: attached after private_value, which would
+        # strip it, so the redactor stays as strict as ever for everything else.
+        properties["contact_email"] = contact_email
+        properties["$set"] = {"email": contact_email}
+        properties["$process_person_profile"] = (
+            True  # False would make PostHog drop $set
+        )
     from smartmemory_app import report_outbox
 
     try:
@@ -379,7 +388,9 @@ def crash_notice(exc: BaseException, args: list[str]) -> str:
     return ""
 
 
-def send_support_report(texts: dict[str, str]) -> ReportResult:
+def send_support_report(
+    texts: dict[str, str], contact_email: str | None = None
+) -> ReportResult:
     """Explicit manual sends remain available when automatic reporting is off."""
     try:
         if not enabled():
@@ -397,7 +408,13 @@ def send_support_report(texts: dict[str, str]) -> ReportResult:
                 "log_tail_daemon": texts["daemon.log"],
             }
         )
-        return _capture("smartmemory_support_report", properties, data_dir, manual=True)
+        return _capture(
+            "smartmemory_support_report",
+            properties,
+            data_dir,
+            manual=True,
+            contact_email=contact_email,
+        )
     except Exception as error:
         log.warning("Support report unavailable (%s)", type(error).__name__)
         return ReportResult("failed")
