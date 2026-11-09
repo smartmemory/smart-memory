@@ -285,7 +285,8 @@ def test_real_sqlite_foreign_workspace_fixture(tmp_path, monkeypatch, caplog):
                 {"content": f"atlas fixture {n}", "origin": "user:test",
                  "created_at": (base + timedelta(seconds=80 - n)).isoformat(),
                  "confidence": 1.0,
-                 "metadata": {"workspace_id": "ws_fresh" if n % 10 == 9 else "ws_other"}},
+                 # Lite stamps workspace_id as a top-level property; a nested "metadata" dict reads back empty.
+                 "workspace_id": "ws_fresh" if n % 10 == 9 else "ws_other"},
                 memory_type="semantic",
             )
         mem.bind_pending_reads(InMemoryPendingStore(), workspace_hidden=False)
