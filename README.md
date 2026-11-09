@@ -885,7 +885,7 @@ only saves the local zip.
 `report --send` can include a contact email so support can reply. Pass `--email you@example.com`,
 or answer the one optional prompt (Enter skips it, and you can choose to remember the address as
 `contact_email` in the config file's `[smartmemory]` section). `--no-email` and `--yes` never prompt.
-Only this explicit send carries an email, automatic crash reports stay anonymous, and `--zip` is unchanged.
+Automatic crash reports never include your email. They share an anonymous install id with your support send, so support can match them to you. `--zip` is unchanged.
 
 `smartmemory report --zip` creates a local support archive. Existing queued reports
 may retry on CLI startup, unless reporting is disabled.
