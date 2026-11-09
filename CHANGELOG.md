@@ -1,7 +1,45 @@
+## Unreleased - REL-2.0-RC2-CLIENT-DEP-1: the wrapper depends on smartmemory-client (2026-11-09)
+
+- `pyproject.toml`: `smartmemory-client>=2.0.0rc1,<2.1` (decision by s1-chat, read back to the owner, reversible before 2.0.0). One `pip install smartmemory==2.0.0rcN` now brings the client too; rc1 needed a second install line. The rc1 lower bound names a pre-release, so pip admits 2.0.0rcN without `--pre`, and `<2.1` keeps the client on the 2.0 line.
+
+## Unreleased - REL-2.0-VERSION-BUMP-1: version 2.0.0 (2026-11-08)
+
+- Version set to 2.0.0 on the 2.0 branch (wrapper pins `smartmemory-core==2.0.0` and `smartmemory-mcp==2.0.0`). No tag, no publish (D-0138).
+
+## Unreleased - CORE-2.0-OPENAI3-PIN-1 (2026-11-08)
+
+- Cap `openai` below 3 (`openai>=1.0.0,<3`). openai 3.x builds on httpx2, which core's `destination_pin.py` refuses by design, so Groq calls failed closed on a fresh install. Test `tests/unit/test_openai_dependency_cap.py` asserts the bound.
+
+## Unreleased - MCP-2.0-DHRUV-SUPERSESSION-LABEL-TWIN-1 fix r1 (2026-11-08)
+
+- Native Lite recall (`format_recall_lines`) renders ` [replaces <id8>]` after the `[mem:<id>]` tag when an item carries `via_supersession_of` (top level, attribute or metadata). Same text as `smartmemory_mcp.result_labels.supersession_label`, copied because the pinned MCP release has no such module; a parity row on each side asserts it.
+
+## Unreleased - WRAPPER-2.0-WORKSPACE-PARTIAL-TEST-ROW-1 (2026-11-07)
+
+- Give the workspace partial recall test its own matching candidates so it exercises a spent scan budget while preserving the shared seed and strict assertions.
+- The workspace partial row now also expects `complete` (CHANGELOG U5.21: a spent scan budget reports `complete` False), and the refusal test creates `sm2_intake` with `IF NOT EXISTS` since core creates it at construction when `sm2_save_local_admission` is ON.
+
+## Unreleased - D-0139 gate rollback: RECALL-CONFLICT-FLAG-1 (2026-11-07)
+## Unreleased - RECALL-CONFLICT-FLAG-1 D-0139 dependency repair
+
+- Revalidate the restored adapter against its fixed core dependency and retain its typed conflict evidence boundary.
+
+## Unreleased - D-0139 gate rollback: SM-HOOKS-2-0-1 (2026-11-07)
+
+- Exclude the side-branch merge after its paired gate introduced a failure. Earlier entries remain as history. See REL-2.0-MERGE-D0139-1/gates/smart-memory-bisection.json.
+
 # Changelog — smartmemory
+
+## Unreleased - RECALL-CONFLICT-FLAG-1
+
+- Forward strict conflict reads through the local search allowlist used by MCP.
+## Unreleased - DOC-2.0-PARITY-R5B-NOTES-1 (2026-11-06)
+
+- Lite access counts now track public retrievals. Internal ingestion lookups no longer increment `access_count` or refresh `last_accessed`. Wildcard search now records returned items through core search. Returned get and search counters show the value before the current read, so fresh saves can show lower counts than 1.5. See core CHANGELOG SEC-PROPS-FIELD-1 (2026-10-12), fixes r1 and r2.
 
 ## Unreleased
 
+- LITE-2.0-SPAWN-SAFEPATH-ADJACENT-1: Tour, offline diagnostics, and update subprocesses use Python safe-path mode and an explicit resolved working directory so modules in the caller directory cannot shadow child imports.
 - LITE-2.0-WORKER-SPAWN-SAFEPATH-1: Start the on-demand Lite worker with Python safe-path mode and the resolved data directory as its working directory, preventing imports from the caller's directory. Preserve both protections in worker-spawn regression tests.
 - LITE-2.0-WORKGRAPH-WRAPPER-RED-1: verify Lite deferred work in the admitted receipt queue introduced by the 2.0 cutover, alongside the legacy rollback queue. Keep real SQLite coverage of keyless saves, re-extraction and cross-process worker completion.
 

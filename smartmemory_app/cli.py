@@ -1146,9 +1146,11 @@ def _installed_version_from_subprocess() -> str | None:
     result = subprocess.run(
         [
             sys.executable,
+            "-P",
             "-c",
             "from importlib.metadata import version; print(version('smartmemory'))",
         ],
+        cwd=str(Path(sys.executable).resolve().parent),
         capture_output=True,
         text=True,
         check=False,
@@ -1180,7 +1182,8 @@ def update_cmd(ctx: click.Context) -> None:
     daemon_was_running = get_status() is not None
     click.echo(f"Updating SmartMemory {current_version} to {latest}...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "smartmemory"],
+        [sys.executable, "-P", "-m", "pip", "install", "-U", "smartmemory"],
+        cwd=str(Path(sys.executable).resolve().parent),
         check=False,
     )
     if result.returncode != 0:

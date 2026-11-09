@@ -60,6 +60,7 @@ def _item_to_recall_dict(item: Any) -> dict:
                 "reference",
                 "valid_start_time",
                 "transaction_time",
+                "via_supersession_of",
             )
         }
     )
@@ -94,9 +95,24 @@ def _item_to_recall_dict(item: Any) -> dict:
         "transaction_time": raw.get("transaction_time"),
         "metadata": metadata,
     }
+    if raw.get("via_supersession_of"):
+        out["via_supersession_of"] = raw["via_supersession_of"]
     if status is not None:
         out[READ_STATUS_KEY] = status
     return out
+
+
+def supersession_label(item: dict) -> str:
+    """` [replaces <id8>]` for a surfaced successor, else "".
+
+    Twin of smartmemory_mcp.result_labels.supersession_label (the pinned MCP release has no such module, so the
+    format is copied; a parity test on each side asserts identical text). Top-level marker first, then metadata.
+    """
+    metadata = item.get("metadata")
+    previous_id = item.get("via_supersession_of") or (
+        metadata.get("via_supersession_of") if isinstance(metadata, dict) else None
+    )
+    return f" [replaces {str(previous_id)[:8]}]" if previous_id else ""
 
 
 class MalformedReadStatusError(ValueError):
@@ -364,7 +380,7 @@ def format_recall_lines(
         state_tag = f"[{carrier['extraction_state']}] " if carrier else ""
         lines.append(
             f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}{state_tag}"
-            f"[mem:{recall_item_label(it)}] {body}"
+            f"[mem:{recall_item_label(it)}]{supersession_label(it)} {body}"
         )
 
     if not lines:

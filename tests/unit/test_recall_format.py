@@ -266,3 +266,62 @@ def test_trace_silent_on_io_error(tmp_path):
         snapshot_used=False,
         latency_ms=0,
     )
+
+
+# --- supersession label (MCP-2.0-DHRUV-SUPERSESSION-LABEL-TWIN-1 fix r1) ------
+
+OLD_ID = "old-rule-123456789"
+
+# Parity rows: the same inputs and exact strings as smart-memory-mcp tests/test_supersession_label.py.
+LABEL_PARITY_ROWS = [
+    ({"via_supersession_of": OLD_ID}, " [replaces old-rule]"),
+    ({"metadata": {"via_supersession_of": OLD_ID}}, " [replaces old-rule]"),
+    (
+        {
+            "via_supersession_of": "top-id-12345",
+            "metadata": {"via_supersession_of": OLD_ID},
+        },
+        " [replaces top-id-1]",
+    ),
+    ({"metadata": {}}, ""),
+]
+
+
+def test_supersession_label_parity_rows():
+    from smartmemory_app.recall_format import supersession_label
+
+    for item, expected in LABEL_PARITY_ROWS:
+        assert supersession_label(item) == expected
+
+
+def test_format_renders_replaces_label_for_dict_attr_and_metadata():
+    from types import SimpleNamespace
+
+    from smartmemory_app.recall_format import format_recall_lines
+
+    base = {"memory_type": "semantic", "content": "Use the lab-confirmed code."}
+    items = [
+        {**base, "item_id": "a", "via_supersession_of": OLD_ID},
+        {
+            **base,
+            "item_id": "b",
+            "content": "second",
+            "metadata": {"via_supersession_of": OLD_ID},
+        },
+        SimpleNamespace(
+            item_id="c",
+            memory_type="semantic",
+            content="third",
+            metadata={},
+            via_supersession_of=OLD_ID,
+        ),
+        {**base, "item_id": "d", "content": "plain"},
+    ]
+    lines = format_recall_lines(items, top_k=10).splitlines()[1:]
+    assert lines == [
+        "- [semantic] [date?] [mem:a] [replaces old-rule] Use the lab-confirmed code.",
+        "- [semantic] [date?] [mem:b] [replaces old-rule] second",
+        "- [semantic] [date?] [mem:c] [replaces old-rule] third",
+        "- [semantic] [date?] [mem:d] plain",
+    ]
+    assert OLD_ID not in "\n".join(lines)

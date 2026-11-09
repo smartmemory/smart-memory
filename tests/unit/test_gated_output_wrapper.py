@@ -217,8 +217,8 @@ RECALL_ROWS = [
         1,
         [(t, k) for k in (200,) for t in ("", "/project")],
         ["test_u521_5"],
-        ("read_gate_scan_budget_spent", FETCH_BOUND),
-        [gate_warning("recall workspace search", "read_gate_scan_budget_spent")]
+        (*PARTIAL, FETCH_BOUND),
+        [gate_warning("recall workspace search")]
         + [(STORAGE_LOG, "WARNING", SHORTFALL_BOUND % 1)],
     ),
     (
@@ -250,6 +250,22 @@ RECALL_ROWS = [
 def test_recall_widens_to_the_bound_and_says_when_the_answer_is_partial(
     world, caplog, case, arm, budget, asked, ids, names, warnings
 ):
+    if case == "workspace on partial":
+        # The cwd is a lexical content query. Give only this row more matching
+        # candidates than max_scan=1, all retired so the visible seed stays the same.
+        for n in range(2):
+            world.mem._graph.backend.add_node(
+                f"test_u521_workspace_partial_{n}",
+                {
+                    "content": f"project budget note {n}",
+                    "origin": "user:test",
+                    "retired": True,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "kind": "x",
+                    "metadata": {"kind": "x"},
+                },
+                memory_type="semantic",
+            )
     world.budget["max_scan"] = budget
     out = recall(**arm)
     assert world.calls == asked
@@ -899,7 +915,7 @@ def test_a_gate_refusal_propagates_from_search_and_is_logged_once(unbound, caplo
     The wrapper must not answer with an empty list."""
     backend = unbound._graph.backend
     with backend._lock:
-        backend._conn.execute("CREATE TABLE sm2_intake (id TEXT)")
+        backend._conn.execute("CREATE TABLE IF NOT EXISTS sm2_intake (id TEXT)")
     with pytest.raises(PendingFacadeUnavailable):
         storage.search("atlas", top_k=3)
     core_logger = "smartmemory.search.pending_facade"
