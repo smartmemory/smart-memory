@@ -1,6 +1,6 @@
 {
   "name": "smartmemory",
-  "version": "0.1.0",
+  "version": "2.0.1",
   "description": "Persistent session memory for Claude Code — zero Docker, one install.",
   "mcpServers": {
     "smartmemory": {

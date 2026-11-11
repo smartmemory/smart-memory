@@ -1,3 +1,7 @@
+## 2.0.1
+
+Version bump to 2.0.1, every SmartMemory repo reads the same version (REL-2.0-VERSION-BUMP-2.0.1-1).
+
 ## Unreleased - CLI-REPORT-SEND-EMAIL-1: `report --send` takes an optional contact email (2026-11-10)
 
 - `smartmemory report --send` resolves a contact email from `--email`, then the stored `contact_email` (`[smartmemory]` in config.toml, written only after an explicit "remember" yes), then one optional tty prompt. `--no-email`, `--yes` and non-tty input never prompt. The email is sent as `contact_email` and as PostHog `$set.email` (with `$process_person_profile` true, otherwise PostHog drops `$set`) so support can identify the reporter. It is attached after `private_value`, so the redactor is unchanged. `--zip`, `report_exception` and `report_event` never carry an email in their payloads, but they share the install id that `$set.email` is attached to, so after one send with an email, that install's automatic reports can be matched to it in PostHog. Tests: `tests/cli/test_report_send_email.py`.
