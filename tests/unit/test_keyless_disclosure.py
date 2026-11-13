@@ -149,7 +149,7 @@ def test_provider_none_discloses_no_llm_even_when_core_finds_a_route(
     monkeypatch.setattr(storage, "apply_runtime_config", lambda: None)
     monkeypatch.setattr(
         "smartmemory.utils.llm.llm_route_available",
-        lambda: (available, "effective core route"),
+        lambda *a, **k: (available, "effective core route"),
     )
     assert storage.llm_extraction_warning() == NO_LLM_PROVIDER_OFF_LINE
     viewer_server._print_llm_extraction_status()

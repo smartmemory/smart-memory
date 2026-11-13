@@ -2,6 +2,8 @@
 
 Version bump to 2.0.1, every SmartMemory repo reads the same version (REL-2.0-VERSION-BUMP-2.0.1-1).
 
+- Fix: with no LLM provider (or a local provider with no model), the wrapper's route hold replaced core's `llm_route_available` with a zero-argument function, and core 2.0.1 calls it as `llm_route_available(model)` (`pipeline/model_router.py`), so opening local memory raised `TypeError`. The hold now takes and forwards core's arguments; the tests' route mocks match the call shape (REL-2.0-CUT-1).
+
 ## Unreleased - CLI-REPORT-SEND-EMAIL-1: `report --send` takes an optional contact email (2026-11-10)
 
 - `smartmemory report --send` resolves a contact email from `--email`, then the stored `contact_email` (`[smartmemory]` in config.toml, written only after an explicit "remember" yes), then one optional tty prompt. `--no-email`, `--yes` and non-tty input never prompt. The email is sent as `contact_email` and as PostHog `$set.email` (with `$process_person_profile` true, otherwise PostHog drops `$set`) so support can identify the reporter. It is attached after `private_value`, so the redactor is unchanged. `--zip`, `report_exception` and `report_event` never carry an email in their payloads, but they share the install id that `$set.email` is attached to, so after one send with an email, that install's automatic reports can be matched to it in PostHog. Tests: `tests/cli/test_report_send_email.py`.

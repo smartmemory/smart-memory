@@ -294,7 +294,9 @@ def _hold_llm_route_off() -> None:
         return
     resolve = core_llm.llm_route_available
 
-    def llm_route_available() -> tuple[bool, str]:
+    # Same call shape as core's resolver: core 2.0.1 calls it as llm_route_available(model)
+    # (pipeline/model_router.py:119), a zero-arg shim raised TypeError there.
+    def llm_route_available(*args, **kwargs) -> tuple[bool, str]:
         try:
             cfg = load_config()
         except Exception:
@@ -303,7 +305,7 @@ def _hold_llm_route_off() -> None:
             return False, NO_LLM_PROVIDER_OFF_LINE
         if cfg is not None and local_llm_without_model(cfg):
             return False, NO_LOCAL_MODEL_OFF_LINE
-        return resolve()
+        return resolve(*args, **kwargs)
 
     llm_route_available._no_local_model_hold = True
     llm_route_available.__wrapped__ = resolve

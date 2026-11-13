@@ -299,7 +299,7 @@ def test_save_on_demand_child_inherits_config(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_memory", None)
     monkeypatch.setattr(storage, "_data_path", None)
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (False, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (False, "test")
     )
     real_popen = subprocess.Popen
     children = []

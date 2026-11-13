@@ -26,7 +26,7 @@ def lite(tmp_path, monkeypatch, request):
     monkeypatch.setenv("SMARTMEMORY_OBSERVABILITY", "false")
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (False, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (False, "test")
     )
     # CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so the offer test needs a provider;
     # the route mock above still decides whether one is reachable.
@@ -170,7 +170,8 @@ def test_reextract_flags(lite, monkeypatch, flags, mode, count):
     other = storage.ingest("Bob lives in Paris.", origin="cli:add")
     memory.update_properties(other, {"extraction_status": "llm_enriched"})
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (bool(flags), "test")
+        "smartmemory.utils.llm.llm_route_available",
+        lambda *a, **k: (bool(flags), "test"),
     )
     monkeypatch.setattr(
         "smartmemory_app.cli._daemon_request",
@@ -211,7 +212,7 @@ def test_legacy_status_offer_and_requeue(lite, monkeypatch):
     memory, _, _ = lite
     storage.ingest("Alice works at Anthropic.", origin="cli:add")
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (True, "test")
     )
     from smartmemory_app.viewer_server import _build_app
 
@@ -259,7 +260,7 @@ def test_receipt_status_offer_and_requeue(lite, monkeypatch):
     assert work_counts(memory)["pending"] == 1
     assert_tail(memory, "stage:enrich", "pending")
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (True, "test")
     )
     health = TestClient(viewer_server._build_app(), base_url="http://localhost")
     assert (
@@ -295,7 +296,7 @@ def test_daemon_reads_worker_extract_fresh(lite, tmp_path, monkeypatch):
 
     memory, client, lock = lite
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (True, "test")
     )
     response = client.post(
         "/memory/ingest",
@@ -311,7 +312,7 @@ def test_daemon_reads_worker_extract_fresh(lite, tmp_path, monkeypatch):
     boundary.mkdir()
     (boundary / "sitecustomize.py").write_text("""
 import smartmemory.utils.llm as llm
-llm.llm_route_available = lambda: (True, "test")
+llm.llm_route_available = lambda *a, **k: (True, "test")
 llm.call_llm = lambda **kwargs: ({}, "{}")
 from smartmemory.background import extraction_worker
 extraction_worker._run_llm_extraction = lambda content: {"status": "ok", "extraction": {"entities": [], "relations": []}}
@@ -393,7 +394,7 @@ def test_setup_and_startup_offer(lite, monkeypatch, capsys, caplog):
 
     storage.ingest("Alice works at Anthropic.", origin="cli:add")
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (True, "test")
     )
     status = (
         TestClient(viewer_server._build_app(), base_url="http://localhost")
@@ -491,7 +492,7 @@ def test_status_down_never_constructs_memory(tmp_path, monkeypatch):
     monkeypatch.setattr("smartmemory_app.daemon.get_status", lambda: None)
     monkeypatch.setattr("smartmemory_app.daemon.should_be_running", lambda: False)
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (True, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (True, "test")
     )
     constructor = Mock(side_effect=AssertionError("status must not construct memory"))
     monkeypatch.setattr(storage, "get_memory", constructor)
