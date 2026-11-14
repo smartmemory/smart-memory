@@ -2314,6 +2314,29 @@ def _render_ask_relations(result: dict) -> None:
             )
 
 
+def _render_cited_records(result: dict) -> None:
+    """The records a written answer cites, with type and date (CLAIMS-02-FIX1).
+
+    ``used_evidence_ids`` is the evidence the answer cites (core's grounding check); an
+    answer that cites none of it prints no list.
+    """
+    by_id = {
+        item.get("item_id"): item
+        for item in result.get("evidence") or []
+        if isinstance(item, dict)
+    }
+    used = [i for i in result.get("used_evidence_ids") or [] if isinstance(i, str)]
+    if not used:
+        return
+    click.echo("  Cited records:")
+    for item_id in used:
+        item = by_id.get(item_id) or {}
+        click.echo(
+            f"    - [{item.get('memory_type') or 'unknown'}] {item_id} "
+            f"({item.get('created_at') or 'date unknown'})"
+        )
+
+
 @cli.command("ask")
 @click.argument("question")
 @click.option(
@@ -2387,6 +2410,7 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
         return
 
     click.echo(result["answer"])
+    _render_cited_records(result)
     if not reasoning:
         click.echo(click.style("  (add --reasoning to see why)", dim=True))
         return
