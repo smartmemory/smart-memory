@@ -1,3 +1,10 @@
+## Unreleased - WRAPPER-CONTRACT-130: packaged mirror schema follows mirror contract 1.3.0 (2026-11-15)
+
+- `smartmemory_app/mirror_schema.json` `$defs` are copied from the authoritative mirror contract 1.3.0 (json round-trip, the file keeps its own `$schema` + `$defs` layout). Before, the packaged copy was 1.2.0 plus CLAIMS-20's `DecisionBody` fields, and the drift test was red against the contract.
+- Changes are additive: `ErrorCode` gains `PLAN_ENUMERATION_TOO_LARGE` and `PLAN_ENUMERATION_UNAVAILABLE`; `MappingRow` gains optional `applied_lifecycle`; `PlanMember` gains optional `prepared_effects` and `owned_incident_edges` (new defs `PreparedEffect`, `PreparedEffectReference`, `OwnedIncidentEdge`, `PlanControlEndpoint`); `ReviewedMemberState`, `RunReport` and `UnitResult` change descriptions only. No shape the app writes got stricter, so no producer changed.
+- The app does not produce or read the plan enumerations, the new error codes or `applied_lifecycle` yet; they are vendored for validation only.
+- Tests: the drift pin moves to 1.3.0 and the new hash; `tests/contract/test_mirror_contract_130.py` checks every error code the app raises is a contract code, and that 1.2.0- and 1.3.0-shaped plan members and mapping rows validate while malformed enumerations are refused.
+
 ## Unreleased - CLAIMS-20-FIX2: Lite mirror sync keeps who decided (2026-11-14)
 
 - Fix: the packaged mirror schema's `DecisionBody` gains the contract's optional `decided_by` and `recommended_by`. Before, a Lite decision that named who decided or recommended it was refused by local unit validation and never synced. Only `DecisionBody` changed; the other post-1.2.0 contract defs are still not vendored here.
