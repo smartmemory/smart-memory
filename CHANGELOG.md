@@ -1,3 +1,10 @@
+## Unreleased - CLAIMS-02-FIX1: `sm ask` with an LLM goes through core's grounded ask (2026-11-14)
+
+- Fix: the daemon's synthesized `POST /memory/ask` no longer builds its own prompt and model call. Both modes now go through core's `SmartMemory.ask`, so a question with no matching memory answers "No stored record matches this question." without calling a model, an answer that cites none of its evidence is replaced by "The answer could not be tied to a stored record.", and every answer carries `used_evidence_ids` and `grounded`. Needs the core release with CLAIMS-BUILD-02 and CLAIMS-02-FIX1 (lockstep pin).
+- `sm ask` prints "Cited records:" under a written answer: each cited record with its type and date. An answer that cites nothing prints no list.
+- The store lock is released while the model answers, as before. Error responses are unchanged (coded 502 for a provider failure, the missing-`openai` text, 502 for an empty reply).
+- Removed the daemon's own `_ask_relations`, `_ask_prompt`, `_fact_texts`, `_collapse_fields`, `_hit_id` and `_node_label` (core now walks the relations and shows collapsed facts to the model). `_split_answer` is core's `split_answer`.
+
 ## 2.0.1
 
 Version bump to 2.0.1, every SmartMemory repo reads the same version (REL-2.0-VERSION-BUMP-2.0.1-1).

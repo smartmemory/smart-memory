@@ -426,7 +426,6 @@ def test_search_and_ask_rank_source_memories_not_rows(lite_store, monkeypatch, c
         monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
         monkeypatch.setenv("GROQ_API_KEY", "bogus-not-a-real-key")
         monkeypatch.setattr(local_api, "llm_key_present", lambda: True)
-        monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
         prompts.clear()
         body = lite_store.post("/ask", json=request)
         assert body.status_code == 200, body.text

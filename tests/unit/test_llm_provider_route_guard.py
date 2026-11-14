@@ -253,11 +253,18 @@ def _daemon_ask():
     """sm ask and the tour's ask: the daemon's /memory/ask."""
     from smartmemory_app.viewer_server import _build_app
 
+    from unittest.mock import patch
+
+    from smartmemory_app import local_api
+
     _runtime()
     client = TestClient(
         _build_app(), base_url="http://localhost", raise_server_exceptions=False
     )
-    return client.post("/memory/ask", json={"question": QUESTION})
+    # One evidence row: with none, ask answers "no record" without reaching the model (CLAIMS-02-FIX1).
+    row = {"item_id": "m1", "content": "We picked Postgres."}
+    with patch.object(local_api, "_search_items", lambda body: [row]):
+        return client.post("/memory/ask", json={"question": QUESTION})
 
 
 def _worker_extraction():

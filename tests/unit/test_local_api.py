@@ -299,8 +299,19 @@ class TestAsk:
             "smartmemory_app.config.load_config",
             lambda: SmartMemoryConfig(mode="local", llm_provider="groq"),
         )
-        monkeypatch.setattr(local_api, "_search_items", lambda body: [])
-        monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
+        # Synthesized ask goes through core's AskManager with the daemon's llm_fn and one evidence
+        # row (with none, no model is called: CLAIMS-02-FIX1).
+        from smartmemory.managers.ask import AskManager
+
+        def ask(question, limit, *, reasoning, mode, search_fn, llm_fn=None):
+            return AskManager(
+                search_fn=lambda q, k: [{"item_id": "m1", "content": "c1"}],
+                edges_fn=lambda _id: [],
+                node_fn=lambda _id: None,
+                llm_fn=llm_fn,
+            ).ask(question, limit, reasoning=reasoning, mode=mode)
+
+        monkeypatch.setattr(local_api, "_get_mem", lambda: MagicMock(ask=ask))
 
         response = client.post("/ask", json={"question": "What did we decide?"})
 

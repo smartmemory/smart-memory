@@ -13,7 +13,7 @@ Relation rows mirror `sm ask`: structural edges (GROUNDED_IN, CONTAINS_ENTITY,
 MENTIONED_IN, HAS_VERSION) describe how memory is wired rather than what it
 claims, so they are not shown as relations. Because a memory item's own edges
 are almost entirely structural, the semantic edges reachable from it are the
-ones hanging off its entities — exactly what `local_api._ask_relations` walks.
+ones hanging off its entities — exactly what core's `AskManager.collect_relations` walks.
 This client walks the same hop and marks those rows `via`, so filtering the
 infra edges does not strand the walk on a memory node.
 
@@ -32,7 +32,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-# Same set local_api._STRUCTURAL_EDGE_TYPES excludes from `sm ask` relations.
+# Same set core's smartmemory.managers.ask.STRUCTURAL_EDGE_TYPES excludes from `sm ask` relations.
 STRUCTURAL_EDGE_TYPES = frozenset(
     {"GROUNDED_IN", "CONTAINS_ENTITY", "MENTIONED_IN", "HAS_VERSION"}
 )
@@ -87,7 +87,7 @@ class FocusView:
 
 
 def node_label(node: dict, fallback: str = "") -> str:
-    """Human label for a graph node. Mirrors local_api._node_label ordering."""
+    """Human label for a graph node. Mirrors core AskManager._label ordering."""
     if not isinstance(node, dict):
         return fallback
     for key in ("label", "name", "content"):
@@ -256,7 +256,7 @@ class ExploreClient:
             direction = "incoming" if edge.get("target_id") == item_id else "outgoing"
             add(edge, direction)
 
-        # The entity hop — the same walk local_api._ask_relations performs, so a
+        # The entity hop — the same walk core's AskManager.collect_relations performs, so a
         # memory item whose own edges are all structural still has a walkable
         # adjacency list instead of an empty pane.
         entity_ids = [
