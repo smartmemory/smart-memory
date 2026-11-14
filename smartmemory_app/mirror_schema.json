@@ -584,6 +584,18 @@
             }
           ]
         },
+        "decided_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "CLAIMS-BUILD-20: optional caller-stated name, stripped plain text, never verified or used for authorization. Emitted only when set, so a decision without it keeps its digest."
+        },
+        "recommended_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "CLAIMS-BUILD-20: optional caller-stated name, stripped plain text, never verified or used for authorization. Emitted only when set, so a decision without it keeps its digest."
+        },
         "outcome": {
           "anyOf": [
             {

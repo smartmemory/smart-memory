@@ -1,3 +1,7 @@
+## Unreleased - CLAIMS-20-FIX2: Lite mirror sync keeps who decided (2026-11-14)
+
+- Fix: the packaged mirror schema's `DecisionBody` gains the contract's optional `decided_by` and `recommended_by`. Before, a Lite decision that named who decided or recommended it was refused by local unit validation and never synced. Only `DecisionBody` changed; the other post-1.2.0 contract defs are still not vendored here.
+
 ## Unreleased - CLAIMS-02-FIX1: `sm ask` with an LLM goes through core's grounded ask (2026-11-14)
 
 - Fix: the daemon's synthesized `POST /memory/ask` no longer builds its own prompt and model call. Both modes now go through core's `SmartMemory.ask`, so a question with no matching memory answers "No stored record matches this question." without calling a model, an answer that cites none of its evidence is replaced by "The answer could not be tied to a stored record.", and every answer carries `used_evidence_ids` and `grounded`. Needs the core release with CLAIMS-BUILD-02 and CLAIMS-02-FIX1 (lockstep pin).
