@@ -115,7 +115,9 @@
         "DELETE_APPROVAL_REQUIRED",
         "DELETE_COUNT_CONFIRMATION_REQUIRED",
         "DELETE_PLAN_TOO_LARGE",
-        "INCIDENT_SET_TOO_LARGE"
+        "INCIDENT_SET_TOO_LARGE",
+        "PLAN_ENUMERATION_TOO_LARGE",
+        "PLAN_ENUMERATION_UNAVAILABLE"
       ]
     },
     "Error": {
@@ -583,6 +585,18 @@
               "type": "null"
             }
           ]
+        },
+        "decided_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "CLAIMS-BUILD-20: optional caller-stated name, stripped plain text, never verified or used for authorization. Emitted only when set, so a decision without it keeps its digest."
+        },
+        "recommended_by": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "CLAIMS-BUILD-20: optional caller-stated name, stripped plain text, never verified or used for authorization. Emitted only when set, so a decision without it keeps its digest."
         },
         "outcome": {
           "anyOf": [
@@ -3075,6 +3089,151 @@
       ],
       "additionalProperties": false
     },
+    "PlanControlEndpoint": {
+      "description": "Control identity only. artifact is a mapping in the authenticated caller pair/workspace. An unmapped/native endpoint is represented only by an opaque scoped key, never native content, fields or an ArtifactRef for another pair/workspace. The variants are exclusive.",
+      "oneOf": [
+        {
+          "type": "object",
+          "description": "Mirror-mapped endpoint in this pair/workspace.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef"
+            }
+          },
+          "required": [
+            "artifact"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "description": "Opaque scoped endpoint identity. No native content or properties.",
+          "properties": {
+            "opaque_key": {
+              "$ref": "#/$defs/Key"
+            }
+          },
+          "required": [
+            "opaque_key"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PreparedEffectReference": {
+      "type": "object",
+      "description": "Exact removed reference occurrence and control target under deletion_policy.prepared_effect_paths, using its canonical wire-payload root, concrete before-image indices, membership semantics and ordering. No hosted knowledge content.",
+      "properties": {
+        "field_path": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 4096,
+          "description": "Concrete RFC 6901 before-image leaf pointer rooted at the normalized artifact wire payload, as specified by deletion_policy.prepared_effect_paths. Expand reference_catalog wildcards to before-image indices. Control path only, never a field value."
+        },
+        "target": {
+          "$ref": "#/$defs/PlanControlEndpoint"
+        }
+      },
+      "required": [
+        "field_path",
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "PreparedEffect": {
+      "type": "object",
+      "description": "Server-computed destructive effect on the enclosing PlanMember.artifact, using the same effect vocabulary and preparation as apply/Removal. field_paths and references are complete exact affected sets governed by deletion_policy.prepared_effect_paths, including its canonical wire-payload root, before-image leaf occurrences, duplicate/moved-target semantics, ordering and control-entry accounting. delete addresses the whole artifact, so field_paths=[] and references=[]; retire names /declaration/tier; unlink names every removed reference occurrence and target. No semantic field values, content or native properties. One entry per distinct effect. Discovery does not authorize a composite retire+unlink apply: existing one-Removal-per-artifact coverage still refuses such a replacement.",
+      "properties": {
+        "effect": {
+          "type": "string",
+          "enum": [
+            "delete",
+            "retire",
+            "unlink"
+          ]
+        },
+        "field_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^/",
+            "maxLength": 4096,
+            "description": "Concrete RFC 6901 before-image leaf pointer rooted at the normalized artifact wire payload, as specified by deletion_policy.prepared_effect_paths. Expand reference_catalog wildcards to before-image indices. Control path only, never a field value."
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreparedEffectReference"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "effect",
+        "field_paths",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "OwnedIncidentEdge": {
+      "type": "object",
+      "description": "Retained, not deletion-acknowledged, mirror-OWNED incident edge mapping in the authenticated pair/workspace, including a physically absent edge. source/relation/target are immutable endpoint/relation control identities only. base is its current retained mapping head and reviewed_state is its current before-image, including absent presence when appropriate. artifact equals reviewed_state.artifact. Borrowed edges, native user edges and other pairs/workspaces never appear. A native endpoint is an opaque key only. No edge properties or hosted knowledge content.",
+      "properties": {
+        "artifact": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "properties": {
+                "kind": {
+                  "const": "edge"
+                }
+              }
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/PlanControlEndpoint"
+        },
+        "relation": {
+          "$ref": "#/$defs/Key"
+        },
+        "target": {
+          "$ref": "#/$defs/PlanControlEndpoint"
+        },
+        "base": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/Base"
+            },
+            {
+              "properties": {
+                "ownership": {
+                  "const": "owned"
+                }
+              }
+            }
+          ]
+        },
+        "reviewed_state": {
+          "$ref": "#/$defs/ReviewedMemberState"
+        }
+      },
+      "required": [
+        "artifact",
+        "source",
+        "relation",
+        "target",
+        "base",
+        "reviewed_state"
+      ],
+      "additionalProperties": false
+    },
     "PlanMember": {
       "type": "object",
       "properties": {
@@ -3136,6 +3295,24 @@
             "$ref": "#/$defs/IncidentBlocker"
           },
           "maxItems": 1000
+        },
+        "prepared_effects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PreparedEffect"
+          },
+          "maxItems": 3,
+          "uniqueItems": true,
+          "description": "Complete per-member effects, at most one each of unlink/retire/delete. Across a coupled unit the sum of field_paths entries plus references entries is <=1000. Each individual set is also <=1000. Bound overflow returns PLAN_ENUMERATION_TOO_LARGE, never partial/truncated data."
+        },
+        "owned_incident_edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OwnedIncidentEdge"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "description": "Complete retained owned-edge membership for a deleting node, including physically absent mapped edges; [] for other members. <=1000 distinct edges across the coupled unit, de-duplicated by artifact when both endpoints are members. Combined canonical UTF-8 bytes of both new fields across the unit <=1048576. Count/byte overflow returns PLAN_ENUMERATION_TOO_LARGE and refuses the affected unit, never truncates. Existing incident, apply-unit and deletion-plan bounds also remain in force."
         }
       },
       "required": [
@@ -3147,7 +3324,8 @@
         "reviewed_state",
         "incident_blockers"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "One row per submitted member, not an expanded apply unit. Controller amendment 3 (2026-10-06): prepared_effects and owned_incident_edges are additive optional control-only observations. An upgraded server emits both fields on every enumerable plan row, including coverage/no-delete/consent refusals. Present [] means the complete set is empty. Absence means unknown capability/completeness, never []. CLI refuses destructive work it cannot enumerate with PLAN_ENUMERATION_UNAVAILABLE, including updates/replacements whose lack of destructive effects cannot be proven, without guessing, probing or sequentially splitting coupled/cyclic units. Both fields are bound to the request pair, epoch, generation, source checkpoint and unit/group plus mapping heads and reviewed before-image/incident digests. Apply recomputes the same sets and validates their bound observations; changed sets/head/before-image yield STALE_PLAN. Scope is server-derived and reauthorized."
     },
     "MemberOutcomeFlags": {
       "type": "object",
@@ -3168,6 +3346,7 @@
     },
     "UnitResult": {
       "type": "object",
+      "description": "plan retains one PlanMember per submitted member and passes both optional enumeration fields unchanged, including refusal observations. A refusal is not an expanded operation or deletion approval. PLAN_ENUMERATION_TOO_LARGE refuses the affected unit with no mutation, receipt, charge or baseline advance. Omitted fields on that refusal are unknown, not empty.",
       "properties": {
         "operation_id": {
           "$ref": "#/$defs/Id"
@@ -4129,6 +4308,16 @@
               "type": "null"
             }
           ]
+        },
+        "applied_lifecycle": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonObject"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -4623,7 +4812,8 @@
           ]
         },
         "incident_reference_hash": {
-          "$ref": "#/$defs/Hash"
+          "$ref": "#/$defs/Hash",
+          "description": "Digest of canonicalization.incident_reference_preimage, binding physical associations plus retained scoped owned-edge identities/heads, including physically absent edges. No recursive nested review digest. Apply CAS validates the complete physical set and retained mapping heads/membership."
         },
         "base_receipt_id": {
           "anyOf": [
@@ -5497,6 +5687,7 @@
     },
     "RunReport": {
       "type": "object",
+      "description": "RunResult preserves UnitResult.plan control enumerations and typed overflow/unavailable errors unchanged. Local holds/errors must not fabricate complete empty enumerations. held_deletes exposes every known held removal; when enumeration is unknown, report the affected unit and explicit error, never imply a complete set or mirror_equal=true. D/N and confirmation use the complete server-computed removal/group observations before batching.",
       "properties": {
         "message_type": {
           "const": "run_report"
