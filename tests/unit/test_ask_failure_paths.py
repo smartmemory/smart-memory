@@ -144,10 +144,10 @@ def test_daemon_ask_failure_shows_detail_and_reports(
     def search(_body):
         if search_error is not None:
             raise search_error
-        return []
+        # One evidence row: with none, ask answers "no record" without reaching the model (CLAIMS-02-FIX1).
+        return [{"item_id": "m1", "content": "We picked Postgres for its JSON support."}]
 
     monkeypatch.setattr(local_api, "_search_items", search)
-    monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
     monkeypatch.setattr(core_llm, "call_llm", call_llm)
 
     client = TestClient(

@@ -209,11 +209,23 @@ def _client(monkeypatch, provider, exc):
     save_config(
         SmartMemoryConfig(mode="local", daemon_port=PORT, llm_provider=provider)
     )
+    def ask(question, limit, *, reasoning, mode, search_fn, llm_fn=None):
+        if mode == "extractive":
+            return dict(EXTRACTIVE)
+        # Synthesized goes through core's AskManager with the daemon's llm_fn and one evidence row
+        # (with none, no model is called: CLAIMS-02-FIX1).
+        from smartmemory.managers.ask import AskManager
+
+        return AskManager(
+            search_fn=lambda q, k: [{"item_id": "m1", "content": "c1"}],
+            edges_fn=lambda _id: [],
+            node_fn=lambda _id: None,
+            llm_fn=llm_fn,
+        ).ask(question, limit, reasoning=reasoning)
+
     mem = MagicMock()
-    mem.ask.return_value = dict(EXTRACTIVE)
+    mem.ask.side_effect = ask
     monkeypatch.setattr(local_api, "_get_mem", lambda: mem)
-    monkeypatch.setattr(local_api, "_search_items", lambda body: [])
-    monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
 
     def call_llm(**_kw):
         if exc is None:

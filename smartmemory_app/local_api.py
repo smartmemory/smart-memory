@@ -1105,11 +1105,6 @@ class AskRequest(BaseModel):
     reasoning: bool = True
 
 
-_STRUCTURAL_EDGE_TYPES = frozenset(
-    {"GROUNDED_IN", "CONTAINS_ENTITY", "MENTIONED_IN", "HAS_VERSION"}
-)
-
-
 def _get_neighbor_payload(memory_id: str) -> dict:
     """Return the same neighbor-and-edge payload exposed by ``/{id}/neighbors``."""
     mem = _get_mem()
@@ -1161,125 +1156,23 @@ def _node_label_from_record(item_id: str, node: object) -> str:
     return str(node.get("label") or node.get("name") or node.get("content") or item_id)
 
 
-def _node_label(item_id: str) -> str:
-    """Resolve a graph-node ID to its human-readable label when available."""
-    mem = _get_mem()
-    from smartmemory_app.remote_backend import RemoteMemory
+def _llm_unlocked(**kwargs):
+    """Core's ``call_llm`` with the daemon's store lock released for the call (CLAIMS-02-FIX1).
 
-    if isinstance(mem, RemoteMemory):
-        node = mem.get_node(item_id)
-    else:
-        with _rw_lock:
-            node = _get_backend().get_node(item_id)
-    return _node_label_from_record(item_id, node)
-
-
-def _ask_relations(hits: list[dict]) -> list[dict[str, str]]:
-    """Collect one-hop entity relation edges for the memories used as evidence."""
-    relations: list[dict[str, str]] = []
-    seen: set[tuple[str, str, str]] = set()
-    for hit in hits:
-        memory_id = hit.get("item_id") or hit.get("id")
-        if not isinstance(memory_id, str) or not memory_id:
-            continue
-        neighbors = _get_neighbor_payload(memory_id).get("neighbors", [])
-        for neighbor in neighbors:
-            entity_id = neighbor.get("item_id") if isinstance(neighbor, dict) else None
-            if not isinstance(entity_id, str) or not entity_id:
-                continue
-            for edge in _get_neighbor_payload(entity_id).get("edges", []):
-                if not isinstance(edge, dict):
-                    continue
-                source_id = edge.get("source_id")
-                target_id = edge.get("target_id")
-                relation_type = edge.get("edge_type") or edge.get("link_type")
-                if (
-                    not isinstance(source_id, str)
-                    or not isinstance(target_id, str)
-                    or not isinstance(relation_type, str)
-                    or memory_id in (source_id, target_id)
-                    or relation_type.upper() in _STRUCTURAL_EDGE_TYPES
-                ):
-                    continue
-                key = (source_id, relation_type, target_id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                # DIST-LITE-9: labels are what a reader sees, ids are what a UI focuses.
-                # `AskPanel` addresses the edge as `${source_id}->${target_id}:${type}`,
-                # the same id the graph package's normalizer builds — a label pair cannot
-                # address a graph element. Contract:
-                # smart-memory-docs/docs/features/DIST-LITE-9/ask-contract.json
-                relations.append(
-                    {
-                        "source": _node_label(source_id),
-                        "type": relation_type,
-                        "target": _node_label(target_id),
-                        "source_id": source_id,
-                        "target_id": target_id,
-                    }
-                )
-    return relations
-
-
-def _hit_id(hit: dict) -> str:
-    return str(hit.get("item_id") or hit.get("id") or "")
-
-
-def _fact_texts(hit: dict) -> list[str]:
-    """The text of the matching facts search nested under a source memory."""
-    return [
-        str(child["content"])
-        for child in hit.get("children") or []
-        if isinstance(child, dict) and child.get("content")
-    ]
-
-
-def _collapse_fields(hit: dict) -> dict:
-    """The ``children`` and ``collapse`` blocks a collapsed search row carries, else nothing."""
-    return {k: hit[k] for k in ("children", "collapse") if hit.get(k)}
-
-
-def _ask_prompt(question: str, evidence: list[dict], relations: list[dict]) -> str:
-    """Format retrieved memories and graph edges as the model's grounded evidence."""
-    memories = (
-        "\n".join(
-            f"- [{item['item_id']}] {item['content']}"
-            + "".join(f"\n  - fact: {fact}" for fact in _fact_texts(item))
-            for item in evidence
-        )
-        or "- (no matching memories)"
-    )
-    edges = (
-        "\n".join(
-            f"- {edge['source']} --{edge['type']}--> {edge['target']}"
-            for edge in relations
-        )
-        or "- (no graph relations found)"
-    )
-    return (
-        f"Question: {question}\n\n"
-        f"Retrieved memories:\n{memories}\n\n"
-        f"Graph relations:\n{edges}\n\n"
-        "Answer using only this evidence. Respond in exactly this format:\n"
-        "ANSWER: <one or two plain sentences that answer the question directly>\n"
-        "REASONING: <concise reasoning that cites the memories and relations used>\n"
-        "If the evidence is insufficient, say so plainly in ANSWER."
-    )
-
-
-def _split_answer(text: str) -> tuple[str, str]:
-    """Split the model reply into (answer, reasoning) on the ANSWER:/REASONING: markers.
-
-    Falls back to (first paragraph, remainder) when the model ignores the format,
-    so the CLI never shows an empty answer.
+    ``ask_endpoint`` holds ``_rw_lock`` once while core reads the store; the model call reads
+    none of it and can take seconds, so other requests do not wait on it.
     """
-    body = text.strip()
-    m = re.search(r"ANSWER:\s*(.*?)\s*(?:REASONING:\s*(.*))?$", body, re.S | re.I)
-    if m and m.group(1).strip():
-        return m.group(1).strip(), (m.group(2) or "").strip()
-    parts = re.split(r"\n\s*\n", body, maxsplit=1)
-    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+    from smartmemory.utils.llm import call_llm
+
+    _rw_lock.release()
+    try:
+        return call_llm(**kwargs)
+    finally:
+        _rw_lock.acquire()
+
+
+# The reply parser core's ask path uses; kept under its old name for callers of this module.
+from smartmemory.managers.ask import split_answer as _split_answer  # noqa: E402
 
 
 @api.post("/ask")
@@ -1298,8 +1191,32 @@ def ask_endpoint(body: AskRequest) -> dict:
         except RemoteBackendError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+    from smartmemory.managers.ask import AskUnavailable
+    from smartmemory.utils.llm_client.provider_secrets import ProviderRouteRefused
     from smartmemory_app import llm_errors
     from smartmemory_app.config import llm_provider_none
+
+    def search_fn(question: str, limit: int) -> list[dict]:
+        # Collapsed rows keep their matching facts: core carries `children`/`collapse` onto
+        # the evidence item and shows the facts to the model under it.
+        return _search_items(SearchRequest(query=question, top_k=limit))
+
+    def core_ask(mode: str, **extra) -> dict:
+        # CLAIMS-02-FIX1: both modes go through core's one ask path (`SmartMemory.ask`), so
+        # zero evidence never reaches a model, citations are checked and every answer
+        # carries `used_evidence_ids` and `grounded`.
+        with _rw_lock:
+            try:
+                return _get_mem().ask(
+                    body.question,
+                    body.limit,
+                    reasoning=body.reasoning,
+                    mode=mode,
+                    search_fn=search_fn,
+                    **extra,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # CLI-TOUR-LLM-ROUTE-1: provider none is no LLM whatever keys the daemon
     # inherited, and a configured provider whose own key is absent answers
@@ -1314,93 +1231,44 @@ def ask_endpoint(body: AskRequest) -> dict:
             "No usable LLM (%s). Returning extractive memories without a written answer.",
             failure.code if failure else "no provider key",
         )
-        collapsed: dict[str, dict] = {}
-
-        def search_fn(question: str, limit: int) -> list[dict]:
-            rows = _search_items(SearchRequest(query=question, top_k=limit))
-            for row in rows:
-                if fields := _collapse_fields(row):
-                    collapsed[_hit_id(row)] = fields
-            return rows
-
-        with _rw_lock:
-            try:
-                result = _get_mem().ask(
-                    body.question,
-                    body.limit,
-                    reasoning=body.reasoning,
-                    mode="extractive",
-                    search_fn=search_fn,
-                )
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if isinstance(result, dict):
-            for item in result.get("evidence") or []:
-                if isinstance(item, dict) and collapsed.get(item.get("item_id")):
-                    item.update(collapsed[item["item_id"]])
+        result = core_ask("extractive")
         if failure is not None and isinstance(result, dict):
             result = {**result, "code": failure.code, "notice": failure.message()}
         return result
 
-    hits = _search_items(SearchRequest(query=body.question, top_k=body.limit))
-    evidence = [
-        {
-            "item_id": _hit_id(hit),
-            "content": str(hit.get("content") or ""),
-            **_collapse_fields(hit),
-        }
-        for hit in hits
-        if isinstance(hit, dict) and (hit.get("item_id") or hit.get("id"))
-    ]
-    relations = _ask_relations(hits)
-
     try:
-        from smartmemory.utils.llm import call_llm
+        return core_ask("synthesized", llm_fn=_llm_unlocked)
+    except AskUnavailable as exc:
+        if exc.reason == "no_answer":
+            raise HTTPException(
+                status_code=502,
+                detail="The configured LLM returned no answer, no fallback answer was generated.",
+            ) from exc
+        cause = exc.__cause__ or exc
+    except ProviderRouteRefused as exc:
+        cause = exc
+    log.error("sm ask LLM request failed", exc_info=cause)  # raw detail: daemon.log only
+    if not (
+        isinstance(cause, ImportError)
+        and (cause.name == "openai" or str(cause) == "openai package is required")
+    ):
+        # CLI-TOUR-LLM-ROUTE-1: one plain message with a stable code; the
+        # exception goes to the crash report, never to the terminal.
+        failure = llm_errors.classify(cause, cfg.llm_provider)
+        try:
+            from smartmemory_app.crash_reporter import report_in_background
 
-        _, answer = call_llm(
-            system_prompt=(
-                "You are SmartMemory's evidence-grounded question-answering assistant. "
-                "Do not invent facts beyond the provided memories and graph relations."
-            ),
-            user_content=_ask_prompt(body.question, evidence, relations),
-            max_output_tokens=500,
-            temperature=0,
-        )
-    except Exception as exc:
-        log.exception("sm ask LLM request failed")  # raw detail: daemon.log only
-        if not (
-            isinstance(exc, ImportError)
-            and (exc.name == "openai" or str(exc) == "openai package is required")
-        ):
-            # CLI-TOUR-LLM-ROUTE-1: one plain message with a stable code; the
-            # exception goes to the crash report, never to the terminal.
-            failure = llm_errors.classify(exc, cfg.llm_provider)
-            try:
-                from smartmemory_app.crash_reporter import report_in_background
-
-                report_in_background(exc, source="daemon", handled=True)
-            except Exception:
-                log.warning("sm ask: crash report for the LLM failure was not sent")
-            return JSONResponse(status_code=502, content=failure.payload())
-        detail = (
-            "Python dependency 'openai' is missing, its SDK provides transport for "
-            "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
-            "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
-            "(core-library users: pip install 'smartmemory-core[llm]')."
-        )
-        raise HTTPException(status_code=502, detail=detail)
-    if not isinstance(answer, str) or not answer.strip():
-        raise HTTPException(
-            status_code=502,
-            detail="The configured LLM returned no answer, no fallback answer was generated.",
-        )
-    direct, reasoning = _split_answer(answer)
-    return {
-        "answer": direct,
-        "reasoning": reasoning,
-        "evidence": evidence,
-        "relations": relations,
-    }
+            report_in_background(cause, source="daemon", handled=True)
+        except Exception:
+            log.warning("sm ask: crash report for the LLM failure was not sent")
+        return JSONResponse(status_code=502, content=failure.payload())
+    detail = (
+        "Python dependency 'openai' is missing, its SDK provides transport for "
+        "Groq and other OpenAI-compatible providers. No OpenAI API key is required. "
+        "Reinstall/upgrade: pip install --upgrade --force-reinstall smartmemory "
+        "(core-library users: pip install 'smartmemory-core[llm]')."
+    )
+    raise HTTPException(status_code=502, detail=detail) from cause
 
 
 # LAUNCH-METRICS-1: daemon-side ingest. Remote mode forwards to the configured
