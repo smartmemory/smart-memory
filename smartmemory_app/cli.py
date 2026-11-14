@@ -2141,6 +2141,8 @@ def search_cmd(
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id}  {content}")
+        if r.get("matched_by"):  # CLAIMS-BUILD-21: the search lanes that found this result
+            click.echo(f"    found by: {', '.join(r['matched_by'])}")
         for child in r.get("children") or []:
             if isinstance(child, dict) and child.get("content"):
                 click.echo(f"    [fact] {child['content']}")

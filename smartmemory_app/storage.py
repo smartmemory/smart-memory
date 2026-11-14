@@ -1075,7 +1075,12 @@ def _result_dict(hit) -> dict:
         hit.get("item_id") if isinstance(hit, dict) else getattr(hit, "item_id", None)
     )
     validated_carrier(read_status_of(hit), item_id)
-    return hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+    row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+    # CLAIMS-BUILD-21: core stamps the lanes that found a search hit as the response-only ``_matched_by``, which
+    # ``to_dict`` leaves out. Copied only where stamped, so a get or list row gains no key.
+    if "_matched_by" in getattr(hit, "__dict__", {}):
+        row["matched_by"] = hit._matched_by
+    return row
 
 
 def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:

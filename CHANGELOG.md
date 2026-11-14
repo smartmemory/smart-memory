@@ -1,3 +1,7 @@
+## Unreleased - CLAIMS-BUILD-21: search results name the lanes that found them (2026-11-14)
+
+- Lite search rows (library, daemon `/memory/search`, local MCP) carry `matched_by`, the retrieval lanes that found each result (`["lexical", "semantic"]`), copied from core's `_matched_by` stamp; `null` when core did not record it. Get and list rows gain no key. `sm search` prints `found by: ...` under a result that names its lanes, and `--json` rows carry the field.
+
 ## Unreleased - WRAPPER-CONTRACT-130: packaged mirror schema follows mirror contract 1.3.0 (2026-11-15)
 
 - `smartmemory_app/mirror_schema.json` `$defs` are copied from the authoritative mirror contract 1.3.0 (json round-trip, the file keeps its own `$schema` + `$defs` layout). Before, the packaged copy was 1.2.0 plus CLAIMS-20's `DecisionBody` fields, and the drift test was red against the contract.
