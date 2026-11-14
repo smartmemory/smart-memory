@@ -136,3 +136,42 @@ def test_the_store_lock_is_released_while_the_model_answers(synthesized_ask, mon
     assert response.status_code == 200, response.text
     assert seen == [True]
     assert response.json()["grounded"] is True
+
+
+def _cli_ask(client, monkeypatch, *args):
+    from click.testing import CliRunner
+
+    from smartmemory_app import cli as cli_module
+
+    def request(method, path, **kwargs):
+        response = client.request(method, path.removeprefix("/memory"), **kwargs)
+        response.raise_for_status()
+        return response.json()
+
+    monkeypatch.setattr(cli_module, "_memory_request", request)
+    return CliRunner().invoke(cli_module.cli, ["ask", *args])
+
+
+def test_sm_ask_lists_the_records_the_answer_cites_with_type_and_date(synthesized_ask, monkeypatch):
+    memory, client, _calls, replies = synthesized_ask
+    _store_consent_record(memory)
+    replies.append(f"ANSWER: Version 3.0 [{ITEM_ID}].\nREASONING: The site 03 record.")
+
+    result = _cli_ask(client, monkeypatch, "Which consent form did site 03 use?")
+
+    assert result.exit_code == 0, result.output
+    assert f"Version 3.0 [{ITEM_ID}]." in result.output
+    assert "Cited records:" in result.output
+    assert f"[episodic] {ITEM_ID} (20" in result.output
+
+
+def test_sm_ask_lists_no_cited_records_for_an_untied_answer(synthesized_ask, monkeypatch):
+    memory, client, _calls, replies = synthesized_ask
+    _store_consent_record(memory)
+    replies.append("ANSWER: Version 9.9 from memory.")
+
+    result = _cli_ask(client, monkeypatch, "Which consent form did site 03 use?")
+
+    assert result.exit_code == 0, result.output
+    assert UNTIED_ANSWER in result.output
+    assert "Cited records:" not in result.output
