@@ -1,3 +1,5 @@
+## 2.0.2
+
 ## Unreleased - CLAIMS-BUILD-21: search results name the lanes that found them (2026-11-14)
 
 - Lite search rows (library, daemon `/memory/search`, local MCP) carry `matched_by`, the retrieval lanes that found each result (`["lexical", "semantic"]`), copied from core's `_matched_by` stamp; `null` when core did not record it. Get and list rows gain no key. `sm search` prints `found by: ...` under a result that names its lanes, and `--json` rows carry the field.
