@@ -1332,9 +1332,17 @@ def _routes_to_anthropic(model: str, pin: Optional[str], agent: bool) -> bool:
 
     A full ``claude-*`` or ``anthropic/*`` id, or a bare sonnet/opus/haiku alias that
     core expands because the Agent SDK is not importable. A provider pin or the SDK
-    route owns the call otherwise.
+    route owns the call otherwise. Only a core that has main's Anthropic route
+    (``ANTHROPIC_OPENAI_BASE_URL``) sends there; an older core sends these names to the
+    OpenAI client, which the wrapper's route guard refuses (check_llm says so).
     """
     if pin or agent:
+        return False
+    try:
+        import smartmemory.utils.llm as core_llm
+    except Exception:
+        return False
+    if not hasattr(core_llm, "ANTHROPIC_OPENAI_BASE_URL"):
         return False
     name = (model or "").lower().strip()
     return name.startswith(("claude", "anthropic/")) or name in (
@@ -1712,6 +1720,26 @@ def check_llm(ctx: Context, context: str = "doctor") -> Row:
             f"no LLM key ({', '.join(LLM_KEY_ENV_VARS)} all absent), so {ask_off} and LLM extraction are off.",
             "Set GROQ_API_KEY (or another provider key), run sm config llm_provider groq, then sm restart",
         )
+    if route.pin != "bedrock" and route.probe_url:
+        from smartmemory_app.llm_errors import refused_host
+
+        # WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the daemon's route guard refuses a call to
+        # any host off the picked provider's allowlist, so doctor never calls it PASS.
+        host = refused_host(app_provider, route.probe_url, cfg.llm_base_url)
+        if host:
+            fix = (
+                "Upgrade smartmemory-core (an older core sends Claude models to the OpenAI client), "
+                "or pick another provider with sm setup, then sm restart"
+                if app_provider in ("anthropic", "claude-agent")
+                else "Pick the provider that endpoint belongs to (sm setup), or unset OPENAI_BASE_URL, "
+                "then sm restart"
+            )
+            return row(
+                FAIL,
+                f"{route_text}. llm_provider {app_provider} may not send to {host}, so "
+                f"SmartMemory refuses the call and nothing is sent: {ask_off} and LLM extraction fail.",
+                fix,
+            )
     if not any(name in where_keys for name in LLM_KEY_ENV_VARS):
         # config.llm_key_present gates the daemon worker and Tier-2 enqueue on these names.
         return row(

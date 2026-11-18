@@ -239,6 +239,8 @@ def test_legacy_entry_refuses_to_consume(tmp_path):
 
 
 def configure(tmp_path, monkeypatch):
+    # The worker writes LLM_* into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
     for key in (
         "OPENAI_BASE_URL",
         "SMARTMEMORY_LLM_MODEL",
@@ -247,7 +249,8 @@ def configure(tmp_path, monkeypatch):
         "SMARTMEMORY_LLM_BASE_URL",
         "LLM_PROVIDER",
     ):
-        monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     config = tmp_path / "config" / "smartmemory" / "config.toml"
     config.parent.mkdir(parents=True)
     config.write_text(
@@ -279,7 +282,10 @@ def test_worker_entry_applies_persisted_config(tmp_path, monkeypatch):
     configure(tmp_path, monkeypatch)
     observed = []
 
-    def run(data_dir, *, idle_exit, lease):
+    def run(data_dir, *, idle_exit, lease, v2=None):
+        assert (
+            v2 is None
+        )  # U20.S1-HANDLERS: the admission switch chain is OFF, so the legacy drain alone
         observed.append((data_dir, idle_exit, lease, provider_env()))
 
     monkeypatch.setattr("smartmemory.pipeline.work_graph.worker.run_worker", run)
@@ -293,7 +299,7 @@ def test_save_on_demand_child_inherits_config(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "_memory", None)
     monkeypatch.setattr(storage, "_data_path", None)
     monkeypatch.setattr(
-        "smartmemory.utils.llm.llm_route_available", lambda: (False, "test")
+        "smartmemory.utils.llm.llm_route_available", lambda *a, **k: (False, "test")
     )
     real_popen = subprocess.Popen
     children = []
@@ -301,7 +307,9 @@ def test_save_on_demand_child_inherits_config(tmp_path, monkeypatch):
     # Exercise real storage save -> core callback -> on-demand spawner. Replace
     # only the final worker command with a child that records its inherited env.
     def capture(command, **kwargs):
-        assert command[2] == "smartmemory.cli"
+        # WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: the held wrapper entry, never core's CLI worker.
+        assert command[1:4] == ["-P", "-m", "smartmemory_app.worker_entry"], command
+        assert kwargs["cwd"] == str(tmp_path.resolve()), kwargs
         destination = tmp_path / "child-env.json"
         script = (
             "import os,json,pathlib; pathlib.Path("
@@ -505,3 +513,44 @@ def test_legacy_launchd_without_pidfile(tmp_path, monkeypatch, caplog, bootout_o
             assert "1 processing rows remain unrecovered" in caplog.text
     finally:
         cleanup(process)
+
+
+# WRAPPER-WORKER-V2-FALLBACK-1: one row per core shape the worker entry can meet.
+def _run_v1(data_dir, *, idle_exit, lease):
+    return ("legacy", data_dir, idle_exit, lease)
+
+
+def _run_v2(data_dir, *, idle_exit, lease, v2=None):
+    return ("v2", data_dir, idle_exit, lease, v2)
+
+
+@pytest.mark.parametrize(
+    "run_worker, expected, warns",
+    [
+        (
+            _run_v1,
+            ("legacy", "d", 1.0, 2.0),
+            True,
+        ),  # older core: no v2 param, no lite_handlers
+        (
+            _run_v2,
+            ("v2", "d", 1.0, 2.0, None),
+            False,
+        ),  # current core, switch OFF: v2=None
+    ],
+    ids=["older-core-no-v2", "current-core-switch-off"],
+)
+def test_run_configured_worker_core_shapes(
+    monkeypatch, caplog, run_worker, expected, warns
+):
+    from smartmemory_app import worker_entry
+
+    monkeypatch.setattr(worker_entry, "apply_runtime_config", lambda: None)
+    monkeypatch.setattr("smartmemory.pipeline.work_graph.worker.run_worker", run_worker)
+    monkeypatch.setattr(worker_entry, "_v2_config", lambda data_dir: None)
+    with caplog.at_level(logging.WARNING, logger="smartmemory_app.worker_entry"):
+        assert (
+            worker_entry.run_configured_worker("d", idle_exit=1.0, lease=2.0)
+            == expected
+        )
+    assert any("legacy drain only" in r.message for r in caplog.records) is warns

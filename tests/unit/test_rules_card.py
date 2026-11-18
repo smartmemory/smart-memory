@@ -14,6 +14,7 @@ from smartmemory_app.lifecycle_config import LifecycleConfig
 from smartmemory_app.recall_format import payload_ids
 from smartmemory_app.rules_card import build_rules_card
 from smartmemory_app.session_lessons import ORIGIN, capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "rules_card"
 
@@ -70,6 +71,13 @@ def test_capture_replays_raw_fixture_and_persists_kind(
     mem = environment
     monkeypatch.setenv("GROQ_API_KEY", "fixture-only")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    opt_in_capture_llm(monkeypatch)
+    # capture writes these into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
+    for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     calls = []
 
     def replay(**kwargs):

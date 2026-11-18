@@ -25,6 +25,22 @@ def llm_on(tmp_path, monkeypatch):
     _write_config(tmp_path, monkeypatch, "groq")
 
 
+def _write_config(tmp_path, monkeypatch, provider):
+    from smartmemory_app import config
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        f'[smartmemory]\nmode = "local"\n[local]\nllm_provider = "{provider}"\n'
+    )
+    monkeypatch.setattr(config, "config_path", lambda: cfg_path)
+
+
+@pytest.fixture
+def llm_on(tmp_path, monkeypatch):
+    """CLI-TOUR-LLM-ROUTE-1: provider none means no LLM, so a test that means "LLM on" says groq."""
+    _write_config(tmp_path, monkeypatch, "groq")
+
+
 @pytest.mark.parametrize("available", [False, True])
 @pytest.mark.parametrize("sync", [False, True])
 def test_storage_discloses_effective_local_route(
@@ -133,7 +149,7 @@ def test_provider_none_discloses_no_llm_even_when_core_finds_a_route(
     monkeypatch.setattr(storage, "apply_runtime_config", lambda: None)
     monkeypatch.setattr(
         "smartmemory.utils.llm.llm_route_available",
-        lambda: (available, "effective core route"),
+        lambda *a, **k: (available, "effective core route"),
     )
     assert storage.llm_extraction_warning() == NO_LLM_PROVIDER_OFF_LINE
     viewer_server._print_llm_extraction_status()

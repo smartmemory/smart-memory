@@ -20,15 +20,35 @@ from smartmemory_app.capture_slices import rss_mb
 log = logging.getLogger(__name__)
 
 
+def _hold_llm_if_provider_none() -> None:
+    """Install the daemon's no-LLM hold in this process when llm_provider is none.
+
+    WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: the capture worker builds its own memory
+    (create_lite_memory) and never runs storage.apply_runtime_config, so without
+    this the route hold and the send block were missing here.
+    """
+    from smartmemory_app.config import llm_provider_none, load_config
+
+    try:
+        cfg = load_config()
+    except Exception as exc:  # capture_llm_opted_in already keeps capture costless
+        log.warning("Capture: config unreadable (%s), no-LLM hold not installed", exc)
+        return
+    if llm_provider_none(cfg):
+        from smartmemory_app.storage import _block_llm_transport, _hold_llm_route_off
+
+        _hold_llm_route_off()
+        _block_llm_transport()
+
+
 def _ai_opted_in() -> bool:
     """MEM-SIZE-1: AI on the capture path is a per-source opt-in, default OFF (owner: "captures too").
 
     Session lessons run only on the opt-in (offline capture then records them as degraded, as before). The Groq pin
-    and the LLM pipeline profile need the opt-in AND an online capture (``_memory``).
+    and the LLM pipeline profile need the opt-in AND an online capture (``_memory``). FWD-MERGE-4: the 2.0 gate
+    ``capture_queue.capture_llm_opted_in`` decides, so provider none or a non-Groq provider ignores either switch.
     """
-    from smartmemory.ingest.admission import CLAUDE_CODE_TRANSCRIPT, ai_opted_in
-
-    return ai_opted_in(CLAUDE_CODE_TRANSCRIPT)
+    return queue.capture_llm_opted_in()
 
 
 def _memory():
@@ -37,6 +57,13 @@ def _memory():
 
     # Capture is costless by default: rules extraction, local embeddings, keyword index, local enrichers, no LLM
     # route at all (``llm_allowed=False``). Only the AI opt-in pins Groq, never subscription billing.
+    from smartmemory_app.worker_entry import install_worker_spawner
+
+    from smartmemory_app.storage import _guard_llm_route
+
+    _hold_llm_if_provider_none()
+    _guard_llm_route()  # no send to a provider the user did not pick (ROUTE-PORT-1)
+    install_worker_spawner()  # saves here spawn the held wrapper worker, not core's
     ai = _ai_opted_in() and os.environ.get("SMARTMEMORY_CAPTURE_OFFLINE") != "1"
     if ai:
         if not os.environ.get("GROQ_API_KEY"):
@@ -48,9 +75,45 @@ def _memory():
         os.environ["OPENAI_BASE_URL"] = "https://api.groq.com/openai/v1"
         os.environ["SMARTMEMORY_LLM_MODEL"] = "openai/gpt-oss-120b"
     os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = "local"
+    _core_summary_follows(ai)
     return create_lite_memory(
         data_dir=str(queue.capture_dir().parent),
         pipeline_profile=PipelineConfig.lite() if ai else PipelineConfig.costless(),
+    )
+
+
+def _core_summary_follows(ai: bool) -> None:
+    """Make core's chunk-summary admission take capture's AI decision (FWD-MERGE-4 review HIGH).
+
+    Core's ``admit`` reads ``SMARTMEMORY_INGEST_AI_SUMMARY`` itself and calls its LLM for the
+    transcript chunk summary, outside the capture pipeline. When capture makes no LLM call
+    (the 2.0 gate refused: provider none or not groq, or capture is offline), the transcript
+    kind is taken out of this process's switch and the summary stays extractive.
+    """
+    from smartmemory.ingest.admission import (
+        AI_SUMMARY_ENV,
+        CLAUDE_CODE_TRANSCRIPT,
+        ai_opted_in,
+    )
+
+    if ai or not ai_opted_in(CLAUDE_CODE_TRANSCRIPT):
+        return
+    kinds = [k.strip() for k in os.environ.get(AI_SUMMARY_ENV, "").split(",")]
+    rest = [k for k in kinds if k and k != CLAUDE_CODE_TRANSCRIPT]
+    if rest:
+        os.environ[AI_SUMMARY_ENV] = ",".join(rest)
+    else:
+        os.environ.pop(AI_SUMMARY_ENV, None)
+    if ai_opted_in(CLAUDE_CODE_TRANSCRIPT):
+        # Core's own source policy turned it on: there is no switch left to take out.
+        raise RuntimeError(
+            "core's source policy turns AI transcript summaries on, but capture makes no LLM call here"
+        )
+    log.warning(
+        "%s names %s, but capture makes no LLM call here (llm_provider is none or not groq, "
+        "or capture is offline): transcript chunk summaries are extractive, no AI summary",
+        AI_SUMMARY_ENV,
+        CLAUDE_CODE_TRANSCRIPT,
     )
 
 
@@ -403,6 +466,13 @@ def run() -> None:
             return
 
 
-if __name__ == "__main__":
+def main() -> None:
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     logging.basicConfig(level=logging.WARNING)
     run()
+
+
+if __name__ == "__main__":
+    main()

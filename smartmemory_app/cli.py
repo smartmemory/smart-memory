@@ -1146,9 +1146,11 @@ def _installed_version_from_subprocess() -> str | None:
     result = subprocess.run(
         [
             sys.executable,
+            "-P",
             "-c",
             "from importlib.metadata import version; print(version('smartmemory'))",
         ],
+        cwd=str(Path(sys.executable).resolve().parent),
         capture_output=True,
         text=True,
         check=False,
@@ -1180,7 +1182,8 @@ def update_cmd(ctx: click.Context) -> None:
     daemon_was_running = get_status() is not None
     click.echo(f"Updating SmartMemory {current_version} to {latest}...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "smartmemory"],
+        [sys.executable, "-P", "-m", "pip", "install", "-U", "smartmemory"],
+        cwd=str(Path(sys.executable).resolve().parent),
         check=False,
     )
     if result.returncode != 0:
@@ -1386,9 +1389,9 @@ def worker_cmd(ctx: click.Context, loop: bool) -> None:
 @worker_cmd.command("requeue-dead")
 def requeue_dead_cmd() -> None:
     """Reset dead and skipped boxes for another worker attempt."""
-    from smartmemory.pipeline.work_graph.spawn import spawn_worker_if_idle
     from smartmemory_app.storage import _resolve_data_dir
     from smartmemory_app.work_graph import get_work_graph
+    from smartmemory_app.worker_entry import spawn_worker_if_idle
 
     count = get_work_graph().requeue_dead()
     if count:
@@ -2138,6 +2141,8 @@ def search_cmd(
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id}  {content}")
+        if r.get("matched_by"):  # CLAIMS-BUILD-21: the search lanes that found this result
+            click.echo(f"    found by: {', '.join(r['matched_by'])}")
         for child in r.get("children") or []:
             if isinstance(child, dict) and child.get("content"):
                 click.echo(f"    [fact] {child['content']}")
@@ -2311,6 +2316,29 @@ def _render_ask_relations(result: dict) -> None:
             )
 
 
+def _render_cited_records(result: dict) -> None:
+    """The records a written answer cites, with type and date (CLAIMS-02-FIX1).
+
+    ``used_evidence_ids`` is the evidence the answer cites (core's grounding check); an
+    answer that cites none of it prints no list.
+    """
+    by_id = {
+        item.get("item_id"): item
+        for item in result.get("evidence") or []
+        if isinstance(item, dict)
+    }
+    used = [i for i in result.get("used_evidence_ids") or [] if isinstance(i, str)]
+    if not used:
+        return
+    click.echo("  Cited records:")
+    for item_id in used:
+        item = by_id.get(item_id) or {}
+        click.echo(
+            f"    - [{item.get('memory_type') or 'unknown'}] {item_id} "
+            f"({item.get('created_at') or 'date unknown'})"
+        )
+
+
 @cli.command("ask")
 @click.argument("question")
 @click.option(
@@ -2384,6 +2412,7 @@ def ask_cmd(question: str, limit: int, reasoning: bool, extractive: bool) -> Non
         return
 
     click.echo(result["answer"])
+    _render_cited_records(result)
     if not reasoning:
         click.echo(click.style("  (add --reasoning to see why)", dim=True))
         return
@@ -3471,6 +3500,56 @@ def doctor_cmd(
     )
 
 
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def _valid_email(value: str) -> bool:
+    local, _, domain = value.partition("@")
+    return bool(
+        local and domain and "@" not in domain and not any(c.isspace() for c in value)
+    )
+
+
+def _report_contact_email(
+    email: str | None, no_email: bool, yes: bool
+) -> tuple[str | None, bool]:
+    """(email, typed_at_prompt): --email, then the stored contact_email, then one tty prompt."""
+    if no_email:
+        return None, False
+    if email is not None:
+        email = email.strip()
+        if not _valid_email(email):
+            raise click.UsageError("--email needs an address like name@example.com.")
+        return email, False
+    from smartmemory_app.config import load_config
+
+    stored = load_config().contact_email
+    if stored:
+        return stored, False
+    if yes or not _stdin_is_tty():
+        return None, False
+    typed = click.prompt(
+        "Email for support to reply (optional, Enter to skip)",
+        default="",
+        show_default=False,
+    ).strip()
+    if not typed:
+        return None, False
+    if not _valid_email(typed):
+        click.echo("That does not look like an email address. Skipping it.")
+        return None, False
+    return typed, True
+
+
+def _remember_contact_email(email: str) -> None:
+    from smartmemory_app.config import load_config, save_config
+
+    cfg = load_config(apply_env=False)
+    cfg.contact_email = email
+    save_config(cfg)
+
+
 @cli.command("report")
 @click.argument(
     "report_args",
@@ -3503,6 +3582,10 @@ def doctor_cmd(
 @click.option(
     "--yes", is_flag=True, help="Confirm the support upload without a prompt."
 )
+@click.option("--email", help="Contact email for support to reply to (with --send).")
+@click.option(
+    "--no-email", is_flag=True, help="Do not ask for or send a contact email."
+)
 def report_cmd(
     report_args: tuple[str, ...],
     severity: str,
@@ -3511,6 +3594,8 @@ def report_cmd(
     yes: bool = False,
     zip_bundle: bool = False,
     bundle_path: Path | None = None,
+    email: str | None = None,
+    no_email: bool = False,
 ) -> None:
     """Format a tracker bug report with local CLI diagnostics.
 
@@ -3548,14 +3633,23 @@ def report_cmd(
         )
         click.echo("Includes redacted CLI and daemon log tails (up to 30 KB each).")
         click.echo("Credentials, memory bodies and home-directory names are removed.")
+        contact, typed = _report_contact_email(email, no_email, yes)
+        if contact:
+            click.echo(f"Includes your contact email: {contact}")
         if not yes and not click.confirm(
             "Send this to SmartMemory support?", default=False
         ):
             click.echo("Cancelled. Nothing sent.")
             return
+        if (
+            typed
+            and not yes
+            and click.confirm("Remember this email for future reports?", default=False)
+        ):
+            _remember_contact_email(contact)
         from smartmemory_app.crash_reporter import bounded_report
 
-        result = bounded_report(send_support_report, texts)
+        result = bounded_report(send_support_report, texts, contact)
         if result.status == "sent":
             click.echo(
                 f"Sent. Report ID: {result.report_id}. Quote this ID to support@smartmemory.ai."
@@ -3739,6 +3833,11 @@ def config_cmd(key: str | None, value: str | None) -> None:
 
     cfg = load_config(apply_env=False)  # never persist inherited env values
     setattr(cfg, key, coerced)
+    if key == "llm_provider" and value == "none":
+        # WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 F1: none means no LLM, so a leftover model or
+        # endpoint is cleared rather than left to look like a live route.
+        cfg.llm_model = ""
+        cfg.llm_base_url = ""
     save_config(cfg)
     click.echo(f"{key} = {value}")
 
@@ -4276,6 +4375,9 @@ def server_cmd() -> None:
 
 def main() -> None:
     """Run the CLI with literal arguments on Windows."""
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     cli(windows_expand_args=False)
 
 

@@ -20,6 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from smartmemory.models.read_status import READ_STATUS_KEY, read_status_of
+from smartmemory.refusal_logging import refusal_logged, refusal_text
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TRACE_PATH = Path(
@@ -57,6 +60,7 @@ def _item_to_recall_dict(item: Any) -> dict:
                 "reference",
                 "valid_start_time",
                 "transaction_time",
+                "via_supersession_of",
             )
         }
     )
@@ -75,7 +79,8 @@ def _item_to_recall_dict(item: Any) -> dict:
     ):
         if raw.get(key) is not None:
             metadata[key] = raw[key]
-    return {
+    status = _carrier_of(item, raw)
+    out = {
         "item_id": raw.get("item_id") or raw.get("id") or raw.get("decision_id"),
         "memory_type": raw.get("memory_type")
         or ("decision" if raw.get("decision_id") else "?"),
@@ -90,6 +95,66 @@ def _item_to_recall_dict(item: Any) -> dict:
         "transaction_time": raw.get("transaction_time"),
         "metadata": metadata,
     }
+    if raw.get("via_supersession_of"):
+        out["via_supersession_of"] = raw["via_supersession_of"]
+    if status is not None:
+        out[READ_STATUS_KEY] = status
+    return out
+
+
+def supersession_label(item: dict) -> str:
+    """` [replaces <id8>]` for a surfaced successor, else "".
+
+    Twin of smartmemory_mcp.result_labels.supersession_label (the pinned MCP release has no such module, so the
+    format is copied; a parity test on each side asserts identical text). Top-level marker first, then metadata.
+    """
+    metadata = item.get("metadata")
+    previous_id = item.get("via_supersession_of") or (
+        metadata.get("via_supersession_of") if isinstance(metadata, dict) else None
+    )
+    return f" [replaces {str(previous_id)[:8]}]" if previous_id else ""
+
+
+class MalformedReadStatusError(ValueError):
+    """A result carries a ``read_status`` that is present but unreadable (U5.22, C1/C8)."""
+
+
+def validated_carrier(status: Any, item_id: Any) -> dict | None:
+    """``status`` as a carrier copy: None when absent, a typed refusal (one WARNING) when present but unreadable.
+
+    Absent (None) is the legacy gate-OFF shape and stays unchanged. A present carrier must be a dict holding a
+    non-empty string ``extraction_state``. Anything else is never read as absent, because that would show a
+    legacy-looking row for an item whose extraction status was lost.
+    """
+    if status is None:
+        return None
+    if not isinstance(status, dict):
+        reason = f"a {type(status).__name__}, not a dict"
+    elif not (
+        isinstance(status.get("extraction_state"), str) and status["extraction_state"]
+    ):
+        reason = "a dict without a string extraction_state"
+    else:
+        return dict(status)
+    log.warning(
+        "read_status carrier on %s is %s: refusing to normalize the row without its extraction status",
+        item_id,
+        reason,
+    )
+    raise MalformedReadStatusError(f"read_status on {item_id} is {reason}")
+
+
+def _carrier_of(item: Any, raw: dict) -> dict | None:
+    """The response-only read_status carrier (gate-ON arm), or None when absent."""
+    status = raw.get(READ_STATUS_KEY) if isinstance(raw, dict) else None
+    if status is None and not isinstance(item, dict):
+        status = read_status_of(item)
+    item_id = (
+        raw.get("item_id") or raw.get("id") or raw.get("decision_id")
+        if isinstance(raw, dict)
+        else None
+    )
+    return validated_carrier(status, item_id)
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -311,9 +376,11 @@ def format_recall_lines(
                 )
             date_tag = f"[{date or 'date?'}] "
         body = body.replace("\n", "\n  ")
+        carrier = validated_carrier(it.get(READ_STATUS_KEY), it.get("item_id"))
+        state_tag = f"[{carrier['extraction_state']}] " if carrier else ""
         lines.append(
-            f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}"
-            f"[mem:{recall_item_label(it)}] {body}"
+            f"- {stale_marker}{conf_marker}[{mtype}] {date_tag}{state_tag}"
+            f"[mem:{recall_item_label(it)}]{supersession_label(it)} {body}"
         )
 
     if not lines:
@@ -440,10 +507,21 @@ def record_hook_error(message: str, error: Exception | str) -> None:
         active["errors"].append(detail)
 
 
+def _core_already_logged(error: Exception | str) -> bool:
+    """``error`` carries core's logged mark (the read gate is always on)."""
+    return isinstance(error, BaseException) and refusal_logged(error)
+
+
 def record_hook_degradation(message: str, error: Exception | str) -> None:
-    """Log a non-fatal loss separately from a failed injection."""
-    detail = f"{message}: {error}"
-    log.warning("%s", detail)
+    """Log a non-fatal loss separately from a failed injection.
+
+    U5.21 (C1): a core refusal the site that raised it already logged (the mark ``smartmemory.refusal_logging`` puts on
+    the exception, the only carrier) is recorded in the trace without a second WARNING. For any unmarked error or a plain
+    string, the WARNING is written exactly as before.
+    """
+    detail = f"{message}: {refusal_text(error) if isinstance(error, BaseException) else error}"
+    if not _core_already_logged(error):
+        log.warning("%s", detail)
     active = _ACTIVE_TRACE.get()
     if active is not None:
         active.setdefault("degradations", []).append(detail)
@@ -464,7 +542,8 @@ def derive_workspace_id(cwd: str | None) -> str | None:
     Strategy:
       1. SMARTMEMORY_WORKSPACE_ID env var wins.
       2. Otherwise: realpath(cwd) → optional `git rev-parse --show-toplevel` →
-         realpath again → sha1[:12], prefixed `ws_`.
+         realpath again → sha1[:12], prefixed `ws_`. A linked git worktree
+         resolves to its main checkout (``_checkout_root``), so both share one id.
       3. None cwd returns None.
 
     Symlinked paths collapse to the same id as the real path.
@@ -478,16 +557,24 @@ def derive_workspace_id(cwd: str | None) -> str | None:
     canonical = os.path.realpath(cwd)
     try:
         result = subprocess.run(
-            ["git", "-C", canonical, "rev-parse", "--show-toplevel"],
+            [
+                "git",
+                "-C",
+                canonical,
+                "rev-parse",
+                "--show-toplevel",
+                "--git-dir",
+                "--git-common-dir",
+            ],
             capture_output=True,
             text=True,
             encoding="utf-8",
             timeout=1,
             check=True,
         )
-        toplevel = result.stdout.strip()
-        if toplevel:
-            canonical = os.path.realpath(toplevel)
+        toplevel, *dirs = result.stdout.splitlines() or [""]
+        if toplevel.strip():
+            canonical = _checkout_root(canonical, toplevel.strip(), dirs)
     except (subprocess.SubprocessError, OSError, UnicodeDecodeError) as exc:
         log.warning(
             "workspace lost git-root resolution, using cwd %s: %s", canonical, exc
@@ -495,6 +582,27 @@ def derive_workspace_id(cwd: str | None) -> str | None:
 
     digest = hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
     return f"ws_{digest}"
+
+
+def _checkout_root(cwd: str, toplevel: str, dirs: list[str]) -> str:
+    """The checkout a workspace id names (LITE-RECALL-WIDEN-UNBOUNDED-1).
+
+    ``--show-toplevel`` of a linked worktree is the worktree itself, so a session
+    there got a fresh, empty workspace (and recall widened over the whole store
+    looking for it). A linked worktree's git dir differs from its common dir, the
+    main repo's ``.git``; the main checkout is that directory's parent. A plain
+    checkout (git dir == common dir), a submodule (common dir ``.git/modules/<n>``)
+    and a bare repo's worktree (common dir ``<n>.git``) keep their toplevel, so
+    their ids are unchanged. ``dirs`` are rev-parse's ``--git-dir`` and
+    ``--git-common-dir`` lines, relative to ``cwd`` or absolute.
+    """
+    root = os.path.realpath(toplevel)
+    if len(dirs) != 2:
+        return root
+    git_dir, common = (os.path.realpath(os.path.join(cwd, d.strip())) for d in dirs)
+    if git_dir != common and os.path.basename(common) == ".git":
+        return os.path.dirname(common)
+    return root
 
 
 # --- Trace -------------------------------------------------------------------

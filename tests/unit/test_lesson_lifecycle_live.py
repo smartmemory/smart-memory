@@ -6,6 +6,7 @@ from pathlib import Path
 from smartmemory_app import storage
 from smartmemory_app.lifecycle import MemoryLifecycle
 from smartmemory_app.session_lessons import capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_lifecycle_live"
 
@@ -29,7 +30,17 @@ def test_live_responses_three_sessions(tmp_path, monkeypatch, provider_pin_isola
         "SMARTMEMORY_HOOK_TRACE": str(tmp_path / "trace.jsonl"),
     }.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    opt_in_capture_llm(monkeypatch)
+    # capture writes LLM_* into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
+    for key in (
+        "LLM_PROVIDER",
+        "LLM_API_KEY",
+        "OPENAI_BASE_URL",
+        "SMARTMEMORY_CAPTURE_OFFLINE",
+    ):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
 
     sessions = json.loads((FIXTURES / "sessions.json").read_text())
     recorded_ids = [

@@ -229,7 +229,9 @@ def test_asgi_failure_reports_and_preserves_500(capture):
 
     # The viewer mounts a catch-all static route, so put this test route before it.
     app.router.routes.insert(0, app.router.routes.pop())
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(
+        app, base_url="http://localhost", raise_server_exceptions=False
+    ) as client:
         response = client.get("/test-report-failure")
         assert response.status_code == 500 and response.text == "Internal Server Error"
         assert capture["done"].wait(3)

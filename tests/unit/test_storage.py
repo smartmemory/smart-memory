@@ -73,7 +73,13 @@ def test_local_memory_disables_entity_grounding_by_default(tmp_path, keyed):
     from smartmemory_app import storage
     from smartmemory_app.config import SmartMemoryConfig
 
-    config = SmartMemoryConfig(mode="local", coreference=True)
+    config = SmartMemoryConfig(
+        # llm_provider none (the default) holds the LLM off whatever the key
+        # (WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1), so the row picks a provider.
+        mode="local",
+        coreference=True,
+        llm_provider="groq",
+    )
     mock_mem = MagicMock()
     mock_pm = MagicMock()
     mock_store = MagicMock()
@@ -372,7 +378,7 @@ def test_search_forwards_lifecycle_and_asof_params():
 def test_wildcard_search_hides_superseded_and_retracted_by_default():
     """CORE-RETRACTED-RECALL-1: the "*" branch never reaches core, so it must filter itself.
 
-    `search("*")` short-circuits to _list_all_memories() and returns without calling
+    `search("*")` short-circuits to _core_wildcard_rows() and returns without calling
     mem.search(), so core's lifecycle filters cannot run. Without an equivalent filter
     here, wildcard was the one local-mode surface still handing back withdrawn and
     replaced beliefs by default.
@@ -388,7 +394,7 @@ def test_wildcard_search_hides_superseded_and_retracted_by_default():
 
     with (
         patch("smartmemory_app.storage.get_memory", return_value=MagicMock()),
-        patch("smartmemory_app.storage._list_all_memories", return_value=list(rows)),
+        patch("smartmemory_app.storage._core_wildcard_rows", return_value=list(rows)),
     ):
         default = storage.search("*")
         with_retracted = storage.search("*", include_retracted=True)
@@ -525,3 +531,12 @@ def test_daemon_missing_model_message_reaches_user_unchanged(
     assert message in capsys.readouterr().out.splitlines()
     embedder.assert_not_called()
     assert "Run sm setup" in viewer_server._last_warmup_failure
+
+
+def test_scoped_validity_retains_live_facade_parameter_census():
+    """New public search qualifiers must not silently disappear in the adapter."""
+    from tests.unit.test_search_hop_surface import (
+        test_enumerating_core_search_allowlist,
+    )
+
+    test_enumerating_core_search_allowlist()

@@ -12,6 +12,7 @@ from click.testing import CliRunner
 from smartmemory_app.cli import lifecycle_reclassify
 from smartmemory_app.lesson_classifier import PROMPT, classify_lessons
 from smartmemory_app.session_lessons import capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURES = Path(__file__).parents[1] / "fixtures/lesson_classifier"
 
@@ -22,6 +23,8 @@ def replay(monkeypatch, tmp_path, provider_pin_isolated):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "ws")
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    opt_in_capture_llm(monkeypatch)
     calls = []
 
     def install(name):

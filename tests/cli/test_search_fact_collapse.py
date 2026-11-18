@@ -1,4 +1,5 @@
 """CLI-SEARCH-FACT-COLLAPSE-1: `sm search` and `sm ask` rank source memories, not rows.
+2.0 (CLI-2.0-SEARCH-FACT-COLLAPSE-1): plus the multi-source parent rule rows at the end of ``ROWS``.
 
 Real Lite store (real MiniLM, no LLM), the daemon's HTTP surface and the CLI renderer. Relation
 edges are seeded directly with ``fact`` + ``fact_embedding`` + ``source_item`` the way the extraction
@@ -137,6 +138,73 @@ WINDOW_POOL = [
     },
 ]
 
+
+# CLI-2.0-SEARCH-FACT-COLLAPSE-1: a 2.0 edge can have several producers (G22 `source_items`, writers
+# append). Core sets `source_item` to the list's last entry (the most recent producer).
+def _multi_fact(source_items, source_item):
+    meta = {"source_item": source_item}
+    if source_items is not None:
+        meta["source_items"] = source_items
+    return {
+        "item_id": "fact::m",
+        "memory_type": "fact",
+        "content": "shared fact",
+        "metadata": meta,
+    }
+
+
+def _multi_memory(item_id):
+    return {"item_id": item_id, "memory_type": "episodic", "content": f"text {item_id}"}
+
+
+def _children_by_parent(items, log):
+    return [
+        (i["item_id"], _fact_texts(i), i.get("collapse", {}).get("promoted"))
+        for i in items
+    ]
+
+
+def _first_producer_in_pool(items, log):
+    # m-y is listed before m-z and is in the pool: the fact joins it, not the most recent m-z
+    assert _children_by_parent(items, log) == [
+        ("m-y", ["shared fact"], False),
+        ("m-z", [], None),
+    ]
+
+
+def _none_in_pool_most_recent(items, log):
+    # no producer in the pool: the most recent (source_item = last entry) is promoted
+    assert _children_by_parent(items, log) == [
+        ("m-y", ["shared fact"], True),
+        ("m-q", [], None),
+    ]
+
+
+def _single_source_item_as_on_1_5(items, log):
+    # a 1.x edge (scalar only) groups under its source_item even when another memory is in the pool
+    assert _children_by_parent(items, log) == [
+        ("m-a", ["shared fact"], True),
+        ("m-b", [], None),
+    ]
+
+
+VENDOR = "who owns the vendor risk register"
+VENDOR_FACT = "Kofi Mensah owns the vendor risk register"
+
+
+def _seeded_multi_source(items, log):
+    # neither producer's text matches: the fact promotes the most recent producer (last in the stored
+    # list), nested once; the earlier producer stays out
+    ids = _ids(items)
+    assert (
+        "m-v2" in ids
+        and "m-v1" not in ids
+        and not any(i.startswith("fact::") for i in ids)
+    ), ids
+    v2 = next(i for i in items if i["item_id"] == "m-v2")
+    assert (_fact_texts(v2), v2["collapse"]["promoted"]) == ([VENDOR_FACT], True)
+
+
 # (label, via, request, check)
 ROWS = [
     (
@@ -193,6 +261,35 @@ ROWS = [
         "ask-llm",
         {"question": CUTOFF},
         _ask_llm_prompt,
+    ),
+    (
+        "multi-source fact: parent = first source_items entry already in the pool",
+        "multi",
+        [
+            _multi_fact(["m-x", "m-y", "m-z"], "m-z"),
+            _multi_memory("m-z"),
+            _multi_memory("m-y"),
+        ],
+        _first_producer_in_pool,
+    ),
+    (
+        "multi-source fact: none in the pool -> the most recent producer",
+        "multi",
+        [_multi_fact(["m-x", "m-y"], "m-y"), _multi_memory("m-q")],
+        _none_in_pool_most_recent,
+    ),
+    (
+        "single source_item (1.x edge): grouped exactly as on 1.5",
+        "multi",
+        [_multi_fact(None, "m-a"), _multi_memory("m-b")],
+        _single_source_item_as_on_1_5,
+    ),
+    # Last: it seeds more rows into the shared store.
+    (
+        "seeded source_items edge on Lite: none in the pool -> the most recent producer",
+        "search-seeded",
+        {"query": VENDOR, "top_k": 5},
+        _seeded_multi_source,
     ),
 ]
 
@@ -271,6 +368,51 @@ def test_search_and_ask_rank_source_memories_not_rows(lite_store, monkeypatch, c
                 "created_at": "2026-08-01T00:00:00+00:00",
             }
             return collapse_to_parents(WINDOW_POOL, 5, lambda _id: readable, **request)
+        if via == "multi":
+            from smartmemory_app.search_collapse import collapse_to_parents
+
+            return collapse_to_parents(request, 5, _multi_memory)
+        if via == "search-seeded":
+            from smartmemory.plugins.embedding import create_embeddings
+
+            backend = storage.get_memory()._graph.backend
+            # Raw producers, never matched on their own text. A real save would hide the fact until its
+            # extraction finishes (2.0 pending_facade), and this fixture runs no worker.
+            for item_id, text in (
+                ("m-v1", "Archive note three."),
+                ("m-v2", "Lunch order for Friday."),
+            ):
+                backend.add_node(
+                    item_id,
+                    {
+                        "content": text,
+                        "memory_type": "episodic",
+                        "origin": "user:fixture",
+                    },
+                )
+            for entity in ("Kofi", "register"):
+                backend.add_node(
+                    entity,
+                    {
+                        "content": entity,
+                        "memory_type": "concept",
+                        "origin": "user:fixture",
+                    },
+                )
+            backend.add_edge(
+                "Kofi",
+                "register",
+                "OWNS",
+                {
+                    "fact": VENDOR_FACT,
+                    "fact_embedding": [
+                        float(x) for x in create_embeddings(VENDOR_FACT)
+                    ],
+                    "origin": "enricher:llm_extract",
+                    "source_items": ["m-v1", "m-v2"],
+                },
+            )
+            return lite_store.post("/search", json=request).json()["items"]
         if via == "cli":
             monkeypatch.setattr(cli_module, "_memory_request", cli_request)
             result = CliRunner().invoke(cli_module.cli, ["search", *request])
@@ -284,7 +426,6 @@ def test_search_and_ask_rank_source_memories_not_rows(lite_store, monkeypatch, c
         monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "groq")
         monkeypatch.setenv("GROQ_API_KEY", "bogus-not-a-real-key")
         monkeypatch.setattr(local_api, "llm_key_present", lambda: True)
-        monkeypatch.setattr(local_api, "_ask_relations", lambda hits: [])
         prompts.clear()
         body = lite_store.post("/ask", json=request)
         assert body.status_code == 200, body.text

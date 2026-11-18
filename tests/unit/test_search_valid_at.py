@@ -58,9 +58,9 @@ def test_valid_at_reaches_real_core(lite, monkeypatch, query, filters):
 
     monkeypatch.setattr(lite, "search", record)
     results = storage.search(
-        query, filters=filters, valid_at="2026-04-10", sort_by="recency"
+        query, filters=filters, valid_at="2026-04-10T00:00:00Z", sort_by="recency"
     )
-    assert received and all(c["valid_at"] == "2026-04-10" for c in received)
+    assert received and all(c["valid_at"] == "2026-04-10T00:00:00Z" for c in received)
     assert item_id in [r["item_id"] for r in results]
     assert all(r["metadata"]["valid_at_resolution"] == "valid_time" for r in results)
 
@@ -83,9 +83,9 @@ def test_unknown_kwargs_warn_once_and_limit_stays_excluded(lite, caplog):
 @pytest.mark.parametrize(
     "options",
     [
-        {"valid_at": "2026-04-10"},
+        {"valid_at": "2026-04-10T00:00:00Z"},
         {"manual_scan": False},
-        {"manual_scan": False, "valid_at": "2026-04-10"},
+        {"manual_scan": False, "valid_at": "2026-04-10T00:00:00Z"},
         {key: True for key in storage._ALLOWED - {"sort_by", "origin"}},
     ],
     ids=["valid-at", "manual-scan", "manual-scan-and-valid-at", "all-options"],
@@ -130,5 +130,8 @@ def test_local_backend_reaches_real_wrapper(lite, monkeypatch):
         return real_search(*args, **kwargs)
 
     monkeypatch.setattr(lite, "search", record)
-    assert LocalBackend().search("", valid_at="2026-04-10", sort_by="recency") == []
-    assert received[0]["valid_at"] == "2026-04-10"
+    assert (
+        LocalBackend().search("", valid_at="2026-04-10T00:00:00Z", sort_by="recency")
+        == []
+    )
+    assert received[0]["valid_at"] == "2026-04-10T00:00:00Z"

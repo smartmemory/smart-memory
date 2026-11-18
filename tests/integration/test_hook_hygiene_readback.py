@@ -77,15 +77,17 @@ def test_distill_workspace_readback_across_git_worktrees(
     monkeypatch: pytest.MonkeyPatch,
     pinned: bool,
 ) -> None:
-    a, b = tmp_path / "repo", tmp_path / "worktree"
+    a, b, c = tmp_path / "repo", tmp_path / "worktree", tmp_path / "other-repo"
     subprocess.run(["git", "init", "-q", str(a)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", str(c)], check=True, capture_output=True)
     # Orphan worktree: no commit and no mutation of the working repository.
     subprocess.run(
         ["git", "-C", str(a), "worktree", "add", "--orphan", "-b", "other", str(b)],
         check=True,
         capture_output=True,
     )
-    assert derive_workspace_id(str(a)) != derive_workspace_id(str(b))
+    # A linked worktree shares its checkout's workspace (LITE-RECALL-WIDEN-UNBOUNDED-1); another checkout does not.
+    assert derive_workspace_id(str(a)) == derive_workspace_id(str(b)) != derive_workspace_id(str(c))
     if pinned:
         monkeypatch.setenv("SMARTMEMORY_WORKSPACE_ID", "logical-project")
     text = "Retain the complete settlement reference."
@@ -95,5 +97,7 @@ def test_distill_workspace_readback_across_git_worktrees(
     assert rows[0].metadata["workspace_id"] == derive_workspace_id(str(a))
     at_a = storage.recall(cwd=str(a), include_snapshot=False)
     at_b = storage.recall(cwd=str(b), include_snapshot=False)
+    at_c = storage.recall(cwd=str(c), include_snapshot=False)
     assert text in at_a and f"[mem:{rows[0].item_id}]" in at_a
-    assert (text in at_b) is pinned
+    assert text in at_b and f"[mem:{rows[0].item_id}]" in at_b
+    assert (text in at_c) is pinned

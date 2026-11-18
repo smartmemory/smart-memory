@@ -673,8 +673,8 @@ class TourDaemon:
             raise RuntimeError("tour daemon port was not selected")
         if self.data_dir is None:
             self.data_dir = Path(tempfile.mkdtemp(prefix="smartmemory-tour-"))
-        else:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = self.data_dir.expanduser().resolve()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.store_was_empty = not any(self.data_dir.iterdir())
         self.base_url = f"http://127.0.0.1:{self.port}"
 
@@ -690,7 +690,8 @@ class TourDaemon:
             f"main(port={self.port!r}, open_browser=False)"
         )
         self.process = subprocess.Popen(
-            [sys.executable, "-c", code],
+            [sys.executable, "-P", "-c", code],
+            cwd=str(self.data_dir),
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

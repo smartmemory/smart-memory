@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from smartmemory_app.config import (
     LLM_PROVIDER_TABLE,
+    LOCAL_PLACEHOLDER_KEY,
     NO_LLM_PROVIDER_OFF_LINE,
     NO_LOCAL_MODEL_OFF_LINE,
     SmartMemoryConfig,
@@ -42,6 +43,7 @@ from smartmemory_app.config import (
     local_llm_without_model,
     set_derived_env,
 )
+
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +195,9 @@ def _run_startup_warmups(
 
 def apply_runtime_config() -> SmartMemoryConfig:
     """Apply persisted provider settings before memory construction or worker spawn."""
+    from smartmemory_app.worker_entry import install_worker_spawner
+
+    install_worker_spawner()  # before load_config: no store is built if it raises
     cfg = load_config()
     if not os.environ.get("SMARTMEMORY_EMBEDDING_PROVIDER"):
         os.environ["SMARTMEMORY_EMBEDDING_PROVIDER"] = cfg.embedding_provider
@@ -201,6 +206,7 @@ def apply_runtime_config() -> SmartMemoryConfig:
         _hold_llm_route_off()
     if llm_provider_none(cfg):
         _block_llm_transport()
+    _guard_llm_route()
     return cfg
 
 
@@ -267,7 +273,7 @@ def _provider_default_model(provider: str | None, environ=None) -> str | None:
             ", ".join(LLM_PROVIDER_TABLE),
         )
         return None
-    return LLM_PROVIDER_TABLE.get(provider, (None, None))[1]
+    return LLM_PROVIDER_TABLE.get(provider, (None, None, ()))[1]
 
 
 def _hold_llm_route_off() -> None:
@@ -288,7 +294,9 @@ def _hold_llm_route_off() -> None:
         return
     resolve = core_llm.llm_route_available
 
-    def llm_route_available() -> tuple[bool, str]:
+    # Same call shape as core's resolver: core 2.0.1 calls it as llm_route_available(model)
+    # (pipeline/model_router.py:119), a zero-arg shim raised TypeError there.
+    def llm_route_available(*args, **kwargs) -> tuple[bool, str]:
         try:
             cfg = load_config()
         except Exception:
@@ -297,7 +305,7 @@ def _hold_llm_route_off() -> None:
             return False, NO_LLM_PROVIDER_OFF_LINE
         if cfg is not None and local_llm_without_model(cfg):
             return False, NO_LOCAL_MODEL_OFF_LINE
-        return resolve()
+        return resolve(*args, **kwargs)
 
     llm_route_available._no_local_model_hold = True
     llm_route_available.__wrapped__ = resolve
@@ -326,7 +334,7 @@ def _block_llm_transport() -> None:
                 "No-LLM guard: core has no %s, that send path is not blocked", name
             )
             continue
-        if getattr(real, "_no_llm_provider_block", False):
+        if _wraps(real, "_no_llm_provider_block"):
             continue
 
         def blocked(*args, _real=real, _name=name, **kwargs):
@@ -345,6 +353,132 @@ def _block_llm_transport() -> None:
         blocked.__wrapped__ = real
         setattr(core_llm, name, blocked)
     log.info("LLM send paths blocked: llm_provider is none")
+
+
+def _wraps(fn, marker: str) -> bool:
+    """Whether ``fn`` or anything it wraps carries ``marker`` (the guards stack in either order)."""
+    while fn is not None:
+        if getattr(fn, marker, False):
+            return True
+        fn = getattr(fn, "__wrapped__", None)
+    return False
+
+
+def _bearer_for(provider: str, api_key: str | None) -> str | None:
+    """The key a guarded call may carry: never another provider's ambient key.
+
+    A local server or an unknown provider (loopback only) gets the local placeholder:
+    such servers ignore auth, and an inherited cloud key must not reach them. A cloud
+    provider keeps the key core resolved unless it is another provider's ambient key
+    (core matches a key to an endpoint by exact host, so ``api.groq.com.`` fell back to
+    OPENAI_API_KEY); then it carries its own key, or the placeholder when that is unset.
+    ``api_key`` None means the OpenAI SDK would read OPENAI_API_KEY.
+    """
+    from smartmemory_app.config import LLM_KEY_ENV_VARS, LLM_PROVIDER_KEY_ENV
+    from smartmemory_app.llm_errors import ANTHROPIC_FAMILY
+
+    own_name = LLM_PROVIDER_KEY_ENV.get(provider) or (
+        "ANTHROPIC_API_KEY" if provider in ANTHROPIC_FAMILY else None
+    )
+    if own_name is None:
+        return LOCAL_PLACEHOLDER_KEY
+    own = os.environ.get(own_name) or None
+    effective = api_key or os.environ.get("OPENAI_API_KEY")
+    foreign = {os.environ.get(n) for n in LLM_KEY_ENV_VARS if n != own_name}
+    if effective and effective != own and effective in foreign:
+        return own or LOCAL_PLACEHOLDER_KEY
+    return api_key
+
+
+def _guard_llm_route() -> None:
+    """Refuse any LLM send to a host the picked provider may not use.
+
+    WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1: the provider table pins a model per
+    provider, but core still decides the endpoint from the model name and the ambient
+    env, and on 2.0 it sends a ``claude-*`` model with no Agent SDK to api.openai.com
+    under whatever OPENAI_API_KEY is set (main's core half, 7d792b92, is not on 2.0).
+    Core's extractor also sends a ``llama*`` model to Groq whenever GROQ_API_KEY is set,
+    even with a local provider picked, and an inherited ``OPENAI_BASE_URL`` sends every
+    call, with the OpenAI key, to whatever host it names. So the two functions that
+    send to a provider are wrapped in core's module (call_llm reads them at call time):
+    ``call_openai_chat`` may only reach a host on the picked provider's allowlist
+    (``llm_errors.refused_host``: a cloud provider's own hosts, a local server's
+    loopback or ``llm_base_url`` host, an unknown provider's loopback), and the Claude
+    Agent SDK only serves the Anthropic family. A local provider's call carries the
+    local placeholder key, and no call carries another provider's ambient key
+    (``_bearer_for``). Bedrock needs an explicit
+    ``LLM_PROVIDER=bedrock`` pin and is left as is. Each call re-reads the config, as
+    the provider-none block does; provider none is that block's job. A refusal sends
+    nothing, logs a WARNING and raises ``LlmRouteRefused``.
+    """
+    from smartmemory.utils import llm as core_llm
+
+    from smartmemory_app.llm_errors import (
+        ANTHROPIC_FAMILY,
+        LlmRouteRefused,
+        OPENAI_URL,
+        SOURCE_BASE_URL,
+        refusal_remedy,
+        refused_host,
+    )
+
+    def picked() -> tuple[str, str]:
+        try:
+            cfg = load_config()
+        except Exception:
+            return "", ""  # unreadable config: an unknown provider, loopback only
+        return (cfg.llm_provider or "none").strip().lower(), cfg.llm_base_url or ""
+
+    def refuse(provider: str, target: str, source: str | None, path: str):
+        log.warning(
+            "LLM call refused before sending: llm_provider is %r but the call would go to %s (%s). %s",
+            provider,
+            target,
+            path,
+            refusal_remedy(provider, source),
+        )
+        raise LlmRouteRefused(provider, target, source)
+
+    def openai_chat(*args, _real, **kwargs):
+        provider, base_url = picked()
+        if provider != "none":
+            source = None
+            target = kwargs.get("api_base")
+            if not target and (target := os.environ.get("OPENAI_BASE_URL")):
+                source = SOURCE_BASE_URL
+            target = target or OPENAI_URL
+            host = refused_host(provider, target, base_url)
+            if host:
+                refuse(provider, host, source, "OpenAI-compatible client")
+            kwargs["api_key"] = _bearer_for(provider, kwargs.get("api_key"))
+        return _real(*args, **kwargs)
+
+    def claude_agent(*args, _real, **kwargs):
+        provider, _base_url = picked()
+        if provider != "none" and provider not in ANTHROPIC_FAMILY:
+            refuse(provider, "the Claude Agent SDK", None, "Claude Agent SDK")
+        return _real(*args, **kwargs)
+
+    for name, check in (
+        ("call_openai_chat", openai_chat),
+        ("_call_claude_agent", claude_agent),
+    ):
+        real = getattr(core_llm, name, None)
+        if real is None:
+            log.warning(
+                "Provider route guard: core has no %s, that send path is not guarded",
+                name,
+            )
+            continue
+        if _wraps(real, "_provider_route_guard"):
+            continue
+
+        def guarded(*args, _real=real, _check=check, **kwargs):
+            return _check(*args, _real=_real, **kwargs)
+
+        guarded._provider_route_guard = True
+        guarded.__wrapped__ = real
+        setattr(core_llm, name, guarded)
 
 
 def _get_local_memory(
@@ -624,11 +758,52 @@ def _normalize_ingest_result(result) -> str | dict:
     """
     if isinstance(result, str):
         return result
-    if isinstance(result, dict):
+    if isinstance(result, dict) and "schema_version" not in result:
         if result.get("status") == "held":
             return result
         return result.get("item_id") or str(result)
-    return str(result)
+    # Receipt arm (N-02.activate.outer-readers): a save receipt reads as its subject id, never str(receipt).
+    from smartmemory_app.save_return import resolve_save_return
+
+    resolved = resolve_save_return(result, op="ingest").value
+    return resolved if isinstance(resolved, str) else str(resolved)
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        log.warning("%s=%r is not a positive integer, using %d", name, raw, default)
+        return default
+    return value
+
+
+# LITE-RECALL-WIDEN-UNBOUNDED-1: recall doubles its fetch while filtering leaves slots empty. A workspace that matches
+# no row (a session in a fresh git worktree) doubled until one page held the whole store: a full-table read per round,
+# under the backend lock, for hours. The widest fetch is this multiple of top_k, and never below the floor.
+#   SMARTMEMORY_RECALL_WIDEN_FACTOR   widest recall fetch, as a multiple of top_k (8)
+_RECALL_WIDEN_FACTOR = _positive_int_env("SMARTMEMORY_RECALL_WIDEN_FACTOR", 8)
+_RECALL_WIDEN_FLOOR = 16
+
+
+def _recall_fetch_ceiling(requested: int, first_fetch: int) -> int:
+    """The widest fetch one recall round may ask for; never below the first fetch, so round 1 is unchanged."""
+    return max(first_fetch, _RECALL_WIDEN_FLOOR, _RECALL_WIDEN_FACTOR * requested)
+
+
+def _recall_clock() -> float:
+    """Epoch seconds: the clock a recall ``deadline`` is read on (``lifecycle_api`` stamps it from ``time.time``)."""
+    return time.time()
+
+
+def recall_deadline_passed(deadline: float | None) -> bool:
+    """True once ``deadline`` (epoch seconds) has passed. Without a deadline the clock is not read."""
+    return deadline is not None and _recall_clock() >= deadline
 
 
 def _split_recall_counts(top_k: int) -> tuple[int, int]:
@@ -696,6 +871,39 @@ def ingest(
       usearch and entity_patterns.jsonl require cross-process coordination.
       On Timeout: raises filelock.Timeout — caller surfaces as error string.
     """
+    result, remote = _ingest_raw(content, memory_type, sync, properties, origin)
+    return result if remote else _legacy_ingest_view(result, sync)
+
+
+def ingest_with_receipt(
+    content: str,
+    memory_type: str = "episodic",
+    sync: bool = True,
+    properties: dict[str, str] | None = None,
+    origin: str | None = None,
+):
+    """The receipt doorway of ``ingest``: the same save, returned as a ``save_return.SaveReturn``.
+
+    ``ingest`` keeps its legacy return (an item_id string, or the sync=False dict) for its existing callers, so a
+    core save receipt reads there as its subject id (U4.32). This doorway is for callers that render the receipt
+    (MCP ``memory_save``, G52/G137): on the receipt arm ``value`` is the subject id and ``receipt``/``summary`` are
+    the wire receipt and its one line; on the legacy arm ``value`` is exactly what ``ingest`` returns and
+    ``receipt`` is None (no receipt is made up). Hosted mode is ``ingest``'s hosted return on the legacy arm.
+    Refusals (``SaveRejected``, ``SaveReturnRefused``) are the ones ``ingest`` raises. Arguments are ``ingest``'s.
+    """
+    from smartmemory_app.save_return import SaveReturn, resolve_save_return
+
+    result, remote = _ingest_raw(content, memory_type, sync, properties, origin)
+    if remote:  # hosted receipts belong to the hosted-adapters step (see ``save``): ``ingest``'s hosted return, as is
+        return SaveReturn(result)
+    resolved = resolve_save_return(result, op="ingest")
+    if resolved.receipt is not None:
+        return resolved
+    return SaveReturn(_legacy_ingest_view(result, sync))
+
+
+def _ingest_raw(content, memory_type, sync, properties, origin):
+    """Run one ``ingest`` save and return ``(what core or the hosted client returned, unread; whether hosted)``."""
     mem = get_memory()
     from smartmemory_app.remote_backend import RemoteMemory
 
@@ -719,24 +927,87 @@ def ingest(
             if k not in RESERVED_INGEST_PROPERTIES:
                 ctx[k] = v
     if isinstance(mem, RemoteMemory):
-        return mem.ingest(content, memory_type, context=ctx)
+        return mem.ingest(content, memory_type, context=ctx), True
     # Local path — acquire write lock for cross-process coordination
     data_path = _data_path if _data_path is not None else _resolve_data_dir()
     lock = _get_lock_file(data_path)
     with lock:
-        result = mem.ingest(content, context=ctx, sync=sync)
-        if isinstance(result, dict) and result.get("status") == "held":
-            return result
-        if not sync and isinstance(result, dict):
-            # Initialization has applied the effective provider/model settings.
-            # Use core's placement resolver, not the foreground extraction status:
-            # even a configured LLM is deferred and reports ruler_only at save time.
-            warning = llm_extraction_warning()
-            if warning:
-                log.warning("%s", warning)
-                return {**result, "warning": warning}
-            return result
+        return mem.ingest(content, context=ctx, sync=sync), False
+
+
+def _legacy_ingest_view(result, sync: bool):
+    """The legacy local ``ingest`` return of one core result: the item_id string, the sync=False dict, or a hold."""
+    # sync=False: a receipt reads as the legacy dict; legacy returns pass through unchanged
+    if not sync:
+        from smartmemory_app.save_return import ingest_dict
+
+        result = ingest_dict(result, op="ingest")
+    if isinstance(result, dict) and result.get("status") == "held":
+        return result
+    if not sync and isinstance(result, dict):
+        # Initialization has applied the effective provider/model settings.
+        # Use core's placement resolver, not the foreground extraction status:
+        # even a configured LLM is deferred and reports ruler_only at save time.
+        warning = llm_extraction_warning()
+        if warning:
+            log.warning("%s", warning)
+            return {**result, "warning": warning}
+        return result
     return _normalize_ingest_result(result)
+
+
+def save(call, *, memory=None):
+    """Submit one receipt-arm save call (``save_caller.SaveCall``) and return its ``SaveReturn``.
+
+    The explicit-wait, retry-key doorway (C-01.activate.save.local-adapters). It is not ``ingest``: it calls only
+    ``SmartMemory.save``, which core refuses with ``SaveNotEnabled`` until the common-receipt facade is enabled, and
+    it never falls back to ``add``/``ingest``. Local mode takes the same cross-process write lock as ``ingest``.
+    Hosted mode is refused: hosted receipts belong to the hosted-adapters step, and the hosted API is unchanged.
+
+    ``memory`` lets a caller that already holds the local ``SmartMemory`` (the MCP backend) pass it; the default is
+    the active backend.
+    """
+    from contextlib import ExitStack
+
+    from smartmemory_app.save_caller import (
+        MEMORY_UNAVAILABLE,
+        SAVE_UNAVAILABLE,
+        WRITE_LOCK_UNAVAILABLE,
+        refuse,
+        refuse_from,
+        submit,
+    )
+
+    try:
+        mem = memory if memory is not None else get_memory()
+    except Exception as exc:  # the default memory could not be opened: nothing is saved
+        refuse_from(
+            exc,
+            MEMORY_UNAVAILABLE,
+            "the local memory could not be opened",
+            "nothing was saved and ingest was not used",
+        )
+    from smartmemory_app.remote_backend import RemoteMemory
+
+    if isinstance(mem, RemoteMemory):
+        refuse(
+            SAVE_UNAVAILABLE,
+            "hosted mode has no receipt save from this client",
+            "nothing was saved and ingest was not used",
+        )
+    stack = ExitStack()
+    try:  # only taking the lock is guarded: what submit raises (core's typed refusals) passes through unchanged
+        data_path = _data_path if _data_path is not None else _resolve_data_dir()
+        stack.enter_context(_get_lock_file(data_path))
+    except Exception as exc:  # an unusable data dir, or a lock that is held or times out, saves nothing
+        refuse_from(
+            exc,
+            WRITE_LOCK_UNAVAILABLE,
+            "the local write lock could not be taken",
+            "nothing was saved and ingest was not used",
+        )
+    with stack:
+        return submit(mem, call)
 
 
 def persist_provenance(edits) -> dict:
@@ -763,57 +1034,106 @@ def persist_provenance(edits) -> dict:
         return ProvenancePersister(mem).persist(edits)
 
 
-def _list_all_memories(mem) -> list[dict]:
-    """Return all memory nodes (excluding entity/relation/Version nodes).
+_WILDCARD_PENDING_WINDOW = 200
+_WILDCARD_CORE_CAP = 102_400
+#: Reasons the wrapper adds to a gated recall answer, beside core's coverage names, when optional context it
+#: would have included could not be read: the answer is then partial, never read as "there was none" (U5.21, C8).
+_SNAPSHOT_LOST_REASON = "snapshot_lookup_failed"
+_DECISIONS_LOST_REASON = "decision_lookup_failed"
 
-    Used by wildcard search (`*`). Filters to user memory items only —
-    enrichment creates entity/relation nodes that should not appear in
-    user-facing search results.
+
+def _gated_fetch_cap() -> int:
+    """The widest fetch one gated search may ask for (the read gate is always on).
+
+    Two core bounds, the smaller wins: the budget of core's read gate (``search.lane_gate.DEFAULT_MAX_SCAN``), because a
+    wider fetch cannot reach candidates the gate does not examine, and the intake read port's page limit
+    (``save.read_port.MAX_PAGE_LIMIT``), because a gated search with a bound port asks the port for ``top_k`` rows and
+    core refuses a wider ask (``PendingFacadeUnavailable``).
     """
-    backend = mem._graph.backend
-    snapshot = backend.serialize()
-    _EXCLUDED_TYPES = {"Version", "entity", "relation", "pattern"}
-    items = []
-    for raw in snapshot.get("nodes", []):
-        mt = raw.get("memory_type", "")
-        if mt in _EXCLUDED_TYPES:
-            continue
-        props = raw.get("properties", {})
-        nc = props.get("node_category", "")
-        if nc in ("entity", "relation"):
-            continue
-        # Include user metadata so property filters work on wildcard results
-        metadata = {
-            k: v
-            for k, v in props.items()
-            if k
-            not in {
-                "content",
-                "label",
-                "memory_type",
-                "node_category",
-                "entity_type",
-                "embedding",
-                "category",
-                "confidence",
-                "stale",
-                "reference",
-            }
-        }
-        item = {
-            "item_id": raw.get("item_id", ""),
-            "content": props.get("content", props.get("label", "")),
-            "memory_type": mt or props.get("memory_type", ""),
-            "created_at": raw.get("created_at", props.get("created_at", "")),
-            # CORE-PROPS-1: Include confidence, stale, reference as top-level keys
-            "confidence": props.get("confidence", 1.0),
-            "stale": props.get("stale", False),
-            "reference": props.get("reference", False),
-        }
-        if metadata:
-            item["metadata"] = metadata
-        items.append(item)
-    return items
+    from smartmemory.save.read_port import MAX_PAGE_LIMIT
+    from smartmemory.search.lane_gate import DEFAULT_MAX_SCAN
+
+    return min(DEFAULT_MAX_SCAN, MAX_PAGE_LIMIT)
+
+
+class WildcardEnumerationOverflowError(RuntimeError):
+    """Core's wildcard enumeration still returned a full window at the cap (U5.22, C1/C4)."""
+
+
+def _result_dict(hit) -> dict:
+    """A core read result as a response dict, its read_status carrier checked first (U5.22, C1/C8).
+
+    Core's ``MemoryItem.to_dict()`` copies the response-only carrier with ``dict()``, so an unreadable carrier would
+    escape as a raw ValueError/TypeError, and an empty or stateless dict would be copied as valid. Every result this
+    module serializes goes through here: absent stays legacy, unreadable is ``MalformedReadStatusError`` (one WARNING).
+    """
+    from smartmemory.models.read_status import read_status_of
+
+    from smartmemory_app.recall_format import validated_carrier
+
+    item_id = (
+        hit.get("item_id") if isinstance(hit, dict) else getattr(hit, "item_id", None)
+    )
+    validated_carrier(read_status_of(hit), item_id)
+    row = hit.to_dict() if hasattr(hit, "to_dict") else dict(hit)
+    # CLAIMS-BUILD-21: core stamps the lanes that found a search hit as the response-only ``_matched_by``, which
+    # ``to_dict`` leaves out. Copied only where stamped, so a get or list row gains no key.
+    if "_matched_by" in getattr(hit, "__dict__", {}):
+        row["matched_by"] = hit._matched_by
+    return row
+
+
+def _core_wildcard_rows(mem, **core_kwargs) -> list[dict]:
+    """Gate-ON wildcard: core's merged enumeration is the one authority for membership, payload and read_status.
+
+    The wrapper's own snapshot scan reads the graph only. It cannot see a receipt-only (intake) item, a newer
+    admission revision of a graph row, an admission tombstone or core's origin/lifecycle exclusions, so it is not
+    merged with core's answer: core's answer is used whole. Exhaustion is decided from core's own page: a window that
+    comes back full is doubled until it comes back short, so no returned row is left without its carrier. A full
+    window at the cap is refused (one WARNING, typed error), never truncated.
+    """
+    from smartmemory.search.visibility_gate import gated_partial_coverage
+
+    window = _WILDCARD_PENDING_WINDOW
+    while True:
+        hits = mem.search("*", top_k=window, **core_kwargs)
+        # U5.21 (C3): a short page is exhaustion only when core did not report its own answer as partial.
+        partial = gated_partial_coverage(hits, where="wildcard search")
+        if len(hits) > window:
+            # C4: the bound caps every fetch. A callee that over-returns broke the window contract, so its page can
+            # neither prove exhaustion nor be trusted as complete: refuse, never consume or truncate it.
+            log.warning(
+                "wildcard search refused: core returned %d hits for a window of %d, so the listing bound is broken",
+                len(hits),
+                window,
+            )
+            raise WildcardEnumerationOverflowError(
+                f"wildcard enumeration returned {len(hits)} hits for a window of {window}"
+            )
+        if len(hits) < window and not partial:
+            break
+        if window >= _WILDCARD_CORE_CAP:
+            if len(hits) < window:
+                log.warning(
+                    "wildcard search refused: core reported a partial answer at the cap of %d hits, "
+                    "so the listing would be incomplete",
+                    window,
+                )
+            else:
+                log.warning(
+                    "wildcard search refused: core still returned a full window of %d hits at the cap, "
+                    "so the listing would be incomplete",
+                    window,
+                )
+            raise WildcardEnumerationOverflowError(
+                f"wildcard enumeration exceeds {_WILDCARD_CORE_CAP} hits"
+            )
+        window = min(window * 2, _WILDCARD_CORE_CAP)
+    rows = []
+    for hit in hits:
+        payload = _result_dict(hit)
+        rows.append({"confidence": 1.0, "stale": False, "reference": False, **payload})
+    return rows
 
 
 # All explicit caller-settable SmartMemory.search parameters, plus documented kwargs.
@@ -839,9 +1159,13 @@ _ALLOWED = frozenset(
         "include_consolidated",
         "include_superseded",
         "include_retracted",
+        "manual_scan",
+        "exclude_speculative",
+        "business_scope",
+        "valid_at",
         "as_of_date",
         "as_of_strict",
-        "valid_at",
+        "fail_if_conflicted",
         "since",
         "until",
         "enable_hybrid",
@@ -852,7 +1176,6 @@ _ALLOWED = frozenset(
         "metadata_filter",
         "include_reference",
         "memory_types",
-        "manual_scan",
     }
 )
 
@@ -875,7 +1198,7 @@ def search(
         memory_type: Restrict to a single memory type (e.g. "decision").
         **search_kwargs: Recall tuning forwarded to the core engine
                  (decompose_query, channel_weights, multi_hop, max_hops,
-                 budget_ms, semantic_hops, valid_at). Unknown keys warn and are dropped so
+                 budget_ms, semantic_hops). Unknown keys warn and are dropped so
                  callers/contract drift never raise TypeError here.
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
@@ -963,8 +1286,8 @@ def search(
         "include_superseded",
         "include_retracted",
     }:
-        all_items = _list_all_memories(mem)
-        # F3: this wildcard shortcut bypasses core search visibility. Hide raw hooks here too.
+        all_items = _core_wildcard_rows(mem, **core_kwargs)
+        # F3: hide raw hook rows from the wildcard listing.
         all_items = [
             r
             for r in all_items
@@ -1021,17 +1344,49 @@ def search(
 
             all_items = [r for r in all_items if _keep(r)]
         return all_items
+    from smartmemory.search.results import carry_partial
+    from smartmemory.search.visibility_gate import (
+        FETCH_BOUND_REASON,
+        gated_fetch_bound,
+        gated_partial_coverage,
+    )
+
     if not filters:
         results = mem.search(query, top_k=top_k, **core_kwargs)
+        partial = gated_partial_coverage(results, where="local search")
         if isinstance(results, dict):
-            return {key: [r.to_dict() for r in items] for key, items in results.items()}
-        return [r.to_dict() for r in results]
+            # U5.21 (C4): gate ON, no group holds a row past the fetch (a conforming grouped answer is never cut).
+            return {
+                key: [
+                    _result_dict(r)
+                    for r in gated_fetch_bound(
+                        items, top_k, where=f"local search group {key!r}"
+                    )
+                ]
+                for key, items in results.items()
+            }
+        results = gated_fetch_bound(results, top_k, where="local search")
+        # U5.21 (C8): the call's completeness rides on the returned list (still a plain list to every caller), so a
+        # partial answer with no visible row is never read downstream as "nothing found".
+        return carry_partial([_result_dict(r) for r in results], partial)
     # With filters: fetch a wider window, then post-filter. If still short,
     # widen progressively to avoid missing sparse matches.
+    cap = _gated_fetch_cap()
+    asked = 0
+    partial: tuple[str, ...] = ()
+    settled = False
     for multiplier in (5, 20, 50):
         fetch_k = top_k * multiplier
+        # U5.21 (C4): no fetch is wider than the bound core's read gate can examine.
+        fetch_k = min(fetch_k, cap)
+        if fetch_k <= asked:
+            break  # the last round already asked for the bound: a wider window cannot be asked for
+        asked = fetch_k
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
-        items = [r.to_dict() for r in results]
+        partial = gated_partial_coverage(results, where="local filtered search")
+        # U5.21 (C4): a row past the fetch was never asked for, so it is neither matched nor used (gate ON).
+        results = gated_fetch_bound(results, fetch_k, where="local filtered search")
+        items = [_result_dict(r) for r in results]
         matched = [
             r
             for r in items
@@ -1040,9 +1395,21 @@ def search(
                 for k, v in filters.items()
             )
         ]
-        if len(matched) >= top_k or len(results) < fetch_k:
-            break  # enough matches found, or exhausted all results
-    return matched[:top_k]
+        if len(matched) >= top_k or (len(results) < fetch_k and not partial):
+            settled = True
+            break  # enough matches found, or exhausted all results (core's partial answer is not exhaustion)
+    if not settled:
+        # C3: the widest window this call may ask for is spent and the answer is not proved complete. Said, never
+        # presented as an exhausted search.
+        log.warning(
+            "local filtered search stopped at a fetch of %d: %d of %d wanted matched and candidates past that window "
+            "were not examined",
+            asked,
+            len(matched),
+            top_k,
+        )
+        partial = (*partial, FETCH_BOUND_REASON)
+    return carry_partial(matched[:top_k], partial)
 
 
 def recall(
@@ -1054,8 +1421,12 @@ def recall(
     workspace_id: str | None = None,
     strict: bool | None = None,
     exclude_ids: list[str] | None = None,
+    deadline: float | None = None,
 ) -> str:
     """HOOK-RECALL-RELEVANCE-1: workspace-scoped, ranked, deduped recall.
+
+    ``deadline`` (epoch seconds, ``time.time``): a widening round does not start past it. Without one the fetch
+    ceiling alone bounds the widening (LITE-RECALL-WIDEN-UNBOUNDED-1).
 
     Bug fixes vs legacy:
       - empty-content items skipped
@@ -1080,6 +1451,13 @@ def recall(
         record_hook_degradation,
         recall_item_label,
         time_ms,
+    )
+
+    from smartmemory.search.results import carry_partial_text
+    from smartmemory.search.visibility_gate import (
+        FETCH_BOUND_REASON,
+        gated_fetch_bound,
+        gated_partial_coverage,
     )
 
     t0 = time_ms()
@@ -1108,12 +1486,29 @@ def recall(
     # 1. Optional snapshot frame (graph-mirrored markdown from CORE-SUMMARY-1)
     excluded = set()
     frame = ""
-    if include_snapshot:
+    # U5.21 (C3/C8): why the optional context that rides on the answer is incomplete.
+    context_partial: tuple[str, ...] = ()
+    # LITE-RECALL-WIDEN-UNBOUNDED-1 (RCLWIDEN-CX F1): no lookup, channel or round starts once the deadline has passed,
+    # the first included. ``stopped`` names why widening ended; the one shortfall WARNING below reports it.
+    stopped = (
+        "deadline" if include_snapshot and recall_deadline_passed(deadline) else ""
+    )
+    if include_snapshot and not stopped:
         try:
             snaps = mem.search("", memory_type="snapshot", sort_by="recency", top_k=1)
+            # The frame is one newest row: a partial answer means the newest one may be unexamined. The reader's WARNING
+            # names it and the answer carries it, so a missing frame is not read as "no snapshot".
+            context_partial = gated_partial_coverage(
+                snaps, where="orient snapshot lookup"
+            )
+            snaps = gated_fetch_bound(snaps, 1, where="orient snapshot lookup")
         except Exception as exc:  # noqa: BLE001
+            # U5.21 (C1): record_hook_degradation reads core's logged mark off ``exc`` (gate ON only), so a refusal the
+            # raising site already logged is not logged twice. Any other failure logs as before.
             record_hook_degradation("Orient lost snapshot context", exc)
             snaps = []
+            # C8: a lookup that failed is not "no snapshot". The answer says the frame was lost.
+            context_partial = (_SNAPSHOT_LOST_REASON,)
         snaps = filter_hook_items(snaps, excluded)
         if snaps:
             snap = snaps[0]
@@ -1169,34 +1564,69 @@ def recall(
                 kept.append(r)
         return kept
 
+    if not stopped and recall_deadline_passed(deadline):
+        stopped = "deadline"
+    lessons = []
     try:
-        lessons = eligible(
-            matching_lessons(
-                mem._graph.search_nodes({"memory_type": "decision"}), query
+        if not stopped:
+            lessons = eligible(
+                matching_lessons(
+                    mem._graph.search_nodes({"memory_type": "decision"}), query
+                )
             )
-        )
     except Exception as exc:
         record_hook_degradation("Recall lost decision lookup", exc)
         lessons = []
+        # C8: a lookup that failed is not "no decisions". The answer says the decisions were lost.
+        context_partial = (*context_partial, _DECISIONS_LOST_REASON)
 
     # CORE-RECALL-NO-MANUAL-SCAN-1: hook recall takes graph search's empty answer as
     # final. Needs core >= 1.5.33 (older SmartMemory.search has no `manual_scan`).
     requested = max(0, top_k)
     fetch_k = max(1, requested * (2 if query else 1))
+    # U5.21 (C4): every fetch (the first included) is clamped to what core's read gate can examine, and rows a
+    # callee returns beyond the fetch are not used.
+    # LITE-RECALL-WIDEN-UNBOUNDED-1: the smaller of the gate's bound and the recall ceiling (a multiple of top_k).
+    gate_cap = _gated_fetch_cap()
+    cap = min(_recall_fetch_ceiling(requested, fetch_k), gate_cap)
+    fetch_k = min(fetch_k, cap)
+
+    def examined(found, bound: int, where: str) -> list:
+        return list(gated_fetch_bound(found, bound, where=where))
+
     recent_k, semantic_k = _split_recall_counts(requested)
     results = []
+    # A deadline that passed before the first round: no candidate was examined, so the answer is partial.
+    partial_names: tuple[str, ...] = (FETCH_BOUND_REASON,) if stopped else ()
     body = ""
     emitted = 0
-    while requested:
+    rounds = 0
+    while requested and not stopped:
+        rounds += 1
+        # U5.21 (C3): a short page is exhaustion only when core did not report that answer as partial.
+        partial = False
         if query:
-            raw = list(mem.search(query, top_k=fetch_k, manual_scan=False))
+            found = mem.search(query, top_k=fetch_k, manual_scan=False)
+            partial_names = gated_partial_coverage(found, where="recall search")
+            partial = bool(partial_names)
+            raw = examined(found, fetch_k, "recall search")
             results = eligible(raw)
-            exhausted = len(raw) < fetch_k
+            exhausted = len(raw) < fetch_k and not partial
         elif cwd:
-            recent = list(
-                mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
+            found_recent = mem.search(
+                "", top_k=fetch_k, sort_by="recency", manual_scan=False
             )
-            semantic = list(mem.search(cwd, top_k=fetch_k, manual_scan=False))
+            found_semantic = mem.search(cwd, top_k=fetch_k, manual_scan=False)
+            partial_recent = gated_partial_coverage(
+                found_recent, where="recall recency search"
+            )
+            partial_semantic = gated_partial_coverage(
+                found_semantic, where="recall workspace search"
+            )
+            partial_names = tuple(dict.fromkeys((*partial_recent, *partial_semantic)))
+            partial = bool(partial_names)
+            recent = examined(found_recent, fetch_k, "recall recency search")
+            semantic = examined(found_semantic, fetch_k, "recall workspace search")
             recent_rows, semantic_rows = eligible(recent), eligible(semantic)
             # Preserve ceil(k/2) recency first, then floor(k/2) semantic.
             # Overflow from either channel can replace missing/duplicate slots.
@@ -1206,13 +1636,16 @@ def recall(
                 + recent_rows[recent_k:]
                 + semantic_rows[semantic_k:]
             )
-            exhausted = len(recent) < fetch_k and len(semantic) < fetch_k
-        else:
-            raw = list(
-                mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
+            exhausted = (len(recent) < fetch_k and not partial_recent) and (
+                len(semantic) < fetch_k and not partial_semantic
             )
+        else:
+            found = mem.search("", top_k=fetch_k, sort_by="recency", manual_scan=False)
+            partial_names = gated_partial_coverage(found, where="orient recency search")
+            partial = bool(partial_names)
+            raw = examined(found, fetch_k, "orient recency search")
             results = eligible(raw)
-            exhausted = len(raw) < fetch_k
+            exhausted = len(raw) < fetch_k and not partial
 
         body = format_recall_lines(
             [_item_to_recall_dict(r) for r in lessons + results],
@@ -1222,14 +1655,42 @@ def recall(
         emitted = body.count("\n- ") if body else 0
         if emitted >= requested or exhausted:
             break
-        fetch_k *= 2
+        if fetch_k >= cap:
+            # The bound is spent and the answer is not proved complete: a partial answer (core's gate examined only
+            # part of what it could) or a full page at the bound. Either way deeper candidates were not examined.
+            stopped = (
+                "core reported a partial answer"
+                if partial
+                else "the page came back full"
+            )
+            if cap < gate_cap:
+                stopped = f"ceiling: {stopped}"
+            # C3/C8: candidates past the bound were not examined, so the answer is partial whatever made the stop.
+            partial_names = (*partial_names, FETCH_BOUND_REASON)
+            break
+        if recall_deadline_passed(deadline):
+            # The next round would start past the read's deadline: deeper candidates were not examined either.
+            stopped = "deadline"
+            partial_names = (*partial_names, FETCH_BOUND_REASON)
+            break
+        fetch_k = min(fetch_k * 2, cap)
 
     if emitted < requested:
-        log.warning(
-            "recall shortfall: requested=%d emitted=%d, eligible distinct candidates exhausted",
-            requested,
-            emitted,
-        )
+        if stopped:
+            log.warning(
+                "recall shortfall: requested=%s emitted=%d; stopped widening %s (%s), so eligible "
+                "candidates past what core examined are not shown",
+                _count_text(requested),
+                emitted,
+                f"at a fetch of {fetch_k}" if rounds else "before the first fetch",
+                stopped,
+            )
+        else:
+            log.warning(
+                "recall shortfall: requested=%s emitted=%d; eligible distinct candidates exhausted",
+                _count_text(requested),
+                emitted,
+            )
 
     # 7. Compose: body + optional snapshot frame
     if body and frame:
@@ -1259,7 +1720,20 @@ def recall(
         latency_ms=time_ms() - t0,
     )
 
-    return out
+    # U5.21 (C8): an empty or short recall from a partial answer is not "no memories". The text it returns is the plain
+    # str it always was (OFF: the same object) and its ``.partial`` names why core called the answer partial.
+    return carry_partial_text(
+        out, tuple(dict.fromkeys((*context_partial, *partial_names)))
+    )
+
+
+def _count_text(n: int) -> str:
+    """A caller-supplied count for a log line: the digits when it is a machine-sized int, else its bit length.
+
+    ``%d`` of a 5000-digit int raises ``ValueError`` under Python's int-to-str limit, which would turn a WARNING into a
+    crash. Same text as ``%d`` for every ordinary count.
+    """
+    return str(n) if n.bit_length() <= 64 else f"<an integer of {n.bit_length()} bits>"
 
 
 def _snapshot_is_fresh(snap, max_days: int = 7) -> bool:
@@ -1312,7 +1786,7 @@ def get(item_id: str) -> dict:
     if isinstance(mem, RemoteMemory):
         return mem.get(item_id) or {}  # already a dict
     item = mem.get(resolve_readonly_item_id(mem._graph.backend, item_id))
-    return item.to_dict() if item else {}
+    return _result_dict(item) if item else {}
 
 
 def delete(item_id: str) -> bool:

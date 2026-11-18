@@ -63,7 +63,8 @@ def test_no_key_route_and_cli_return_real_evidence(local_ask, caplog):
     assert body["evidence"][0]["content"] == item.content
     assert body["evidence"][0]["memory_type"] == "semantic"
     assert body["evidence"][0]["created_at"]
-    assert "No LLM configured" in caplog.text
+    assert "No usable LLM (" in caplog.text
+    assert "Returning extractive memories without a written answer." in caplog.text
     for flags in ([], ["--reasoning"]):
         result = CliRunner().invoke(
             cli_module.cli,

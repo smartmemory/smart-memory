@@ -19,7 +19,7 @@ from smartmemory.plugins.embedding import EmbeddingService
 from smartmemory.search.rerank import CrossEncoderReranker
 from smartmemory.tools.factory import create_lite_memory
 
-from smartmemory_app import cli, local_api, storage
+from smartmemory_app import cli, crash_reporter, hook_failures, local_api, storage
 from smartmemory_app.config import LLM_KEY_ENV_VARS
 
 TEXTS = {
@@ -108,6 +108,13 @@ def memory(tmp_path, monkeypatch, reranker):
             )
         monkeypatch.setattr(storage, "get_memory", lambda: mem)
         monkeypatch.setattr(local_api, "get_memory", lambda: mem)
+        # CLI startup spawns daemon threads that flush the report outbox and consume hook-failure
+        # markers. They outlive the test's per-test home patches and would claim queued entries in
+        # the real ``~/.smartmemory/report-outbox``; they are unrelated to the output under test.
+        monkeypatch.setattr(crash_reporter, "flush_in_background", lambda *a, **k: None)
+        monkeypatch.setattr(
+            hook_failures, "consume_in_background", lambda *a, **k: None
+        )
         # Only bypass startup diagnostics; retrieval, models and HTTP routing remain real.
         monkeypatch.setattr(cli, "_prepare_direct_access", lambda **kwargs: None)
         yield mem

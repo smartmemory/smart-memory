@@ -57,6 +57,25 @@ def _score_of(row: dict):
     return None
 
 
+def _parent_of(fact: dict, pool_ids: set) -> str | None:
+    """The memory a fact row groups under (CLI-2.0-SEARCH-FACT-COLLAPSE-1).
+
+    A 2.0 edge can have several producers (``metadata.source_items``, G22): the parent is the first
+    of them already in the pool, so the fact joins a memory that matched on its own, else
+    ``source_item``, which core sets to the list's last entry (the most recent producer). A row
+    with only ``source_item`` (1.x edge, or one producer) groups exactly as on 1.5.
+    """
+    meta = fact.get("metadata") or {}
+    sources = meta.get("source_items")
+    if isinstance(sources, list):
+        for source in sources:
+            if source in pool_ids:
+                return source
+    return meta.get("source_item") or (
+        sources[-1] if isinstance(sources, list) and sources else None
+    )
+
+
 def _child(rank: int, fact: dict) -> dict:
     return {
         "item_id": fact.get("item_id"),
@@ -94,20 +113,32 @@ def collapse_to_parents(
 ) -> list[dict]:
     """Return at most ``k`` rows, one per source memory, facts nested under ``children``.
 
+    A fact's source memory is ``_parent_of``: with several producers, the first already in the pool.
+
     ``rows`` is score-ordered, so a group's rank is where its first row appeared.
     ``fetch_parent`` is a scoped read (``storage.get``): it returns ``{}`` for a memory the
     caller cannot read, in which case the fact stays a standalone row.
     ``since``/``until`` drop rows outside the window BEFORE grouping, so an out-of-window
     fact never admits its parent, and a promoted parent is re-checked against the window.
     """
+    # rank = position in the pre-collapse pool
+    kept = [
+        (rank, row)
+        for rank, row in enumerate(rows, 1)
+        if isinstance(row, dict) and _in_window(row, since, until)
+    ]
+    # Two passes: a multi-source fact's parent depends on which memories are already in the pool.
+    pool_ids = {
+        row.get("item_id") or row.get("id")
+        for _, row in kept
+        if row.get("memory_type") != "fact"
+    }
     groups: dict[str, dict] = {}
     no_source = 0
-    for rank, row in enumerate(rows, 1):  # rank = position in the pre-collapse pool
-        if not isinstance(row, dict) or not _in_window(row, since, until):
-            continue
+    for rank, row in kept:
         item_id = row.get("item_id") or row.get("id")
         if row.get("memory_type") == "fact":
-            source = (row.get("metadata") or {}).get("source_item")
+            source = _parent_of(row, pool_ids)
             if not source:
                 # Legacy edge: nothing to group it with, so it keeps its own slot.
                 no_source += 1

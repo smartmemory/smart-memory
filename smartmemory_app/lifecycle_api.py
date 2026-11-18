@@ -18,8 +18,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
-from smartmemory_app.lifecycle import MemoryLifecycle, run_phase
+from smartmemory_app.lifecycle import STRICT_KEY, MemoryLifecycle, run_phase
 from smartmemory_app.lifecycle_config import LifecycleConfig
 
 log = logging.getLogger(__name__)
@@ -141,7 +142,10 @@ def _drop(phase: str, why: str) -> dict:
 async def _read_phase(request: Request, phase: str, work) -> dict:
     """Run a read phase (orient, recall) on the read pool under a time cap.
 
-    Answers ``{"context": work(body)}``. Three cases answer ``{"context": ""}``, the
+    Answers ``{"context": work(body, start_by)}``: ``start_by`` (epoch seconds) is the
+    deadline the work's recall widening checks before each round, so a started worker
+    stops widening once the answer can no longer be used (LITE-RECALL-WIDEN-UNBOUNDED-1).
+    Three cases answer ``{"context": ""}``, the
     shape the hook client already treats as "nothing to inject", each with a WARNING
     and a running count:
 
@@ -173,7 +177,7 @@ async def _read_phase(request: Request, phase: str, work) -> dict:
         late = time.time() - start_by
         if late >= 0:
             raise _Expired(f"reached a read slot {late:.2f}s past its deadline")
-        return work(body)
+        return work(body, start_by)
 
     try:
         result = await asyncio.wait_for(_run_on(_read_pool, run), timeout=budget)
@@ -222,7 +226,11 @@ def _load_lifecycle_config() -> dict:
 @lifecycle_router.post("/orient")
 async def orient(request: Request):
     return await _read_phase(
-        request, "orient", lambda body: _get_lifecycle(body).orient(cwd=body.get("cwd"))
+        request,
+        "orient",
+        lambda body, deadline: _get_lifecycle(body).orient(
+            cwd=body.get("cwd"), deadline=deadline
+        ),
     )
 
 
@@ -236,31 +244,68 @@ async def recall(request: Request):
     return await _read_phase(
         request,
         "recall",
-        lambda body: _get_lifecycle(body).recall(
-            body.get("prompt", ""), cwd=body.get("cwd")
+        lambda body, deadline: _get_lifecycle(body).recall(
+            body.get("prompt", ""), cwd=body.get("cwd"), deadline=deadline
         ),
     )
+
+
+# What a failed write phase loses, named in the route's WARNING.
+_WRITE_PHASE_LOSS = {
+    "observe": "tool observation",
+    "distill": "turn pair",
+    "learn": "error memory",
+}
+
+
+def _write_phase(phase: str, body: dict):
+    """Run one hook write phase; a write that did not land is an error response, never ``ok``.
+
+    The phase runs strict, so a failed store raises instead of being logged and
+    swallowed inside ``MemoryLifecycle`` (U20.S1-HOOK-STORE-WORKSPACE-REFUSAL-1:
+    the route answered ``{"status": "ok"}`` while every 2.0 store was refused).
+    The CLI caller treats a non-2xx as "daemon unavailable" and runs the phase
+    in-process once more (``cli.run_lifecycle_phase``).
+    """
+    try:
+        run_phase(_get_lifecycle(body), phase, {**body, STRICT_KEY: True})
+    except Exception as exc:
+        lost = _WRITE_PHASE_LOSS[phase]
+        log.warning(
+            "Lifecycle %s write failed; %s not stored: %s: %s",
+            phase,
+            lost,
+            type(exc).__name__,
+            exc,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "phase": phase,
+                "lost": lost,
+                "error": f"{type(exc).__name__}: {exc}",
+            },
+        )
+    return {"status": "ok"}
 
 
 @lifecycle_router.post("/observe")
 async def observe(request: Request):
     body = await request.json()
-    await _off_loop(lambda: run_phase(_get_lifecycle(body), "observe", body))
-    return {"status": "ok"}
+    return await _off_loop(_write_phase, "observe", body)
 
 
 @lifecycle_router.post("/distill")
 async def distill(request: Request):
     body = await request.json()
-    await _off_loop(lambda: run_phase(_get_lifecycle(body), "distill", body))
-    return {"status": "ok"}
+    return await _off_loop(_write_phase, "distill", body)
 
 
 @lifecycle_router.post("/learn")
 async def learn(request: Request):
     body = await request.json()
-    await _off_loop(lambda: run_phase(_get_lifecycle(body), "learn", body))
-    return {"status": "ok"}
+    return await _off_loop(_write_phase, "learn", body)
 
 
 @lifecycle_router.post("/persist")

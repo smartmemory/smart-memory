@@ -72,7 +72,10 @@ def endpoint_inventory(args: list[str] | None = None) -> EndpointInventory:
         for arg in (args or [])
         if "://" in arg
     )
-    constants = sys.modules.get("huggingface_hub.constants")
+    try:
+        constants = sys.modules["huggingface_hub.constants"]
+    except KeyError:
+        constants = None
     if constants is not None and constants.ENDPOINT != "https://huggingface.co":
         urls.append(constants.ENDPOINT)
     try:

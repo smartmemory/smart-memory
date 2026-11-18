@@ -28,6 +28,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from smartmemory_app.local_api import api as _local_api
+from smartmemory_app.loopback_gate import LoopbackGate
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_PORT = 9014
@@ -258,6 +259,11 @@ def _build_app() -> FastAPI:
             except Exception:
                 pass
         return await call_next(request)
+
+    # LITE-LOOPBACK-HOST-GATE-1: add_middleware inserts at the front of the user
+    # middleware list and the stack wraps that list outermost-first, so registering the
+    # gate after _version_guard makes it run first, before every route and mount.
+    app.add_middleware(LoopbackGate)
 
     # One probe per store-touching /health field (HOOK-CONSUMER-SCAN-1). Single-flight: a
     # slow offer scan (every node, under the backend lock) is joined, never stacked.
@@ -818,6 +824,9 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
     No ``port`` means the configured one (``SMARTMEMORY_DAEMON_PORT``, then the
     config file, then ``DEFAULT_PORT``), never a hard-coded 9014 (CLI-TEST-HOST-ISOLATION-1).
     """
+    from smartmemory_app.billing_mode import bind_lite_billing_mode
+
+    bind_lite_billing_mode()
     if port is None:
         from smartmemory_app.config import load_config
 
@@ -836,9 +845,10 @@ def main(port: int | None = None, open_browser: bool = True) -> None:
     data_path.mkdir(parents=True, exist_ok=True)
     pid_file = data_path / "daemon.pid"
 
-    # Load LLM API keys: env → keychain → shell profile.
-    # setup stores keys in all three locations. Keychain and profile
-    # are available immediately without sourcing .zshrc in a new shell.
+    # Load the selected provider's LLM key: env, then keychain, then shell profile
+    # (CLI-DAEMON-KEY-PRECEDENCE-1). setup stores keys in the keychain and the profile,
+    # available without sourcing .zshrc in a new shell. Another provider's stored key
+    # is never loaded, so it can never be sent.
     from smartmemory_app.config import load_llm_keys_from_stores
 
     load_llm_keys_from_stores()

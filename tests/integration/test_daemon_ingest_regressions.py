@@ -29,7 +29,7 @@ def lite_daemon(tmp_path, monkeypatch):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(
         "smartmemory.utils.llm.llm_route_available",
-        lambda: (bool(__import__("os").environ.get("GROQ_API_KEY")), "test"),
+        lambda *a, **k: (bool(__import__("os").environ.get("GROQ_API_KEY")), "test"),
     )
     cfg = config.SmartMemoryConfig(mode="local", data_dir=str(tmp_path))
     monkeypatch.setattr(config, "load_config", lambda: cfg)

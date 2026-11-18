@@ -796,6 +796,9 @@ def _masked_key_hint(key: str) -> str:
     return "..." + key[-4:] if len(key) > 12 else "***"
 
 
+_key_hint = _masked_key_hint  # the 2.0 name for it (WRAPPER-2.0 key-masking port), same function
+
+
 def _persist_env_var(name: str, value: str) -> None:
     """Persist through Windows credentials or a UTF-8 shell profile.
 

@@ -504,7 +504,8 @@ def test_no_plist_template_has_a_key_placeholder():
         "GROQ_API_KEY",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
-        "DEEPSEEK_API_KEY",
+        # 2.0 has no deepseek provider row, so a deepseek config keeps the legacy
+        # load-all (test_daemon_key_precedence "deepseek-unsupported-keeps-legacy").
         "GEMINI_API_KEY",
     ],
 )

@@ -336,7 +336,10 @@ smartmemory lifecycle status           # Show lifecycle config and session stats
 pip install smartmemory                  # Everything: local memory + MCP server + graph viewer + CLI
 pip install smartmemory-core[lite]       # Core library only, no CLI/MCP/viewer
 pip install smartmemory-core[gpu]        # Add the torch stack; CUDA is used automatically when present
+pip install "smartmemory-core[coreference]"  # Optional: resolves he/she/it on save, downloads a model
 ```
+
+Coreference is optional and not included in the default Lite install. This package does not define a `coreference` extra, so install the core one (above) into the same environment. It resolves he/she/it on save and downloads a model on first use.
 
 The default install embeds with all-MiniLM-L6-v2 on ONNX Runtime: about 150 MB and a
 sub-second cold start, no torch. The `[gpu]` or `[torch]` extra swaps the runtime, not the
@@ -878,6 +881,11 @@ support diagnostics after confirmation. Use `--yes` to skip the prompt. Quote th
 report ID to support@smartmemory.ai. If delivery cannot be confirmed within the wait budget, the command reports that
 the upload is queued and saves a local support zip. With reporting disabled, it
 only saves the local zip.
+
+`report --send` can include a contact email so support can reply. Pass `--email you@example.com`,
+or answer the one optional prompt (Enter skips it, and you can choose to remember the address as
+`contact_email` in the config file's `[smartmemory]` section). `--no-email` and `--yes` never prompt.
+Automatic crash reports never include your email. They share an anonymous install id with your support send, so support can match them to you. `--zip` is unchanged.
 
 `smartmemory report --zip` creates a local support archive. Existing queued reports
 may retry on CLI startup, unless reporting is disabled.

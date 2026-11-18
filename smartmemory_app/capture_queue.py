@@ -24,6 +24,62 @@ from smartmemory_app import observe_classify
 
 log = logging.getLogger(__name__)
 
+#: HOOK-CAPTURE-NO-LLM-1 (owner 2026-10-20, "captures too"): transcript capture is internal ingestion and runs the
+#: costless profile (rules extraction, local enrichers, no LLM, no session lessons). Only ``1`` opts in to the
+#: previous Groq-pinned pipeline and LLM session lessons, the explicit per-source opt-in and the rollback.
+CAPTURE_LLM_ENV = "SMARTMEMORY_CAPTURE_LLM"
+
+
+def _capture_opt_in_requested() -> bool:
+    """Either switch asks for AI on capture: ``SMARTMEMORY_CAPTURE_LLM=1`` (2.0) or core's per-source
+    ``SMARTMEMORY_INGEST_AI_SUMMARY`` naming ``claude_code_transcript`` (MEM-SIZE-1, main; FWD-MERGE-4)."""
+    if os.environ.get(CAPTURE_LLM_ENV, "").strip() == "1":
+        return True
+    from smartmemory.ingest.admission import CLAUDE_CODE_TRANSCRIPT, ai_opted_in
+
+    return ai_opted_in(CLAUDE_CODE_TRANSCRIPT)
+
+
+def capture_llm_opted_in() -> bool:
+    """Whether transcript capture may call an LLM (extraction and session lessons). Default no.
+
+    WRAPPER-2.0-LLM-PROVIDER-NONE-PORT-1: llm_provider none means no LLM, so the
+    opt-in is ignored then (it would pin Groq behind the user's choice). An
+    unreadable config keeps capture costless too. WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1:
+    the opted-in pipeline and session lessons are Groq-only, so any provider other than
+    groq ignores the opt-in for the same reason. Both opt-in switches pass these gates.
+    """
+    if not _capture_opt_in_requested():
+        return False
+    try:
+        from smartmemory_app.config import llm_provider_none, load_config
+
+        cfg = load_config()
+        off = llm_provider_none(cfg)
+        provider = (cfg.llm_provider or "none").strip().lower()
+    except Exception as exc:
+        log.warning(
+            "%s=1 ignored: the config could not be read (%s), so capture makes no LLM call",
+            CAPTURE_LLM_ENV,
+            type(exc).__name__,
+        )
+        return False
+    if off:
+        log.warning(
+            "%s=1 ignored: llm_provider is none, so capture makes no LLM call",
+            CAPTURE_LLM_ENV,
+        )
+        return False
+    if provider != "groq":
+        log.warning(
+            "%s=1 ignored: capture's LLM pipeline is Groq-only and llm_provider is %s, "
+            "so capture makes no LLM call",
+            CAPTURE_LLM_ENV,
+            provider,
+        )
+        return False
+    return True
+
 
 def capture_dir() -> Path:
     from smartmemory_app.config import load_config

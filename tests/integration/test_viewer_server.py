@@ -50,7 +50,7 @@ def viewer_client(monkeypatch):
 
     from smartmemory_app.viewer_server import app
 
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     yield client
     backend.close()
 

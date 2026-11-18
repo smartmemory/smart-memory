@@ -162,6 +162,8 @@ def _capture_worker_memory(seen, monkeypatch):
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
     monkeypatch.setenv("SMARTMEMORY_INGEST_AI_SUMMARY", "claude_code_transcript")
     monkeypatch.setenv("GROQ_API_KEY", "not-a-real-key")
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    monkeypatch.setenv("SMARTMEMORY_CAPTURE_LLM", "1")
     with pytest.raises(_Stop):
         capture_worker._memory()
 

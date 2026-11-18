@@ -9,6 +9,7 @@ import pytest
 
 from smartmemory_app import capture_queue as queue, capture_worker
 from smartmemory_app.session_lessons import ORIGIN, capture_lessons
+from tests._capture_llm import opt_in_capture_llm
 
 FIXTURE = Path(__file__).parents[1] / "fixtures/session_final_lesson.jsonl"
 LESSON = (
@@ -28,7 +29,14 @@ def _lessons_opt_in(monkeypatch):
 def lesson_env(monkeypatch, tmp_path, provider_pin_isolated):
     monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GROQ_API_KEY", "fake-groq")
+    # session_lessons writes these into os.environ: setenv first so teardown removes them
+    # (delenv of an absent name records nothing, and LLM_PROVIDER=groq leaked into later files).
+    for key in ("LLM_PROVIDER", "LLM_API_KEY", "OPENAI_BASE_URL"):
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE", raising=False)
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    opt_in_capture_llm(monkeypatch)
     mem = Mock()
     mem.find_decision_conflicts.return_value = []
     mem.search.return_value = []
@@ -137,6 +145,8 @@ def test_retry_degraded_receipt_adds_lessons_without_reimport(lesson_env, monkey
     capture_worker.run()
     assert queue.jobs()[-1]["degradation"]
     monkeypatch.delenv("SMARTMEMORY_CAPTURE_OFFLINE")
+    # Exercises the opt-in LLM path (HOOK-CAPTURE-NO-LLM-1).
+    opt_in_capture_llm(monkeypatch)
     receipt = capture_worker.import_capture(job)
     assert receipt["unchanged"]
     assert receipt["lesson_ids"] == ["lesson-0"]

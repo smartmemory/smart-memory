@@ -122,10 +122,10 @@ def install_daemon_diagnostics(data_dir: Path, *, redact_output: bool = False) -
     """Install process/thread hooks and a redacted daemon file handler once."""
     try:
         if redact_output:
-            for name in ("stdout", "stderr"):
-                stream = getattr(sys, name)
-                if not isinstance(stream, RedactingStream):
-                    setattr(sys, name, RedactingStream(stream))
+            if not isinstance(sys.stdout, RedactingStream):
+                sys.stdout = RedactingStream(sys.stdout)
+            if not isinstance(sys.stderr, RedactingStream):
+                sys.stderr = RedactingStream(sys.stderr)
         path = data_dir / "daemon.log"
         root = logging.getLogger()
         for handler in list(root.handlers):

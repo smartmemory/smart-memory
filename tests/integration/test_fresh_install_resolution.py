@@ -26,6 +26,7 @@ import tomllib
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 import pytest
 
@@ -73,7 +74,7 @@ def test_declared_dependencies_include_openai_transport():
     openai = [req for req in requirements if req.name.lower() == "openai"]
     assert len(openai) == 1, "default install must declare the openai Python SDK"
     assert openai[0].marker is None, "the SDK must not depend on an extra or platform"
-    assert str(openai[0].specifier) == ">=1.0.0"
+    assert openai[0].specifier == SpecifierSet(">=1.0.0,<3")
 
 
 @pytest.mark.skipif(

@@ -74,7 +74,8 @@ def offline_checks(task: str, *, budget: float | None = None) -> list[str]:
     )
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "smartmemory_app.diagnostic_worker", task],
+            [sys.executable, "-P", "-m", "smartmemory_app.diagnostic_worker", task],
+            cwd=str(Path(sys.executable).resolve().parent),
             env=env,
             capture_output=True,
             timeout=budget,

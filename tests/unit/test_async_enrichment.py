@@ -385,7 +385,7 @@ class TestTwoTierIngest:
         with patch(
             "smartmemory_app.storage.ingest", return_value=mock_result
         ) as mock_ingest:
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             r = client.post("/memory/ingest", json={"content": "Alice leads Atlas"})
 
         assert r.status_code == 200
@@ -409,7 +409,7 @@ class TestTwoTierIngest:
         with patch(
             "smartmemory_app.storage.ingest", return_value="sync-id"
         ) as mock_ingest:
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             r = client.post(
                 "/memory/ingest",
                 json={"content": "Bob tests", "memory_type": "semantic"},
@@ -440,7 +440,7 @@ class TestClearFlushesQueue:
             connection.execute("CREATE TABLE test_b2_reset (item_id TEXT)")
         connection.close()
         with patch("smartmemory_app.storage._shutdown"):
-            client = TestClient(app)
+            client = TestClient(app, base_url="http://localhost")
             response = client.post("/memory/clear")
 
         assert response.status_code == 200, response.text

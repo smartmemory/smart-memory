@@ -182,9 +182,9 @@ def test_viewer_main_without_a_port_uses_the_configured_one_not_9014(
     monkeypatch.setattr(
         "smartmemory_app.hook_failures.consume_in_background", lambda *a: None
     )
-    monkeypatch.setattr(
-        "smartmemory_app.config.load_llm_keys_from_stores", lambda: None
-    )
+    # 2.0 loads LLM keys inline in main() (keychain, then shell profile);
+    # keep the test off the owner's real keychain.
+    monkeypatch.setattr("keyring.get_password", lambda *a, **k: None)
     monkeypatch.setattr("atexit.register", lambda *a, **k: None)
     config_args = []
     monkeypatch.setattr(

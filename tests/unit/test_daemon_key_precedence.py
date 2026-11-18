@@ -5,6 +5,13 @@ shell, a stale OPENAI_API_KEY left in the keychain. The daemon logged
 "Loaded OPENAI_API_KEY from keychain", then "no usable provider configured" while
 ``sm status`` showed groq. Precedence is: explicit provider > exported env > keychain >
 shell profile, and a credential is never loaded for a provider that is not selected.
+
+WRAPPER-2.0-LLM-PROVIDER-ROUTE-PORT-1 (ported from main 8271d353): 2.0 keeps one
+provider table, so deepseek is an unsupported name there and keeps the legacy
+load-every-key behaviour (the route guard still refuses every known provider's
+endpoint for it). The daemon-boot rows run ``viewer_server.main`` itself against a
+keychain stand-in and a real ``~/.zshrc`` stand-in under a redirected HOME, each
+holding keys for three providers.
 """
 
 from __future__ import annotations
@@ -116,7 +123,15 @@ _ROWS = {
         {OA: "sk-kc"},
     ),
     "anthropic-own-key-only": ("anthropic", {}, {A: "a", OA: "o"}, {}, (A,), {A: "a"}),
-    "deepseek-own-key-only": ("deepseek", {}, {D: "d", OA: "o"}, {}, (D,), {D: "d"}),
+    # 2.0: deepseek is not in the one provider table, so it is an unknown name (legacy)
+    "deepseek-unsupported-keeps-legacy": (
+        "deepseek",
+        {},
+        {D: "d", OA: "o"},
+        {},
+        (D, OA),
+        {D: "d", OA: "o"},
+    ),
     "gemini-own-key-only": ("gemini", {}, {M: "m", OA: "o"}, {}, (M,), {M: "m"}),
     "provider-case-insensitive": ("GROQ", {}, {G: "g", OA: "o"}, {}, (G,), {G: "g"}),
     # providers that use no cloud key load none: provider none means no LLM at all
@@ -241,3 +256,81 @@ def test_tester_repro_stale_openai_never_reaches_the_route(monkeypatch, caplog):
         config.llm_key_present() is False
     )  # truthful: groq is selected and has no key here
     assert any(G in r.getMessage() for r in caplog.records)
+
+
+# Daemon boot: viewer_server.main loads keys before anything can send. Both stand-in
+# stores hold keys for three providers; only the selected provider's name may be set.
+KEYCHAIN = {G: "kc-groq", OA: "kc-openai", A: "kc-anthropic"}
+PROFILE = {G: "pf-groq", M: "pf-gemini", OA: "pf-openai"}
+_BOOT_ROWS = {
+    # provider -> (env names set after boot, the store the value came from)
+    "groq": ((G,), {G: "kc-groq"}),
+    "openai": ((OA,), {OA: "kc-openai"}),
+    "anthropic": ((A,), {A: "kc-anthropic"}),
+    "gemini": ((M,), {M: "pf-gemini"}),  # keychain has none: the profile serves it
+    # a local server: the config sets its auth placeholder, never the stored OpenAI key
+    "ollama": ((OA,), {OA: "local-llm-no-key"}),
+    "claude-agent": ((), {}),
+    "none": ((), {}),
+}
+
+
+class _BootStop(Exception):
+    """Raised where main prints the LLM status, right after key loading."""
+
+
+@pytest.mark.parametrize("provider", sorted(_BOOT_ROWS))
+def test_daemon_boot_loads_only_the_selected_providers_key(
+    provider, monkeypatch, tmp_path
+):
+    from smartmemory_app import (
+        billing_mode,
+        crash_reporter,
+        hook_failures,
+        runtime_diagnostics,
+        viewer_server,
+    )
+    from smartmemory_app.config import save_config
+
+    expected, values = _BOOT_ROWS[provider]
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".zshrc").write_text(
+        "".join(f'export {name}="{value}"\n' for name, value in PROFILE.items())
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path / "data"))
+    for name in ("OPENAI_BASE_URL", "SMARTMEMORY_LLM_MODEL", "LLM_PROVIDER"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    monkeypatch.setattr("keyring.get_password", lambda s, k: KEYCHAIN.get(k))
+    monkeypatch.setattr(billing_mode, "bind_lite_billing_mode", lambda: None)
+    monkeypatch.setattr(
+        runtime_diagnostics, "install_daemon_diagnostics", lambda *a, **k: None
+    )
+    monkeypatch.setattr(crash_reporter, "flush_in_background", lambda: None)
+    monkeypatch.setattr(hook_failures, "consume_in_background", lambda *a: None)
+
+    def stop():
+        raise _BootStop
+
+    monkeypatch.setattr(viewer_server, "_print_llm_extraction_status", stop)
+    save_config(
+        SmartMemoryConfig(
+            mode="local",
+            data_dir=str(tmp_path / "data"),
+            llm_provider=provider,
+            llm_model="qwen2.5:7b" if provider == "ollama" else "",
+        )
+    )
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), pytest.raises(_BootStop):
+        viewer_server.main(port=19999, open_browser=False)
+
+    assert {n for n in LLM_KEY_ENV_VARS if os.environ.get(n)} == set(expected)
+    for name, value in values.items():
+        assert os.environ[name] == value
+    for value in (*KEYCHAIN.values(), *PROFILE.values()):
+        assert value not in out.getvalue()  # names only, never values

@@ -65,6 +65,7 @@ def lite_env(tmp_path, monkeypatch):
         monkeypatch.setenv(f"{prefix}_PORT", str(DEAD_BACKEND[1]))
     for name in (
         "SMARTMEMORY_CAPTURE_OFFLINE",
+        "SMARTMEMORY_CAPTURE_LLM",
         "SMARTMEMORY_INGEST_AI_SUMMARY",
         "SMARTMEMORY_COSTLESS_ORIGINS",
         "SMARTMEMORY_WORKSPACE_ID",
@@ -125,6 +126,18 @@ def llm_calls(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def lite_ws(lite_env):
+    """The store's own generated Lite workspace: the one the admission path owns and the writes must carry."""
+    from smartmemory.identity_switches import lite_owner_identity
+    from smartmemory_app.storage import get_memory
+
+    get_memory()  # creates memory.db; the identity mints into it
+    identity = lite_owner_identity(lite_env)
+    assert identity is not None, "precondition: the Lite identity switch must be ON"
+    return identity.workspace_id
+
+
 def _lifecycle():
     from smartmemory_app.lifecycle import MemoryLifecycle
     from smartmemory_app.lifecycle_config import LifecycleConfig
@@ -132,29 +145,32 @@ def _lifecycle():
     return MemoryLifecycle("hcnl-session", LifecycleConfig())
 
 
-def _observe(tmp_path):
+def _observe(tmp_path, ws):
     _lifecycle().observe(
         tool_name="Bash",
         tool_input={"command": "kubectl apply -f redis.yaml"},
         tool_result=ENTITY_TEXT,
-        cwd=str(tmp_path),
+        workspace_id=ws,
+        strict=True,
     )
 
 
-def _learn(tmp_path):
-    _lifecycle().learn(tool_name="Bash", error=ENTITY_TEXT, cwd=str(tmp_path))
+def _learn(tmp_path, ws):
+    _lifecycle().learn(
+        tool_name="Bash", error=ENTITY_TEXT, workspace_id=ws, strict=True
+    )
 
 
-def _distill(tmp_path):
-    lifecycle = _lifecycle()
-    lifecycle._current_user_turn = f"Who deployed Redis? {ENTITY_TEXT}"
-    lifecycle.distill(
+def _distill(tmp_path, ws):
+    _lifecycle().distill(
         "Alice Johnson confirmed it runs in Berlin for Acme Corporation.",
-        cwd=str(tmp_path),
+        workspace_id=ws,
+        user_turn=f"Who deployed Redis? {ENTITY_TEXT}",
+        strict=True,
     )
 
 
-def _capture(tmp_path):
+def _capture(tmp_path, ws):
     from smartmemory_app.capture_worker import import_capture
 
     turns = [
@@ -192,17 +208,19 @@ def _capture(tmp_path):
     result = import_capture(
         {
             "transcript_path": str(path),
-            "workspace_id": "ws-hcnl",
+            "workspace_id": ws,
             "session_id": "hcnl-capture",
             "cwd": str(tmp_path),
         }
     )
-    # Session lessons are an LLM step: costless capture skips them (MEM-SIZE-1 AI opt-in is off).
+    # Session lessons are an LLM step: costless capture skips them (MEM-SIZE-1, not a degradation, so the
+    # whole-file retry never re-runs the import for them).
     assert result["lessons_skipped"] is True
+    assert not result.get("degradation"), result.get("degradation")
     assert result["chunks_ingested"] >= 1
 
 
-def _user_add(tmp_path):
+def _user_add(tmp_path, ws):
     from smartmemory_app import storage
 
     storage.ingest(ENTITY_TEXT, memory_type="semantic", origin="cli:add")
@@ -245,7 +263,7 @@ def _entity_edges(db: Path, origin: str) -> int:
     ("label", "origin", "write", "costless"), ROWS, ids=[row[0] for row in ROWS]
 )
 def test_internal_notes_make_no_llm_call(
-    label, origin, write, costless, lite_env, tmp_path, request
+    label, origin, write, costless, lite_env, lite_ws, tmp_path, request
 ):
     from smartmemory_app.storage import apply_runtime_config
     from smartmemory.utils.llm import llm_route_available
@@ -257,13 +275,13 @@ def test_internal_notes_make_no_llm_call(
     db = lite_env / "memory.db"
 
     if not costless:
-        write(tmp_path)
+        write(tmp_path, lite_ws)
         kinds = {kind for kind, _ in _box_kinds(db)}
         assert "extract" in kinds, f"control lost its deferred LLM extraction: {kinds}"
         return
 
     calls = request.getfixturevalue("llm_calls")
-    write(tmp_path)
+    write(tmp_path, lite_ws)
     # The wrapper's own worker entry: it passes core's v2 config, so v2 boxes (stage:enrich) are drained too.
     from smartmemory_app.worker_entry import run_configured_worker
 
@@ -283,3 +301,36 @@ def test_internal_notes_make_no_llm_call(
 
 
 # Origin selection and its SMARTMEMORY_COSTLESS_ORIGINS rollback: core tests/unit/pipeline/test_costless_origin.py.
+
+
+@pytest.mark.parametrize(
+    ("provider", "bypass"),
+    [("openai", False), ("none", False), ("openai", True)],
+    ids=["openai", "none", "control-fix-bypassed-reaches-llm"],
+)
+def test_core_summary_switch_follows_capture_gate(
+    provider, bypass, lite_env, lite_ws, llm_calls, tmp_path, monkeypatch, caplog
+):
+    """FWD-MERGE-4 review HIGH: main's SMARTMEMORY_INGEST_AI_SUMMARY reaches core's admission,
+    which calls its LLM for the chunk summary itself. Capture's gate (groq only, online)
+    must govern that call too. The control row bypasses the fix and must reach the LLM."""
+    import smartmemory_app.capture_worker as capture_worker
+    from smartmemory.ingest.admission import AI_SUMMARY_ENV, CLAUDE_CODE_TRANSCRIPT
+
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", provider)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-a-key")
+    monkeypatch.setenv(AI_SUMMARY_ENV, CLAUDE_CODE_TRANSCRIPT)
+    if bypass:
+        monkeypatch.setattr(capture_worker, "_core_summary_follows", lambda ai: None)
+        try:
+            _capture(tmp_path, lite_ws)
+        except Exception:
+            pass  # a trapped LLM call may surface, only the attempt matters here
+        assert "call_llm" in llm_calls, (
+            f"precondition: without the fix core's summary must reach the LLM: {llm_calls}"
+        )
+        return
+    with caplog.at_level("WARNING", logger="smartmemory_app.capture_worker"):
+        _capture(tmp_path, lite_ws)
+    assert llm_calls == [], f"core summary admission reached the LLM: {llm_calls}"
+    assert "transcript chunk summaries are extractive" in caplog.text
