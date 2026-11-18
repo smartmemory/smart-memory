@@ -1,3 +1,9 @@
+## 2.0.2.2
+
+## Unreleased - 2.0.2.2: core pin moves to the graph-view and first-install patch (2026-11-18)
+
+- The wrapper pins `smartmemory-core[lite,wikipedia,typescript]==2.0.2.2` (REL-2-0-2-PATCH-LAND-1; see core CHANGELOG 2.0.2.2: the graph view loads again for workspaces with links, the hold works from a fresh local install, first-install edges). Nothing else changes: the MCP pin stays `==2.0.2` and the client range stays `>=2.0.2,<2.1`.
+
 ## 2.0.2.1
 
 ## Unreleased - 2.0.2.1: core pin moves to the approval patch (2026-11-18)
