@@ -1,3 +1,9 @@
+## 2.0.2.1
+
+## Unreleased - 2.0.2.1: core pin moves to the approval patch (2026-11-18)
+
+- The wrapper pins `smartmemory-core[lite,wikipedia,typescript]==2.0.2.1`, the 2.0.2 approval patch (BUG-HOLD-INPLACE-EDIT-1; see core CHANGELOG 2.0.2.1). Nothing else changes: the MCP pin stays `==2.0.2` and the client range stays `>=2.0.2,<2.1`.
+
 ## 2.0.2
 
 ## Unreleased - CLAIMS-BUILD-21: search results name the lanes that found them (2026-11-14)
