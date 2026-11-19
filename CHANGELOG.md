@@ -1,8 +1,8 @@
-## 2.0.2.2
-
 ## Unreleased - TEST-TEARDOWN-1
 
-- Removed the README wording test for shell quoting and the source scan for retag options. The CLI still has a test for the rendered retag help.
+- Removed the README wording test for shell quoting.
+
+## 2.0.2.2
 
 ## Unreleased - 2.0.2.2: core pin moves to the graph-view and first-install patch (2026-11-18)
 
