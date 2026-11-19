@@ -21,7 +21,7 @@ pip install smartmemory
 smartmemory setup
 ```
 
-That's it. Setup asks a couple of questions (arrow keys, sensible defaults) and wires SmartMemory into Claude Code. Using Cursor instead? Run `smartmemory setup --for cursor`.
+That's it. Setup asks a couple of questions (arrow keys, sensible defaults) and wires SmartMemory into Claude Code. For Cursor, run `sm mcp install cursor` after setup.
 
 Now try it:
 
@@ -149,7 +149,7 @@ Want Claude to call memory as a tool too? Install the MCP server:
 sm mcp install claude-code    # also: cursor, codex
 ```
 
-Using Cursor as your editor? `smartmemory setup --for cursor` configures it in one step.
+Using Cursor as your editor? Run `sm mcp install cursor` after setup to write its MCP configuration.
 
 ## Use it with Obsidian
 
@@ -271,8 +271,8 @@ Keyless local semantic hop searches print a notice when the heuristic planner is
 smartmemory setup                      # Interactive first-run questionnaire
 smartmemory setup --mode local         # Skip questionnaire, set local mode
 smartmemory setup --mode remote --api-url https://your-service.example  # SMARTMEMORY_API_KEY in env
-smartmemory setup --for cursor         # Configure for Cursor instead of Claude Code
-smartmemory server                     # Start MCP server (called by MCP clients)
+smartmemory setup --for cursor         # Print an MCP config snippet for Cursor
+sm mcp install cursor                 # Write the MCP config for Cursor
 smartmemory uninstall                  # Remove hooks, skills, plist, and data
 smartmemory uninstall --keep-data      # Remove hooks/plist but keep memories
 ```
@@ -724,10 +724,10 @@ SOCKS support for Requests and Wikipedia calls is included in the wrapper's `req
 
 ```bash
 # Local
-SMARTMEMORY_MODE=local smartmemory server
+SMARTMEMORY_MCP_MODE=local smartmemory-mcp
 
 # Remote
-SMARTMEMORY_MODE=remote SMARTMEMORY_API_KEY=sk_... smartmemory server
+SMARTMEMORY_API_KEY=sk_... smartmemory-mcp
 ```
 
 Env vars always override the config file, which is the correct path for Docker and CI. The setup TUI is automatically disabled in non-interactive environments.

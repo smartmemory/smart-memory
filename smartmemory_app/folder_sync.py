@@ -2,7 +2,7 @@
 
 Everything runs on this machine against the local daemon. The connector and the runner contract (checkpoint per record,
 content-hash dedupe, deletion after two complete snapshots) live in ``smartmemory_connectors``; this module only supplies the
-sink (the daemon's ``/ingest`` and ``DELETE /{id}``), the PDF text extractor and the state-file location.
+sink (the daemon's ``POST /memory/ingest`` and ``DELETE /memory/{id}``), the PDF text extractor and the state-file location.
 
 ``smartmemory-connectors`` is imported lazily: the wrapper does not depend on it yet (optional extra ``folders``).
 """
@@ -84,7 +84,7 @@ class DaemonSink:
         }
         out = self._request(
             "POST",
-            "/ingest",
+            "/memory/ingest",
             json={
                 "content": record.text,
                 "memory_type": "episodic",
@@ -107,7 +107,7 @@ class DaemonSink:
         import click
 
         try:
-            out = self._request("DELETE", f"/{item_id}")
+            out = self._request("DELETE", f"/memory/{item_id}")
         except click.ClickException as exc:
             if "not found" in str(exc.message).lower():
                 return

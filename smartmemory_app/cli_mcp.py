@@ -38,13 +38,18 @@ _SERVER_KEY = "smartmemory"
 MCP_MODE_ENV = "SMARTMEMORY_MCP_MODE"
 
 
-def _resolve_server_command() -> str:
+def _resolve_server_command(*, required: bool = False) -> str:
     """Locate the ``smartmemory-mcp`` console script.
 
-    Falls back to the bare command name when ``which`` cannot find it — that
-    way the config still works once the user finishes activating a venv.
+    By default the installer can write config before the user activates a venv.
+    Setup requires the launcher to be available before offering a config snippet.
     """
     found = shutil.which("smartmemory-mcp")
+    if required and not found:
+        raise click.ClickException(
+            "The smartmemory-mcp executable is missing from PATH. "
+            "Install smartmemory-mcp or activate the environment that contains it, then rerun setup."
+        )
     return found or "smartmemory-mcp"
 
 

@@ -10,7 +10,7 @@ from smartmemory_app.folder_sync import FolderSyncError, state_path, sync_folder
 
 
 class FakeDaemon:
-    """Stands in for the daemon's /ingest and DELETE /{id}. ``down`` mimics an unreachable daemon (None)."""
+    """Stands in for the daemon's mounted memory routes. ``down`` mimics an unreachable daemon (None)."""
 
     def __init__(self):
         self.items, self.calls, self.down, self.n = {}, [], False, 0
@@ -19,14 +19,14 @@ class FakeDaemon:
         self.calls.append((method, path))
         if self.down:
             return None
-        if method == "POST" and path == "/ingest":
+        if method == "POST" and path == "/memory/ingest":
             self.n += 1
             self.items[f"m{self.n}"] = kw["json"]
             return {"item_id": f"m{self.n}"}
-        if method == "DELETE":
+        if method == "DELETE" and path.startswith("/memory/"):
             import click
 
-            if self.items.pop(path[1:], None) is None:
+            if self.items.pop(path.removeprefix("/memory/"), None) is None:
                 raise click.ClickException("Memory not found")
             return {}
         raise AssertionError((method, path))
@@ -64,7 +64,7 @@ def test_create_unchanged_replace_and_remove(env):
     (root / "a.md").write_text("alpha changed\n")
     r = run(env, reconcile_every=0)
     assert r.replaced == 1 and len(daemon.items) == 2
-    assert ("DELETE", "/m1") in daemon.calls
+    assert ("DELETE", "/memory/m1") in daemon.calls
     (root / "b.md").unlink()
     assert run(env, reconcile_every=0).archived == 0
     assert run(env, reconcile_every=0).archived == 1 and len(daemon.items) == 1
@@ -116,3 +116,49 @@ def test_cli_prints_a_summary_and_exits_nonzero_on_failures(env, monkeypatch):
     (root / "b.md").write_text("beta\n")
     res = CliRunner().invoke(cli_mod.cli, ["folder", "sync", str(root)])
     assert res.exit_code == 1 and "failed 1" in res.output
+    assert "failed 1" in res.stderr
+
+
+def test_sync_uses_mounted_daemon_routes(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from smartmemory.tools import factory
+    from smartmemory_app import storage, viewer_server
+
+    root = tmp_path / "notes"
+    root.mkdir()
+    note = root / "audit-cli.md"
+    note.write_text("First audit folder note", encoding="utf-8")
+    monkeypatch.setenv("SMARTMEMORY_MODE", "local")
+    monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("SMARTMEMORY_LLM_PROVIDER", "none")
+    monkeypatch.setenv("SMARTMEMORY_NO_WARM", "1")
+    monkeypatch.setattr(storage, "_memory", None)
+    monkeypatch.setattr(storage, "_data_path", None)
+    # Use the real Lite store without model files or detached workers.
+    monkeypatch.setattr(factory, "_require_embedding_model", lambda **kwargs: None)
+    create_lite_memory = factory.create_lite_memory
+
+    def without_embeddings(**kwargs):
+        kwargs["pipeline_profile"].store.embed = False
+        return create_lite_memory(spawn_worker=False, **kwargs)
+
+    monkeypatch.setattr(factory, "create_lite_memory", without_embeddings)
+    try:
+        with TestClient(viewer_server.app, base_url="http://127.0.0.1") as client:
+            statuses = []
+
+            def request(method, path, **kwargs):
+                response = client.request(method, path, **kwargs)
+                statuses.append((method, response.status_code))
+                response.raise_for_status()
+                return response.json() if response.content else {}
+
+            def sync():
+                return sync_folder(str(root), preset="markdown", request=request)
+
+            assert sync().created == 1, statuses
+            note.write_text("Revised audit folder note", encoding="utf-8")
+            assert sync().replaced == 1, statuses
+            assert statuses == [("POST", 200), ("DELETE", 204), ("POST", 200)]
+    finally:
+        storage._shutdown()

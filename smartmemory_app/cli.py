@@ -800,15 +800,18 @@ def folder_sync_cmd(root: str, preset: str, watch_seconds: int | None) -> None:
             r = sync_folder(root, preset=preset, request=_daemon_request)
         except FolderSyncError as exc:
             raise click.ClickException(str(exc)) from None
-        click.echo(
+        summary = (
             f"created {r.created}, replaced {r.replaced}, unchanged {r.unchanged}, removed {r.archived}, "
             f"skipped {r.inaccessible}, failed {r.failed}"
             + (f", stopped: {r.error_code}" if r.error_code else "")
         )
+        failed = bool(r.failed or r.error_code)
         if watch_seconds is None:
-            if r.failed or r.error_code:
-                raise click.exceptions.Exit(1)
+            if failed:
+                raise click.ClickException(f"Folder sync incomplete ({summary}).")
+            click.echo(summary)
             return
+        click.echo(summary, err=failed)
         time.sleep(watch_seconds)
 
 
@@ -4316,6 +4319,11 @@ def reindex_cmd() -> None:
         raise click.ClickException("Reindex is only available in local mode.")
     result = _daemon_request("POST", "/memory/reindex")
     if result is not None:
+        if skipped := result.get("skipped", 0):
+            raise click.ClickException(
+                f"Reindex incomplete ({skipped} of {result['total']} memories skipped, "
+                f"{result['reindexed']} reindexed)."
+            )
         click.echo(
             f"Reindexed {result.get('reindexed', '?')} memories "
             f"({result.get('dims', '?')}d, {result.get('provider', '?')}, "
@@ -4366,11 +4374,11 @@ def reextract_cmd(yes: bool, all_items: bool, ruler: bool, decline: bool) -> Non
 
 @cli.command("server", hidden=True)
 def server_cmd() -> None:
-    """Start the SmartMemory MCP server (called by MCP clients, not users)."""
-    click.echo(
-        "MCP server is now 'smartmemory-mcp'. It's included in your installation."
+    """Report that this legacy MCP launcher has been retired."""
+    raise click.ClickException(
+        "This MCP launcher has been retired. Use smartmemory-mcp as the MCP command "
+        "or run sm mcp install <client> to update the client config."
     )
-    click.echo("Run: smartmemory-mcp")
 
 
 def main() -> None:

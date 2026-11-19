@@ -321,7 +321,7 @@ HOOK_REGISTRATIONS = _get_hook_registrations(shell="bash")
     "--for",
     "for_tool",
     default=None,
-    help="Tool config (e.g. 'cursor'). Works in both modes.",
+    help="Print an MCP config snippet for a client (e.g. 'cursor').",
 )
 @click.option(
     "--api-url", help="Remote service base URL (overrides SMARTMEMORY_API_URL)."
@@ -362,6 +362,11 @@ def setup(
         raise click.ClickException(_SETUP_INSTALLATION_ERROR)
     if not installation.socks_support_ok:
         click.echo(f"Warning: {SOCKS_PROXY_ERROR}", err=True)
+
+    if for_tool:
+        from smartmemory_app.cli_mcp import _resolve_server_command
+
+        _resolve_server_command(required=True)
 
     from smartmemory_app.config import config_path
 
@@ -1118,10 +1123,16 @@ def _remote_login(api_key: str | None, api_url: str | None = None) -> str:
 
 def _setup_tool_config(tool: str) -> None:
     """Emit tool-specific MCP config snippet."""
+    from smartmemory_app.cli_mcp import _server_block
+
+    block = _server_block()
     click.echo(f"\nTool config for {tool}:")
-    click.echo(
-        '  Add to your MCP config: {"command": "smartmemory", "args": ["server"]}'
-    )
+    if tool.lower() == "codex":
+        import tomli_w
+
+        click.echo(tomli_w.dumps({"mcp_servers": {"smartmemory": block}}).rstrip())
+    else:
+        click.echo(f"  Add to your MCP config: {json.dumps(block)}")
 
 
 # ── Uninstall command ─────────────────────────────────────────────────────────
@@ -1141,8 +1152,10 @@ def uninstall(keep_data: bool) -> None:
         from smartmemory_app.daemon import stop_daemon
 
         stop_daemon()
-    except Exception:
-        pass
+    except Exception as exc:
+        raise click.ClickException(
+            redact_credentials(f"Uninstall stopped because background shutdown could not be verified. {exc}")
+        ) from exc
     _uninstall_launchd_plist()
     _deregister_hooks()
     _remove_hooks()
@@ -1756,14 +1769,28 @@ def _uninstall_launchd_plist() -> None:
     if platform.system() != "Darwin":
         return
 
+    from smartmemory_app.daemon import _launchd_loaded
+
     for plist_name, label in [(PLIST_NAME, "daemon"), (WORKER_PLIST_NAME, "worker")]:
         plist_dest = LAUNCH_AGENTS_DIR / plist_name
         if not plist_dest.exists():
             continue
-        subprocess.run(
-            ["launchctl", "unload", str(plist_dest)],
-            capture_output=True,
-        )
+        try:
+            result = subprocess.run(
+                ["launchctl", "unload", str(plist_dest)],
+                capture_output=True,
+            )
+            # stop_daemon may already have unloaded the job. Check the actual state.
+            still_loaded = result.returncode != 0 and _launchd_loaded(plist_dest.stem)
+        except (OSError, RuntimeError) as exc:
+            raise click.ClickException(
+                redact_credentials(f"Could not verify launchd unload for {plist_name}. {exc}")
+            ) from exc
+        if still_loaded:
+            raise click.ClickException(
+                f"Could not unload {plist_name} (launchctl exit {result.returncode}). "
+                "The job is still loaded."
+            )
         plist_dest.unlink(missing_ok=True)
         click.echo(f"Removed {label} launchd plist.")
 

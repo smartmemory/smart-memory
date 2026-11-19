@@ -355,6 +355,50 @@ class TestUninstallLaunchdPlist:
 
 
 class TestUninstallCommand:
+    @pytest.fixture(autouse=True)
+    def isolate_hook_paths(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("smartmemory_app.setup.HOOKS_DEST", tmp_path / "hooks")
+        monkeypatch.setattr("smartmemory_app.setup.SETTINGS", tmp_path / "settings.json")
+        monkeypatch.setattr("smartmemory_app.config.config_path", lambda: tmp_path / "config.toml")
+
+    def test_uninstall_preserves_data_when_stop_fails(self, tmp_path, monkeypatch):
+        data_dir = tmp_path / "audit-cli-data"
+        data_dir.mkdir()
+        monkeypatch.setenv("SMARTMEMORY_DATA_DIR", str(data_dir))
+        with (
+            patch("smartmemory_app.daemon.stop_daemon", side_effect=RuntimeError("exit unverified")),
+            patch("platform.system", return_value="Linux"),
+        ):
+            from smartmemory_app.setup import uninstall
+
+            result = CliRunner().invoke(uninstall)
+
+        assert result.exit_code == 1, result.output
+        assert "exit unverified" in result.stderr
+        assert "SmartMemory removed" not in result.stdout
+        assert data_dir.is_dir()
+
+    def test_uninstall_preserves_plist_when_unload_fails(self, tmp_path, monkeypatch):
+        from smartmemory_app import setup
+
+        plist = tmp_path / setup.PLIST_NAME
+        plist.touch()
+        monkeypatch.setattr(setup, "LAUNCH_AGENTS_DIR", tmp_path)
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("smartmemory_app.daemon.stop_daemon"),
+            patch("smartmemory_app.daemon._launchd_loaded", return_value=True),
+            patch("smartmemory_app.setup.subprocess.run") as run,
+        ):
+            run.return_value = MagicMock(returncode=5, stderr=b"unload refused")
+            result = CliRunner().invoke(setup.uninstall, ["--keep-data"])
+
+        assert result.exit_code == 1, result.output
+        assert "unload" in result.stderr
+        assert plist.name in result.stderr
+        assert "SmartMemory removed" not in result.stdout
+        assert plist.is_file()
+
     @staticmethod
     def _invoke(tmp_path, monkeypatch, *args):
         config_file = tmp_path / "config" / "smartmemory" / "config.toml"
