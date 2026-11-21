@@ -1,3 +1,7 @@
+## Unreleased - BUG-FAIL-IF-CONFLICTED-SOURCE-DATE-1 fix round 2: remote mode keeps the could-not-decide marker (2026-11-21)
+
+- `RemoteMemory.search` keeps the REST body's top-level `conflict_check` (thread-local), read through the new `RemoteMemory.last_conflict_check()`. `storage.search` in remote mode now sets `last_conflict_check()` from it, as the local path already did. Each row's `conflict` (now carrying undecided pairs) passes through unchanged. Not built: a typed error for the 409 in remote mode (the generic HTTP error still carries the body). Test: `tests/unit/test_search_conflict_strict.py::test_w4_remote_mode_keeps_the_marker_and_the_rows_conflict`.
+
 ## Unreleased - BUG-FAIL-IF-CONFLICTED-SOURCE-DATE-1: the local search path carries the could-not-decide marker (2026-11-21)
 
 - Checked, no change needed: `fail_if_conflicted` is already in `storage._ALLOWED` on `origin/main`, so the strict read reaches core and core's `ConflictCheckUndecidedError` and `RecallConflictError` arrive as themselves. What was dropped is the `mark` marker (it rides on a list subclass that `search()` flattens to plain rows).

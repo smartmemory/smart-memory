@@ -1297,7 +1297,10 @@ def search(
             raise NotImplementedError(
                 "Property filters are not supported in remote mode. Remove --<property> flags."
             )
-        return mem.search(query, top_k, **core_kwargs)
+        rows = mem.search(query, top_k, **core_kwargs)
+        # Fix r2 (adjudication-r1 M3): the service's marker survives the envelope unwrap.
+        _conflict_check.value = mem.last_conflict_check()
+        return rows
     # Wildcard: return ALL memory nodes (not entity/relation/pattern nodes).
     # top_k is intentionally not applied — "*" means "list everything".
     if query.strip() == "*" and set(core_kwargs) <= {
@@ -1372,7 +1375,9 @@ def search(
 
     if not filters:
         results = mem.search(query, top_k=top_k, **core_kwargs)
-        _conflict_check.value = _marker_of(results)  # before the gate helpers, which rebuild the list
+        _conflict_check.value = _marker_of(
+            results
+        )  # before the gate helpers, which rebuild the list
         partial = gated_partial_coverage(results, where="local search")
         if isinstance(results, dict):
             # U5.21 (C4): gate ON, no group holds a row past the fetch (a conforming grouped answer is never cut).
