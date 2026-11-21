@@ -1,3 +1,9 @@
+## Unreleased - BUG-FAIL-IF-CONFLICTED-SOURCE-DATE-1: the local search path carries the could-not-decide marker (2026-11-21)
+
+- Checked, no change needed: `fail_if_conflicted` is already in `storage._ALLOWED` on `origin/main`, so the strict read reaches core and core's `ConflictCheckUndecidedError` and `RecallConflictError` arrive as themselves. What was dropped is the `mark` marker (it rides on a list subclass that `search()` flattens to plain rows).
+- New `storage.last_conflict_check()`: core's "could not decide" marker (setting `conflict_check_unsure` at `mark`) from this thread's latest `search()`, unchanged, `None` after any other search.
+- Tests: `tests/unit/test_search_conflict_strict.py` (new, real Lite core, no model call). Needs core `fix/conflict-undecided-switch` landed first.
+
 ## 2.0.2.2
 
 ## Unreleased - 2.0.2.2: core pin moves to the graph-view and first-install patch (2026-11-18)

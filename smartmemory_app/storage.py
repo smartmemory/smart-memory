@@ -1179,6 +1179,24 @@ _ALLOWED = frozenset(
     }
 )
 
+_conflict_check = threading.local()
+
+
+def last_conflict_check() -> dict | None:
+    """The "could not decide" marker of this thread's latest ``search()``, unchanged from core.
+
+    Set only on a ``fail_if_conflicted=True`` read with core's ``conflict_check_unsure="mark"`` setting when a pair
+    could not be decided. ``None`` after every other search (reset on each call). ``search()`` returns plain rows, so the
+    marker travels beside them here instead of being dropped with the list subclass that carried it.
+    """
+    return getattr(_conflict_check, "value", None)
+
+
+def _marker_of(results) -> dict | None:
+    diagnostics = getattr(results, "diagnostics", None)
+    marker = getattr(diagnostics, "conflict_check", None)
+    return dict(marker) if marker else None
+
 
 def search(
     query: str,
@@ -1202,6 +1220,7 @@ def search(
                  callers/contract drift never raise TypeError here.
     """
     top_k = max(1, min(top_k, 200))  # clamp to [1, 200]
+    _conflict_check.value = None
     if search_kwargs.get("origin") is not None and load_config().mode == "remote":
         raise NotImplementedError(
             "--origin is not supported in remote mode: the hosted search API "
@@ -1353,6 +1372,7 @@ def search(
 
     if not filters:
         results = mem.search(query, top_k=top_k, **core_kwargs)
+        _conflict_check.value = _marker_of(results)  # before the gate helpers, which rebuild the list
         partial = gated_partial_coverage(results, where="local search")
         if isinstance(results, dict):
             # U5.21 (C4): gate ON, no group holds a row past the fetch (a conforming grouped answer is never cut).
@@ -1383,6 +1403,7 @@ def search(
             break  # the last round already asked for the bound: a wider window cannot be asked for
         asked = fetch_k
         results = mem.search(query, top_k=fetch_k, **core_kwargs)
+        _conflict_check.value = _marker_of(results)
         partial = gated_partial_coverage(results, where="local filtered search")
         # U5.21 (C4): a row past the fetch was never asked for, so it is neither matched nor used (gate ON).
         results = gated_fetch_bound(results, fetch_k, where="local filtered search")
