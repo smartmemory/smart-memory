@@ -1,3 +1,9 @@
+## 2.0.3
+
+## Unreleased - 2.0.3: core and MCP pins move to 2.0.3, the decision view and the decision doors (2026-11-22)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.3` (was 2.0.2.2), MCP pin `smartmemory-mcp==2.0.3` (was 2.0.2): a rule's history, which rule is live at each site, automatic changes, and the refusal of generic writes to a decision's history. Client range unchanged (`>=2.0.2,<2.1`). REL-2-0-3-CUT-1.
+
 ## 2.0.2.2
 
 ## Unreleased - 2.0.2.2: core pin moves to the graph-view and first-install patch (2026-11-18)
