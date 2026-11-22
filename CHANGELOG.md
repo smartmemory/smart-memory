@@ -7,6 +7,11 @@
 - Checked, no change needed: `fail_if_conflicted` is already in `storage._ALLOWED` on `origin/main`, so the strict read reaches core and core's `ConflictCheckUndecidedError` and `RecallConflictError` arrive as themselves. What was dropped is the `mark` marker (it rides on a list subclass that `search()` flattens to plain rows).
 - New `storage.last_conflict_check()`: core's "could not decide" marker (setting `conflict_check_unsure` at `mark`) from this thread's latest `search()`, unchanged, `None` after any other search.
 - Tests: `tests/unit/test_search_conflict_strict.py` (new, real Lite core, no model call). Needs core `fix/conflict-undecided-switch` landed first.
+## 2.0.3
+
+## Unreleased - 2.0.3: core and MCP pins move to 2.0.3, the decision view and the decision doors (2026-11-22)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.3` (was 2.0.2.2), MCP pin `smartmemory-mcp==2.0.3` (was 2.0.2): a rule's history, which rule is live at each site, automatic changes, and the refusal of generic writes to a decision's history. Client range unchanged (`>=2.0.2,<2.1`). REL-2-0-3-CUT-1.
 
 ## 2.0.2.2
 
