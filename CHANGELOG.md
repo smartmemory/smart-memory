@@ -2,6 +2,33 @@
 
 - Removed the README wording test for shell quoting.
 
+## 2.0.5
+
+## Unreleased - 2.0.5: core pin moves to 2.0.5, the stored snapshot fix (2026-11-23)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.5` (was 2.0.4): a stored snapshot no longer shows a note that was hidden after the snapshot was taken. MCP pin unchanged at `smartmemory-mcp==2.0.4`.
+
+## 2.0.4
+
+## Unreleased - 2.0.4: core and MCP pins move to 2.0.4, the conflict flag fix (2026-11-23)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.4` (was 2.0.3), MCP pin `smartmemory-mcp==2.0.4` (was 2.0.3): a strict read (`fail_if_conflicted`) never passes silently when it cannot decide, and the "could not decide" marker reaches local and remote callers. Client range unchanged (`>=2.0.2,<2.1`). REL-2-0-4-CUT-1.
+
+## Unreleased - BUG-FAIL-IF-CONFLICTED-SOURCE-DATE-1 fix round 2: remote mode keeps the could-not-decide marker (2026-11-21)
+
+- `RemoteMemory.search` keeps the REST body's top-level `conflict_check` (thread-local), read through the new `RemoteMemory.last_conflict_check()`. `storage.search` in remote mode now sets `last_conflict_check()` from it, as the local path already did. Each row's `conflict` (now carrying undecided pairs) passes through unchanged. Not built: a typed error for the 409 in remote mode (the generic HTTP error still carries the body). Test: `tests/unit/test_search_conflict_strict.py::test_w4_remote_mode_keeps_the_marker_and_the_rows_conflict`.
+
+## Unreleased - BUG-FAIL-IF-CONFLICTED-SOURCE-DATE-1: the local search path carries the could-not-decide marker (2026-11-21)
+
+- Checked, no change needed: `fail_if_conflicted` is already in `storage._ALLOWED` on `origin/main`, so the strict read reaches core and core's `ConflictCheckUndecidedError` and `RecallConflictError` arrive as themselves. What was dropped is the `mark` marker (it rides on a list subclass that `search()` flattens to plain rows).
+- New `storage.last_conflict_check()`: core's "could not decide" marker (setting `conflict_check_unsure` at `mark`) from this thread's latest `search()`, unchanged, `None` after any other search.
+- Tests: `tests/unit/test_search_conflict_strict.py` (new, real Lite core, no model call). Needs core `fix/conflict-undecided-switch` landed first.
+## 2.0.3
+
+## Unreleased - 2.0.3: core and MCP pins move to 2.0.3, the decision view and the decision doors (2026-11-22)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.3` (was 2.0.2.2), MCP pin `smartmemory-mcp==2.0.3` (was 2.0.2): a rule's history, which rule is live at each site, automatic changes, and the refusal of generic writes to a decision's history. Client range unchanged (`>=2.0.2,<2.1`). REL-2-0-3-CUT-1.
+
 ## 2.0.2.2
 
 ## Unreleased - 2.0.2.2: core pin moves to the graph-view and first-install patch (2026-11-18)
@@ -971,7 +998,6 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   this to four params for months. The allowlist now enumerates every explicit core search
   parameter and a guard test fails when a new one is added without being forwarded.
 
-
 ### Changed
 - **`smartmemory-mcp` pin bumped 1.4.67 → 1.4.91.** The wrapper installs the current MCP server again (release.sh had been warning about the drift).
 - **License.** `smartmemory` now ships under the SmartMemory Lite Runtime License instead of AGPL: free for personal, internal, evaluation, and non-commercial use; shipping it inside a commercial product needs a Lite Redistribution Agreement (free during early access). See LICENSE.
@@ -1097,7 +1123,6 @@ every such call failed with `Invalid API Key`, even though the correct provider 
 configured. Keys are now matched to the endpoint first, falling back to `OPENAI_API_KEY`.
 Local servers such as Ollama and LM Studio are unaffected.
 
-
 ## [1.4.62] - 2026-08-08
 
 ### Fixed — local extraction could silently learn nothing
@@ -1156,7 +1181,6 @@ All four are now forwarded, with a regression test. Remote mode was unaffected (
 the POST body separately). **If you add a parameter to `SmartMemory.search()` that callers
 can set, add it to this allowlist in the same change** — the drop-don't-raise design means
 nothing will tell you it is missing.
-
 
 ## [1.4.59] - 2026-08-04
 
@@ -1296,7 +1320,6 @@ Core 1.4.59 delivers the auditable-memory surface: `explain()` single-call prove
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.39 (1.4.39)
 - Version copied from smartmemory-core 1.4.39 release (single-source lockstep).
 
-
 ### Fixed — Deleted memories left orphaned vector embeddings behind (CORE-VEC-DELETE-1)
 - `sm`'s local/lite mode never actually removed a deleted memory's embedding from disk —
   `smartmemory-core`'s usearch backend had no single-item delete, so the vector index kept
@@ -1409,7 +1432,6 @@ Core 1.4.59 delivers the auditable-memory surface: `explain()` single-call prove
 ### Changed (auto, lockstep) — pin smartmemory-core==0.9.48 (1.4.24)
 - Automated lockstep sync triggered by smartmemory-core 0.9.48 release.
 
-
 ## [1.4.23] - 2026-06-04
 
 ### Security
@@ -1485,7 +1507,6 @@ Contract: `smart-memory-docs/docs/features/LAUNCH-METRICS-1/launch-event-contrac
 ### Changed — BREAKING
 
 - **CORE-MEMORY-DYNAMICS-1 M1b: `working` → `pending` rename (wrapper).** `smartmemory_app/lifecycle.py` distill path now writes `memory_type="pending"` (was `"working"`; the core validator rejects the old value post-rename). `smartmemory_app/cli.py` `_VALID_MEMORY_TYPES` set rebuilt with `"pending"`. `smartmemory_app/local_api.py` user_types tuple in SELECT-by-type query updated. Test fixture in `tests/integration/test_local_api_integration.py::test_node_fields_correct` updated. README evolver listing removed `WorkingToEpisodicEvolver` / `WorkingToProceduralEvolver` (retired in core M1b); "Working Memory" type description replaced with "Pending Memory".
-
 
 ### Added
 

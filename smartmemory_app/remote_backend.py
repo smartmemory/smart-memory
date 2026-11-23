@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -475,8 +476,20 @@ class RemoteMemory:
             return result
         return result.get("item_id", "unknown")
 
+    def last_conflict_check(self) -> dict | None:
+        """The service's top-level ``conflict_check`` marker of this thread's latest ``search()``, or None.
+
+        BUG-FAIL-IF-CONFLICTED-SOURCE-DATE-1 fix r2 (adjudication-r1 M3): ``search`` returns only the rows, so the
+        envelope's marker is kept here for ``storage.last_conflict_check()``. Each row also carries the pair on its
+        own ``conflict`` field (the service forwards it), which needs no side channel.
+        """
+        return getattr(self._search_marker, "value", None)
+
     def search(self, query: str, top_k: int = 5, **kwargs) -> list[dict]:
         """POST /memory/search. Returns list[dict] (not MemoryItem objects)."""
+        if not hasattr(self, "_search_marker"):
+            self._search_marker = threading.local()
+        self._search_marker.value = None
         body = {"query": query, "top_k": top_k, "enable_hybrid": True, **kwargs}
         result = self._request("POST", "/memory/search", json=body)
         if isinstance(result, dict):
@@ -484,6 +497,10 @@ class RemoteMemory:
                 # Surface the failure — do NOT return an error-dict that the CLI renders
                 # as "No results", hiding a 30s timeout / unreachable service.
                 raise RemoteBackendError(err)
+            marker = result.get("conflict_check")
+            self._search_marker.value = (
+                marker if isinstance(marker, dict) and marker else None
+            )
             # CORE-RECALL-LINEAGE-1 SearchResponse envelope: {"results": [...], ...}.
             # (Expertise-mode bucket maps can't occur here — this body never sets
             # expertise=true, so "results" is always a flat list per the contract.)
