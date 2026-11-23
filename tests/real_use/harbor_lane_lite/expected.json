@@ -1,0 +1,6 @@
+{
+  "_doc": "OPS-REAL-USE-HOSTED-LITE-1. known_gaps: rows that fail on smart-memory main 87121f3 (first run 2026-11-23), each naming the filed bug that owns it. A gap that starts passing fails the run until it is removed here (the fixing change cuts it). A row not listed must pass. Expected answers live in notes-lite.md and scenario.json and are never edited to pass.",
+  "known_gaps": {
+    "L-22": "BUG-LITE-IMPORT-NOT-ROUNDTRIP-1: after export then import into a fresh install, 'Kestrel website launch date' ranks the launch note 5th (1st in the install it came from), behind the client note and both hosting decisions; the import drops decision status and superseded_by (its own WARNING), so the replaced Netlify decision comes back active next to Cloudflare"
+  }
+}

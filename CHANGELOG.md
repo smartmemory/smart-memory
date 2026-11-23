@@ -6,6 +6,10 @@
 
 ## 2.0.4
 
+## Unreleased - OPS-REAL-USE-HOSTED-LITE-1: a real-use scenario for the Lite app (2026-11-23)
+
+- `tests/real_use/` (new): one person's week offline (`harbor_lane_lite`, 24 rows frozen in smart-memory-ops `units/OPS-REAL-USE-HOSTED-LITE-1/notes-lite.md` before the code), sent through the Lite app's own local routes, the MCP local backend for decisions and the `export` / `import` commands; answers checked in plain code. No model key, every non-loopback socket refused and logged (row L-24), so nothing is recorded or replayed. Runs once per session under xdist (`_once.py`). The land gate runs this folder on every Lite app land. First run: 23 of 24 pass; L-22 is a known gap (BUG-LITE-IMPORT-NOT-ROUNDTRIP-1: an import brings the replaced decision back active and changes search answers).
+
 ## Unreleased - 2.0.4: core and MCP pins move to 2.0.4, the conflict flag fix (2026-11-23)
 
 - Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.4` (was 2.0.3), MCP pin `smartmemory-mcp==2.0.4` (was 2.0.3): a strict read (`fail_if_conflicted`) never passes silently when it cannot decide, and the "could not decide" marker reaches local and remote callers. Client range unchanged (`>=2.0.2,<2.1`). REL-2-0-4-CUT-1.
