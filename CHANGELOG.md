@@ -1,3 +1,9 @@
+## 2.0.5
+
+## Unreleased - 2.0.5: core pin moves to 2.0.5, the stored snapshot fix (2026-11-23)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.5` (was 2.0.4): a stored snapshot no longer shows a note that was hidden after the snapshot was taken. MCP pin unchanged at `smartmemory-mcp==2.0.4`.
+
 ## 2.0.4
 
 ## Unreleased - 2.0.4: core and MCP pins move to 2.0.4, the conflict flag fix (2026-11-23)
