@@ -1,3 +1,9 @@
+## 2.0.6
+
+## Unreleased - 2.0.6: core pin moves to 2.0.6 (2026-11-25)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.6` (was 2.0.5). This brings the core fixes landed since 2.0.5: decision history keeps who answered and pages without gaps, a replaced decision keeps its links, a full export then import no longer duplicates decisions, Lite stores repair old edge markers and plan task status on open, and erasure counts notes tagged with a learned name. MCP pin unchanged at `smartmemory-mcp==2.0.4`.
+
 ## 2.0.5
 
 ## Unreleased - 2.0.5: core pin moves to 2.0.5, the stored snapshot fix (2026-11-23)
