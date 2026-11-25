@@ -999,6 +999,19 @@ def ingest_endpoint(body: IngestRequest) -> dict:
     response = {"item_id": result["item_id"] if isinstance(result, dict) else result}
     if isinstance(result, dict) and result.get("warning"):
         response["warning"] = result["warning"]
+    # BUG-OBSIDIAN-LITE-SAVE-RECEIPT-1: core's Lite save returns the SM2-SAVE-1 1.1 receipt
+    # (placement "lite", subject.item_id, run_id, status_url); the legacy view carries it as
+    # `receipt`. Return it at the top level next to the 1.x keys, the same additive shape the
+    # hosted /memory/ingest returns (service ingest.py terminal_save_receipt), so SDK readers
+    # decode a receipt instead of refusing a bare {item_id}.
+    receipt = result.get("receipt") if isinstance(result, dict) else None
+    if isinstance(receipt, dict):
+        return {**response, **receipt}
+    log.warning(
+        "POST /memory/ingest: the save of %s returned no 2.0 receipt; answering the 1.x "
+        "{item_id} body, which 2.0 SDK readers refuse as unsupported",
+        response["item_id"],
+    )
     return response
 
 

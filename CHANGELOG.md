@@ -1,3 +1,8 @@
+## Unreleased - BUG-OBSIDIAN-LITE-SAVE-RECEIPT-1: Lite saves answer a 2.0 receipt (2026-11-25)
+
+- `POST /memory/ingest` on the Lite daemon now returns the save receipt core already made (schema 1.1, `placement: lite`, `subject.item_id`, `run_id`, `status_url`) next to the old `item_id` and `warning` keys, the same additive shape the hosted service returns. It used to drop the receipt, so 2.0 SDK readers (the Obsidian plugin in Lite mode) refused every save as `unsupported receipt schema_version null` while the note was stored, and each later save uploaded another copy. A save that comes back without a receipt still answers the old body and logs a WARNING.
+- `GET /health` on a Lite daemon adds `okf_namespace`, the install's OKF namespace (the workspace part of `smartmemory://<namespace>/<item_id>` that Lite's own exporter and vault writer use), so the Obsidian plugin can write a Lite note's id into its frontmatter.
+
 ## 2.0.6
 
 ## Unreleased - 2.0.6: core pin moves to 2.0.6 (2026-11-25)
