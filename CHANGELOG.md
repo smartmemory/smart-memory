@@ -1,3 +1,7 @@
+## Unreleased - TEST-TEARDOWN-1
+
+- Removed the README wording test for shell quoting.
+
 ## 2.0.7
 
 ## Unreleased - 2.0.7: core, MCP and client pins move to 2.0.7 (2026-11-25)
