@@ -1,3 +1,9 @@
+## Unreleased - OPS-CLI-WIRING-AUDIT-1: wrapper CLI and MCP wiring (2026-11-25)
+
+- Setup and init print configuration for the installed `smartmemory-mcp` executable and report when it is missing. The retired `smartmemory server` command exits with migration instructions.
+- Folder sync uses the daemon's mounted memory routes and reports failed runs on stderr.
+- Uninstall stops before removing data when background shutdown or launchd unload cannot be verified. Reindex exits with an error and shows skipped counts when it cannot re-embed every memory.
+
 ## 2.0.7
 
 ## Unreleased - 2.0.7: core, MCP and client pins move to 2.0.7 (2026-11-25)
@@ -46,12 +52,6 @@
 - Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.3` (was 2.0.2.2), MCP pin `smartmemory-mcp==2.0.3` (was 2.0.2): a rule's history, which rule is live at each site, automatic changes, and the refusal of generic writes to a decision's history. Client range unchanged (`>=2.0.2,<2.1`). REL-2-0-3-CUT-1.
 
 ## 2.0.2.2
-
-### Unreleased
-
-- Setup and init print configuration for the installed `smartmemory-mcp` executable and report when it is missing. The retired `smartmemory server` command exits with migration instructions.
-- Folder sync uses the daemon's mounted memory routes and reports failed runs on stderr.
-- Uninstall stops before removing data when background shutdown or launchd unload cannot be verified. Reindex exits with an error and shows skipped counts when it cannot re-embed every memory.
 
 ## Unreleased - 2.0.2.2: core pin moves to the graph-view and first-install patch (2026-11-18)
 
