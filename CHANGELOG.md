@@ -2,6 +2,22 @@
 
 - Removed the README wording test for shell quoting.
 
+## 2.0.7
+
+## Unreleased - 2.0.7: core, MCP and client pins move to 2.0.7 (2026-11-25)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.7` (was 2.0.6). MCP pin `smartmemory-mcp==2.0.7` (was 2.0.4): the hosted instructions now name the decision tools, and decision history and replaced decisions read correctly. Client range `smartmemory-client>=2.0.7,<2.1` (was `>=2.0.2,<2.1`): decision history paging, typed link rows, and import merge counts.
+## Unreleased - BUG-OBSIDIAN-LITE-SAVE-RECEIPT-1: Lite saves answer a 2.0 receipt (2026-11-25)
+
+- `POST /memory/ingest` on the Lite daemon now returns the save receipt core already made (schema 1.1, `placement: lite`, `subject.item_id`, `run_id`, `status_url`) next to the old `item_id` and `warning` keys, the same additive shape the hosted service returns. It used to drop the receipt, so 2.0 SDK readers (the Obsidian plugin in Lite mode) refused every save as `unsupported receipt schema_version null` while the note was stored, and each later save uploaded another copy. A save that comes back without a receipt still answers the old body and logs a WARNING.
+- `GET /health` on a Lite daemon adds `okf_namespace`, the install's OKF namespace (the workspace part of `smartmemory://<namespace>/<item_id>` that Lite's own exporter and vault writer use), so the Obsidian plugin can write a Lite note's id into its frontmatter.
+
+## 2.0.6
+
+## Unreleased - 2.0.6: core pin moves to 2.0.6 (2026-11-25)
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.6` (was 2.0.5). This brings the core fixes landed since 2.0.5: decision history keeps who answered and pages without gaps, a replaced decision keeps its links, a full export then import no longer duplicates decisions, Lite stores repair old edge markers and plan task status on open, and erasure counts notes tagged with a learned name. MCP pin unchanged at `smartmemory-mcp==2.0.4`.
+
 ## 2.0.5
 
 ## Unreleased - 2.0.5: core pin moves to 2.0.5, the stored snapshot fix (2026-11-23)
@@ -9,6 +25,10 @@
 - Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.5` (was 2.0.4): a stored snapshot no longer shows a note that was hidden after the snapshot was taken. MCP pin unchanged at `smartmemory-mcp==2.0.4`.
 
 ## 2.0.4
+
+## Unreleased - OPS-REAL-USE-HOSTED-LITE-1: a real-use scenario for the Lite app (2026-11-23)
+
+- `tests/real_use/` (new): one person's week offline (`harbor_lane_lite`, 24 rows frozen in smart-memory-ops `units/OPS-REAL-USE-HOSTED-LITE-1/notes-lite.md` before the code), sent through the Lite app's own local routes, the MCP local backend for decisions and the `export` / `import` commands; answers checked in plain code. No model key, every non-loopback socket refused and logged (row L-24), so nothing is recorded or replayed. Runs once per session under xdist (`_once.py`). The land gate runs this folder on every Lite app land. First run: 23 of 24 pass; L-22 is a known gap (BUG-LITE-IMPORT-NOT-ROUNDTRIP-1: an import brings the replaced decision back active and changes search answers).
 
 ## Unreleased - 2.0.4: core and MCP pins move to 2.0.4, the conflict flag fix (2026-11-23)
 
@@ -998,6 +1018,7 @@ Notable, **user-facing** changes to the `smartmemory` distribution package. The 
   this to four params for months. The allowlist now enumerates every explicit core search
   parameter and a guard test fails when a new one is added without being forwarded.
 
+
 ### Changed
 - **`smartmemory-mcp` pin bumped 1.4.67 → 1.4.91.** The wrapper installs the current MCP server again (release.sh had been warning about the drift).
 - **License.** `smartmemory` now ships under the SmartMemory Lite Runtime License instead of AGPL: free for personal, internal, evaluation, and non-commercial use; shipping it inside a commercial product needs a Lite Redistribution Agreement (free during early access). See LICENSE.
@@ -1123,6 +1144,7 @@ every such call failed with `Invalid API Key`, even though the correct provider 
 configured. Keys are now matched to the endpoint first, falling back to `OPENAI_API_KEY`.
 Local servers such as Ollama and LM Studio are unaffected.
 
+
 ## [1.4.62] - 2026-08-08
 
 ### Fixed — local extraction could silently learn nothing
@@ -1181,6 +1203,7 @@ All four are now forwarded, with a regression test. Remote mode was unaffected (
 the POST body separately). **If you add a parameter to `SmartMemory.search()` that callers
 can set, add it to this allowlist in the same change** — the drop-don't-raise design means
 nothing will tell you it is missing.
+
 
 ## [1.4.59] - 2026-08-04
 
@@ -1320,6 +1343,7 @@ Core 1.4.59 delivers the auditable-memory surface: `explain()` single-call prove
 ### Changed (auto, lockstep) — track smartmemory-core==1.4.39 (1.4.39)
 - Version copied from smartmemory-core 1.4.39 release (single-source lockstep).
 
+
 ### Fixed — Deleted memories left orphaned vector embeddings behind (CORE-VEC-DELETE-1)
 - `sm`'s local/lite mode never actually removed a deleted memory's embedding from disk —
   `smartmemory-core`'s usearch backend had no single-item delete, so the vector index kept
@@ -1432,6 +1456,7 @@ Core 1.4.59 delivers the auditable-memory surface: `explain()` single-call prove
 ### Changed (auto, lockstep) — pin smartmemory-core==0.9.48 (1.4.24)
 - Automated lockstep sync triggered by smartmemory-core 0.9.48 release.
 
+
 ## [1.4.23] - 2026-06-04
 
 ### Security
@@ -1507,6 +1532,7 @@ Contract: `smart-memory-docs/docs/features/LAUNCH-METRICS-1/launch-event-contrac
 ### Changed — BREAKING
 
 - **CORE-MEMORY-DYNAMICS-1 M1b: `working` → `pending` rename (wrapper).** `smartmemory_app/lifecycle.py` distill path now writes `memory_type="pending"` (was `"working"`; the core validator rejects the old value post-rename). `smartmemory_app/cli.py` `_VALID_MEMORY_TYPES` set rebuilt with `"pending"`. `smartmemory_app/local_api.py` user_types tuple in SELECT-by-type query updated. Test fixture in `tests/integration/test_local_api_integration.py::test_node_fields_correct` updated. README evolver listing removed `WorkingToEpisodicEvolver` / `WorkingToProceduralEvolver` (retired in core M1b); "Working Memory" type description replaced with "Pending Memory".
+
 
 ### Added
 

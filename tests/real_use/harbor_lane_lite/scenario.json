@@ -1,0 +1,26 @@
+{
+  "_doc": "OPS-REAL-USE-HOSTED-LITE-1. The Lite week, machine form of smart-memory-ops units/OPS-REAL-USE-HOSTED-LITE-1/notes-lite.md (frozen 2026-11-23, before any code). Texts are the pilot week's (pilot-week-scenario.md, P1 ids in `from`). Never tuned to pass: a failing row is a finding and a known gap in expected.json naming its bug.",
+  "search_top_k": 5,
+  "notes": {
+    "standup": {"row": "L-01", "from": "P1-01", "text": "Harbor Lane weekly standup is on Mondays at 9:30 in the small meeting room."},
+    "client": {"row": "L-02", "from": "P1-02", "text": "Kestrel Bakery is our newest client; their contact is Dana Whitfield and the project is a new website."},
+    "launch": {"row": "L-03", "from": "P1-03", "text": "The Kestrel Bakery website launch date is 14 March."},
+    "invoice": {"row": "L-04", "from": "P1-05", "text": "Invoices go out on the first working day of each month; Priya sends them."},
+    "printer": {"row": "L-05", "from": "P1-06", "text": "The office printer on the second floor needs toner ordered from Inkwell Supplies."},
+    "cost": {"row": "L-10", "from": "P1-25", "text": "Netlify's plan for Kestrel would cost more than budgeted; Tom suggests Cloudflare Pages instead."}
+  },
+  "decisions": {
+    "netlify": {"row": "L-09", "from": "P1-09", "text": "We will host the Kestrel Bakery website on Netlify.", "evidence": "client"},
+    "cloudflare": {"row": "L-11", "from": "P1-26", "text": "We will host the Kestrel Bakery website on Cloudflare Pages.", "reason": "Netlify plan over budget"}
+  },
+  "queries": {
+    "standup": "when is the weekly standup",
+    "launch": "Kestrel website launch date",
+    "hosting": "Kestrel website hosting",
+    "recall": "Kestrel website launch",
+    "printer": "printer toner"
+  },
+  "kept_after_delete": ["standup", "client", "launch", "invoice", "cost"],
+  "launch_phrase": "launch date is 14 March",
+  "printer_phrase": "Inkwell Supplies"
+}
