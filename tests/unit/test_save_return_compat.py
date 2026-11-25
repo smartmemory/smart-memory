@@ -1523,9 +1523,19 @@ def test_daemon_ingest_route_reads_the_id_on_both_arms(lite_ingest, result, expe
     from smartmemory_app.local_api import IngestRequest, ingest_endpoint
 
     lite_ingest(result)
-    assert ingest_endpoint(IngestRequest(content="test content")) == {
-        "item_id": expected
-    }
+    body = ingest_endpoint(IngestRequest(content="test content"))
+    assert body["item_id"] == expected
+    if isinstance(result, str) or "schema_version" not in (
+        result if isinstance(result, dict) else result.to_dict()
+    ):
+        assert body == {"item_id": expected}  # legacy arm: the 1.x body, unchanged
+        return
+    # BUG-OBSIDIAN-LITE-SAVE-RECEIPT-1: the receipt arm answers the 1.1 receipt next to the 1.x keys
+    wire = result if isinstance(result, dict) else result.to_dict()
+    assert body == {"item_id": expected, **wire}
+    assert body["schema_version"] == "1.1"
+    assert body["subject"]["item_id"] == expected
+    assert body["run_id"] and body["status_url"]
 
 
 @pytest.mark.parametrize(

@@ -334,6 +334,8 @@ def _build_app() -> FastAPI:
                 "mode": mode,
                 "capabilities": _capabilities(mode),
             }
+            if mode == "lite":
+                _add_okf_namespace(response)
             if startup_status == "degraded":
                 response["degraded_reason"] = (
                     startup_reason
@@ -452,6 +454,8 @@ def _build_app() -> FastAPI:
             "mode": mode,
             "capabilities": capabilities,
         }
+        if mode == "lite":
+            _add_okf_namespace(response)
         if degraded_reason:
             response["degraded_reason"] = degraded_reason
         if stale:
@@ -473,6 +477,25 @@ def _build_app() -> FastAPI:
 
 # Module-level app — importable by tests without starting uvicorn or events server.
 app = _build_app()
+
+
+def _add_okf_namespace(response: dict) -> None:
+    """BUG-OBSIDIAN-LITE-SAVE-RECEIPT-1: add the install's OKF namespace to a Lite ``/health`` body.
+
+    It is the workspace part of the ``smartmemory://<namespace>/<item_id>`` resource that core's Lite
+    exporter, importer and vault writer use, so a client writing OKF frontmatter (Obsidian) names Lite
+    items the same way. Not a secret: it is written into every exported Lite note.
+    """
+    try:
+        from smartmemory.okf import lite_namespace
+
+        response["okf_namespace"] = lite_namespace()
+    except Exception:
+        log.warning(
+            "OKF namespace unavailable; /health omits okf_namespace and clients cannot "
+            "write OKF resources for Lite items",
+            exc_info=True,
+        )
 
 
 def _startup_line(message: str) -> None:

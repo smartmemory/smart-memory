@@ -279,3 +279,29 @@ def test_status_renders_warming_without_broken_restart_guidance(runner):
     assert "models are still loading" in result.output.lower()
     assert "should be running" not in result.output
     assert "sm restart" not in result.output
+
+
+def test_lite_health_reports_the_install_okf_namespace(tmp_path, monkeypatch):
+    """BUG-OBSIDIAN-LITE-SAVE-RECEIPT-1: Lite /health names the OKF namespace core's Lite exporter uses."""
+    monkeypatch.setenv("SMARTMEMORY_CONFIG_DIR", str(tmp_path / "cfg"))
+    client = _health_client(tmp_path, monkeypatch)
+    config = SimpleNamespace(
+        mode="local", llm_provider="none", embedding_provider="local"
+    )
+    memory = MagicMock()
+    memory._graph.backend.serialize.return_value = {"nodes": []}
+
+    with (
+        patch("smartmemory_app.config.load_config", return_value=config),
+        patch("smartmemory_app.config.llm_key_present", return_value=False),
+        patch("smartmemory_app.storage.get_memory", return_value=memory),
+        patch("smartmemory_app.work_graph.get_work_status", return_value={}),
+    ):
+        first = client.get("/health").json()
+        second = client.get("/health").json()
+
+    from smartmemory.okf import lite_namespace
+
+    assert first["mode"] == "lite"
+    assert first["okf_namespace"].startswith("local-")
+    assert first["okf_namespace"] == second["okf_namespace"] == lite_namespace()
