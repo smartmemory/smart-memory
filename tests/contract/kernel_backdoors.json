@@ -1,0 +1,141 @@
+{
+ "handle_keys": [
+  "private_graph",
+  "version_tracker_attr",
+  "lite_store_reset",
+  "debug_clear"
+ ],
+ "handles": {
+  "debug_clear": {},
+  "lite_store_reset": {
+   "smartmemory_app/capture_hold.py": {
+    "count": 1
+   },
+   "smartmemory_app/capture_queue.py": {
+    "count": 12
+   },
+   "smartmemory_app/capture_slices.py": {
+    "count": 1
+   },
+   "smartmemory_app/cli.py": {
+    "count": 1
+   },
+   "smartmemory_app/cli_code.py": {
+    "count": 1
+   },
+   "smartmemory_app/daemon.py": {
+    "count": 10
+   },
+   "smartmemory_app/env_pin.py": {
+    "count": 1
+   },
+   "smartmemory_app/hook_consumer.py": {
+    "count": 2
+   },
+   "smartmemory_app/hook_failures.py": {
+    "count": 1
+   },
+   "smartmemory_app/hook_install.py": {
+    "count": 2
+   },
+   "smartmemory_app/install_check.py": {
+    "count": 6
+   },
+   "smartmemory_app/lifecycle.py": {
+    "count": 3
+   },
+   "smartmemory_app/recall_format.py": {
+    "count": 1
+   },
+   "smartmemory_app/report_outbox.py": {
+    "count": 9
+   },
+   "smartmemory_app/setup.py": {
+    "count": 6
+   },
+   "smartmemory_app/setup_state.py": {
+    "count": 2
+   },
+   "smartmemory_app/store_reset.py": {
+    "count": 3
+   },
+   "smartmemory_app/support_diagnostics.py": {
+    "count": 1
+   },
+   "smartmemory_app/tour.py": {
+    "count": 1
+   },
+   "smartmemory_app/viewer_server.py": {
+    "count": 2
+   }
+  },
+  "private_graph": {
+   "smartmemory_app/capture_worker.py": {
+    "count": 1
+   },
+   "smartmemory_app/cli.py": {
+    "count": 1
+   },
+   "smartmemory_app/lesson_lifecycle.py": {
+    "count": 1
+   },
+   "smartmemory_app/local_api.py": {
+    "count": 1
+   },
+   "smartmemory_app/rules_card.py": {
+    "count": 1
+   },
+   "smartmemory_app/session_lessons.py": {
+    "count": 1
+   },
+   "smartmemory_app/storage.py": {
+    "count": 4
+   },
+   "smartmemory_app/viewer_server.py": {
+    "count": 1
+   }
+  },
+  "version_tracker_attr": {}
+ },
+ "member_imports": {},
+ "packages": [
+  "smartmemory_app"
+ ],
+ "reasons": [
+  {
+   "changes": [
+    "private_graph smartmemory_app/capture_worker.py 0->1",
+    "private_graph smartmemory_app/cli.py 0->1",
+    "private_graph smartmemory_app/lesson_lifecycle.py 0->1",
+    "private_graph smartmemory_app/local_api.py 0->1",
+    "private_graph smartmemory_app/rules_card.py 0->1",
+    "private_graph smartmemory_app/session_lessons.py 0->1",
+    "private_graph smartmemory_app/storage.py 0->4",
+    "private_graph smartmemory_app/viewer_server.py 0->1",
+    "lite_store_reset smartmemory_app/capture_hold.py 0->1",
+    "lite_store_reset smartmemory_app/capture_queue.py 0->12",
+    "lite_store_reset smartmemory_app/capture_slices.py 0->1",
+    "lite_store_reset smartmemory_app/cli.py 0->1",
+    "lite_store_reset smartmemory_app/cli_code.py 0->1",
+    "lite_store_reset smartmemory_app/daemon.py 0->10",
+    "lite_store_reset smartmemory_app/env_pin.py 0->1",
+    "lite_store_reset smartmemory_app/hook_consumer.py 0->2",
+    "lite_store_reset smartmemory_app/hook_failures.py 0->1",
+    "lite_store_reset smartmemory_app/hook_install.py 0->2",
+    "lite_store_reset smartmemory_app/install_check.py 0->6",
+    "lite_store_reset smartmemory_app/lifecycle.py 0->3",
+    "lite_store_reset smartmemory_app/recall_format.py 0->1",
+    "lite_store_reset smartmemory_app/report_outbox.py 0->9",
+    "lite_store_reset smartmemory_app/setup.py 0->6",
+    "lite_store_reset smartmemory_app/setup_state.py 0->2",
+    "lite_store_reset smartmemory_app/store_reset.py 0->3",
+    "lite_store_reset smartmemory_app/support_diagnostics.py 0->1",
+    "lite_store_reset smartmemory_app/tour.py 0->1",
+    "lite_store_reset smartmemory_app/viewer_server.py 0->2"
+   ],
+   "date": "2026-11-26",
+   "reason": "K1: today's counts"
+  }
+ ],
+ "schema": 1
+}
