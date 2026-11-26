@@ -15,6 +15,7 @@ from pathlib import Path
 
 import click
 
+from smartmemory_app import cli_decide
 from smartmemory_app.add_options import AddCommand, SearchCommand
 from smartmemory_app.console import configure_console_encoding, read_utf8_stdin
 from smartmemory_app.daemon import (
@@ -2141,7 +2142,7 @@ def search_cmd(
         # CORE-PROPS-1 Phase 2: stale marker
         stale_marker = "⚠" if r.get("stale") else ""
         click.echo(f"{stale_marker}{conf_marker}[{mem_type}] {item_id}  {content}")
-        if r.get("matched_by"):  # CLAIMS-BUILD-21: the search lanes that found this result
+        if r.get("matched_by"):  # CLAIMS-BUILD-21: matching search lanes
             click.echo(f"    found by: {', '.join(r['matched_by'])}")
         for child in r.get("children") or []:
             if isinstance(child, dict) and child.get("content"):
@@ -2201,9 +2202,7 @@ def _render_why_provenance(
     click.echo(
         f"DECISION  {_why_title(decision)}  ({decision.get('status', 'unknown')}, {_why_date(decision)})"
     )
-    rationale = decision.get("rationale") or decision.get("reasoning")
-    if rationale:
-        click.echo(f"  rationale: {rationale}")
+    cli_decide.render_reasons(decision)
 
     superseded = provenance.get("superseded") or []
     if superseded:
@@ -2228,6 +2227,9 @@ def _render_why_provenance(
     also_matched = [_why_title(item) for item in matches[1:] if isinstance(item, dict)]
     if also_matched:
         click.echo("\nAlso matched: " + ", ".join(also_matched))
+
+
+cli.add_command(cli_decide.decide_cmd)
 
 
 @cli.command("why")
@@ -2292,11 +2294,7 @@ def why_cmd(question: str, top_k: int, as_json: bool) -> None:
         lineage_result.get("lineage", []) if isinstance(lineage_result, dict) else []
     )
     for item in lineage:
-        if not isinstance(item, dict):
-            continue
-        click.echo(
-            f"[{item.get('memory_type', '?')}] {item.get('content', '')} ({str(item.get('item_id', ''))[:8]})"
-        )
+        cli_decide.render_lineage_item(item, hits[0])
 
 
 def _render_ask_relations(result: dict) -> None:

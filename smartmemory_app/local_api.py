@@ -10,9 +10,8 @@ GET  /recall             → /memory/recall           (DAEMON-1: session context
 POST /clear              → /memory/clear
 POST /reindex            → /memory/reindex          (re-embed all with current model)
 POST /vector/query       → /memory/vector/query     (WEB-VECTOR-SEARCH-TAB-1 U3: NN query; shapes = vector-contract.json)
-GET  /vector/stats       → /memory/vector/stats
-GET  /vector/items/{id}  → /memory/vector/items/{id}
-GET  /vector/missing     → /memory/vector/missing
+GET  /vector/{stats,missing}, /vector/items/{id} → local vector index reads
+POST /decisions/create   → /memory/decisions/create (structured Lite decision)
 GET  /vector/projection  → /memory/vector/projection  (VEC-TAB-U6: 2D/3D map coordinates, ids only)
 GET  /{id}/neighbors     → /memory/{id}/neighbors  (BEFORE /{id} — declaration order matters; DIST-OBSIDIAN-LITE-1: each neighbor carries direction)
 GET  /{id}               → /memory/{id}
@@ -27,7 +26,6 @@ import functools
 import inspect
 import ipaddress
 import logging
-import re
 import threading
 from typing import Any, Literal, Optional
 
@@ -42,6 +40,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from smartmemory.errors import MissingModelError
 from smartmemory_app.config import UnconfiguredError, llm_key_present
 from smartmemory_app.search_collapse import collapse_to_parents, pool_size, scoped_get
+from smartmemory_app.local_decisions import create_decision
 from smartmemory_app.storage import StoreClosingError, get_memory, store_in_use
 
 log = logging.getLogger(__name__)
@@ -85,6 +84,7 @@ class _StoreGatedRoute(APIRoute):
 
 api = FastAPI(title="SmartMemory Local API", docs_url=None, redoc_url=None)
 api.router.route_class = _StoreGatedRoute
+api.post("/decisions/create")(create_decision)
 
 
 @api.exception_handler(StoreClosingError)
@@ -1185,7 +1185,7 @@ def _llm_unlocked(**kwargs):
 
 
 # The reply parser core's ask path uses; kept under its old name for callers of this module.
-from smartmemory.managers.ask import split_answer as _split_answer  # noqa: E402
+from smartmemory.managers.ask import split_answer as _split_answer  # noqa: E402,F401
 
 
 @api.post("/ask")
@@ -1260,7 +1260,7 @@ def ask_endpoint(body: AskRequest) -> dict:
         cause = exc.__cause__ or exc
     except ProviderRouteRefused as exc:
         cause = exc
-    log.error("sm ask LLM request failed", exc_info=cause)  # raw detail: daemon.log only
+    log.error("sm ask LLM request failed", exc_info=cause)  # daemon log only
     if not (
         isinstance(cause, ImportError)
         and (cause.name == "openai" or str(cause) == "openai package is required")

@@ -185,6 +185,8 @@ memory = create_lite_memory(pipeline_profile=PipelineConfig.lite(llm_enabled=Fal
 
 ```bash
 sm add "text"                  # Remember something
+sm decide "Use SQLite" --why "Runs offline" --ruled-out "Hosted Postgres"
+sm why "SQLite"                # Read the decision, reason and alternatives
 sm search "query"              # Find memories by meaning
 sm search "*"                  # List everything
 sm ask "what did we decide?"   # Answer, or labelled excerpts locally without an LLM key
