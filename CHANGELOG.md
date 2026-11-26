@@ -1,3 +1,7 @@
+## 2.0.9
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.9` (lockstep). MCP `==2.0.9` (decision tools carry the stated recommender and decider). Client stays `>=2.0.7,<2.1` (2.0.9 is in range).
+
 ## Unreleased
 
 - Added `sm decide` to record a decision with its reason and optional ruled-out alternatives in Lite or hosted mode. `sm why` shows those details.
