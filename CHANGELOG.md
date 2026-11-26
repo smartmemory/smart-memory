@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Count raw backend connection access in the Lite kernel contract test.
+
 - Added a Lite contract test that flags increases in per-file kernel back-door counts.
 
 ## 2.0.8
