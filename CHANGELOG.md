@@ -1,3 +1,7 @@
+## Unreleased
+
+- Added a Lite contract test that flags increases in per-file kernel back-door counts.
+
 ## 2.0.8
 
 - Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.8` (lockstep). MCP stays `==2.0.7`, client `>=2.0.7,<2.1` (no change since 2.0.7 beyond tests).
