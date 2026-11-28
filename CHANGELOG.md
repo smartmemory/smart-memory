@@ -1,3 +1,7 @@
+## 2.0.10
+
+- Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.10` (lockstep). MCP `==2.0.10` (read-only decision effects tool, effects counts on decision write replies). Client stays `>=2.0.7,<2.1` (client did not move since 2.0.9).
+
 ## 2.0.9
 
 - Core pin `smartmemory-core[lite,wikipedia,typescript]==2.0.9` (lockstep). MCP `==2.0.9` (decision tools carry the stated recommender and decider). Client stays `>=2.0.7,<2.1` (2.0.9 is in range).
